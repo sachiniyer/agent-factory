@@ -138,7 +138,7 @@ func TestObserveTaskRunWhilePausedDropsFailedCapture(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "paused-drop", backend, true, session.Running)
-	key := daemonInstanceKey(repoID, inst.Title)
+	key := stableSessionKey(repoID, inst)
 
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
@@ -178,7 +178,7 @@ func TestFailedCaptureDropsTaskRunTurnWatch(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "watch-drop", backend, true, session.Running)
-	key := daemonInstanceKey(repoID, inst.Title)
+	key := stableSessionKey(repoID, inst)
 
 	boundary := time.Now()
 	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
@@ -210,7 +210,7 @@ func TestStreakReanchorDropsTaskRunTurnWatch(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
 	inst := registerStarted(t, manager, repoID, repoPath, "watch-gap", backend, true, session.Running)
-	key := daemonInstanceKey(repoID, inst.Title)
+	key := stableSessionKey(repoID, inst)
 
 	now := time.Now()
 	oldNow := nowFunc
@@ -236,6 +236,41 @@ func TestStreakReanchorDropsTaskRunTurnWatch(t *testing.T) {
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok = manager.taskRunTurnWatches[key]
 	require.False(t, ok, "a re-anchored streak must invalidate the watcher")
+}
+
+// A boundary that bound over proven stillness — a fresh task's first bind
+// seeds the still base at the send behind WaitForReady — already observed
+// the absent half of the scoped contract: the watcher the feed builds for
+// it is primed, so a turn that began before the first daemon capture still
+// counts on its first chrome frame rather than being read as indicator
+// noise the absent→present contract never armed (#5221 review).
+func TestNoteTaskRunTurnEvidencePrimesFromSeededStillBase(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-primed", Path: t.TempDir(), Program: "codex", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.TaskRunActive(), "precondition: a task-spawned session starts with its run in flight")
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	require.False(t, inst.TaskRunStillBaseAt().IsZero(),
+		"a first bind seeds the still base — the send proved the pane still")
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "turn-primed"
+
+	// The very first daemon frame already shows the indicator — the turn
+	// began in the blind window before the first capture. Primed by the
+	// seeded base, the watch counts it; unprimed it would discard the chrome.
+	require.True(t, m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{
+			Content:  "\x1b[2J\x1b[H› \r\n\r\n  esc to interrupt\r\n",
+			Captured: true,
+		}, boundary.Add(time.Millisecond), epoch),
+		"proven-absence boundary: the first present frame is the turn")
 }
 
 // A run that ends on a Ready→Ready observation changes no liveness, and

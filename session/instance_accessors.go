@@ -538,6 +538,18 @@ func (i *Instance) TaskRunPromptAttemptAt() time.Time {
 	return i.taskRunPromptAttemptAt
 }
 
+// TaskRunStillBaseAt is the run's proven-stillness edge for the current
+// boundary: seeded at the send when delivery provably found a still pane, or
+// latched by a sustained still run after a contended one (#5221 review). A
+// nonzero value tells the pane-chrome watcher the absent half of the scoped
+// turn contract is already observed — a present indicator may count as the
+// turn without waiting out the absence grace again.
+func (i *Instance) TaskRunStillBaseAt() time.Time {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunStillBaseAt
+}
+
 // GetGitWorktree returns the git worktree for the instance
 func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
 	i.mu.RLock()

@@ -127,12 +127,16 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 	}
 }
 
-// paneObservationMinGap floors the continuity horizon: two successful
-// captures further apart than this AND than thrice the caller's declared
-// cadence mark the interval between them unobserved — a hole (failed probes,
-// a stalled serial walk) in which churn could hide. The floor keeps a
-// sub-second tick from declaring a hole on ordinary scheduler jitter.
-const paneObservationMinGap = 10 * time.Second
+// paneObservationSlack bounds the lateness a capture may carry past one
+// declared cadence before the interval between them counts as unobserved —
+// a hole (failed probes, a stalled serial walk) in which churn could hide.
+// The slack must stay under the shortest completion arm's grace: a gap that
+// could hide a whole churn→quiet cycle may never read as observed silence,
+// so the horizon is one cadence plus this slack rather than a multiple of
+// the cadence — capping the cadence input would have left the multiplied
+// horizon uncapped (#5221 review). Ten seconds keeps ordinary scheduler and
+// transport jitter inside the streak while a longer stall rebases it.
+const paneObservationSlack = 10 * time.Second
 
 // NotePaneCaptureObserved stamps pane evidence at the completion of a
 // successful pane capture (#5221 review). expectedInterval is the cadence the
@@ -149,10 +153,7 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	if at.IsZero() {
 		return false
 	}
-	maxGap := 3 * expectedInterval
-	if maxGap < paneObservationMinGap {
-		maxGap = paneObservationMinGap
-	}
+	maxGap := expectedInterval + paneObservationSlack
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	reanchored := i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap
@@ -171,7 +172,7 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 // attempted and lost — a confirmed failed capture, or a snapshot whose
 // transport errored before any frame could answer. Skipping the stamp is not
 // enough: two successful captures straddling one failure can sit inside the
-// gap horizon (60s apart under the paused path's 90s slack), leaving the old
+// gap horizon (35s apart under the paused path's 40s slack), leaving the old
 // streak intact while the failed frame in between could have hidden active
 // churn (#5221 review). Clearing lastPaneCaptureAt makes the next success
 // re-anchor a fresh streak from its own instant; clearing the expiry keeps a

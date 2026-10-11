@@ -291,23 +291,37 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 	return &TurnWatch{agent: agent, boundary: boundary}
 }
 
+// PrimeScopedAbsence marks the indicator's absence already proven — for a
+// boundary that bound over a pane provably not in a turn: a fresh session's
+// prompt was delivered behind WaitForReady, an uncontended redelivery found
+// the pane still for a full grace, or a still run has since latched (#5221
+// review). The absent half of the turn contract was observed at that proof,
+// so the first present frame can count as the turn without waiting out the
+// grace again — a fresh task whose agent starts turning before the first
+// daemon capture otherwise discards its own chrome. No-op for the timed-row
+// agents, whose proof is the row's own clock.
+func (w *TurnWatch) PrimeScopedAbsence() { w.armed = true }
+
 // Observe folds one captured frame into the watch and reports whether it
-// proves a turn began after the boundary. `at` must be the frame's CAPTURE
-// (or request-start) instant, not the caller's apply time: for a remote
-// session the pane is captured inside the sandbox and processed after
-// transport, and measuring the boundary's age at apply time would let that
-// unbounded latency inflate it until a pre-boundary turn's row fits (#5221
-// review). For the timed-row agents (claude, devin) a row's presence is not
-// enough — scrollback can hold a stale one — so the row's elapsed timer must
-// have advanced against the previous capture, the same contract
-// submittedTurnVisible applies inside the submit window; and the ticking
-// row's own elapsed must fit inside the boundary's age at capture, or a turn
-// already running when the prompt went out gets attributed to it. The other
-// agents' indicators are scoped to their live frame but carry no clock, so
-// the absence must persist for the arm grace before a present frame can
-// count — the start edge the elapsed check expresses for timed rows, and
-// the proof a single repaint-dropped frame cannot fake (#5221 review).
-func (w *TurnWatch) Observe(content string, at time.Time) bool {
+// proves a turn began after the boundary. capturedAt must be the earliest
+// instant the frame could exist — the request's start, since the pane is
+// captured mid-flight inside a remote transport — so the timed-row agents
+// can bound the row's elapsed by the boundary's true age at capture.
+// observedAt is when the frame's knowledge actually landed — the capture's
+// completion — and it clocks the scoped agents' absence: request-start there
+// would let transport latency stretch a one-second repaint gap into the
+// whole arm grace (#5221 review). For the timed-row agents (claude, devin) a
+// row's presence is not enough — scrollback can hold a stale one — so the
+// row's elapsed timer must have advanced against the previous capture, the
+// same contract submittedTurnVisible applies inside the submit window; and
+// the ticking row's own elapsed must fit inside the boundary's age at
+// capture, or a turn already running when the prompt went out gets
+// attributed to it. The other agents' indicators are scoped to their live
+// frame but carry no clock, so the absence must persist for the arm grace
+// before a present frame can count — the start edge the elapsed check
+// expresses for timed rows, and the proof a single repaint-dropped frame
+// cannot fake (#5221 review).
+func (w *TurnWatch) Observe(content string, capturedAt, observedAt time.Time) bool {
 	switch w.agent {
 	case tmux.ProgramClaude, tmux.ProgramDevin:
 		cur := timedTurnRowsByIdentity(content)
@@ -319,13 +333,13 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 		// display's own resolution — real elapsed is strictly less than
 		// displayed+1s, so demanding that fit inside the boundary's age makes a
 		// strictly-pre-boundary turn unrepresentable (#5221 review).
-		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
+		return ticked && row.elapsed+time.Second <= capturedAt.Sub(w.boundary)
 	default:
 		if !submittedTurnContent(content, w.agent) {
 			if w.absentSince.IsZero() {
-				w.absentSince = at
+				w.absentSince = observedAt
 			}
-			if at.Sub(w.absentSince) >= turnIndicatorAbsentGrace {
+			if observedAt.Sub(w.absentSince) >= turnIndicatorAbsentGrace {
 				w.armed = true
 			}
 			return false

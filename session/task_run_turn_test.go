@@ -420,11 +420,11 @@ func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
 	// the candidate before this frame's still stamp re-opens it.
 	inst.NotePaneCaptureObserved(t1.Add(30*time.Second), time.Second)
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second), epoch))
-	inst.NotePaneCaptureObserved(t1.Add(40*time.Second+2*paneObservationMinGap), time.Second)
+	inst.NotePaneCaptureObserved(t1.Add(40*time.Second+2*paneObservationSlack), time.Second)
 	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
 		"a re-anchored streak clears the candidate it straddled")
-	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*paneObservationMinGap), epoch))
-	require.Equal(t, t1.Add(40*time.Second+2*paneObservationMinGap), inst.taskRunStillCandidateAt,
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*paneObservationSlack), epoch))
+	require.Equal(t, t1.Add(40*time.Second+2*paneObservationSlack), inst.taskRunStillCandidateAt,
 		"the post-hole still frame opens a fresh candidate")
 }
 
