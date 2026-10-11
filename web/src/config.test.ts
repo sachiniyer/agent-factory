@@ -1334,8 +1334,9 @@ test("saveNotice deduplicates a scoped IPv6 address with an escaped quote in the
   // deduplicates the zoned wildcard forecast against the [::] serving notice.
   const configuredAddr = '[::%foo"bar]:0';
   const servingAddr = "[::]:9443";
-  // Go's %q wraps the address in double quotes and escapes the inner " as \":
-  const writeWarning = `network.listen_addr "${configuredAddr.replace(/"/g, '\\"')}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  // Go's %q wraps the address in double quotes and escapes the inner " as \"
+  // and \ as \\ (backslash first, then quote, matching Go's strconv.Quote order):
+  const writeWarning = `network.listen_addr "${configuredAddr.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
   const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
   const restartNotice = "Applied — the running daemon is using the new value now.";
   const notice = saveNotice(
