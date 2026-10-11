@@ -7748,7 +7748,7 @@ function splitListenHostPort(addr) {
 }
 function normalizeListenHost(host, bindSucceeded) {
   if (host === "") {
-    return "0.0.0.0";
+    return bindSucceeded ? "0.0.0.0" : "";
   }
   if (host.includes(":")) {
     const v6 = canonicalizeIPv6Host(host, bindSucceeded);
@@ -7893,7 +7893,7 @@ function normalizeListenPort(port) {
   return port;
 }
 function isDecimalPort(port) {
-  return port === "" || /^\d+$/.test(port);
+  return port === "" || /^[+-]?\d+$/.test(port);
 }
 function listenerRebindFailedFor(warnings, listenerKey) {
   const prefix = "apply " + listenerKey + " ";

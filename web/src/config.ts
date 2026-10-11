@@ -326,7 +326,7 @@ function goUnquote(s: string): string {
 //      address as [::]:<port>, so channel 1's 0.0.0.0 and channel 2's [::] are
 //      the same listener. normalizeListenHost canonicalizes IPv6 hosts to their
 //      RFC 5952 form (so 0:0:0:0:0:0:0:0 and :: compare equal) and maps the
-//      empty host (":8443") to the same "0.0.0.0"; a concrete host (loopback,
+//      empty host (":8443") to the same "0.0.0.0" on a confirmed rebind; a concrete host (loopback,
 //      LAN IP) is returned as-is. The cross-family wildcard equivalence (:: ->
 //      0.0.0.0) is gated on bindSucceeded: on a host with IPV6_V6ONLY the IPv6
 //      and IPv4 wildcards expose different address families, so only a
@@ -590,7 +590,18 @@ function splitListenHostPort(addr: string): { host: string; port: string } | nul
 // equivalence.
 function normalizeListenHost(host: string, bindSucceeded: boolean): string {
   if (host === "") {
-    return "0.0.0.0";
+    // An empty host (":8443") binds every interface. Go's net.Listen("tcp",
+    // ":8443") binds the dual-stack [::]:8443 on most hosts, which net.Addr().String()
+    // reports as "[::]:8443" (the IPv6 wildcard), not "0.0.0.0:8443" (the IPv4
+    // wildcard). On an IPV6_V6ONLY host ":8443" is an IPv6 wildcard while
+    // "0.0.0.0:8443" is IPv4-only — different families, exactly like [::] vs
+    // 0.0.0.0 — so collapsing ":8443" to "0.0.0.0" unconditionally would suppress a
+    // forecast for a restart that additionally exposes IPv6 when the serving
+    // listener is IPv4-only. Gating on bindSucceeded (the same gate the explicit
+    // "::" form uses below) keeps the empty host distinct from a serving 0.0.0.0
+    // until a confirmed rebind, and normalizes it to "0.0.0.0" once the rebind
+    // has succeeded and the two are confirmed to be the same bind.
+    return bindSucceeded ? "0.0.0.0" : "";
   }
   if (host.includes(":")) {
     const v6 = canonicalizeIPv6Host(host, bindSucceeded);
@@ -893,18 +904,18 @@ function normalizeListenPort(port: string): string {
   return port;
 }
 
-// isDecimalPort reports whether a port string is a Go-style decimal port: a
-// non-empty run of ASCII digits (optionally zero-padded), matching the grammar
-// Go's net.LookupPort treats as a numeric port (strconv.Atoi, decimal only).
-// The empty string (an omitted port, e.g. "0.0.0.0:") is also a decimal port —
-// net.LookupPort resolves it to 0 (the ephemeral wildcard) — so it normalizes
-// to "0" via normalizeListenPort. JavaScript's Number("0x50") (hex) and
-// Number("1e2") (exponent) are NOT decimal ports: Go routes them through the
-// service-name database (net.LookupPort), where /etc/services may map them to
-// a different port than the hex/exponent value, so they must not be coerced to
-// a decimal port in the browser.
+// isDecimalPort reports whether a port string is a Go-style decimal port: an
+// optional leading sign (+ or -) followed by a non-empty run of ASCII digits,
+// matching the grammar Go's net.LookupPort treats as a numeric port (strconv.Atoi,
+// which accepts an optional sign; -0 is valid and yields 0). The empty string (an
+// omitted port, e.g. "0.0.0.0:") is also a decimal port — net.LookupPort resolves
+// it to 0 (the ephemeral wildcard) — so it normalizes to "0" via normalizeListenPort.
+// JavaScript's Number("0x50") (hex) and Number("1e2") (exponent) are NOT decimal
+// ports: Go routes them through the service-name database (net.LookupPort), where
+// /etc/services may map them to a different port than the hex/exponent value, so
+// they must not be coerced to a decimal port in the browser.
 function isDecimalPort(port: string): boolean {
-  return port === "" || /^\d+$/.test(port);
+  return port === "" || /^[+-]?\d+$/.test(port);
 }
 
 // listenerRebindFailedFor reports whether a listener rebind failed during the
