@@ -532,6 +532,120 @@ test("saveNotice keeps the exposure forecast when a service-name port resolves t
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
+test("saveNotice deduplicates a successful hostname rebind (configured hostname vs serving IP)", () => {
+  // When the saved key is a listener (network.listen_addr) and the rebind
+  // succeeded (apply_outcome "applied"), the configured hostname resolved to
+  // the serving IP at bind time. Channel 1 (exposureWarning) names the configured
+  // hostname while channel 2 (ListenerExposureNotice) names the kernel-resolved
+  // IP from net.Addr().String(). The browser cannot reproduce DNS, so rather than
+  // comparing the hostname against the IP textually, the dedup treats them as the
+  // same bind when the rebind succeeded (the saved key is a listener key and
+  // apply_outcome is "applied") and the configured host is a non-literal hostname
+  // while the serving host is a literal IP — keyed by listener and port alone.
+  // The same bind on the same listener and port is the one hazard, and the
+  // authoritative channel-2 notice (with the dialable address) surfaces.
+  const configuredAddr = "myhost:9443";
+  const servingAddr = "192.0.2.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the serving IP) only; the hostname forecast is the same bind and
+  // is suppressed.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice deduplicates a successful hostname rebind for the preview listener", () => {
+  // The hostname relaxation applies to network.preview_listen_addr as well: a
+  // successful rebind resolves the configured hostname to the serving IP, and the
+  // preview listener's per-write forecast (PreviewListenerExposureNotice on
+  // channel 1) names the configured hostname while the apply-time transition
+  // notice (channel 2) names the resolved IP. The dedup matches them by listener
+  // key and port when the rebind succeeded and the configured host is a
+  // non-literal hostname.
+  const configuredAddr = "myhost:9444";
+  const servingAddr = "192.0.2.1:9444";
+  const writeWarning = `network.preview_listen_addr "${configuredAddr}" is reachable from the network · it is the web-tab preview origin, kept separate from network.listen_addr so it never serves the daemon control API · it serves your previewed dev servers, each on its own hostname · a remote browser gains nothing from the bind: per-tab origins are *.localhost names, which a browser resolves to its own machine, so remote viewers keep the same-origin preview on network.listen_addr · but *.localhost is a browser convention, not a restriction — anything that reaches this address can send Host: <tab>.localhost itself, and a tab\'s hostname is the only credential this listener checks, so a hostname that leaks through a log, a screenshot, or browser history becomes readable from the network instead of only from this machine · editor tabs are withheld entirely while this is network-bound · set it to a loopback address such as 127.0.0.1:9444, or "" to disable it`;
+  const applyWarning = `network.preview_listen_addr "${servingAddr}" is reachable from the network · it is the web-tab preview origin, kept separate from network.listen_addr so it never serves the daemon control API · it serves your previewed dev servers, each on its own hostname · a remote browser gains nothing from the bind: per-tab origins are *.localhost names, which a browser resolves to its own machine, so remote viewers keep the same-origin preview on network.listen_addr · but *.localhost is a browser convention, not a restriction — anything that reaches this address can send Host: <tab>.localhost itself, and a tab\'s hostname is the only credential this listener checks, so a hostname that leaks through a log, a screenshot, or browser history becomes readable from the network instead of only from this machine · editor tabs are withheld entirely while this is network-bound · set it to a loopback address such as 127.0.0.1:9444, or "" to disable it`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.preview_listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the serving IP) only; the hostname forecast is the same bind and
+  // is suppressed.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps the exposure forecast for a hostname when the saved key is not a listener (require_token flip)", () => {
+  // The hostname relaxation is gated on the saved key being a listener key
+  // (network.listen_addr / network.preview_listen_addr) and apply_outcome being
+  // "applied" — a successful rebind resolved the configured hostname to the
+  // serving IP. When the saved key is network.require_token the listener did not
+  // rebind on this save, so the browser cannot confirm the configured hostname
+  // resolved to the serving address (a prior rebind may have failed, leaving the
+  // listener serving a different address while config carries the hostname). The
+  // strict host comparison is kept, so a hostname forecast and a different serving
+  // IP both surface. This preserves the failed-rebind case (finding #5:
+  // TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress pins the
+  // serving-vs-configured split) for a hostname the same way it does for a
+  // configured IP.
+  const configuredAddr = "myhost:9443";
+  const servingAddr = "192.0.2.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the saved key is not a listener, so the rebind success signal
+  // is absent and the strict host comparison keeps the two addresses distinct.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps the exposure forecast for a hostname when the rebind failed (deferred)", () => {
+  // A failed rebind is "deferred" (config/effect.go saveRules:
+  // ListenerRebindFailed → ApplyStatusDeferred), not "applied", so the per-key
+  // apply_outcome the dedup gates on is not "applied" and the hostname relaxation
+  // does not fire. The configured hostname did not bind (the listener is still
+  // serving the old address), so the serving address (channel 2) is not the
+  // resolved form of the configured hostname — the two are different hazards, and
+  // the strict host comparison is kept so the forecast for the configured address
+  // the listener has not yet bound is preserved.
+  const configuredAddr = "myhost:9443";
+  const servingAddr = "192.0.2.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the rebind failed (apply_outcome "deferred"), so the hostname
+  // relaxation is gated off and the strict host comparison is kept.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
 test("saveNotice tolerates an older daemon that sends no address", () => {
   // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
   // form must not render "undefined" at the user.

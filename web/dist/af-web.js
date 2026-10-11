@@ -7659,7 +7659,7 @@ function listenerExposureIdentity(w) {
   const m = w.match(/^(\S+) "([^"]+)"/);
   return m ? `${m[1]} ${m[2]}` : "";
 }
-function listenerExposureDedup(writeId, applyId) {
+function listenerExposureDedup(writeId, applyId, bindSucceeded) {
   if (writeId === applyId) {
     return true;
   }
@@ -7677,7 +7677,9 @@ function listenerExposureDedup(writeId, applyId) {
     return false;
   }
   if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
-    return false;
+    if (!(bindSucceeded && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
+      return false;
+    }
   }
   const wPort = normalizeListenPort(wAddr.port);
   const aPort = normalizeListenPort(aAddr.port);
@@ -7685,6 +7687,12 @@ function listenerExposureDedup(writeId, applyId) {
     return true;
   }
   return wPort === "0" && aPort !== "0";
+}
+function isListenHostLiteral(host) {
+  if (host.includes(":")) {
+    return true;
+  }
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
 }
 function splitListenHostPort(addr) {
   if (addr.startsWith("[")) {
@@ -7766,13 +7774,15 @@ function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
+  const savedKey = resp.result.key;
+  const listenerRebindSucceeded = (savedKey === "network.listen_addr" || savedKey === "network.preview_listen_addr") && resp.apply_outcome === "applied";
   const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => {
     if (applyWarnings.includes(w)) {
       return false;
     }
     if (isListenerExposureWarning(w)) {
       const id = listenerExposureIdentity(w);
-      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw)))) {
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), listenerRebindSucceeded))) {
         return false;
       }
     }

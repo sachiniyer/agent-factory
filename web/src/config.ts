@@ -272,7 +272,7 @@ function listenerExposureIdentity(w: string): string {
 // listenerExposureDedup returns true when a write-side exposure forecast
 // (channel 1, exposureWarning) is the same hazard an apply-side notice (channel 2,
 // ListenerExposureNotice/PreviewListenerExposureNotice) already covers
-// authoritatively. It compares listenerExposureIdentity values, with two
+// authoritatively. It compares listenerExposureIdentity values, with three
 // relaxations for the same-listener case:
 //
 //   1. Wildcard host normalization: a configured 0.0.0.0 (IPv4 wildcard) and a
@@ -288,6 +288,21 @@ function listenerExposureIdentity(w: string): string {
 //      so a :0 in the forecast is the only direction the wildcard appears; the
 //      inverse — a concrete forecast against a :0 notice — does not arise and is
 //      not relaxed.
+//   3. Hostname bind (bindSucceeded only): a configured non-literal host (a
+//      hostname like "myhost" the validator accepts) resolves to a literal IP at
+//      bind time, so channel 1 names the configured hostname while channel 2 names
+//      the kernel-resolved IP. The browser cannot reproduce DNS, so a textual host
+//      comparison cannot match them; instead, when the listener rebind SUCCEEDED
+//      (the saved key is a listener key and apply_outcome is "applied"), the
+//      configured host is the bind the serving address resolved from, and the
+//      dedup matches by listener key and port alone. The browser gates this on
+//      the daemon's success signal because it cannot resolve the hostname itself:
+//      isListenHostLiteral distinguishes a numeric IP (the serving address form)
+//      from a hostname (the configured form), and bindSucceeded is the apply's
+//      per-key outcome, which is "applied" only when the rebind landed and
+//      "deferred" when it failed (config/effect.go saveRules). The failed-rebind
+//      case below is preserved: a failed rebind is "deferred", not "applied", so
+//      bindSucceeded is false and the strict host comparison still applies.
 //
 // The failed-rebind case where both addresses are concrete and differ is preserved:
 // two different concrete ports for the same host do not match, and two different
@@ -299,7 +314,7 @@ function listenerExposureIdentity(w: string): string {
 // (normalizeListenPort → WELL_KNOWN_TCP_SERVICES), so a configured 0.0.0.0:http
 // and a serving 0.0.0.0:80 or [::]:80 compare equal — net.Listen resolves the
 // service name the same way net.LookupPort does (config/listen_addr.go).
-function listenerExposureDedup(writeId: string, applyId: string): boolean {
+function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: boolean): boolean {
   if (writeId === applyId) {
     return true;
   }
@@ -319,7 +334,20 @@ function listenerExposureDedup(writeId: string, applyId: string): boolean {
     return false;
   }
   if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
-    return false;
+    // A successful listener rebind resolves a non-literal configured host (a
+    // hostname the validator accepts, e.g. the machine's hostname) to the
+    // literal serving address net.Addr().String() reports. The browser cannot
+    // reproduce that resolution, so rather than comparing the hostname against
+    // the IP textually, treat them as the same bind when the rebind succeeded
+    // (bindSucceeded, from the per-key apply_outcome) and the configured host is
+    // a hostname (not a numeric IP — isListenHostLiteral) while the serving host
+    // is a literal IP. The failed-rebind case (a prior rebind left the listener
+    // serving a different address) is preserved: a failed rebind is "deferred",
+    // not "applied", so bindSucceeded is false and the strict host comparison
+    // keeps two different concrete addresses distinct.
+    if (!(bindSucceeded && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
+      return false;
+    }
   }
   const wPort = normalizeListenPort(wAddr.port);
   const aPort = normalizeListenPort(aAddr.port);
@@ -330,6 +358,28 @@ function listenerExposureDedup(writeId: string, applyId: string): boolean {
   // listener and host. The apply channel never carries :0 (it names the serving
   // bound address), so only the forecast direction needs the wildcard.
   return wPort === "0" && aPort !== "0";
+}
+
+// isListenHostLiteral reports whether a host part (already split by
+// splitListenHostPort, so brackets are stripped for IPv6) is a numeric IP address
+// rather than a hostname. A configured address can be a hostname the validator
+// accepts (config/listen_addr.go) and net.Listen resolves to a literal IP at bind
+// time; the serving address (channel 2, from net.Addr().String()) is always a
+// literal. listenerExposureDedup uses this to distinguish the two when a
+// successful rebind resolved the hostname, so a hostname forecast and the literal
+// serving notice are the same bind rather than two different exposures.
+//   - IPv4: a dotted-quad of 1-3 digit octets, matching the form the validator
+//     and net.Listen accept (and net.Addr().String() reports verbatim).
+//   - IPv6: any host containing a colon — splitListenHostPort already stripped
+//     the brackets, so "::", "2001:db8::1" etc. are bare IPv6.
+//   - Everything else is a hostname (a name the resolver will look up), including
+//     "localhost" and "myhost"; both are non-literal and are left for the hostname
+//     relaxation to treat as the bind's configured name.
+function isListenHostLiteral(host: string): boolean {
+  if (host.includes(":")) {
+    return true;
+  }
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
 }
 
 // splitListenHostPort splits a "<host>:<port>" or "[<host>]:<port>" address into
@@ -449,6 +499,22 @@ export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
+  // Whether the listener rebind the save moved actually landed — the daemon's
+  // per-key apply_outcome. A listener key (network.listen_addr /
+  // network.preview_listen_addr) whose rebind succeeded is "applied"; a failed
+  // rebind is "deferred" (config/effect.go saveRules: ListenerRebindFailed →
+  // ApplyStatusDeferred). Only a successful rebind guarantees the configured
+  // address resolved to the serving address at bind time, so the hostname
+  // relaxation in listenerExposureDedup (a non-literal configured host matched to
+  // the literal serving IP) is gated on this. A require_token save (not a
+  // listener key) is "applied" but no rebind happened, so the gate is the key AND
+  // the outcome: a prior failed rebind left the listener serving a different
+  // address than the configured one, and a require_token flip's forecast for the
+  // configured address must not be deduped against the serving address's notice.
+  const savedKey = resp.result.key;
+  const listenerRebindSucceeded =
+    (savedKey === "network.listen_addr" || savedKey === "network.preview_listen_addr") &&
+    resp.apply_outcome === "applied";
   // Merge both warning channels so independent per-write advisories (e.g. an
   // unregistered-account warning on a default_accounts write) survive even when
   // channel 2 carries an unrelated apply warning (e.g. a pending rebind retried
@@ -464,19 +530,22 @@ export function saveNotice(resp: ConfigSetResponse): string {
   //      ListenerExposureNotice/PreviewListenerExposureNotice). Both channels
   //      phrase that hazard differently and the server keeps channel 2
   //      authoritative on a successful exposure transition, so the forecast is
-   //      dropped only when channel 2 carries the notice for the SAME listener at
-   //      the SAME address — network.listen_addr and network.preview_listen_addr
-   //      are independent listeners, and a notice for one is not an authoritative
-   //      copy of a forecast for the other; and even for the same listener a
-   //      failed rebind can leave the serving address (channel 2) different from
-   //      the configured address (channel 1), in which case the forecast names a
-   //      future state the notice does not cover. listenerExposureIdentity matches
-   //      them, with one relaxation: when the configured address is ephemeral
-   //      (port :0), a successful rebind resolves it to a concrete kernel-assigned
-   //      port that channel 2 names, so a :0 forecast matches any concrete serving
-   //      port for the same listener and host (listenerExposureDedup). The
-   //      failed-rebind case has two different concrete addresses and is not
-   //      relaxed.
+  //      dropped only when channel 2 carries the notice for the SAME listener at
+  //      the SAME address — network.listen_addr and network.preview_listen_addr
+  //      are independent listeners, and a notice for one is not an authoritative
+  //      copy of a forecast for the other; and even for the same listener a
+  //      failed rebind can leave the serving address (channel 2) different from
+  //      the configured address (channel 1), in which case the forecast names a
+  //      future state the notice does not cover. listenerExposureIdentity matches
+  //      them, with relaxations: when the configured address is ephemeral
+  //      (port :0), a successful rebind resolves it to a concrete kernel-assigned
+  //      port that channel 2 names, so a :0 forecast matches any concrete serving
+  //      port for the same listener and host (listenerExposureDedup); when the
+  //      configured host is a non-literal hostname that a successful rebind
+  //      resolved to the literal serving address, the browser cannot reproduce
+  //      DNS, so the dedup matches by listener key and port alone when the rebind
+  //      succeeded (gated on the per-key apply_outcome). The failed-rebind case
+  //      has two different concrete addresses and is not relaxed.
   //
   // Other per-write advisories (the unregistered-account warning, the
   // project-scoped branch_prefix notice) have no apply-side counterpart and are
@@ -488,7 +557,7 @@ export function saveNotice(resp: ConfigSetResponse): string {
         }
         if (isListenerExposureWarning(w)) {
           const id = listenerExposureIdentity(w);
-          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw)))) {
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), listenerRebindSucceeded))) {
             return false;
           }
         }
