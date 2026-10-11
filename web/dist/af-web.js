@@ -7681,8 +7681,8 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded) {
       return false;
     }
   }
-  const wPort = normalizeListenPort(wAddr.port);
-  const aPort = normalizeListenPort(aAddr.port);
+  const wPort = normalizeListenPort(wAddr.port, bindSucceeded);
+  const aPort = normalizeListenPort(aAddr.port, bindSucceeded);
   if (wPort === aPort) {
     return true;
   }
@@ -7725,11 +7725,17 @@ function normalizeListenHost(host, bindSucceeded) {
   return host;
 }
 function canonicalizeIPv6Host(host) {
+  let zone = "";
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    zone = host.slice(pct);
+    host = host.slice(0, pct);
+  }
   const groups = parseIPv6Groups(host);
   if (groups === null) {
-    return host;
+    return host + zone;
   }
-  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && (groups[5] === 65535 || groups[5] === 0) && !(groups[5] === 0 && groups[6] === 0 && groups[7] === 0)) {
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 65535) {
     const hi = groups[6];
     const lo = groups[7];
     return `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
@@ -7765,7 +7771,11 @@ function canonicalizeIPv6Host(host) {
       i++;
     }
   }
-  return parts.join(":");
+  const canonical = parts.join(":");
+  if (canonical === "::") {
+    return canonical;
+  }
+  return canonical + zone;
 }
 function parseIPv6Groups(host) {
   const pct = host.indexOf("%");
@@ -7890,10 +7900,13 @@ var WELL_KNOWN_TCP_SERVICES = new Map(
     "rdp": 3389
   })
 );
-function normalizeListenPort(port) {
+function normalizeListenPort(port, bindSucceeded) {
   const n = Number(port);
   if (!Number.isNaN(n)) {
     return String(n);
+  }
+  if (!bindSucceeded) {
+    return port;
   }
   const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
   return resolved !== void 0 ? String(resolved) : port;

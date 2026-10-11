@@ -324,13 +324,19 @@ function listenerExposureIdentity(w: string): string {
 // rebind). Zero-padded zero ports ("00", "000") and an omitted port ("0.0.0.0:")
 // are normalized to "0" (net.LookupPort resolves them to 0, the ephemeral wildcard).
 // Service-name ports the table knows ("http", "https", …) are resolved to their
-// numeric ports (normalizeListenPort → WELL_KNOWN_TCP_SERVICES), so a configured
-// 0.0.0.0:http and a serving 0.0.0.0:80 or [::]:80 compare equal. Service names
-// the table does NOT carry (http-alt, mysql, … — net.LookupPort reads /etc/services,
-// which is larger than the browser-side fallback) are handled by the
-// bindSucceeded-gated resolved-port relaxation above, which does not depend on the
-// table: on a successful rebind the configured port IS the serving port whether
-// or not the browser can resolve its name.
+// numeric ports (normalizeListenPort → WELL_KNOWN_TCP_SERVICES) only on a
+// successful rebind (bindSucceeded): Go's net.LookupPort augments its built-in
+// mappings from the daemon host's /etc/services, so the browser-side table is not
+// authoritative on a host that maps a name to a different port, and on a failed
+// rebind the configured service name is a future state the kernel has not
+// resolved. On a successful rebind the table is a convenience for the common case
+// (http→80), and the resolved-port relaxation above matches a service-name
+// forecast to any concrete numeric serving port without the table; on a failed
+// rebind (or a non-listener save) the service name is returned unchanged so a
+// host-specific mapping never suppresses a warning for a different restart port.
+// Service names the table does NOT carry (http-alt, mysql, … — net.LookupPort
+// reads /etc/services, which is larger than the browser-side fallback) are handled
+// by the same resolved-port relaxation on a successful rebind.
 function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: boolean): boolean {
   if (writeId === applyId) {
     return true;
@@ -366,8 +372,8 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
       return false;
     }
   }
-  const wPort = normalizeListenPort(wAddr.port);
-  const aPort = normalizeListenPort(aAddr.port);
+  const wPort = normalizeListenPort(wAddr.port, bindSucceeded);
+  const aPort = normalizeListenPort(aAddr.port, bindSucceeded);
   if (wPort === aPort) {
     return true;
   }
@@ -450,11 +456,13 @@ function splitListenHostPort(addr: string): { host: string; port: string } | nul
 // (canonicalizeIPv6Host), so a non-canonical configured spelling the validator
 // accepts — e.g. "0:0:0:0:0:0:0:0" — compares equal to the compressed "::"
 // form net.Addr().String() reports for the serving address. IPv4-mapped
-// (::ffff:0.0.0.0) and IPv4-compatible (::1.2.3.4) forms are collapsed to
-// the bare IPv4 address by canonicalizeIPv6Host (matching net.IP.String via
-// IP.To4), so a configured [::ffff:0.0.0.0]:0 — the IPv4-mapped wildcard —
-// compares equal to a serving [::]:0 on a dual-stack bind. Matching only the
-// already-compressed "::" left the uncompressed wildcard and its canonical form
+// (::ffff:0.0.0.0) is collapsed to the bare IPv4 address by
+// canonicalizeIPv6Host (matching net.IP.String via IP.To4), so a configured
+// [::ffff:0.0.0.0]:0 — the IPv4-mapped wildcard — compares equal to a
+// serving [::]:0 on a dual-stack bind. IPv4-compatible (::1.2.3.4) is NOT
+// collapsed — Go's net.ParseIP("::1.2.3.4").String() is "::102:304" (not
+// "1.2.3.4") and To4() is nil, so it is a distinct IPv6 address. Matching only
+// the already-compressed "::" left the uncompressed wildcard and its canonical form
 // as different literals, so both versions of the same exposure rendered. The
 // IPv6 unspecified address ("::") is the all-interfaces wildcard on a
 // dual-stack host and maps to the IPv4 "0.0.0.0" wildcard, matching the
@@ -497,34 +505,51 @@ function normalizeListenHost(host: string, bindSucceeded: boolean): string {
 // >= 2), and no leading zeros per group. net.Addr().String() already emits
 // this form for the serving address (channel 2), so canonicalizing a
 // non-canonical configured spelling (channel 1, e.g. "0:0:0:0:0:0:0:0")
-// lets the two compare equal. IPv4-mapped (::ffff:0.0.0.0) and IPv4-compatible
-// (::1.2.3.4) forms are emitted as the bare IPv4 dotted-quad, matching
-// net.IP.String()/net.Addr().String() which emits the IPv4 form for both via
-// IP.To4(); a dual-stack net.Listen("tcp", "[::ffff:0.0.0.0]:0") reports
-// "[::]:<port>", and ::ffff:0.0.0.0 canonicalizes to 0.0.0.0 (the IPv4
-// wildcard) which normalizeListenHost already maps to the same value as ::.
-// A zone identifier (%zone, RFC 4007) is stripped before parsing — Go accepts a
-// scoped address like "0:0:0:0:0:0:0:0%lo" but net.Addr().String() drops the
-// zone, so canonicalizing the bare address matches the serving form.
+// lets the two compare equal. IPv4-mapped (::ffff:0.0.0.0) is emitted as the
+// bare IPv4 dotted-quad, matching net.IP.String()/net.Addr().String() which
+// emits the IPv4 form via IP.To4; a dual-stack net.Listen("tcp",
+// "[::ffff:0.0.0.0]:0") reports "[::]:<port>", and ::ffff:0.0.0.0
+// canonicalizes to 0.0.0.0 (the IPv4 wildcard) which normalizeListenHost
+// already maps to the same value as ::. IPv4-compatible (::1.2.3.4, the first
+// 96 bits zero) is NOT collapsed: Go's net.ParseIP("::1.2.3.4").String() is
+// "::102:304" (not "1.2.3.4") and To4() is nil, so it is a distinct IPv6
+// address, not IPv4 — a failed-rebind forecast for [::1.2.3.4]:8443 against a
+// serving 1.2.3.4:8443 must not be deduped as the same address.
+// A zone identifier (%zone, RFC 4007) is stripped before parsing so
+// parseIPv6Groups does not reject it, but is PRESERVED for scoped non-wildcard
+// addresses: Go's net.TCPAddr.String() retains the zone for scoped
+// non-wildcard addresses (e.g. [fe80::1%eth0]:8443), so a failed rebind that
+// leaves the daemon serving [fe80::1%eth0]:8443 while config carries
+// [fe80::1%eth1]:8443 must not compare equal — stripping both zones would
+// suppress the future-state forecast. The all-zeros wildcard (::) drops the
+// zone because Go's net.Addr().String() drops it from the bound address, so
+// [0:0:0:0:0:0:0:0%lo] canonicalizes to :: (the zone is irrelevant for a
+// dual-stack wildcard).
 // Returns the input unchanged when it is not a parseable bare IPv6 address
 // (a hostname or an IPv4 host).
 function canonicalizeIPv6Host(host: string): string {
+  let zone = "";
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    zone = host.slice(pct);
+    host = host.slice(0, pct);
+  }
   const groups = parseIPv6Groups(host);
   if (groups === null) {
-    return host;
+    return host + zone;
   }
-  // IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d): the first 10
-  // bytes are zero and bytes 10-11 are 0xffff (mapped) or 0 (compatible). Go's
-  // net.IP.To4() collapses both to a 4-byte IPv4, and net.IP.String() emits the
-  // dotted-quad, so canonicalizing to the IPv4 form matches the serving
-  // address net.Addr().String() reports for a bind the validator accepts. The
-  // all-zeros address (::) is excluded: it is the IPv6 unspecified address (the
-  // wildcard), not an IPv4-compatible address, and normalizeListenHost gates its
-  // cross-family equivalence to 0.0.0.0 on bindSucceeded (on a host with
-  // IPV6_V6ONLY, [::] and 0.0.0.0 expose different address families).
+  // IPv4-mapped (::ffff:a.b.c.d): the first 80 bits are zero and bytes 10-11
+  // are 0xffff. Go's net.IP.To4() collapses this to a 4-byte IPv4 address, and
+  // net.IP.String() emits the dotted-quad, so canonicalizing to the IPv4 form
+  // matches the serving address net.Addr().String() reports for a bind the
+  // validator accepts. IPv4-compatible (::a.b.c.d, the first 96 bits zero) is
+  // NOT collapsed: Go's net.ParseIP("::1.2.3.4").String() is "::102:304" (not
+  // "1.2.3.4") and To4() is nil, so it is a distinct IPv6 address, not IPv4 —
+  // a failed-rebind forecast for [::1.2.3.4]:8443 against a serving 1.2.3.4:8443
+  // must not be deduped as the same address. The zone is not relevant for an
+  // IPv4-mapped address (net.Addr().String() reports the bare IPv4 form).
   if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 &&
-      (groups[5] === 0xffff || groups[5] === 0) &&
-      !(groups[5] === 0 && groups[6] === 0 && groups[7] === 0)) {
+      groups[5] === 0xffff) {
     const hi = groups[6];
     const lo = groups[7];
     return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
@@ -563,7 +588,20 @@ function canonicalizeIPv6Host(host: string): string {
       i++;
     }
   }
-  return parts.join(":");
+  const canonical = parts.join(":");
+  // Preserve the zone for scoped non-wildcard addresses. Go's
+  // net.TCPAddr.String() retains the zone for scoped non-wildcard addresses
+  // (e.g. fe80::1%eth0), so two different scoped interfaces (fe80::1%eth0 vs
+  // fe80::1%eth1) must NOT compare equal — a failed rebind can leave the daemon
+  // serving one zone while config carries another, and the future-state
+  // forecast for the distinct zone must surface. The all-zeros wildcard (::)
+  // drops the zone: Go's net.Addr().String() drops it from the bound address
+  // (the zone is irrelevant for a dual-stack wildcard), so the canonical form
+  // is zone-less.
+  if (canonical === "::") {
+    return canonical;
+  }
+  return canonical + zone;
 }
 
 // parseIPv6Groups parses a bare IPv6 host (brackets already stripped) into its
@@ -574,9 +612,11 @@ function canonicalizeIPv6Host(host: string): string {
 // an IPv4 host without a colon).
 //
 // A zone identifier (%zone, RFC 4007 — e.g. "0:0:0:0:0:0:0:0%lo") is stripped
-// before parsing: Go's net.Listen accepts a scoped address but net.Addr().String()
-// drops the zone from the bound address, so canonicalizing the bare address
-// matches the serving form. The zone is never part of the canonical form.
+// before parsing so the group parser does not reject it. canonicalizeIPv6Host
+// extracts and preserves the zone for scoped non-wildcard addresses (Go's
+// net.TCPAddr.String() retains it, e.g. [fe80::1%eth0]:8443), dropping it only
+// for the all-zeros wildcard (::, where net.Addr().String() drops it from the
+// bound address).
 function parseIPv6Groups(host: string): number[] | null {
   const pct = host.indexOf("%");
   if (pct >= 0) {
@@ -671,14 +711,20 @@ function parseHexGroup(s: string): number {
 // to. The validator (config/listen_addr.go) accepts service-name ports via the
 // same net.LookupPort call, so any name the config allows must resolve here for
 // the dedup to match the configured spelling (channel 1) against the kernel's
-// bound spelling (channel 2) — when the rebind did not succeed and the
-// resolved-port relaxation (listenerExposureDedup, gated on bindSucceeded) does
-// not apply. Names this table does not carry (http-alt, mysql, …) are handled by
-// that relaxation on a successful rebind, where the configured port IS the
-// serving port the kernel resolved it to and the browser need not reproduce
-// net.LookupPort; a name neither the table nor a successful rebind covers is
-// returned unchanged so a name the server does not recognize never collapses two
-// different addresses.
+// bound spelling (channel 2) — but only on a successful rebind (bindSucceeded),
+// because Go's net.LookupPort augments and overwrites its built-in service
+// mappings from the daemon host's service database: on a host mapping "http" to
+// 8080, the table's "http"→80 is wrong, and a failed rebind leaves the serving
+// port at the old address while the configured service name forecasts a different
+// restart port, so the table would suppress a warning for a port the host may
+// map differently. The resolved-port relaxation in listenerExposureDedup (also
+// gated on bindSucceeded) handles a successful rebind without the table: on a
+// successful rebind the configured port IS the serving port the kernel resolved
+// it to, so a service-name forecast matches any concrete numeric serving port
+// for the same listener and (normalized) host. Names this table does not carry
+// (http-alt, mysql, …) are also handled by that relaxation. A name neither the
+// table nor a successful rebind covers is returned unchanged so a name the
+// server does not recognize never collapses two different addresses.
 const WELL_KNOWN_TCP_SERVICES: ReadonlyMap<string, number> = new Map(
   // The entries below are the IANA well-known TCP services (port < 1024) that
   // /etc/services ships on Linux/macOS — the realistic set for a listen address.
@@ -734,17 +780,29 @@ const WELL_KNOWN_TCP_SERVICES: ReadonlyMap<string, number> = new Map(
 // "000") and an omitted port ("") — all of which net.LookupPort resolves to 0
 // (the ephemeral wildcard) — compare equal to "0". A concrete port is returned
 // as-is (leading zeros stripped for numeric strings). A non-numeric service name
-// is resolved via the IANA well-known TCP services map (WELL_KNOWN_TCP_SERVICES),
-// matching net.LookupPort("tcp", ...) on the server: a configured
-// 0.0.0.0:http binds port 80, so the serving address (0.0.0.0:80 or [::]:80)
-// and the forecast (0.0.0.0:http) compare equal and the dedup suppresses the
-// duplicate forecast. An unknown service name (which the validator would reject
-// at config-set time) is returned unchanged so a name the server does not
-// recognize never collapses two different addresses.
-function normalizeListenPort(port: string): string {
+// is resolved via the IANA well-known TCP services map
+// (WELL_KNOWN_TCP_SERVICES) only on a successful rebind (bindSucceeded):
+// Go's net.LookupPort augments its built-in service mappings from the daemon
+// host's /etc/services, so the browser-side table is not authoritative on a
+// host that maps a name to a different port. On a failed rebind (or a
+// non-listener save) the serving address is the OLD bound port and the
+// configured service name is a future state the kernel has not resolved, so
+// resolving it to a well-known port would suppress a warning for a port the
+// host may map differently. On a successful rebind the configured port IS the
+// serving port, and the resolved-port relaxation in listenerExposureDedup
+// (also gated on bindSucceeded) matches a service-name forecast to any
+// concrete numeric serving port without the table, so the table is a
+// convenience for the common case (http→80) rather than a source of truth.
+// An unknown service name (which the validator would reject at config-set
+// time, or the table does not carry) is returned unchanged so a name the
+// server does not recognize never collapses two different addresses.
+function normalizeListenPort(port: string, bindSucceeded: boolean): string {
   const n = Number(port);
   if (!Number.isNaN(n)) {
     return String(n);
+  }
+  if (!bindSucceeded) {
+    return port;
   }
   const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
   return resolved !== undefined ? String(resolved) : port;

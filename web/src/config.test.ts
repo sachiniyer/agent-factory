@@ -529,12 +529,13 @@ test("saveNotice deduplicates a service-name configured port against a numeric s
   // exposureWarning names the configured 0.0.0.0:http. Without service-name
   // resolution in normalizeListenPort the two would not compare equal and the
   // same exposure would render twice. normalizeListenPort resolves well-known
-  // service names to their numeric ports (matching net.LookupPort), so the
-  // forecast is suppressed and only the authoritative channel-2 notice surfaces.
-  // The cross-family wildcard equivalence (:: -> 0.0.0.0) is gated on a
-  // successful rebind (bindSucceeded), so the rebind must have landed
-  // (apply_outcome "applied") for the configured 0.0.0.0 and the serving [::] to
-  // compare equal — on a host with IPV6_V6ONLY they expose different families.
+  // service names to their numeric ports (matching net.LookupPort) on a
+  // successful rebind (bindSucceeded), so the forecast is suppressed and only
+  // the authoritative channel-2 notice surfaces. The cross-family wildcard
+  // equivalence (:: -> 0.0.0.0) is also gated on a successful rebind
+  // (bindSucceeded), so the rebind must have landed (apply_outcome "applied")
+  // for the configured 0.0.0.0 and the serving [::] to compare equal — on a host
+  // with IPV6_V6ONLY they expose different families.
   const configuredAddr = "0.0.0.0:http";
   const servingAddr = "[::]:80";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -554,9 +555,13 @@ test("saveNotice deduplicates a service-name configured port against a numeric s
 });
 
 test("saveNotice keeps the exposure forecast when a service-name port resolves to a different number than the serving port", () => {
-  // normalizeListenPort resolves service names, but it does not collapse two
-  // different concrete ports: a configured 0.0.0.0:https (port 443) and a
-  // serving address on port 8443 are different binds, so both surface.
+  // normalizeListenPort resolves service names only on a successful rebind
+  // (bindSucceeded); on a non-listener save (network.require_token, not a
+  // rebind) the table is not authoritative — Go's net.LookupPort augments its
+  // built-in mappings from the daemon host's /etc/services, so the browser-side
+  // table could resolve a name to a different port than the host. In this case
+  // 0.0.0.0:https (port 443) and a serving address on port 8443 are different
+  // binds, so both surface.
   const configuredAddr = "0.0.0.0:https";
   const servingAddr = "0.0.0.0:8443";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -960,6 +965,95 @@ test("saveNotice deduplicates a zoned IPv6 non-ephemeral wildcard (configured [0
     }),
   );
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps the exposure forecast when a service-name port is not resolved on a non-listener save", () => {
+  // Go's net.LookupPort augments its built-in service mappings from the daemon
+  // host's /etc/services, so the browser-side WELL_KNOWN_TCP_SERVICES table is
+  // not authoritative: a host can map "http" to a different port (e.g. 8080).
+  // On a require_token flip (not a listener rebind, so bindSucceeded is false)
+  // the serving address is the OLD bound port while the configured service name
+  // is a future state the kernel has not resolved, so the table is not used and
+  // the service-name forecast does not collapse to the well-known port — both
+  // the channel-2 notice (the serving port) and the channel-1 forecast (the
+  // configured service name) surface. The configured 0.0.0.0:http and the serving
+  // 0.0.0.0:80 are the same port on a host with the default /etc/services, but
+  // the browser cannot know that without the rebind success signal, and a host
+  // that maps "http" to 8080 would suppress a warning for a different restart
+  // state.
+  const configuredAddr = "0.0.0.0:http";
+  const servingAddr = "0.0.0.0:80";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the saved key is not a listener, so the rebind success signal
+  // is absent and the service-name table is not used; the configured 0.0.0.0:http
+  // forecast is not resolved to 80 and is distinct from the serving 0.0.0.0:80.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps distinct scoped IPv6 zones on a non-listener save (require_token flip)", () => {
+  // Go's net.TCPAddr.String() retains the zone for scoped non-wildcard
+  // addresses (e.g. [fe80::1%eth0]:8443), so a failed rebind that leaves the
+  // daemon serving [fe80::1%eth0]:8443 while config carries [fe80::1%eth1]:8443
+  // is two different scoped interfaces, and a require_token flip must not
+  // suppress the future-state forecast for the distinct %eth1 zone.
+  // canonicalizeIPv6Host preserves the zone for scoped non-wildcard addresses
+  // (dropping it only for the all-zeros wildcard ::, where net.Addr().String()
+  // drops it from the bound address), so fe80::1%eth0 and fe80::1%eth1 do NOT
+  // compare equal and both the channel-2 notice (%eth0) and the channel-1
+  // forecast (%eth1) surface.
+  const configuredAddr = "[fe80::1%eth1]:8443";
+  const servingAddr = "[fe80::1%eth0]:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the two scoped addresses have different zones, and
+  // canonicalizeIPv6Host preserves the zone for non-wildcard addresses, so
+  // fe80::1%eth0 and fe80::1%eth1 do not compare equal.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps IPv4-compatible IPv6 distinct from IPv4 on a non-listener save (require_token flip)", () => {
+  // ::1.2.3.4 is the IPv4-compatible form (the first 96 bits are zero, no
+  // 0xffff prefix). Go's net.ParseIP("::1.2.3.4").String() is "::102:304" (not
+  // "1.2.3.4") and To4() is nil, so it is a distinct IPv6 address, not IPv4.
+  // Only the IPv4-MAPPED form (::ffff:a.b.c.d, the first 80 bits zero and bytes
+  // 10-11 0xffff) is collapsed to IPv4 by Go's net.IP.To4(). A failed rebind
+  // can leave an IPv4 1.2.3.4:8443 listener serving while [::1.2.3.4]:8443
+  // remains configured, so a require_token flip must not suppress the
+  // future-state forecast for the distinct IPv4-compatible address.
+  // canonicalizeIPv6Host canonicalizes ::1.2.3.4 to ::102:304 (the IPv6 form),
+  // not to 1.2.3.4 (the IPv4 form), so the two do not compare equal.
+  const configuredAddr = "[::1.2.3.4]:8443";
+  const servingAddr = "1.2.3.4:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — ::1.2.3.4 (IPv4-compatible) canonicalizes to ::102:304 (the
+  // IPv6 form, not 1.2.3.4), so it does not compare equal to the serving 1.2.3.4.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice tolerates an older daemon that sends no address", () => {
