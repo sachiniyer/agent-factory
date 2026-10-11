@@ -278,7 +278,12 @@ type taskRunTurnWatchEntry struct {
 // the same map — while the evidence write follows the observation epoch fence,
 // same as RecordPaneChurnCheckpointAtEpoch above.
 func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, content string, capturedAt time.Time, epoch uint64) bool {
-	if !instance.TaskRunActive() {
+	// Empty content is skipped, not fed: HasUpdated answers a failed capture
+	// the same way it answers a genuinely empty pane — the Observation carries
+	// no success bit — so an empty frame cannot arm a scoped watcher's
+	// absent→present contract. Only confirmed non-empty frames may (#5221
+	// review).
+	if !instance.TaskRunActive() || content == "" {
 		return false
 	}
 	// ResolvedAgent, not Program: the pane runs what the last handoff or

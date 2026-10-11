@@ -127,13 +127,21 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 	}
 }
 
-// NotePaneCaptureObserved stamps paneEvidenceFloorAt at the request-start of
-// this process's first successful pane capture (#5221 review): the quiet arm
-// measures silence from the later of the durable churn stamp and that floor,
-// so an interval the process did not observe — startup materialization,
-// sequential Start(false) calls, a process pause — can never count as quiet.
-// Later captures do not move the floor: from the first frame onward the poll
-// sees every churn itself, and lastPaneChurnAt carries the live signal.
+// paneObservationMaxGap is the stall horizon for the quiet arm's observation
+// streak: at the daemon's ~1s poll cadence a successful-capture gap beyond
+// this is an observation hole — failed probes or a stalled serial loop — in
+// which churn could hide, never a scheduling jitter. Generous to a loaded
+// host's loop time; a starved streak merely degrades the run to the bounded
+// silent arm rather than releasing on unobserved time.
+const paneObservationMaxGap = 10 * time.Second
+
+// NotePaneCaptureObserved stamps pane evidence at the completion of a
+// successful pane capture (#5221 review): the first capture floors the
+// silent arm's clock (startup materialization, sequential Start(false)
+// calls, or a process pause can never count as quiet), and any hole in the
+// successful-capture streak rebases the quiet arm's clock to the capture
+// that ends it — an unobserved interval is not silence, before OR after the
+// first frame.
 func (i *Instance) NotePaneCaptureObserved(at time.Time) {
 	if at.IsZero() {
 		return
@@ -143,4 +151,8 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time) {
 	if i.paneEvidenceFloorAt.IsZero() {
 		i.paneEvidenceFloorAt = at
 	}
+	if i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > paneObservationMaxGap {
+		i.paneQuietStreakAt = at
+	}
+	i.lastPaneCaptureAt = at
 }

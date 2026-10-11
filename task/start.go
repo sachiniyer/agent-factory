@@ -231,20 +231,23 @@ func WaitForReadyAndSubmitPrompt(
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
-		// A sent-unverified verdict means every capture succeeded but none
-		// rendered prompt-specific proof. One signal can still settle it (#4429):
-		// the agent's own mid-turn chrome. Readiness proved the composer idle
-		// before the send, so in-turn chrome appearing inside the window is this
-		// submission's work starting — positive delivery evidence, not a
-		// readability guess. A miss claims nothing; the ambiguous verdict stands.
-		if status == session.PromptSentUnverified &&
+		// The agent's own mid-turn chrome serves two verdicts here (#4429,
+		// #5219): for sent-unverified it is the one positive delivery proof
+		// left, and for delivered it is the run's turn boundary when the
+		// scoped indicator can appear before the daemon's first poll — a
+		// daemon watcher's first sight of it already present can never be
+		// attributed, so the turn would wait for the quiet fallback.
+		// Readiness proved the composer idle before the send, so chrome in
+		// this window is this submission's work starting. A miss claims
+		// nothing; signatureless agents have no chrome to find, so they skip
+		// the watch rather than burn its budget.
+		if turnSignaturedAgent(instance.ResolvedAgent()) &&
+			(status == session.PromptDelivered || status == session.PromptSentUnverified) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
-			// The chrome is also the run's turn boundary (#5219): a task run may
-			// only end idle once the agent has demonstrably taken the turn, and
-			// this observation is the earliest the boundary can land — often a
-			// full poll tick before the daemon's own watch sees the row tick.
 			instance.RecordTaskRunTurn(time.Now())
-			return session.PromptDelivered, nil
+			if status == session.PromptSentUnverified {
+				return session.PromptDelivered, nil
+			}
 		}
 		return status, nil
 	}

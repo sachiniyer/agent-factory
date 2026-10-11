@@ -328,3 +328,16 @@ func tickingTimedRow(prev, cur map[string]timedRow) (timedRow, bool) {
 	}
 	return timedRow{}, false
 }
+
+// turnSignaturedAgent reports whether the resolved agent draws in-turn chrome
+// submittedTurnVisible can find (#5221 review): scoped indicators for codex,
+// amp, and opencode; timed status rows for claude and devin. A signatureless
+// agent's pane has nothing the watch can attribute — running it would only
+// burn the post-submit budget.
+func turnSignaturedAgent(agent string) bool {
+	switch agent {
+	case tmux.ProgramClaude, tmux.ProgramDevin, tmux.ProgramCodex, tmux.ProgramAmp, tmux.ProgramOpencode:
+		return true
+	}
+	return false
+}

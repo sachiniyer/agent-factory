@@ -45,25 +45,3 @@ func TestNoteTaskRunTurnEvidenceDropsPreBoundaryCapture(t *testing.T) {
 	_, watched = m.taskRunTurnWatches[key]
 	require.True(t, watched, "a post-boundary capture feeds the watcher")
 }
-
-// A successful but EMPTY capture is a real frame for the scoped agents — the
-// definitive indicator-absent observation that arms the absent→present
-// contract (#5221 review). Dropping it at the helper's entrance would leave
-// the watch blind across a repaint.
-func TestNoteTaskRunTurnEvidenceFeedsEmptyFrame(t *testing.T) {
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "turn-empty", Path: t.TempDir(), Program: "codex", TaskID: "task-1",
-	})
-	require.NoError(t, err)
-	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStartedForTest(true)
-
-	boundary := time.Now()
-	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
-	_, epoch := inst.InFlightOpAndEpoch()
-
-	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
-	require.False(t, m.noteTaskRunTurnEvidence("turn-empty", inst, "", boundary.Add(time.Millisecond), epoch))
-	_, watched := m.taskRunTurnWatches["turn-empty"]
-	require.True(t, watched, "an empty successful capture still arms the scoped watcher's absence")
-}

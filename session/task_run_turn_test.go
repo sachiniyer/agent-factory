@@ -614,3 +614,26 @@ func TestTaskRunFailedSendDoesNotRestoreAsArmedBoundary(t *testing.T) {
 	require.False(t, reloaded.TaskRunActive(),
 		"a proven-failed send is no boundary — restore matches the un-restarted run's first-Ready end")
 }
+
+// A hole in the capture streak — failed probes or a stalled status loop —
+// hides any churn the pane produced inside it, so the quiet arm's clock
+// restarts at the capture that ends the hole rather than counting
+// unobserved time as silence (#5221 review).
+func TestTaskRunQuietArmRebasesAfterObservationGap(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-2 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(30*time.Second), epoch))
+
+	// The poll watched from the send through t0+40s, then went dark — failed
+	// snapshots or a stalled loop — long past the stall horizon.
+	inst.NotePaneCaptureObserved(t0.Add(40 * time.Second))
+	inst.NotePaneCaptureObserved(time.Now())
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the hidden interval is not silence — the quiet clock restarts at the capture that ends the gap")
+	require.True(t, inst.taskRunTurnGateHeld)
+}

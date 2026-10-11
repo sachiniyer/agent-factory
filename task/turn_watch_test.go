@@ -163,17 +163,3 @@ func TestTurnWatch_PreBoundaryTurnRejectsAtCaptureTime(t *testing.T) {
 		t.Fatal("a turn younger than the boundary's capture-age still fires")
 	}
 }
-
-// An empty successful capture is a definitive indicator-absent frame for the
-// scoped agents (#5221 review): discarding it would leave the watcher unarmed
-// across a repaint, so the turn's own indicator arriving next could never
-// prove it began after the boundary.
-func TestTurnWatch_EmptyFrameArmsScopedAgents(t *testing.T) {
-	w := NewTurnWatch("codex", time.Now())
-	if w.Observe("", time.Now()) {
-		t.Fatal("an empty frame is an absence, not a turn")
-	}
-	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", time.Now()) {
-		t.Fatal("the absent→present edge spans the empty frame")
-	}
-}

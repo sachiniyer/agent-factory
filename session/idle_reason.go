@@ -316,16 +316,16 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 	}
 	// The durable churn stamp can be far older than the pane's true last
 	// output — churn after the first post-prompt edge is not re-checkpointed —
-	// so silence is measured from the later of the stamp and the first pane
-	// capture this process actually observed. A zero floor means nothing has
-	// been observed since (re)start: unobserved time is not silence (#5221
-	// review).
-	if i.paneEvidenceFloorAt.IsZero() {
+	// so silence is measured from the later of the stamp and the START of the
+	// current uninterrupted capture streak. A zero streak means nothing has
+	// been observed since (re)start, and a hole mid-window means the churn it
+	// hid resets the clock: unobserved time is never silence (#5221 review).
+	if i.paneQuietStreakAt.IsZero() {
 		return false
 	}
 	base := i.lastPaneChurnAt
-	if i.paneEvidenceFloorAt.After(base) {
-		base = i.paneEvidenceFloorAt
+	if i.paneQuietStreakAt.After(base) {
+		base = i.paneQuietStreakAt
 	}
 	return time.Since(base) >= taskRunCompletionQuietGrace
 }
