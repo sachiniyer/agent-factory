@@ -442,7 +442,11 @@ function splitListenHostPort(addr: string): { host: string; port: string } | nul
 // IPv6 hosts are parsed and re-emitted in their RFC 5952 canonical form
 // (canonicalizeIPv6Host), so a non-canonical configured spelling the validator
 // accepts — e.g. "0:0:0:0:0:0:0:0" — compares equal to the compressed "::"
-// form net.Addr().String() reports for the serving address. Matching only the
+// form net.Addr().String() reports for the serving address. IPv4-mapped
+// (::ffff:0.0.0.0) and IPv4-compatible (::1.2.3.4) forms are collapsed to
+// the bare IPv4 address by canonicalizeIPv6Host (matching net.IP.String via
+// IP.To4), so a configured [::ffff:0.0.0.0]:0 — the IPv4-mapped wildcard —
+// compares equal to a serving [::]:0 on a dual-stack bind. Matching only the
 // already-compressed "::" left the uncompressed wildcard and its canonical form
 // as different literals, so both versions of the same exposure rendered. The
 // IPv6 unspecified address ("::") is the all-interfaces wildcard on a
@@ -465,16 +469,29 @@ function normalizeListenHost(host: string): string {
 // >= 2), and no leading zeros per group. net.Addr().String() already emits
 // this form for the serving address (channel 2), so canonicalizing a
 // non-canonical configured spelling (channel 1, e.g. "0:0:0:0:0:0:0:0")
-// lets the two compare equal. Returns the input unchanged when it is not a
-// parseable bare IPv6 address (a hostname, an IPv4 host, or an IPv4-embedded
-// tail like "::ffff:1.2.3.4" whose canonical form Go emits as the bare IPv4
-// — left unmatched rather than approximated, since it is not a realistic
-// control-plane bind and reproducing net.IP.String()'s v4 detection is out
-// of scope here).
+// lets the two compare equal. IPv4-mapped (::ffff:0.0.0.0) and IPv4-compatible
+// (::1.2.3.4) forms are emitted as the bare IPv4 dotted-quad, matching
+// net.IP.String()/net.Addr().String() which emits the IPv4 form for both via
+// IP.To4(); a dual-stack net.Listen("tcp", "[::ffff:0.0.0.0]:0") reports
+// "[::]:<port>", and ::ffff:0.0.0.0 canonicalizes to 0.0.0.0 (the IPv4
+// wildcard) which normalizeListenHost already maps to the same value as ::.
+// Returns the input unchanged when it is not a parseable bare IPv6 address
+// (a hostname or an IPv4 host).
 function canonicalizeIPv6Host(host: string): string {
   const groups = parseIPv6Groups(host);
   if (groups === null) {
     return host;
+  }
+  // IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d): the first 10
+  // bytes are zero and bytes 10-11 are 0xffff (mapped) or 0 (compatible). Go's
+  // net.IP.To4() collapses both to a 4-byte IPv4, and net.IP.String() emits the
+  // dotted-quad, so canonicalizing to the IPv4 form matches the serving
+  // address net.Addr().String() reports for a bind the validator accepts.
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 &&
+      (groups[5] === 0xffff || groups[5] === 0)) {
+    const hi = groups[6];
+    const lo = groups[7];
+    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
   }
   // Find the longest run of consecutive zero groups (length >= 2) to compress.
   let bestStart = -1;
@@ -514,25 +531,45 @@ function canonicalizeIPv6Host(host: string): string {
 }
 
 // parseIPv6Groups parses a bare IPv6 host (brackets already stripped) into its
-// 8 16-bit groups, handling a single "::" zero-run compression. Returns null
-// for anything that is not a pure-hex IPv6 address (a hostname, an IPv4 host,
-// or an IPv4-embedded tail), so callers leave those unchanged.
+// 8 16-bit groups, handling a single "::" zero-run compression and an IPv4-
+// embedded tail (the last colon-separated group is a dotted quad, e.g.
+// "::ffff:0.0.0.0"). The IPv4 tail occupies the final two 16-bit groups.
+// Returns null for anything that is not a parseable IPv6 address (a hostname or
+// an IPv4 host without a colon).
 function parseIPv6Groups(host: string): number[] | null {
   const dbl = host.indexOf("::");
   if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
   let head: string[];
   let tail: string[];
+  let ipv4Groups: [number, number] | null = null;
   if (dbl < 0) {
     const parts = host.split(":");
-    if (parts.length !== 8) return null;
-    head = parts;
-    tail = [];
+    // An IPv4-embedded tail (the last segment is a dotted quad) occupies two
+    // 16-bit groups, so 7 hex groups + 1 IPv4 part makes 8.
+    if (parts.length > 0 && parts[parts.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(parts[parts.length - 1]);
+      if (ipv4Groups === null) return null;
+      if (parts.length !== 7) return null;
+      head = parts.slice(0, 6);
+      tail = [];
+    } else {
+      if (parts.length !== 8) return null;
+      head = parts;
+      tail = [];
+    }
   } else {
     const h = host.slice(0, dbl);
     const t = host.slice(dbl + 2);
     head = h === "" ? [] : h.split(":");
     tail = t === "" ? [] : t.split(":");
-    if (head.length + tail.length >= 8) return null;
+    if (tail.length > 0 && tail[tail.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(tail[tail.length - 1]);
+      if (ipv4Groups === null) return null;
+      tail = tail.slice(0, -1);
+      if (head.length + tail.length + 2 > 8) return null;
+    } else {
+      if (head.length + tail.length >= 8) return null;
+    }
   }
   const groups = new Array(8).fill(0);
   for (let i = 0; i < head.length; i++) {
@@ -540,12 +577,36 @@ function parseIPv6Groups(host: string): number[] | null {
     if (g < 0) return null;
     groups[i] = g;
   }
+  // Tail groups fill from the end; with an IPv4 tail the hex groups stop at
+  // index 5 (groups 6-7 are the IPv4 part).
+  const tailStart = ipv4Groups !== null ? 6 - tail.length : 8 - tail.length;
   for (let i = 0; i < tail.length; i++) {
     const g = parseHexGroup(tail[i]);
     if (g < 0) return null;
-    groups[8 - tail.length + i] = g;
+    groups[tailStart + i] = g;
+  }
+  if (ipv4Groups !== null) {
+    groups[6] = ipv4Groups[0];
+    groups[7] = ipv4Groups[1];
   }
   return groups;
+}
+
+// parseIPv4Embedded parses a dotted-quad IPv4 address (e.g. "0.0.0.0",
+// "1.2.3.4") into two 16-bit groups (the high and low 16 bits), matching the
+// tail of an IPv4-mapped/compatible IPv6 address. Returns null for anything
+// that is not a valid dotted quad.
+function parseIPv4Embedded(s: string): [number, number] | null {
+  const octets = s.split(".");
+  if (octets.length !== 4) return null;
+  const vals: number[] = [];
+  for (const o of octets) {
+    if (o.length === 0 || !/^\d+$/.test(o)) return null;
+    const v = parseInt(o, 10);
+    if (v > 255) return null;
+    vals.push(v);
+  }
+  return [(vals[0] << 8) | vals[1], (vals[2] << 8) | vals[3]];
 }
 
 // parseHexGroup parses a single 1-4 hex-digit IPv6 group (0–0xffff). Returns

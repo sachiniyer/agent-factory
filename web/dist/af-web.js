@@ -7726,6 +7726,11 @@ function canonicalizeIPv6Host(host) {
   if (groups === null) {
     return host;
   }
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && (groups[5] === 65535 || groups[5] === 0)) {
+    const hi = groups[6];
+    const lo = groups[7];
+    return `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
+  }
   let bestStart = -1;
   let bestLen = 0;
   let curStart = -1;
@@ -7764,17 +7769,33 @@ function parseIPv6Groups(host) {
   if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
   let head;
   let tail;
+  let ipv4Groups = null;
   if (dbl < 0) {
     const parts = host.split(":");
-    if (parts.length !== 8) return null;
-    head = parts;
-    tail = [];
+    if (parts.length > 0 && parts[parts.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(parts[parts.length - 1]);
+      if (ipv4Groups === null) return null;
+      if (parts.length !== 7) return null;
+      head = parts.slice(0, 6);
+      tail = [];
+    } else {
+      if (parts.length !== 8) return null;
+      head = parts;
+      tail = [];
+    }
   } else {
     const h2 = host.slice(0, dbl);
     const t = host.slice(dbl + 2);
     head = h2 === "" ? [] : h2.split(":");
     tail = t === "" ? [] : t.split(":");
-    if (head.length + tail.length >= 8) return null;
+    if (tail.length > 0 && tail[tail.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(tail[tail.length - 1]);
+      if (ipv4Groups === null) return null;
+      tail = tail.slice(0, -1);
+      if (head.length + tail.length + 2 > 8) return null;
+    } else {
+      if (head.length + tail.length >= 8) return null;
+    }
   }
   const groups = new Array(8).fill(0);
   for (let i = 0; i < head.length; i++) {
@@ -7782,12 +7803,29 @@ function parseIPv6Groups(host) {
     if (g < 0) return null;
     groups[i] = g;
   }
+  const tailStart = ipv4Groups !== null ? 6 - tail.length : 8 - tail.length;
   for (let i = 0; i < tail.length; i++) {
     const g = parseHexGroup(tail[i]);
     if (g < 0) return null;
-    groups[8 - tail.length + i] = g;
+    groups[tailStart + i] = g;
+  }
+  if (ipv4Groups !== null) {
+    groups[6] = ipv4Groups[0];
+    groups[7] = ipv4Groups[1];
   }
   return groups;
+}
+function parseIPv4Embedded(s) {
+  const octets = s.split(".");
+  if (octets.length !== 4) return null;
+  const vals = [];
+  for (const o of octets) {
+    if (o.length === 0 || !/^\d+$/.test(o)) return null;
+    const v = parseInt(o, 10);
+    if (v > 255) return null;
+    vals.push(v);
+  }
+  return [vals[0] << 8 | vals[1], vals[2] << 8 | vals[3]];
 }
 function parseHexGroup(s) {
   if (s === "" || s.length > 4) return -1;
