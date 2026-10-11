@@ -7656,7 +7656,7 @@ function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  const warnings = [...writeWarnings, ...applyWarnings.filter((w) => !writeWarnings.includes(w))];
+  const warnings = applyWarnings.length > 0 ? applyWarnings : writeWarnings;
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }

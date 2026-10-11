@@ -198,12 +198,16 @@ export function shouldCloseSavedField(
  * exactly that case, which is the one place that tells an operator, at save
  * time, that the account they defaulted to is unregistered and how to fix it.
  *
- * The form therefore reads both channels, the same contract the CLI
- * (`commands/configcmd.go`, channel 1 first then channel 2 deduped) and the TUI
- * (`ui/config_target.go`, channel 1 as a fallback) already implement — so all
- * three surfaces agree on what warnings a given write produces. Channel 1 is
- * shown first, then channel 2 minus any string already shown from channel 1;
- * a warning that rides both channels is printed once, not twice.
+ * The form reads channel 2 first, then channel 1 only when channel 2 is empty
+ * — the same contract the TUI (`ui/config_target.go`) already implements. The
+ * server's completeConfigSaveWarnings keeps channel 2 authoritative: on a
+ * successful apply it retains only the apply-time wording (dropping the
+ * writer's forecast) to avoid showing the same hazard twice when the two
+ * surfaces phrase it differently, and on a failed/unconfirmed apply it merges
+ * both channels into channel 2. So channel 2 already carries the complete,
+ * deduped set whenever the apply produced anything; channel 1 is needed only as
+ * the fallback for the silent-apply case, where channel 2 is empty and channel
+ * 1 carries the sole warning.
  *
  * The restart notice is normally shown only for a key that requires a restart,
  * since "Applied" under every field is noise. A warning overrides that gate:
@@ -217,13 +221,16 @@ export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  // Deduped union of both channels: channel 1 (per-write) first, then channel 2
-  // (apply-time) minus any string already shown from channel 1. Matches the CLI,
-  // which reads channel 1 unconditionally and then channel 2 deduped against it
-  // (commands/configcmd.go). A `??` fallback alone would lose the channel-1
-  // notice when channel 2 is non-empty with an unrelated warning (the rebind
-  // failure + exposure-notice case), so the union is read, not a fallback.
-  const warnings = [...writeWarnings, ...applyWarnings.filter((w) => !writeWarnings.includes(w))];
+  // Channel 2 (apply-time) is authoritative: completeConfigSaveWarnings keeps it
+  // as the complete, deduped set on a successful apply (dropping the writer's
+  // differently-worded forecast so the same hazard is not shown twice) and
+  // merges both channels into it on a failed/unconfirmed apply. Channel 1
+  // (per-write) is the fallback for the silent-apply case — a `default_accounts`
+  // write is EffectAppliedLive and produces no apply warning, so channel 2 is
+  // empty and the unregistered-account advisory rides channel 1 alone. Matches
+  // the TUI (ui/config_target.go), which reads channel 2 then falls back to
+  // channel 1 for the same reason.
+  const warnings = applyWarnings.length > 0 ? applyWarnings : writeWarnings;
   // A warning makes the apply outcome actionable even for an ordinarily-live
   // key. In that case the restart notice must not be hidden by the key's static
   // requires-restart classification: it describes what happened to this save.
