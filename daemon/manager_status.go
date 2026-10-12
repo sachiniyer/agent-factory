@@ -431,7 +431,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// an unobserved hole — the watcher pairs frames, so it resets too (#5221
 	// review).
 	effectiveTick := max(
-		time.Duration(m.Config().DaemonPollInterval)*time.Millisecond,
+		min(time.Duration(m.Config().DaemonPollInterval)*time.Millisecond, statusSweepFloorCap),
 		min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap),
 	)
 	pausedCadence := taskRunPollBackstop
@@ -452,15 +452,21 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 			// stamp and retire an open candidate — see the normal-poll
 			// branch for why a working frame can never stamp the edge.
 			instance.NotePaneWaitingAtEpoch(epoch)
-		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+		} else if task.TurnSignaturedAgent(instance.ResolvedAgent()) || instance.TaskRunChurnSinceBoundary() {
 			// A confirmed-unchanged frame is the stillness edge a boundary
 			// bound over an already-churning pane owes before its churn may
 			// stand in for the turn (#5221 review). A baseline frame is a
 			// first look — present, but not proven unchanged — so it cannot
 			// stamp it. The !obs.Captured return above makes the captured
 			// gate belt-and-braces, kept local so the invariant survives a
-			// reorder (#5221 review).
-			churnCheckpoint = true
+			// reorder (#5221 review). A SIGNATURELESS agent's unchanged frame
+			// is ambiguous one step deeper — a static mid-turn frame renders
+			// the same bytes as real idle — so it may stamp only after churn
+			// proved this boundary's pane is answering its own prompt (#5221
+			// review).
+			if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+				churnCheckpoint = true
+			}
 		}
 	}
 	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {
@@ -553,11 +559,12 @@ var statusSweepFloorCap = 30 * time.Second
 // lands this session at position x ≤ lastSweep inside it: the gap is
 // pass−elapsed+x, and the elapsed already spent inside this pass REDUCES
 // the reserve, never adds to it — a late-capture's declared expiry must not
-// stretch past the whole next pass (#5221 review). Sweep terms stay capped
+// stretch past the whole next pass (#5221 review). EVERY term stays capped
 // at statusSweepFloorCap — a cycle slower than that is a stall that left
-// panes genuinely unwatched, not a schedule — so the total is bounded by
-// max(scheduled, cap)+cap; an operator-set interval slower than the cap is
-// the pacing term, not compressed away.
+// panes genuinely unwatched, and an operator-set interval slower than the
+// cap is the same unwatched window by configuration rather than accident:
+// honoring it would let a streak span a hole large enough to hide a whole
+// churn-and-settle cycle (#5221 review).
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
 	gap := min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap)
@@ -567,7 +574,7 @@ func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 			elapsed = e
 		}
 	}
-	pass := max(scheduled, max(last, gap))
+	pass := max(min(scheduled, statusSweepFloorCap), max(last, gap))
 	return max(pass-elapsed, 0) + last
 }
 
@@ -854,8 +861,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// own frame and prime the next boundary's watcher with evidence
 			// the previous prompt already produced.
 			instance.NotePaneWaitingAtEpoch(epoch)
-		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
-			settlementCheckpoint = true
+		} else if task.TurnSignaturedAgent(instance.ResolvedAgent()) || instance.TaskRunChurnSinceBoundary() {
+			// A signatureless agent's unchanged frame is ambiguous past the
+			// shared stillness gate: it cannot show working chrome, so a
+			// static mid-turn frame left by older work is byte-identical to
+			// real idle — and would latch the new boundary's stillness base
+			// on the old turn's frame. Only post-boundary churn proves this
+			// pane is answering its own prompt (#5221 review).
+			if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+				settlementCheckpoint = true
+			}
 		}
 	}
 	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {

@@ -384,6 +384,19 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 // var so tests can compress it.
 var taskRunStillGrace = 5 * time.Second
 
+// TaskRunChurnSinceBoundary reports whether pane churn was observed after
+// the current task-run prompt boundary — for a signatureless agent the only
+// evidence the pane is answering THIS prompt rather than parked on a static
+// mid-turn frame left by older work. Without it an unchanged capture is
+// ambiguous (real idle looks identical), so the daemon must not let it
+// stamp the stillness edge the boundary owes (#5221 review).
+func (i *Instance) TaskRunChurnSinceBoundary() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return !i.taskRunPromptAttemptAt.IsZero() &&
+		i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt)
+}
+
 // NotePaneStillAtEpoch latches the stillness edge a contended boundary owes
 // (#5221 review): confirmed-UNCHANGED captures at-or-after the run's prompt
 // attempt, sustained for taskRunStillGrace. A boundary bound while the pane

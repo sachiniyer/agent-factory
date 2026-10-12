@@ -373,6 +373,14 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 	}
 }
 
+// ampIdleFrame is a contiguous live amp prompt box — the strict frame-level
+// signal provenIdleContent accepts (a line-leading glyph or non-blank pane
+// is not an idle observation it will seed from — #5221 review).
+const ampIdleFrame = "╭──────── medium ────────╮\n" +
+	"│ >                                        │\n" +
+	"│                                          │\n" +
+	"╰──────── /tmp/repo (main) ────────╯\n"
+
 // A manual send landing between the readiness wait and the queued prompt's
 // own submission invalidates the wait's idle proof — the pane may already
 // run the manual prompt's turn. The task boundary must then owe the
@@ -382,12 +390,14 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T) {
 	t.Run("mid-gap", func(t *testing.T) {
 		inst, err := session.NewInstance(session.InstanceOptions{
-			Title: "mid-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+			Title: "mid-gap-send", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
 		})
 		if err != nil {
 			t.Fatalf("NewInstance: %v", err)
 		}
-		inst.SetBackend(&startBackend{})
+		inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+			return ampIdleFrame, nil
+		}})
 		inst.SetStartedForTest(true)
 
 		boundary := func() error {
@@ -406,7 +416,7 @@ func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T)
 
 	t.Run("mid-wait", func(t *testing.T) {
 		inst, err := session.NewInstance(session.InstanceOptions{
-			Title: "mid-wait-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+			Title: "mid-wait-send", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
 		})
 		if err != nil {
 			t.Fatalf("NewInstance: %v", err)
@@ -420,7 +430,7 @@ func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T)
 				inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
 				return "booting…", nil
 			}
-			return "ready\n❯", nil
+			return ampIdleFrame, nil
 		}})
 		inst.SetStartedForTest(true)
 
@@ -433,23 +443,62 @@ func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T)
 	})
 }
 
-// The same send with nothing racing keeps the wait's proof: the epoch the
-// proof was earned under still matches at the record, so the stillness base
-// seeds from the observed idleness (#5221 review).
-func TestWaitForReadyAndSubmitPromptSeedsBaseWhenEpochHolds(t *testing.T) {
+// The same send with nothing racing and a strict idle frame keeps the
+// wait's proof: the prompt generation the proof brackets still matches at
+// the record, so the stillness base seeds from the observed idleness
+// (#5221 review).
+func TestWaitForReadyAndSubmitPromptSeedsBaseOnStrictIdleFrame(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "no-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+		Title: "strict-idle", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
 	})
 	if err != nil {
 		t.Fatalf("NewInstance: %v", err)
 	}
-	inst.SetBackend(&startBackend{})
+	inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+		return ampIdleFrame, nil
+	}})
 	inst.SetStartedForTest(true)
 
 	if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := inst.TaskRunStillBaseAt(); got.IsZero() {
-		t.Fatal("stillness base owed — the send's own readiness proof was discarded")
+		t.Fatal("stillness base owed — a strict prompt frame at send time must seed it")
+	}
+}
+
+// Readiness signals that are not idle observations seed nothing: a
+// line-leading glyph cannot be told from scrollback, and a program
+// override calls any non-blank pane ready — either may sit over older work
+// still running, so the base stays owed and must be earned from observed
+// evidence instead (#5221 review).
+func TestWaitForReadyAndSubmitPromptOwesBaseOnLenientReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		content string
+	}{
+		{"claude scrollback glyph", "claude", "stale output\nready\n❯"},
+		{"program override nonblank", "my-agent", "any nonblank pane"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := session.NewInstance(session.InstanceOptions{
+				Title: "lenient-" + tc.name, Path: t.TempDir(), Program: tc.program, TaskID: "task-1",
+			})
+			if err != nil {
+				t.Fatalf("NewInstance: %v", err)
+			}
+			inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+				return tc.content, nil
+			}})
+			inst.SetStartedForTest(true)
+
+			if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
+				t.Fatalf("stillness base seeded at %v — %s is not an idle observation", got, tc.name)
+			}
+		})
 	}
 }

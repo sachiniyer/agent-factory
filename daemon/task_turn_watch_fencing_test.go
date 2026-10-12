@@ -501,6 +501,118 @@ func TestWorkingFrameRetiresTaskRunStillCandidate(t *testing.T) {
 		"an uninterrupted prompt-free working-free run latches the edge")
 }
 
+// signaturelessBackend answers HasUpdatedObserved with a frame whose
+// Updated flag the test toggles — a signatureless pane whose unchanged
+// captures are byte-identical whether the agent is idle or parked mid-turn
+// on a long tool call (#5221 review).
+type signaturelessBackend struct {
+	*session.FakeBackend
+	updated bool
+}
+
+func (b *signaturelessBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
+	return b.updated, false, "aider pane", false, true
+}
+
+// A signatureless agent cannot disambiguate an unchanged frame: real idle
+// and a static mid-turn frame render the same bytes, so the stillness edge
+// an unproven boundary owes must not latch until post-boundary churn proved
+// this pane is answering its own prompt (#5221 review).
+func TestSignaturelessStillEdgeNeedsPostBoundaryChurn(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &signaturelessBackend{FakeBackend: session.NewFakeBackend()}
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "sig-less", Path: repoPath, Program: "aider", TaskID: "task-sig-less",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, repoID, "sig-less", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "sig-less")] = inst
+	manager.mu.Unlock()
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	// An unproven redelivery binds over work the frame cannot show.
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, now.Add(-time.Second)))
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(), "precondition: an unproven bind owes the stillness edge")
+
+	// A static frame — real idle or parked mid-turn, indistinguishable —
+	// must not open the candidate while no post-boundary churn exists.
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"unchanged frames latched a signatureless edge with no post-boundary churn")
+
+	// The prompt's own output lands: post-boundary churn is the proof this
+	// pane is answering, so unchanged frames may now re-earn the edge.
+	backend.updated = true
+	now = now.Add(2 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	backend.updated = false
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"the first unchanged frame after churn re-opens the candidate, not latches")
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.False(t, inst.TaskRunStillBaseAt().IsZero(),
+		"unchanged frames after post-boundary churn must latch the edge")
+}
+
+// An operator-set daemon_poll_interval past the floor cap is the same
+// unwatched window a stalled sweep is — by configuration rather than
+// accident. The reserve must not honor it: a streak spanning such a gap
+// hides a whole churn-and-settle cycle, so every capture is a fresh anchor
+// (#5221 review).
+func TestPausedProbeReserveCapsOperatorInterval(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	cfg := *manager.Config()
+	cfg.DaemonPollInterval = int((60 * time.Second) / time.Millisecond)
+	manager.live.Store(&cfg)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-cap", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	oldSweep := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	oldGap := lastStatusSweepGapNs.Load()
+	t.Cleanup(func() {
+		nowFunc = oldNow
+		lastStatusSweepNs.Store(oldSweep)
+		statusSweepStartNs.Store(oldStart)
+		lastStatusSweepGapNs.Store(oldGap)
+	})
+
+	// Under a 60s interval the reserve declares only the capped 30s+slack:
+	// a +50s re-probe is a hole the streak must not span.
+	lastStatusSweepNs.Store(0)
+	lastStatusSweepGapNs.Store(0)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: inst.ResolvedAgent(), boundary: now,
+		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
+	}
+	now = now.Add(50 * time.Second)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a +50s gap past the floor cap re-anchors — the configured interval counts nothing")
+}
+
 // The paused backstop probe must drop an unanswered capture whole: settling
 // the all-false frame would read the pane idle on no evidence, letting the
 // last confirmed capture's still-live streak release the quiet arm mid-outage

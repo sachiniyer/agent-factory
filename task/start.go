@@ -240,7 +240,19 @@ func WaitForReadyAndSubmitPrompt(
 	}
 
 	if prompt != "" {
-		status, sendEpoch, err := instance.SendPromptWithEvidence(prompt, time.Now, readyEpoch)
+		// The stillness base seeds only from an ACTUAL idle observation — a
+		// strict prompt frame at send time. The readiness wait tolerates
+		// signals that are not that: a line-leading glyph can be scrollback,
+		// a trust dialog is a modal not a composer, and a program override
+		// calls any non-blank pane ready — a wait that passed on any of
+		// those proves nothing about what the pane was doing, so the send
+		// must not carry the bracket it brackets (#5221 review).
+		readyArg := session.NoReadinessProof
+		if content, err := capturePreview(ctx, instance); err == nil &&
+			provenIdleContent(content, instance.ResolvedAgent()) {
+			readyArg = readyEpoch
+		}
+		status, sendEpoch, err := instance.SendPromptWithEvidence(prompt, time.Now, readyArg)
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
@@ -265,7 +277,7 @@ func WaitForReadyAndSubmitPrompt(
 		// window with the old turn's evidence, and the earlier turn's idle
 		// edge could apply on_complete before the queued prompt starts
 		// (#5221 review).
-		if turnSignaturedAgent(instance.ResolvedAgent()) &&
+		if TurnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
 				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {

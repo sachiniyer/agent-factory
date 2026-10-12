@@ -478,6 +478,28 @@ func IsWorkingContent(content, agent string) bool {
 	}
 }
 
+// provenIdleContent reports whether a pane capture is an affirmative idle
+// OBSERVATION — the strict frame-level arms of the readiness signal only.
+// It deliberately accepts nothing the wait tolerates for delivery gating: a
+// line-leading glyph can be scrollback (hasLineLeadingGlyph's own caveat),
+// a trust or doc dialog is a modal to dismiss rather than an idle composer,
+// and the program-override fallback calls any non-blank pane ready — none
+// of those observes the pane at rest, so none may seed a task boundary's
+// stillness base (#5221 review). A prompt frame carrying a working
+// indicator is not idle either.
+func provenIdleContent(content, agent string) bool {
+	if IsWorkingContent(content, agent) {
+		return false
+	}
+	switch agent {
+	case tmux.ProgramAmp:
+		return isAmpPromptFrame(content)
+	case tmux.ProgramOpencode:
+		return isOpencodePromptFrame(content)
+	}
+	return false
+}
+
 // isDocTrustPrompt reports whether content shows the documentation-link trust
 // dialog shared by aider/gemini (and surfaced by claude).
 //
