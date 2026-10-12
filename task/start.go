@@ -217,6 +217,13 @@ func WaitForReadyAndSubmitPrompt(
 	if err := WaitForReady(ctx, instance); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
+	// The readiness wait just proved the composer idle — bind that proof to
+	// the epoch it was earned under. The trust dismissal and boundary below
+	// run without the runtime observation lock, so a manual send can land in
+	// the gap and start its own turn: the record must then see the epoch
+	// moved and owe the stillness base instead of seeding it from a stale
+	// proof (#5221 review).
+	_, readyEpoch := instance.InFlightOpAndEpoch()
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
@@ -227,10 +234,7 @@ func WaitForReadyAndSubmitPrompt(
 	}
 
 	if prompt != "" {
-		// The readiness wait above just proved the composer idle — carry that
-		// proof so a task-run rebind may keep it as the stillness edge its
-		// churn attribution needs (#5221 review).
-		status, err := instance.SendPromptWithEvidence(prompt, time.Now, true)
+		status, sendEpoch, err := instance.SendPromptWithEvidence(prompt, time.Now, readyEpoch)
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
@@ -247,18 +251,19 @@ func WaitForReadyAndSubmitPrompt(
 		// claims nothing; signatureless agents have no chrome to find, so
 		// they skip the watch as well.
 		//
-		// The stamp is fenced to the epoch sampled after this send: a manual
-		// SendPromptWithStatus can land mid-watch — it takes no lock this path
-		// holds — and advance the boundary while the watch still reads the
-		// earlier prompt's chrome. Stamping then would retire the NEW window
-		// with the old turn's evidence, and the earlier turn's idle edge could
-		// apply on_complete before the queued prompt starts (#5221 review).
-		_, watchEpoch := instance.InFlightOpAndEpoch()
+		// The stamp is fenced to the epoch the send itself returned — sampled
+		// inside the record's own lock, so a manual send landing in the gap
+		// before this read (it takes no lock this path holds) cannot hand the
+		// watch the newer boundary's generation while the pane still ticks
+		// the earlier prompt's turn. Stamping then would retire the NEW
+		// window with the old turn's evidence, and the earlier turn's idle
+		// edge could apply on_complete before the queued prompt starts
+		// (#5221 review).
 		if turnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
 				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
-			instance.RecordTaskRunTurnAtEpoch(time.Now(), watchEpoch)
+			instance.RecordTaskRunTurnAtEpoch(time.Now(), sendEpoch)
 			if status == session.PromptSentUnverified {
 				return session.PromptDelivered, nil
 			}

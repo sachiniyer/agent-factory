@@ -840,7 +840,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if manual {
 		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, accountSwap, prompt)
 	} else {
-		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc, false)
+		_, _, serr = instance.SendPromptWithEvidence(prompt, nowFunc, session.NoReadinessProof)
 	}
 	if serr != nil {
 		// The send crossed the runtime boundary, so even an error is an observed

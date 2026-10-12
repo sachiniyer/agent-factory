@@ -707,6 +707,54 @@ func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
 	require.False(t, ok, "a hole past the declared reserve still breaks the streak")
 }
 
+// The same quantization must follow the EFFECTIVE serial sweep cadence, not
+// just the configured tick: maintenance between RefreshStatuses passes runs
+// serially in the same loop, so the real probe spacing is the observed
+// start-to-start gap when that overruns the interval — and the reserve must
+// quantize the backstop onto it or every on-schedule capture re-anchors
+// (#5221 review).
+func TestPausedProbeReserveQuantizesToSweepGap(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-gap", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	oldSweep := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	oldGap := lastStatusSweepGapNs.Load()
+	t.Cleanup(func() {
+		nowFunc = oldNow
+		lastStatusSweepNs.Store(oldSweep)
+		statusSweepStartNs.Store(oldStart)
+		lastStatusSweepGapNs.Store(oldGap)
+	})
+
+	// Sweeps observed 25s apart under the default 1s tick: a probe due at
+	// +30s lands on the +50s sweep start — the reserve must reach it.
+	lastStatusSweepNs.Store(0)
+	lastStatusSweepGapNs.Store(int64(25 * time.Second))
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: inst.ResolvedAgent(), boundary: now,
+		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
+	}
+	now = now.Add(50 * time.Second)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.True(t, ok, "the +50s on-gap probe is the honest spacing when sweeps run 25s apart")
+
+	// A genuinely blind window still re-anchors past the quantized reserve.
+	now = now.Add(2 * time.Minute)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a hole past the declared reserve still breaks the streak")
+}
+
 // The pass duration understates real capture spacing whenever work BETWEEN
 // sweeps overruns the tick — the maintenance passes after RefreshStatuses
 // run serially, and one that blocks (a handoff retry inside its readiness

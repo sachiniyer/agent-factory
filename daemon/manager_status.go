@@ -420,18 +420,23 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// configured daemon_poll_interval slower than the backstop is the real
 	// spacing and must pace the reserve or every on-schedule capture reads
 	// as a hole (#5221 review). A FASTER interval still quantizes the due
-	// check: taskRunBackstopDue is tested once per tick, so a probe due at
-	// +30s under a 25s interval actually lands at +50s — the honest spacing
-	// is the smallest tick multiple at-or-past the backstop, not the
-	// backstop itself (#5221 review). The request-start `capturedAt` stays
-	// the turn-age bound below: that check needs the earliest instant the
-	// frame could exist, this one needs the moment its knowledge actually
-	// landed. A re-anchored streak means the last frame sat across an
-	// unobserved hole — the watcher pairs frames, so it resets too (#5221
+	// check: taskRunBackstopDue is tested once per sweep, so a probe due at
+	// +30s under a 25s cadence actually lands at +50s — and the cadence that
+	// quantizes is the EFFECTIVE one: the configured tick, or the observed
+	// start-to-start sweep gap when between-sweep maintenance stretches the
+	// real spacing past it (#5221 review). The request-start `capturedAt`
+	// stays the turn-age bound below: that check needs the earliest instant
+	// the frame could exist, this one needs the moment its knowledge
+	// actually landed. A re-anchored streak means the last frame sat across
+	// an unobserved hole — the watcher pairs frames, so it resets too (#5221
 	// review).
+	effectiveTick := max(
+		time.Duration(m.Config().DaemonPollInterval)*time.Millisecond,
+		min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap),
+	)
 	pausedCadence := taskRunPollBackstop
-	if tick := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond; tick > 0 {
-		pausedCadence = tick * ((taskRunPollBackstop + tick - 1) / tick)
+	if effectiveTick > 0 {
+		pausedCadence = effectiveTick * ((taskRunPollBackstop + effectiveTick - 1) / effectiveTick)
 	}
 	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pausedCadence), epoch) {
 		m.dropTaskRunTurnWatch(key)

@@ -372,3 +372,53 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 		t.Fatalf("turn observed at %v — the earlier prompt's chrome stamped the NEW boundary", got)
 	}
 }
+
+// A manual send landing between the readiness wait and the queued prompt's
+// own submission invalidates the wait's idle proof — the pane may already
+// run the manual prompt's turn. The task boundary must then owe the
+// stillness base rather than seed it off a proof sampled before the
+// interleaving send (#5221 review).
+func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "mid-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(&startBackend{})
+	inst.SetStartedForTest(true)
+
+	boundary := func() error {
+		// The racing send: it takes no lock the submission path holds, and
+		// lands inside the window the idle proof predates.
+		inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
+		return nil
+	}
+	if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", boundary); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
+		t.Fatalf("stillness base seeded at %v — a proof stale at record time was kept", got)
+	}
+}
+
+// The same send with nothing racing keeps the wait's proof: the epoch the
+// proof was earned under still matches at the record, so the stillness base
+// seeds from the observed idleness (#5221 review).
+func TestWaitForReadyAndSubmitPromptSeedsBaseWhenEpochHolds(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "no-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(&startBackend{})
+	inst.SetStartedForTest(true)
+
+	if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := inst.TaskRunStillBaseAt(); got.IsZero() {
+		t.Fatal("stillness base owed — the send's own readiness proof was discarded")
+	}
+}

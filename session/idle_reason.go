@@ -149,21 +149,37 @@ func (i *Instance) RecordPromptAttemptProven(status PromptDeliveryStatus, attemp
 // recordPromptAttemptForObservation commits only while runtime still owns the
 // delivery. A replacement can proceed without waiting for predecessor I/O; a
 // send that returns afterwards must not seed evidence onto the successor.
+// Returns the epoch the attempt stamped — the value any post-send evidence
+// fence must be raised on, read inside this same lock so a send interleaving
+// before the caller samples cannot hand it the newer boundary's generation
+// (#5221 review).
 func (i *Instance) recordPromptAttemptForObservation(
 	status PromptDeliveryStatus,
 	attemptedAt time.Time,
 	runtime *agentObservationRuntime,
-	paneIdleProven bool,
-) bool {
+	readyEpoch uint64,
+) (uint64, bool) {
 	if attemptedAt.IsZero() {
-		return false
+		return 0, false
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.agentObservation != runtime {
-		return false
+		return 0, false
 	}
-	return i.recordPromptAttemptLocked(status, attemptedAt, paneIdleProven)
+	// The caller's idle proof binds only if the epoch it was earned under is
+	// still current at this record: a send landing inside the wait→submit
+	// gap (a manual SendPromptWithStatus — it takes no lock the caller held)
+	// already bumped the epoch and may have started a turn the pane is
+	// mid-way through, so seeding the base off the stale proof would let
+	// that older turn's chrome satisfy this prompt's window (#5221 review).
+	// A caller with no proof passes NoReadinessProof, which no real epoch
+	// can match.
+	paneIdleProven := i.stateEpoch == readyEpoch
+	if !i.recordPromptAttemptLocked(status, attemptedAt, paneIdleProven) {
+		return 0, false
+	}
+	return i.stateEpoch, true
 }
 
 // recordPromptAttemptLocked stores a prompt boundary. Caller holds i.mu.

@@ -105,14 +105,26 @@ func (i *Instance) AgentObservationCurrent(generation AgentObservationGeneration
 	return generation.value != 0 && i.agentObservationGeneration.Load() == generation.value
 }
 
+// NoReadinessProof is the readyEpoch a caller passes when it carries no
+// pre-send idle proof at all — RPC sends, post-respawn deliveries. It is
+// deliberately unmatchable: stateEpoch starts at 0 and only counts up, so
+// the proof check in the record can never accept it (#5221 review).
+const NoReadinessProof = ^uint64(0)
+
 // SendPromptWithEvidence starts the attempt timestamp only after any pane
 // snapshot already in flight has completed, then records the delivery verdict
-// before another snapshot can begin. paneIdleProven carries the caller's own
-// pre-send readiness proof: a wait that just confirmed the composer idle is
-// observed idleness a task-run rebind may keep as its stillness edge — while
-// sends with no such wait (RPC, post-respawn) must leave the edge owed
-// (#5221 review).
-func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, paneIdleProven bool) (PromptDeliveryStatus, error) {
+// before another snapshot can begin. readyEpoch carries the caller's own
+// pre-send readiness proof as the state epoch that proof was earned under —
+// a wait that just confirmed the composer idle is observed idleness a
+// task-run rebind may keep as its stillness edge, but only while the epoch
+// still matches at the record: a send landing inside the wait→submit gap
+// invalidates the proof it precedes. Pass NoReadinessProof to record the
+// attempt with no idle proof at all (#5221 review). Returns the epoch
+// the attempt stamped: the fence any post-submit evidence (the in-turn
+// chrome watch) must be raised on, captured inside the record's own lock so
+// a send interleaving afterwards cannot hand the caller a newer boundary's
+// generation (#5221 review). sendEpoch is 0 when the attempt never recorded.
+func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, readyEpoch uint64) (PromptDeliveryStatus, uint64, error) {
 	for {
 		target := i.agentObservationTarget()
 		target.runtime.mu.Lock()
@@ -125,9 +137,9 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, p
 		}
 		attemptedAt := now()
 		status, err := SendPromptWithStatus(target.server, prompt)
-		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime, paneIdleProven)
+		sendEpoch, _ := i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime, readyEpoch)
 		target.runtime.mu.Unlock()
-		return status, err
+		return status, sendEpoch, err
 	}
 }
 
