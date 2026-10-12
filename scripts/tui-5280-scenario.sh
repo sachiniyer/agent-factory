@@ -21,6 +21,10 @@ export AF_DRIVER_COLS=200 AF_DRIVER_ROWS=50
 export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
 EVID="$HOME/sandbox/rename-5280"
+# Start empty: under `AF_SELFTEST_NAME` reuse the sandbox (and this dir) can
+# survive from a previous run, and record_r APPENDS — stale verdict rows
+# would otherwise feed the verdict awk below.
+rm -rf "$EVID"
 mkdir -p "$EVID"
 
 # --- provenance --------------------------------------------------------------
@@ -44,6 +48,12 @@ elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
     exit 1
 fi
 (cd "$MASTER_SRC" && go build -buildvcs=false -o "$HOME/bin/af.master" .)
+# Rebuild the branch binary from /src unconditionally: under AF_SELFTEST_NAME
+# reuse the running container predates this checkout, so its boot-time
+# ~/bin/af can be stale while AF_BRANCH_SHA already names the new HEAD —
+# provenance would attribute a stale binary to the wrong commit. /src is
+# read-only; go writes only GOCACHE and the -o target.
+(cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 {
     echo "branch HEAD (bin/af):      $BRANCH_SHA"
     echo "origin/master (af.master): $MASTER_SHA"
@@ -97,7 +107,12 @@ record_r() {
     else
         verdict=silent
     fi
-    bar="$(printf '%s\n' "$screen" | _af_menu_row | tr '\t' ' ')"
+    # Record the notice line itself when there is one — the two builds answer
+    # with DIFFERENT refusal sentences, so the text is part of the verdict
+    # (a bare 'notice' column cannot tell them apart); fall back to the menu
+    # row for prompt/silent states.
+    bar="$(printf '%s\n' "$screen" | grep -oE ".{0,80}can't be renamed.{0,40}|.{0,60}no longer exists.{0,40}" | head -1 | tr '\t' ' ')"
+    [ -n "$bar" ] || bar="$(printf '%s\n' "$screen" | _af_menu_row | tr '\t' ' ')"
     printf '%s\t%s\t%s\n' "$state" "$verdict" "${bar:0:140}" >>"$EVID/$leg-results.tsv"
     _af_log "$leg/$state -> $verdict"
     if [ "$verdict" = prompt ]; then af_send Escape; sleep "$AF_DRIVER_POLL"; fi
@@ -168,6 +183,15 @@ run_leg branch "$HOME/bin/af"
     cat "$EVID/branch-results.tsv"
 } | tee "$EVID/summary.txt"
 
+# The branch's observable contract holds regardless of what master did:
+# every driven state must end in a notice, and that notice must be the one
+# unified sentence — the exact text is what distinguishes this build from a
+# control that already refused with older, divergent wordings.
+awk -F'\t' '$2!="notice"{print "branch state "$1" did not answer with a refusal notice ("$2")"; bad=1} END{exit bad}' \
+    "$EVID/branch-results.tsv" || { cat "$EVID/branch-results.tsv" >&2; exit 1; }
+awk -F'\t' '$3 !~ /Agent and Terminal tabs can.t be renamed/{print "branch state "$1" did not show the unified refusal ("$3")"; bad=1} END{exit bad}' \
+    "$EVID/branch-results.tsv" || { cat "$EVID/branch-results.tsv" >&2; exit 1; }
+
 silents="$(awk -F'\t' '$2=="silent"{print $1}' "$EVID/master-results.tsv")"
 if [ -z "$silents" ]; then
     echo "CONTROL-INCONCLUSIVE: master answered R in every driven state — no silent path reproduced; report on #5280"
@@ -175,13 +199,10 @@ if [ -z "$silents" ]; then
 fi
 
 # The control observed real silence. The branch must answer every one of
-# those states — and must never go silent or open a prompt on a tab that
-# can't be renamed.
+# those states.
 for st in $silents; do
     v="$(awk -F'\t' -v s="$st" '$1==s{print $2}' "$EVID/branch-results.tsv")"
     [ "$v" = notice ] || { _af_fail "branch still non-responsive in state $st (master was silent, branch: $v)"; exit 1; }
 done
-awk -F'\t' '$2!="notice"{print "branch state "$1" did not answer with the refusal notice ("$2")"; bad=1} END{exit bad}' \
-    "$EVID/branch-results.tsv" || { af_capture >&2; exit 1; }
 
-echo "PASS: master silent in [$silents]; branch answers R with a visible refusal notice in every driven state"
+echo "PASS: master silent in [$silents]; branch answers R with the unified refusal notice in every driven state"
