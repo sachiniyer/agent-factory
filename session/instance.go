@@ -239,6 +239,15 @@ type Instance struct {
 	// a missed poll — the hole that rebases paneObservationStreakAt and
 	// retires an open stillness candidate (#5221 review).
 	paneObservationDueAt time.Time
+	// paneObservationWatchAt is the START of the current DENSE watch — the
+	// run of consecutive captures each within paneObservationHorizonCap of
+	// the last. A slower declared cadence keeps the loose sequence above
+	// but not this: "thirty seconds of silence" is a claim about a watched
+	// pane, and a gap that can hide a churn-and-settle cycle cannot carry
+	// a stale churn stamp into the quiet arm's window — so the quiet arm
+	// measures its silence from this edge, not the sequence's (#5221
+	// review).
+	paneObservationWatchAt time.Time
 	// lastPaneCaptureAt is the completion stamp of the latest successful
 	// capture, used to detect the observation holes that rebase
 	// paneObservationStreakAt.

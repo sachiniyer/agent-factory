@@ -181,3 +181,44 @@ func TestIsWorkingContentAmpPatternInCurrentFrameInterior(t *testing.T) {
 		t.Error("IsWorkingContent(amp frame with a working-indicator example in user text, amp) = true, want false")
 	}
 }
+
+// Codex's in-turn chrome is a STATIC "esc to interrupt" hint below its "›"
+// composer — a frame that can sit byte-identical through a whole turn. Reading
+// it as not-working let unchanged mid-turn captures latch a boundary's owed
+// stillness edge, after which the older turn's own indicator satisfied the
+// redelivered prompt's watch (#5221 review).
+func TestIsWorkingContentCodexScopedHint(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			"hint below live composer",
+			"transcript so far\n› \n\n  esc to interrupt\n",
+			true,
+		},
+		{
+			"ansi-wrapped hint below composer",
+			"\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n",
+			true,
+		},
+		{
+			"idle composer without hint",
+			"transcript so far\n› \n",
+			false,
+		},
+		{
+			"hint with no composer in frame",
+			"transcript quoting esc to interrupt in prose\n",
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsWorkingContent(tc.content, tmux.ProgramCodex); got != tc.want {
+				t.Fatalf("IsWorkingContent = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

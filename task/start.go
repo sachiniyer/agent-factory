@@ -289,7 +289,14 @@ func WaitForReadyAndSubmitPrompt(
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
 			instance.RecordTaskRunTurnAtEpoch(time.Now(), sendEpoch)
 			if status == session.PromptSentUnverified {
-				return session.PromptDelivered, nil
+				// The UPGRADE is fenced the same way the stamp is: a
+				// concurrent send landing inside the watch window can tick
+				// the indicator — only an unbroken epoch proves this chrome
+				// is OUR send's turn. Upgrading on anything else retires a
+				// delivery obligation on someone else's work (#5221 review).
+				if _, epoch := instance.InFlightOpAndEpoch(); epoch == sendEpoch {
+					return session.PromptDelivered, nil
+				}
 			}
 		}
 		return status, nil

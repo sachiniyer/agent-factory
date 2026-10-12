@@ -209,6 +209,16 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 		// either — its "continuous" window would borrow unobserved time.
 		i.taskRunStillCandidateAt = time.Time{}
 	}
+	// The DENSE watch — the run of captures each within one horizon cap of
+	// the last — re-anchors on any over-cap gap, scheduled or not. Point
+	// samples on a slow cadence keep the loose sequence above, but "thirty
+	// seconds of silence" is a claim about a watched pane: a gap that can
+	// hide a whole churn-and-settle cycle cannot carry a stale churn stamp
+	// into the quiet arm's window (#5221 review).
+	if i.paneObservationWatchAt.IsZero() ||
+		at.After(i.lastPaneCaptureAt.Add(paneObservationHorizonCap+PaneObservationSlack)) {
+		i.paneObservationWatchAt = at
+	}
 	i.lastPaneCaptureAt = at
 	// Two horizons, two claims (#5221 review): expiresAt is the RECENCY a
 	// single capture may vouch for — bounded at the floor cap no matter how
@@ -247,5 +257,6 @@ func (i *Instance) NotePaneCaptureFailed(observedEpoch uint64) {
 	i.paneObservationStreakAt = time.Time{}
 	i.paneObservationExpiresAt = time.Time{}
 	i.paneObservationDueAt = time.Time{}
+	i.paneObservationWatchAt = time.Time{}
 	i.taskRunStillCandidateAt = time.Time{}
 }

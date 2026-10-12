@@ -110,32 +110,40 @@ func submittedTurnContent(content, agent string) bool {
 	case tmux.ProgramAmp, tmux.ProgramOpencode:
 		return IsWorkingContent(content, agent)
 	case tmux.ProgramCodex:
-		// Codex draws "esc to interrupt" as a bare hint row BELOW its
-		// line-leading "›" composer (the daemon/configagent_delivery_test.go
-		// pane shape). Anchoring on the composer keeps a transcript that quotes
-		// the hint from qualifying.
-		lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
-		composer := -1
-		for i, line := range lines {
-			if strings.HasPrefix(strings.TrimSpace(line), "›") {
-				composer = i
-			}
-		}
-		if composer < 0 {
-			return false
-		}
-		for _, line := range lines[composer+1:] {
-			if escToInterruptHint.MatchString(line) {
-				return true
-			}
-		}
-		return false
+		return codexWorkingContent(content)
 	case tmux.ProgramClaude, tmux.ProgramDevin:
 		// Claude and devin embed the hint in a timed status row —
 		// "✻ … (12s · esc to interrupt)", "Thinking · 3s (esc to interrupt)".
 		// The shape alone is not proof that a turn is running; submittedTurnVisible
 		// is what requires the row to tick.
 		return len(timedTurnRows(content)) > 0
+	}
+	return false
+}
+
+// codexWorkingContent reports whether the captured pane shows codex mid-turn:
+// "esc to interrupt" drawn as a bare hint row BELOW the line-leading "›"
+// composer (the daemon/configagent_delivery_test.go pane shape). Anchoring on
+// the composer keeps a transcript that merely quotes the hint from qualifying.
+// Shared by submittedTurnContent (the post-submit watch) and IsWorkingContent
+// (the daemon's positive working signal — a codex frame holding this shape
+// must never stamp a stillness edge, or an older turn's static indicator
+// could satisfy a redelivered prompt's boundary; #5221 review).
+func codexWorkingContent(content string) bool {
+	lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
+	composer := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "›") {
+			composer = i
+		}
+	}
+	if composer < 0 {
+		return false
+	}
+	for _, line := range lines[composer+1:] {
+		if escToInterruptHint.MatchString(line) {
+			return true
+		}
 	}
 	return false
 }

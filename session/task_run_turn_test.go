@@ -1201,3 +1201,31 @@ func TestNotePaneCaptureSplitsRecencyFromDue(t *testing.T) {
 	require.Equal(t, t0.Add(30*time.Minute+PaneObservationSlack), inst.paneObservationDueAt,
 		"the due horizon honors the declared cadence verbatim")
 }
+
+// The quiet arm's silence is a claim about a WATCHED pane (#5221 review): an
+// over-cap scheduled gap keeps the loose sample sequence — the renewal is
+// on-schedule, not a missed poll — but re-anchors the dense watch, so a churn
+// stamp older than the gap cannot release the instant the renewal lands. The
+// renewal must first earn its own grace inside the capped recency horizon.
+func TestTaskRunQuietArmReanchorsAcrossOverlongScheduledGap(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+	// A proven send well in the past seeds the stillness edge; churn after it
+	// is attributable to the boundary — the quiet arm's only precondition.
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, t0.Add(-45*time.Minute)))
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.RecordPaneChurnCheckpointAtEpoch(t0.Add(-44*time.Minute), epoch)
+	// One capture on an operator's 30-minute cadence, then the on-schedule
+	// renewal landing inside its due horizon: the loose sequence survives…
+	require.True(t, noteCaptureObserved(inst, t0.Add(-30*time.Minute), 30*time.Minute),
+		"the first capture opens the sequence")
+	require.False(t, noteCaptureObserved(inst, t0, 30*time.Minute),
+		"the on-schedule renewal keeps the loose sequence — no missed poll")
+	// …but the renewal cannot release on the spot: the dense watch just
+	// re-anchored, so "30 minutes since churn" is unobserved time, not
+	// silence (#5221 review). Under the loose-streak measure this released
+	// the instant the renewal renewed the capped expiry.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"an over-cap scheduled gap cannot carry a stale churn stamp into the quiet arm")
+}

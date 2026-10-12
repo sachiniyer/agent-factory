@@ -359,9 +359,14 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if status != session.PromptDelivered {
-		t.Fatalf("status = %q, want the observed chrome to keep upgrading to %q",
-			status, session.PromptDelivered)
+	// The upgrade is fenced to the send's own epoch the same way the stamp
+	// is: once the manual send claimed the pane, the working chrome the
+	// watch saw is attributable to ITS turn, so this send keeps its
+	// unverified verdict rather than retiring its obligation on someone
+	// else's work (#5221 review).
+	if status != session.PromptSentUnverified {
+		t.Fatalf("status = %q, want the fenced upgrade to leave %q",
+			status, session.PromptSentUnverified)
 	}
 	if !bumped {
 		t.Fatal("precondition: the mid-watch send never landed")
@@ -552,5 +557,41 @@ func TestWaitForReadyAndSubmitPromptSkipsTurnStampOnUnprovenSend(t *testing.T) {
 	}
 	if got := inst.ToInstanceData().TaskRunTurnObservedAt; !got.IsZero() {
 		t.Fatalf("turn observed at %v — an unproven send stamped chrome that may belong to an older turn", got)
+	}
+}
+
+// The positive control for the fenced upgrade: a proven send with no
+// interleave keeps its epoch, so the chrome the watch observed IS its own
+// turn — the verdict upgrades and the turn stamp lands (#5221 review).
+func TestWaitForReadyAndSubmitPromptUpgradesOnUnfencedSend(t *testing.T) {
+	oldBudget, oldPoll := postSubmitDeliveredBudget, postSubmitDeliveredPoll
+	postSubmitDeliveredBudget = 400 * time.Millisecond
+	postSubmitDeliveredPoll = time.Millisecond
+	t.Cleanup(func() { postSubmitDeliveredBudget, postSubmitDeliveredPoll = oldBudget, oldPoll })
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "clean-send", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(&statusReportingStartBackend{startBackend: &startBackend{previewFn: func() (string, error) {
+		if inst.TaskRunPromptAttemptAt().IsZero() {
+			return ampIdleFrame, nil
+		}
+		return ampWorkingFrame, nil
+	}}, sendStatus: session.PromptSentUnverified})
+	inst.SetStartedForTest(true)
+
+	status, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != session.PromptDelivered {
+		t.Fatalf("status = %q, want the clean send's chrome to upgrade to %q",
+			status, session.PromptDelivered)
+	}
+	if got := inst.ToInstanceData().TaskRunTurnObservedAt; got.IsZero() {
+		t.Fatal("the observed chrome did not stamp the send's own boundary")
 	}
 }

@@ -466,16 +466,19 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 	// The durable churn stamp can be far older than the pane's true last
 	// output — churn after the first post-prompt edge is not re-checkpointed —
 	// so silence is measured from the later of the stamp and the START of the
-	// current uninterrupted capture streak. A dead or never-born streak means
-	// nothing has been observed since (re)start or since the last capture
-	// aged out, and a hole mid-window means the churn it hid resets the
-	// clock: unobserved time is never silence (#5221 review).
-	if !i.paneObservationLiveLocked() {
+	// current DENSE watch. Not the loose sample sequence: a scheduled gap
+	// wider than the horizon cap could hide an entire churn-and-settle cycle,
+	// and letting the sequence carry the stamp would release on a renewal
+	// capture that never watched the pane at all (#5221 review). A dead or
+	// never-born watch means nothing has been observed since (re)start or
+	// since the last capture aged out, and a hole mid-window means the churn
+	// it hid resets the clock: unobserved time is never silence.
+	if !i.paneObservationLiveLocked() || i.paneObservationWatchAt.IsZero() {
 		return false
 	}
 	base := i.lastPaneChurnAt
-	if i.paneObservationStreakAt.After(base) {
-		base = i.paneObservationStreakAt
+	if i.paneObservationWatchAt.After(base) {
+		base = i.paneObservationWatchAt
 	}
 	return time.Since(base) >= taskRunCompletionQuietGrace
 }
@@ -545,11 +548,13 @@ func (i *Instance) ClearIdleEvidence() bool {
 	// spent on it — the silent arm could then satisfy its grace on wall
 	// clock that ran during the swap (#5221 review).
 	if !i.lastPaneCaptureAt.IsZero() || !i.paneObservationStreakAt.IsZero() ||
-		!i.paneObservationExpiresAt.IsZero() || !i.paneObservationDueAt.IsZero() {
+		!i.paneObservationExpiresAt.IsZero() || !i.paneObservationDueAt.IsZero() ||
+		!i.paneObservationWatchAt.IsZero() {
 		i.lastPaneCaptureAt = time.Time{}
 		i.paneObservationStreakAt = time.Time{}
 		i.paneObservationExpiresAt = time.Time{}
 		i.paneObservationDueAt = time.Time{}
+		i.paneObservationWatchAt = time.Time{}
 		changed = true
 	}
 	// The task-run boundary and turn observation are pane-relative evidence of

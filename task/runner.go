@@ -473,6 +473,17 @@ func IsWorkingContent(content, agent string) bool {
 			}
 		}
 		return false
+	case tmux.ProgramCodex:
+		// Codex draws "esc to interrupt" as a bare hint row below its "›"
+		// composer for exactly the duration of a turn — a STATIC indicator:
+		// the frame can sit byte-identical through a long tool call, so an
+		// unproven redelivery bound over it would otherwise read those
+		// unchanged captures as earned stillness, latch the base, and let the
+		// older turn's edge release the queued prompt's window (#5221
+		// review). The match stays scoped to below the composer so transcript
+		// prose quoting the hint cannot pass — same shape the post-submit
+		// watch applies (codexWorkingContent).
+		return codexWorkingContent(content)
 	default:
 		return false
 	}
