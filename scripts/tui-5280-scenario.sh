@@ -17,7 +17,11 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source /src/scripts/tui-driver.sh
 
-export AF_DRIVER_COLS=200 AF_DRIVER_ROWS=50
+# The driver's real default geometry (100x30) — the #5280 re-scope attestation
+# wants the clipping question answered at the width the harness actually
+# renders, not an inflated one: master's per-tab refusal is ~118 chars and
+# clips through errBox.statusLine at this width; the unified sentence fits.
+export AF_DRIVER_COLS=100 AF_DRIVER_ROWS=30
 export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
 EVID="$HOME/sandbox/rename-5280"
@@ -182,6 +186,18 @@ run_leg branch "$HOME/bin/af"
     echo "=== branch results ==="
     cat "$EVID/branch-results.tsv"
 } | tee "$EVID/summary.txt"
+
+# Dump the raw post-R frames into the run log — they are the attestation's
+# evidence (the container and its $EVID go away on teardown).
+for leg in master branch; do
+    for st in a-session-row b-agent-row c-terminal-row d-agent-pane e-terminal-pane; do
+        f="$EVID/$leg-$st-after-R.txt"
+        [ -f "$f" ] || continue
+        echo "=== raw frame: $leg / $st (after R) ==="
+        cat "$f"
+    done
+    [ -f "$EVID/$leg-last-notice.txt" ] && { echo "=== raw frame: $leg / E details ==="; cat "$EVID/$leg-last-notice.txt"; }
+done
 
 # The branch's observable contract holds regardless of what master did:
 # every driven state must end in a notice, and that notice must be the one
