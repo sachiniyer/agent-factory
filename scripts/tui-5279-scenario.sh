@@ -85,9 +85,10 @@ tui_provenance() {
     [ "$sha" = "$want" ] || { _af_fail "$label: running TUI sha256 != $bin"; return 1; }
 }
 
-# seam_count <file> — how many '│││' triple-border seams the capture shows.
-# Three panes produce two seams; grep -o counts each non-overlapping run.
-seam_count() { grep -oF '│││' "$1" | wc -l; }
+# count_glyph <file> <glyph> — occurrences of a literal multi-byte glyph in a
+# capture. grep -o exits 1 on zero matches; '|| true' keeps a legitimate zero
+# (the fixed branch) from tripping the script's set -e + pipefail.
+count_glyph() { { grep -oF "$2" "$1" || true; } | wc -l; }
 
 # purge_archived — af_reset_sandbox wipes instances/ + sibling worktrees and
 # deletes every non-master branch, but archived worktrees live under
@@ -146,11 +147,11 @@ claude = "bash"'
     af_capture >"$EVID/$label-3panes.txt"
 
     local seams
-    seams="$(seam_count "$EVID/$label-3panes.txt")"
+    seams="$(count_glyph "$EVID/$label-3panes.txt" '│││')"
     {
         echo "$label: '│││' seams in capture: $seams"
-        echo "$label: '┐│┌' corner seams:     $(grep -oF '┐│┌' "$EVID/$label-3panes.txt" | wc -l)"
-        echo "$label: '│ │' gap seams:        $(grep -oF '│ │' "$EVID/$label-3panes.txt" | wc -l)"
+        echo "$label: '┐│┌' corner seams:     $(count_glyph "$EVID/$label-3panes.txt" '┐│┌')"
+        echo "$label: '│ │' gap seams:        $(count_glyph "$EVID/$label-3panes.txt" '│ │')"
     } | tee "$EVID/$label-seam-counts.txt"
 
     if [ "$label" = master ]; then
