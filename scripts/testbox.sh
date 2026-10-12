@@ -622,7 +622,13 @@ scenario)
     exec_env=()
     if grep -qE 'AF_(BRANCH|MASTER)_SHA|AF_MASTER_TAR' "$REPO_ROOT/$scenario_rel"; then
         branch_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
-        master_sha="$(git -C "$REPO_ROOT" rev-parse origin/master 2>/dev/null \
+        # A bugfix scenario may pin its control to a known-buggy revision with
+        # a literal AF_CONTROL_SHA=<40hex> line — once the fix merges, archiving
+        # the moving origin/master would build a fixed control that can never
+        # reproduce the bug, and the master leg would fail forever after.
+        master_sha="$(grep -oE 'AF_CONTROL_SHA=[0-9a-f]{40}' "$REPO_ROOT/$scenario_rel" \
+            | head -1 | cut -d= -f2 || true)"
+        [ -n "$master_sha" ] || master_sha="$(git -C "$REPO_ROOT" rev-parse origin/master 2>/dev/null \
             || git -C "$REPO_ROOT" rev-parse master 2>/dev/null || true)"
         [ -n "$branch_sha" ] && exec_env+=(-e "AF_BRANCH_SHA=$branch_sha")
         if [ -n "$master_sha" ]; then

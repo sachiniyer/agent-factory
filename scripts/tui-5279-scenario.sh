@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Real-TUI regression for #5279 — adjacent panes must not draw a '│││' seam.
 #
-#   scripts/testbox.sh playtest -d        # start the sandbox, then:
-#   docker exec <name> bash /src/scripts/tui-5279-scenario.sh
-#   # or in one step:
 #   scripts/testbox.sh scenario scripts/tui-5279-scenario.sh
+#
+# or, on a parked sandbox (`scripts/testbox.sh playtest -d`), inject the
+# provenance inputs yourself — the container cannot resolve them from the
+# linked-worktree /src:
+#
+#   git archive --format=tar bd7b89b700d3343ef575c540789d5966f91f6079 >/tmp/m.tar
+#   chmod 644 /tmp/m.tar
+#   docker cp /tmp/m.tar <name>:/tmp/af-master-src.tar
+#   docker exec -e AF_BRANCH_SHA="$(git rev-parse HEAD)" \
+#               -e AF_MASTER_SHA=bd7b89b700d3343ef575c540789d5966f91f6079 \
+#               -e AF_MASTER_TAR=/tmp/af-master-src.tar \
+#               <name> bash /src/scripts/tui-5279-scenario.sh
 #
 # The bug: each pane frames itself AND the layout's 1-col divider was drawn as
 # '│', so every pane boundary rendered three adjacent vertical bars ('│││',
@@ -12,8 +21,8 @@
 # seam reads '│ │' with the column count unchanged.
 #
 # Both legs run in THIS sandbox against binaries built inside it:
-#   af.master — git archive of origin/master, the control that MUST show the
-#               bug (proves the scenario can detect it)
+#   af.master — git archive of the pinned pre-fix control revision, which MUST
+#               show the bug (proves the scenario can detect it)
 #   af        — the playtest entry's branch build, which must NOT
 # Provenance (git SHAs + sha256sums) is recorded first so every capture can be
 # tied to exact code.
@@ -25,7 +34,18 @@ source /src/scripts/tui-driver.sh
 export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 export AF_DRIVER_COLS=200 AF_DRIVER_ROWS=50
 
+# The control must stay a KNOWN-BUGGY revision: once this fix merges, archiving
+# the moving origin/master would build a fixed control that can never show the
+# seam, and the master leg would fail forever after. `testbox.sh scenario`
+# archives this pinned SHA in place of origin/master; a manual run passes the
+# same SHA as AF_MASTER_SHA with a tar of it. bd7b89b7 is v1.0.311 — the master
+# the issue was filed against.
+AF_CONTROL_SHA=bd7b89b700d3343ef575c540789d5966f91f6079
+
 EVID="$HOME/sandbox/pane-seam-5279"
+# Fresh evidence per run: a retained sandbox's rerun must not mix this run's
+# provenance with a prior run's captures.
+case "$EVID" in */sandbox/*) rm -rf "$EVID" ;; esac
 mkdir -p "$EVID"
 
 # --- provenance --------------------------------------------------------------
@@ -34,14 +54,23 @@ mkdir -p "$EVID"
 # here. `testbox.sh scenario` sees this script consume them and supplies the
 # two SHAs and the master source as a tar:
 #   AF_BRANCH_SHA  — `git rev-parse HEAD` of the worktree mounted at /src
-#   AF_MASTER_SHA  — `git rev-parse origin/master` at run time
-#   AF_MASTER_TAR  — container path of `git archive <master-sha>` output
+#   AF_MASTER_SHA  — the control revision: the script's pinned AF_CONTROL_SHA
+#                    when declared, else `git rev-parse origin/master`
+#   AF_MASTER_TAR  — container path of `git archive <control-sha>` output
 # (falling back to in-container git only if a non-worktree /src ever has one).
 git config --global --add safe.directory /src 2>/dev/null || true
 BRANCH_SHA="${AF_BRANCH_SHA:-$(git -C /src rev-parse HEAD 2>/dev/null || true)}"
 MASTER_SHA="${AF_MASTER_SHA:-$(git -C /src rev-parse origin/master 2>/dev/null || true)}"
 [ -n "$BRANCH_SHA" ] || { _af_fail "branch SHA unknown — pass AF_BRANCH_SHA"; exit 1; }
 [ -n "$MASTER_SHA" ] || { _af_fail "master SHA unknown — pass AF_MASTER_SHA"; exit 1; }
+if [ "$MASTER_SHA" != "$AF_CONTROL_SHA" ]; then
+    _af_log "note: control SHA is $MASTER_SHA, not the pinned $AF_CONTROL_SHA — running anyway"
+fi
+# Rebuild the branch binary from the mounted tree before it is measured:
+# under AF_SELFTEST_NAME sandbox reuse, ~/bin/af can still be the boot build
+# of an older HEAD while provenance.txt names the current one. In-place with
+# -buildvcs=false, exactly as the entry script does.
+(cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 MASTER_SRC="$(mktemp -d /tmp/af-master.XXXXXX)"
 if [ -n "${AF_MASTER_TAR:-}" ]; then
     tar -xf "$AF_MASTER_TAR" -C "$MASTER_SRC"
@@ -50,9 +79,12 @@ elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
     exit 1
 fi
 (cd "$MASTER_SRC" && go build -buildvcs=false -o "$HOME/bin/af.master" .)
+# The control binary is built; the extracted tree is dead weight in a retained
+# sandbox — hundreds of MB per rerun. Drop it now.
+rm -rf "$MASTER_SRC"
 {
     echo "branch HEAD (bin/af):      $BRANCH_SHA"
-    echo "origin/master (af.master): $MASTER_SHA"
+    echo "control (af.master):       $MASTER_SHA (pinned: $AF_CONTROL_SHA)"
     sha256sum "$HOME/bin/af" "$HOME/bin/af.master"
 } | tee "$EVID/provenance.txt"
 
