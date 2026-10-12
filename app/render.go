@@ -266,23 +266,20 @@ func paneOverlayContentRect(styleRect layout.Rect) layout.Rect {
 	return r
 }
 
-// splitDividerStyle recedes the 1-col dividers between panes so the focused
-// pane's frame stays the strongest line on screen.
+// splitDividerStyle recedes the rules inside the rail so the focused pane's
+// frame stays the strongest line on screen.
 var splitDividerStyle = lipgloss.NewStyle().
 	Foreground(ui.CurrentTheme().Border)
 
-// renderDivider renders the 1-col divider right of pane i (§2.6: "N panes
-// divide the workspace width evenly with 1-col dividers").
+// renderDivider renders the 1-col divider column right of pane i (§2.6: "N
+// panes divide the workspace width evenly with 1-col dividers"). The column is
+// a blank gap (#5279): each pane frames itself, so a drawn │ stacked a third
+// bar between the two pane borders and every seam read "│││".
 func (m *home) renderDivider(i int) string {
 	if i < 0 || i >= len(m.lastLayout.Dividers) {
 		return ""
 	}
-	r := m.lastLayout.Dividers[i]
-	if r.Empty() {
-		return ""
-	}
-	col := strings.TrimSuffix(strings.Repeat("│\n", r.H), "\n")
-	return splitDividerStyle.Render(col)
+	return ui.PaneGap(m.lastLayout.Dividers[i])
 }
 
 // renderRailRule renders the full-rail-width horizontal rule separating the

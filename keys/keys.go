@@ -746,6 +746,10 @@ func helpLabelFor(keyList []string) string {
 	return strings.Join(displayKeys(keyList, true), "/")
 }
 
+// HelpLabel is the help and menu label for keyList, for a caller that narrows a
+// binding's keys and must relabel what is left.
+func HelpLabel(keyList []string) string { return helpLabelFor(keyList) }
+
 func normalizeKeySpec(s string) (string, bool) {
 	if s == "" || strings.ContainsAny(s, " \t\n") {
 		return "", false

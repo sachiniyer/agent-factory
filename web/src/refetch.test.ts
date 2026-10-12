@@ -266,28 +266,39 @@ function topLevelFunction(source: string, name: string): string {
 
 test("#3659 every refetcher in index.ts commits through the fence, not inline", () => {
   const source = readFileSync(join(srcRoot, "index.ts"), "utf8");
-  const refetchers: string[] = [];
 
-  for (const name of ["refreshConfig", "refreshRegisteredProjects", "refreshTasks"]) {
-    const body = topLevelFunction(source, name);
-    const delegation = /\b(\w+)\.refresh\(\)/.exec(body);
-    assert.ok(delegation, `${name} must issue its request through a fenced refetcher`);
-    const refetcher = delegation[1];
-    assert.match(
-      source,
-      new RegExp(`const ${refetcher} = createFencedRefetcher\\(`),
-      `${refetcher} must be built by createFencedRefetcher`,
-    );
+  // Discover every fenced refetcher declared at module scope.  The pattern is
+  // always `const <name> = createFencedRefetcher(` — the helper is only ever
+  // called at the top level, so a simple regex over the whole file is reliable.
+  // Skipping the import line is guaranteed by the word-boundary before `const`.
+  const refetchers: string[] = [];
+  const discovery = /\bconst (\w+) = createFencedRefetcher\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = discovery.exec(source)) !== null) {
+    refetchers.push(m[1]);
+  }
+  assert.ok(refetchers.length > 0, "index.ts must declare at least one fenced refetcher");
+
+  // For each discovered refetcher, find the top-level refresh* function that
+  // delegates through it, and confirm the response path is entirely inside the
+  // fence (no .then / store.set shortcuts).
+  const teardown = topLevelFunction(source, "stopStream");
+
+  for (const refetcher of refetchers) {
+    // Locate the refresh* function whose body calls `<refetcher>.refresh()`.
+    const callerMatch = new RegExp(
+      `function (refresh\\w+)\\(\\): void \\{[^}]*?\\b${refetcher}\\.refresh\\(\\)`,
+      "s",
+    ).exec(source);
+    assert.ok(callerMatch, `a top-level refresh* function must delegate to ${refetcher}.refresh()`);
+    const refreshFnName = callerMatch[1];
+    const body = topLevelFunction(source, refreshFnName);
     // The response is settled INSIDE the fence or not at all: a `.then` here would be
     // a second, unfenced path to the store — which is the whole of #3659.
-    assert.doesNotMatch(body, /\.then\(|store\.set\(/, `${name} must not settle a response outside the fence`);
-    refetchers.push(refetcher);
-  }
+    assert.doesNotMatch(body, /\.then\(|store\.set\(/, `${refreshFnName} must not settle a response outside the fence`);
 
-  // And a response outstanding across a stream teardown is disowned: reconnecting
-  // with the same credential moves neither the generation nor the token.
-  const teardown = topLevelFunction(source, "stopStream");
-  for (const refetcher of refetchers) {
+    // And a response outstanding across a stream teardown is disowned: reconnecting
+    // with the same credential moves neither the generation nor the token.
     assert.match(teardown, new RegExp(`${refetcher}\\.invalidate\\(\\)`), `stopStream must invalidate ${refetcher}`);
   }
 });

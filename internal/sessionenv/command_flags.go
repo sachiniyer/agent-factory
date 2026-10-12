@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -405,7 +406,29 @@ func literalCommandArgs(words []*syntax.Word) ([]string, bool) {
 	return args, true
 }
 
+// literalShellWordWork counts literalShellWord calls when a test sets it. Every
+// step of the account-command walk literalizes the word it stands on, so the
+// count is the walk's work in word visits, independent of wall-clock time
+// (#4966). It panics once calls passes a positive limit, so a walk that turns
+// superlinear again fails its test at the budget instead of running for
+// minutes. It is nil outside tests.
+var literalShellWordWork *workCounter
+
+type workCounter struct {
+	calls int
+	limit int
+}
+
+// errWorkLimitExceeded is literalShellWordWork's panic value.
+var errWorkLimitExceeded = errors.New("literalShellWord work limit exceeded")
+
 func literalShellWord(word *syntax.Word) (string, bool) {
+	if counter := literalShellWordWork; counter != nil {
+		counter.calls++
+		if counter.limit > 0 && counter.calls > counter.limit {
+			panic(errWorkLimitExceeded)
+		}
+	}
 	if word == nil {
 		return "", false
 	}

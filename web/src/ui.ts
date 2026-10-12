@@ -24,7 +24,7 @@ import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
-import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
+import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -336,8 +336,10 @@ export interface Actions {
   clearPaneDropHint(): void;
   /** Lands a touch-dragged tab on whichever pane is under the point, splitting or
    *  replacing exactly as a mouse drop does — the same body, not a copy of it
-   *  (split.ts applyTabDrop). False means no pane was under the release. */
-  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean;
+   *  (split.ts applyTabDrop). `landed` false means no pane was under the release;
+   *  `changed` false means the pane rejected the drop and the layout is untouched
+   *  (#4434 — one boolean cannot answer both questions). */
+  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -689,7 +691,7 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
   if (input) input.value = draft;
 }
 
-function loginView(state: AppState, actions: Actions): HTMLElement {
+export function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
       detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
@@ -773,8 +775,19 @@ function connectingView(): HTMLElement {
 /** The tokenless login view (#1696): the daemon exempts this client, so there is no
  *  token to paste — just a Connect button that dials in with the empty-token
  *  sentinel. Normally auto-connected on load; this view is what a user sees only if
- *  they explicitly Disconnect on such a daemon. */
-function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+ *  they explicitly Disconnect on such a daemon.
+ *
+ *  Defense in depth against a stale `authRequired: false`: if a 401 reaches this
+ *  view (`loginCondition === "expired"` — the daemon started requiring a token after
+ *  the tokenless probe), degrade into a paste-token form instead of the
+ *  self-contradictory "No token needed." screen that re-issues the just-rejected
+ *  empty-token request. The primary fix flips `authRequired` in connect()'s catch so
+ *  the paste form is reached directly, but this keeps the screen coherent regardless
+ *  of how the staleness arose. */
+export function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -792,6 +805,57 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
       "p",
       { class: "af-subtitle" },
       "No token needed.",
+    ),
+    form,
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+
+/** The degraded form `noAuthLoginView` falls back to when a 401 reached the tokenless
+ *  branch (`loginCondition === "expired"`): the daemon now requires a token this
+ *  client has none of, so surface a paste field instead of the empty-token Connect.
+ *  Mirrors loginView's paste-form branch (title degrades to "Login expired"). */
+function expiredTokenlessView(state: AppState, actions: Actions): HTMLElement {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting,
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting…" : "Connect",
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button,
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token = input.value.trim();
+    if (token !== "") {
+      actions.connect(token);
+    }
+  });
+
+  const children: (Node | string)[] = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host.",
     ),
     form,
   ];
@@ -2044,8 +2108,15 @@ export class AppShell {
     // Hit-test before dismissal so a release outside both the bar and every pane
     // remains a cancel. The drop itself can synchronously recompose the active kind.
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    // Dismiss only when the drop committed: a landed-but-rejected drop (stale
+    // payload, sole tab on its own edge) changed nothing, so retiring a
+    // user-opened disclosure would imply a transition that did not happen
+    // (#4434). The gesture is still consumed either way — landed means landed.
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */

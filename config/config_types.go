@@ -649,7 +649,31 @@ const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 // rather than being concatenated into DefaultProgram, which is restricted to
 // a bare agent enum name.
 func DefaultConfig() *Config {
-	cfg := &Config{
+	cfg := staticDefaultConfig()
+	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
+		cfg.ProgramOverrides = map[string]string{
+			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
+		}
+	}
+
+	return cfg
+}
+
+// staticDefaultConfig returns the compiled-in default configuration without the
+// machine-dependent claude probe. DefaultConfig layers that probe's
+// auto-detected ProgramOverrides on top of this baseline. Callers that only
+// need a provenance baseline for an already-loaded snapshot — notably the
+// daemon-handoff inspection path — must not rerun the probe or reintroduce
+// overrides the operator cleared, so they take this static baseline instead
+// (#5113). The auto-detected claude override is a runtime augmentation of the
+// global layer, not a compiled-in default, so it has no place in this baseline.
+func staticDefaultConfig() *Config {
+	return &Config{
 		SchemaVersion:          GlobalConfigSchemaVersion,
 		DefaultProgram:         defaultProgram,
 		AutoUpdate:             true,
@@ -677,17 +701,4 @@ func DefaultConfig() *Config {
 		}(),
 		DetachKeys: defaultDetachKeys,
 	}
-
-	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
-		// An alias can resolve to a full command with flags (e.g. "claude
-		// --model opus"), which is already shell syntax and must not be quoted
-		// wholesale. Quote only a provable executable-path prefix and preserve
-		// the alias-provided argument suffix (#569, #2323).
-		command := shellQuoteDetectedCommand(claudePath)
-		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
-		}
-	}
-
-	return cfg
 }

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -141,11 +140,39 @@ type InstanceData struct {
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
-	// a handoff mission was still owed (#4429), so the next idle observation after
-	// the mission is resolved ends the run. Persisted for the same reason as
-	// TaskRunActive: the held edge is already spent and nothing re-derives it.
-	// omitempty + additive: an older record decodes to false, which holds nothing.
+	// a handoff mission was still owed (#4429), so the next idle observation
+	// after the mission is retired ends the run.
+	// Persisted for the same reason as TaskRunActive: the held edge is already
+	// spent and nothing re-derives it. omitempty + additive: an older record
+	// decodes to false, which holds nothing.
+	//
+	// This key keeps ONLY its original meaning (#5221 review): a daemon rolled
+	// back to a release that knows just the mission hold reads it exactly as it
+	// wrote it. The turn-gate hold lives in TaskRunTurnGateHeld so the older
+	// binary drops — rather than releases — a marker it cannot evaluate.
 	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
+	// TaskRunTurnGateHeld records that the run's idle edge was held open because
+	// the prompt had been attempted without turn evidence (#5219). Stored under
+	// its own key for rollback safety: a previous release would misread a
+	// turn-gate hold written into task_run_idle_edge_held as a resolved mission
+	// hold and end the run on the next Ready → Ready tick. An old binary drops
+	// this field and keeps the run open instead — the safe direction.
+	TaskRunTurnGateHeld bool `json:"task_run_turn_gate_held,omitempty"`
+	// TaskRunPromptAttemptAt is the run's OWN prompt boundary (#5221 review),
+	// scoped apart from LastPromptAttemptAt so an interactive send cannot
+	// re-arm a delivery window the agent already satisfied. The boundary moves
+	// only while the window is unsatisfied. Persisted while the run is in
+	// flight for the same reason as TaskRunTurnObservedAt: a restart must not
+	// reopen — or wrongly satisfy — a window the daemon was still holding.
+	TaskRunPromptAttemptAt time.Time `json:"task_run_prompt_attempt_at,omitzero"`
+	// TaskRunTurnObservedAt is when the agent's own in-turn chrome was observed
+	// for the run in flight (#5219) — the one pane signal a still-booting agent
+	// cannot produce: its elapsed-timer status row had to tick, not just render.
+	// Pane churn stays a weaker fact and cannot release the held edge alone.
+	// Persisted for the same reason as TaskRunIdleEdgeHeld: a restart must not
+	// reopen the delivery window an observation already closed. omitempty +
+	// additive: an older record decodes to zero, which releases nothing.
+	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle
@@ -209,6 +236,15 @@ type InstanceData struct {
 	// this evidence existed; callers must treat absence as unknown, never infer it
 	// from Program's requested label.
 	RuntimeProgram string `json:"runtime_program,omitempty"`
+	// RuntimePID and RuntimeStartID are the pane-root process identity captured
+	// at the same boundary that recorded RuntimeProgram (#5066): the pair
+	// proctree.SameIdentity treats as one process instance (PID plus the
+	// kernel's start stamp, which defeats pid reuse). On reattach a matching
+	// pair proves the pane is still the launch af made, so the claim survives a
+	// daemon restart; a mismatch or an unanswerable probe retires it. Zero on
+	// records predating the evidence.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the
@@ -468,22 +504,33 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	// The compatibility projection must capture original values before either it
+	// or the relocation fence below overwrites them. The live archiveReportSource
+	// block above already stamps the fence pre-projection; on the disk-reload path
+	// (archiveReportSource == nil) the recapture below would otherwise run after
+	// projectPending{AccountSwap,Handoff}ForPreviousRelease set
+	// d.StartupStateUnknown = true and snapshot the projected value as the
+	// "original". Snapshot the fence now and reuse it at recapture, exactly as the
+	// live block does. Guarded to the recapture path so the live path pays nothing.
+	var fenceSnapshot *git.ArchiveRollbackFence
+	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
+		fenceSnapshot = archiveRollbackFence(d)
+	}
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
-	// The compatibility projection must capture original values before either it
-	// or the relocation fence below overwrites them. Older binaries ignore
-	// ArchiveReport, but the previous release understands the inert/ownership
-	// fields and relocation recovery. Together they refuse restore and explicit
-	// kill instead of publishing an incomplete tree or deleting the report's row.
+	// Older binaries ignore ArchiveReport, but the previous release understands
+	// the inert/ownership fields and relocation recovery. Together they refuse
+	// restore and explicit kill instead of publishing an incomplete tree or
+	// deleting the report's row.
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		report := *d.ArchiveReport
 		if !reportDetached {
 			report = d.ArchiveReport.Clone()
 		}
 		if report.RollbackFence == nil {
-			report.RollbackFence = archiveRollbackFence(d)
+			report.RollbackFence = fenceSnapshot
 		}
 		d.ArchiveReport = &report
 		d.StartupStateUnknown = true
@@ -761,61 +808,6 @@ func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
 		<-archiveSettled
 	}
 	return s.SaveInstances(instances)
-}
-
-// LoadInstances loads the list of instances from disk.
-func (s *Storage) LoadInstances() ([]*Instance, error) {
-	var allJSON map[string]json.RawMessage
-	if s.repoID != "" {
-		// TUI mode: load just this repo. Surface read errors so startup can
-		// report "couldn't read your sessions" instead of silently showing
-		// an empty list that looks like a fresh install (#766).
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return nil, err
-		}
-		allJSON = map[string]json.RawMessage{s.repoID: raw}
-	} else {
-		// Daemon mode: load all repos. Surface a directory-level read error so
-		// the daemon reports "couldn't read your sessions" instead of silently
-		// presenting an empty list that looks like a fresh install while live
-		// sessions sit unreadable on disk (#868).
-		all, err := s.state.GetAllInstances()
-		if err != nil {
-			return nil, err
-		}
-		allJSON = all
-	}
-
-	var instances []*Instance
-	for repoID, jsonData := range allJSON {
-		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
-			continue
-		}
-		var instancesData []InstanceData
-		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
-		}
-		// Collapse duplicate records written before the dedup-on-save fix
-		// (#808) so a dup-containing file yields one sidebar row per session
-		// immediately, not just after the next save rewrites the file.
-		instancesData = dedupeInstanceData(instancesData)
-		for _, data := range instancesData {
-			data = data.ForStorage()
-			instance, err := FromInstanceData(data)
-			if err != nil {
-				// Instance's tmux session or worktree may have been
-				// destroyed externally. Log and skip rather than
-				// failing the entire load.
-				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
-				continue
-			}
-			instance.PinStorageRepoID(repoID)
-			instances = append(instances, instance)
-		}
-	}
-
-	return instances, nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for

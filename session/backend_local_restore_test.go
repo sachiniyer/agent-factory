@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -149,6 +150,71 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	require.Equal(t, 2, channel.starts, "the attached subscriber must resume on the incoming pane without reconnecting")
 }
 
+// TestLocalBackendSwapAgentRecordsRuntimeProgram is the #5066 pin for the
+// handoff path: SwapAgent launches a replacement agent process, so it must
+// record the plan's resolved base command — the same durable evidence a fresh
+// create writes. Without it an in-place handoff would leave runtime_program
+// empty even though the current process provably came from this daemon.
+func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	geminiBin := filepath.Join(t.TempDir(), "gemini")
+	require.NoError(t, os.WriteFile(geminiBin, []byte("#!/bin/sh\n"), 0o755))
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramGemini: geminiBin}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	ptyFactory := &recordingPtyFactory{t: t}
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "kill-session"):
+				killed = true
+				return nil
+			case strings.Contains(joined, "has-session"):
+				if killed && len(ptyFactory.cmds) == 0 {
+					return errors.New("session absent after close")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return nil, errors.New("pane pid unavailable")
+			}
+			return nil, nil
+		},
+	}
+
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-records", "handoff-records-branch", "", false, false)
+	require.NoError(t, err)
+	ts := tmux.NewTmuxSessionWithDeps("handoff-records", tmux.ProgramClaude, ptyFactory, cmdExec)
+	backend := &LocalBackend{}
+	inst := &Instance{
+		ID:          "handoff-records-id",
+		Title:       "handoff-records",
+		Path:        repoRoot,
+		Program:     tmux.ProgramClaude,
+		backend:     backend,
+		Tabs:        []*Tab{newAgentTab(ts)},
+		gitWorktree: gw,
+		started:     true,
+		liveness:    LiveRunning,
+	}
+
+	plan, err := backend.PrepareAgentSwap(inst, tmux.ProgramGemini)
+	require.NoError(t, err)
+	require.Equal(t, geminiBin, plan.baseProgram,
+		"precondition: the plan's base is the override-resolved command")
+	require.NoError(t, backend.SwapAgent(inst, plan))
+	require.NotEmpty(t, ptyFactory.cmds, "the swap must actually spawn a replacement pane")
+	require.Equal(t, geminiBin, inst.RuntimeProgram(),
+		"the replacement launch must record the resolved command it ran")
+}
+
 // recordingPtyFactory is a tmux.PtyFactory that records each exec.Cmd passed
 // to Start, lets the caller inspect the new-session vs attach-session sequence
 // emitted by Restore's lazy-respawn path. It returns a real (writable) temp
@@ -267,6 +333,166 @@ func TestLocalBackendStartUnverifiedReattachClearsRuntimeProgram(t *testing.T) {
 		"clearing the unverified persisted command must invalidate concurrent drift observers")
 	require.True(t, inst.ConsumeLoadRuntimeReplacement(),
 		"the loader must checkpoint the retired runtime command before publishing the restored row")
+}
+
+// paneReportingExec wraps nameKeyedExec so the pane-identity probes answer
+// with REAL pids the test controls: `display-message` (the active pane's
+// identity at launch) reports activePanePID, and `list-panes -s` (the
+// session-wide scan at reattach) reports one row per pid in allPanes. Every
+// other query keeps the stub answers. That combination is exactly what a live
+// tmux reports for pane roots that survived a daemon restart (#5066).
+func paneReportingExec(t *testing.T, alive map[string]bool, activePanePID int, allPanes ...int) cmd_test.MockCmdExec {
+	t.Helper()
+	inner := nameKeyedExec(alive)
+	var rows strings.Builder
+	for _, pid := range allPanes {
+		fmt.Fprintf(&rows, "%d|0|\n", pid)
+	}
+	return cmd_test.MockCmdExec{
+		RunFunc: inner.RunFunc,
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if !strings.Contains(cmd.String(), "#{pane_pid}|#{pane_dead}") {
+				return inner.Output(cmd)
+			}
+			if strings.Contains(cmd.String(), "list-panes") {
+				return []byte(rows.String()), nil
+			}
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d|0|", activePanePID)), nil
+			}
+			return inner.Output(cmd)
+		},
+	}
+}
+
+// spawnPaneLookalike launches a real process to stand in for the pane root, so
+// the (pid, start-time) identity the launch recorded can be re-verified against
+// the live process table on reattach.
+func spawnPaneLookalike(t *testing.T) proctree.Process {
+	t.Helper()
+	pane := exec.Command("sleep", "600")
+	require.NoError(t, pane.Start())
+	t.Cleanup(func() {
+		_ = pane.Process.Kill()
+		_ = pane.Wait()
+	})
+	proc, err := proctree.Lookup(pane.Process.Pid)
+	require.NoError(t, err)
+	return proc
+}
+
+// TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram is the #5066 fix:
+// a daemon restart reattaches by tmux name, and the pane root still carrying
+// the (pid, start-time) identity recorded at launch proves it IS the process
+// af started — so the launch claim survives instead of being retired.
+func TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	const tmuxName = "af_verified_reattach"
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
+	require.NoError(t, err)
+
+	pane := spawnPaneLookalike(t)
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, pane.PID, pane.PID)
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
+	)
+	inst := &Instance{
+		Title:          "verified-reattach",
+		Path:           repoRoot,
+		Program:        "claude",
+		runtimeProgram: "/opt/claude-resolved --flag",
+		runtimePID:     pane.PID,
+		runtimeStartID: pane.StartID,
+		backend:        &LocalBackend{},
+		liveness:       LiveReady,
+		gitWorktree:    gw,
+		Tabs:           []*Tab{newAgentTab(ts)},
+	}
+
+	require.NoError(t, inst.Start(false))
+	assert.Equal(t, "/opt/claude-resolved --flag", inst.RuntimeProgram(),
+		"a reattach whose pane root matches the recorded launch identity must keep the claim")
+	assert.Equal(t, pane.PID, inst.runtimePID)
+	assert.False(t, inst.ConsumeLoadRuntimeReplacement(),
+		"a verified reattach is not a runtime replacement and must not be checkpointed as one")
+}
+
+// TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram_SplitPane is the
+// #5066 review case: the user split the agent session's window and moved
+// focus, so tmux's active pane is an unrelated one while the launched agent
+// still runs in its own pane. A reattach keyed on the ACTIVE pane would read
+// the split's shell and retire good evidence; matching the recorded identity
+// against every pane of the session keeps it.
+func TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram_SplitPane(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	const tmuxName = "af_verified_reattach_split"
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
+	require.NoError(t, err)
+
+	pane := spawnPaneLookalike(t)
+	const splitPanePID = 424242 // the user's post-split shell; never inspected
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, splitPanePID, splitPanePID, pane.PID)
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
+	)
+	inst := &Instance{
+		Title:          "verified-reattach-split",
+		Path:           repoRoot,
+		Program:        "claude",
+		runtimeProgram: "/opt/claude-resolved --flag",
+		runtimePID:     pane.PID,
+		runtimeStartID: pane.StartID,
+		backend:        &LocalBackend{},
+		liveness:       LiveReady,
+		gitWorktree:    gw,
+		Tabs:           []*Tab{newAgentTab(ts)},
+	}
+
+	require.NoError(t, inst.Start(false))
+	assert.Equal(t, "/opt/claude-resolved --flag", inst.RuntimeProgram(),
+		"a reattach must keep the claim when the recorded launch survives on a NON-active pane")
+	assert.Equal(t, pane.PID, inst.runtimePID)
+}
+
+// TestLocalBackendStartReattachedReplacementClearsRuntimeProgram covers the
+// same restart with the pane root REPLACED under the surviving name: the
+// recorded (pid, start-time) pair no longer matches, so the stale claim is
+// retired exactly like a record that never carried identity evidence.
+func TestLocalBackendStartReattachedReplacementClearsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	const tmuxName = "af_replaced_under_name"
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
+	require.NoError(t, err)
+
+	recorded := spawnPaneLookalike(t)
+	replacement := spawnPaneLookalike(t)
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, replacement.PID, replacement.PID)
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
+	)
+	inst := &Instance{
+		Title:          "replaced-under-name",
+		Path:           repoRoot,
+		Program:        "claude",
+		runtimeProgram: "/old/claude",
+		runtimePID:     recorded.PID,
+		runtimeStartID: recorded.StartID,
+		backend:        &LocalBackend{},
+		liveness:       LiveReady,
+		gitWorktree:    gw,
+		Tabs:           []*Tab{newAgentTab(ts)},
+	}
+
+	require.NoError(t, inst.Start(false))
+	assert.Empty(t, inst.RuntimeProgram(),
+		"a pane root that is not the recorded process proves nothing about the launch command")
+	assert.Zero(t, inst.runtimePID,
+		"the retired claim's process identity must be cleared with it")
+	require.True(t, inst.ConsumeLoadRuntimeReplacement(),
+		"the retired claim still needs its durable checkpoint")
 }
 
 // --- remote terminal capability (#1592 Phase 4 PR7) ---

@@ -1,16 +1,21 @@
 #!/bin/sh
-# release-bump-and-tag.sh — land the stable-release version bump on master and
-# tag the released commit. Called from stable-release.yml's "Tag and publish"
-# job, after all four platform builds have succeeded (#1041).
+# release-bump.sh — land the stable-release version bump on master. Called
+# from stable-release.yml's "Bump and publish" job, after all four platform
+# builds have succeeded (#1041).
 #
-# Usage: release-bump-and-tag.sh <version>    # bare semver, no leading v
+# The tag is deliberately NOT created here: `gh release create --target` makes
+# it atomically with the published release (#5159), so a run that dies after
+# this script at worst leaves a bump commit on master — a clean, re-runnable
+# state — and never a tag with no release.
+#
+# Usage: release-bump.sh <version>    # bare semver, no leading v
 #
 # Runs on the ubuntu-latest release runner. Kept POSIX-portable (no `sed -i`,
 # no `grep -oP`) so scripts/release_scripts_test.go can exercise it hermetically
 # on both the Linux and macOS CI runners.
 set -eu
 
-NEW_VERSION="${1:?usage: release-bump-and-tag.sh <version>}"
+NEW_VERSION="${1:?usage: release-bump.sh <version>}"
 
 # Extract the current value of main.go's `version` fallback string. POSIX BRE,
 # tolerant of the gofmt alignment whitespace around the `=`.
@@ -38,7 +43,7 @@ git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
 git add main.go
 # No-op when main.go already carries the version (e.g. re-running after a
-# failure that landed the bump commit but not the tag).
+# failure that landed the bump commit but not the release).
 if ! git diff --cached --quiet; then
 	git commit -m "chore: release v${NEW_VERSION}"
 fi
@@ -64,9 +69,6 @@ until git push origin HEAD:master; do
 	attempt=$((attempt + 1))
 done
 
-# Tag the commit that actually landed on master. A rebase above may have
-# rewritten HEAD, so the tag is created only after the push succeeds — and
-# pushed after master, never before, so a failure at worst leaves a bump commit
-# with no tag (a clean, re-runnable state) and never a tag with no release.
-git tag "v${NEW_VERSION}"
-git push origin "v${NEW_VERSION}"
+# The workflow tags `git rev-parse HEAD` next: after the rebase-retry loop,
+# HEAD is exactly the commit that landed on master — the sha the release's
+# --target must point at.

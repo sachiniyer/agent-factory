@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
@@ -76,6 +78,18 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if selected == nil {
 		return ""
 	}
+	if selected.IsArchived() || selected.GetInFlightOp() == session.OpRestoring {
+		// The sticky binding keeps an archived session marked (▾) so the
+		// footer's restore verb can act on it (#4755), but no pane can ever
+		// show it. Lost and dead rows are different — tab_pane.go renders
+		// their fallback content, so the hint there names a real divergence,
+		// not a stale claim. Read the liveness axis (IsArchived, not
+		// ShownArchived — the eager re-home flips that predicate false the
+		// moment OpRestoring starts) plus the restoring op, so the whole
+		// restore window stays suppressed while no pane can serve (#4755
+		// review).
+		return ""
+	}
 	if m.paneMatchesSelection(p) {
 		return ""
 	}
@@ -148,11 +162,25 @@ func (m *home) focusOpenPane(p *store.OpenPane) {
 // handleSplitPane dispatches the `S` key: commit the active preview alongside
 // its owner pane. The owner returns to its original committed binding, then
 // the preview target is opened as a new pane or, if already open, focused.
+// With no preview there is nothing to keep, and the key says so rather than
+// doing nothing where the user cannot tell whether it acted (#4957).
 func (m *home) handleSplitPane() (tea.Model, tea.Cmd) {
 	if m.panePreviewTxn == nil {
-		return m, nil
+		return m, m.handleNotice(m.splitPaneUnavailableNotice())
 	}
 	return m, m.commitPanePreviewAlongside()
+}
+
+// splitPaneUnavailableNotice explains a dead `S`. The common case is a
+// selection whose tab already has a pane — there is no preview because the
+// tab is showing for real — so that case names it; every other way to reach
+// here has no preview either, and says only that.
+func (m *home) splitPaneUnavailableNotice() error {
+	if selected := m.store.GetSelectedInstance(); selected != nil &&
+		m.store.FindOpenPane(selected, m.store.ActiveTab()) != nil {
+		return errors.New("The pane is already open")
+	}
+	return errors.New("No preview to keep")
 }
 
 // handleHidePane dispatches the `x` key: hide the FOCUSED pane back to the

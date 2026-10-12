@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sync"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -18,11 +20,149 @@ var configDirForReap = config.GetConfigDir
 // manager readiness barrier opens. Therefore every af.home-scoped container the
 // sweep can see predates create admission; a new CreateSession cannot manufacture
 // a candidate midway through the destructive pass (#2632).
+//
+// When skippedRepos is non-empty the daemon's session view is known-incomplete: a
+// repo whose instances.json was corrupted/unreadable contributed zero rows to
+// m.instances, so the protected-slug set omits that repo's still-running
+// containers. Running the sweep in that state would force-remove live
+// containers the sweep cannot distinguish from genuine orphans — the same
+// "cannot distinguish orphaned from live, err toward sparing" principle the
+// sweep's slug-collision branch already follows (session/orphan_reaper.go). The
+// sweep is deferred instead, and runDeferredOrphanSweepIfReady re-runs it once
+// the poll loop drains the skip set (a skipped repo whose instances.json now
+// parses re-materializes its rows, so the protected set is complete again). This
+// bounds the #2194 regression to one polling interval: genuine orphans survive
+// un-reaped only until the view is complete, while a skipped repo's live
+// container is never force-killed.
 func sweepStartupOrphanContainers(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
 		log.WarningLog.Printf("orphan sweep: cannot resolve the AF home; skipping: %v", err)
 		return
 	}
+	manager.mu.Lock()
+	skipped := len(manager.skippedRepos)
+	if skipped > 0 {
+		manager.deferredOrphanSweepArmed = true
+		manager.mu.Unlock()
+		log.WarningLog.Printf("orphan sweep: deferring the destructive pass; %d repo(s) have unreadable instances.json — their live containers cannot be distinguished from genuine orphans. The sweep will re-run once the skip set drains on the next polling refresh.", skipped)
+		return
+	}
+	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, manager.dockerReapProtectedSlugs())
+}
+
+// runDeferredOrphanSweepIfReady runs the startup orphan sweep that was deferred
+// because skippedRepos was non-empty, once the polling refresh has repaired
+// every skipped repo (drained the skip set to empty). It is the synchronous
+// sweep body invoked by launchDeferredOrphanSweepIfReady on a tracked worker
+// goroutine, and by tests directly. A no-op when the startup sweep was not
+// deferred or the skip set has not yet drained; if any repo is still skipped
+// the sweep stays deferred and re-evaluates on the next poll.
+//
+// Unlike the startup sweep, the deferred sweep runs AFTER the manager readiness
+// barrier has opened (finishInstanceRestore at daemon.go:322), so a CreateSession
+// can be admitted concurrently. A create sets pendingCreates under m.mu and only
+// then provisions its container (manager_create.go), so without a guard a create
+// admitted after the protected-slug snapshot but before SweepOrphanContainers
+// lists containers would publish a container whose slug is absent from the
+// stale protected set — the destructive pass would force-reap a live session
+// (#2632). The startup path is safe only because the not-yet-open readiness
+// barrier excludes creates entirely; this poll-time path uses the dedicated
+// createSweepMu admission barrier instead, held across the protected-slug
+// snapshot AND the SweepOrphanContainers call: a create that has not yet set
+// pendingCreates blocks on createSweepMu until the sweep releases it, and one
+// that already set it is in the protected set. m.mu is released before the
+// (potentially long) Docker list/reap so the barrier blocks only create
+// admission, not Snapshot/RefreshInstances and the other manager operations
+// that take m.mu alone — holding m.mu through external Docker work would stall
+// the whole daemon on an unavailable engine. The slug collection is inlined
+// because dockerReapProtectedSlugs acquires m.mu itself.
+func runDeferredOrphanSweepIfReady(manager *Manager) {
+	homeID, err := configDirForReap()
+	if err != nil {
+		return
+	}
+	manager.createSweepMu.Lock()
+	defer manager.createSweepMu.Unlock()
+	manager.mu.Lock()
+	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 {
+		manager.mu.Unlock()
+		return
+	}
+	manager.deferredOrphanSweepArmed = false
+	// Collect the protected slugs inline under the already-held m.mu (instead of
+	// calling dockerReapProtectedSlugs, which acquires m.mu itself) so the
+	// snapshot and the sweep stay in lockstep under createSweepMu.
+	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
+	for _, inst := range manager.instances {
+		titles = append(titles, inst.Title)
+	}
+	for key, pending := range manager.pendingCreates {
+		if _, settled := manager.instances[key]; settled {
+			continue
+		}
+		titles = append(titles, pending.Title)
+	}
+	slugs := make(map[string]bool, len(titles))
+	for _, t := range titles {
+		slugs[session.Slugify(t)] = true
+	}
+	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses, so the protected set is complete.")
+	manager.mu.Unlock()
+	sweepOrphanContainers(homeID, slugs)
+}
+
+// launchDeferredOrphanSweepIfReady starts the deferred orphan sweep on a
+// separately tracked worker goroutine so the daemon's only polling goroutine is
+// not blocked by the sweep's external Docker list/reap, which can spend 30
+// seconds obtaining/listing Docker state and up to another 30 seconds per orphan
+// in dockerProvisioner.reap — an unavailable engine or a large orphan set would
+// otherwise suspend RefreshStatuses, lost-session recovery, settlement retries,
+// and limit resumes for the whole window. The poll loop calls this instead of
+// runDeferredOrphanSweepIfReady directly so those maintenance passes proceed
+// while the sweep runs in parallel.
+//
+// A no-op when the startup sweep was not deferred, the skip set has not yet
+// drained, or a deferred sweep worker is already in flight (deferredOrphanSweepInFlight);
+// in the last case the in-flight worker is still holding the createSweepMu
+// admission barrier, so re-launching would only queue a redundant goroutine on
+// it. The create/sweep exclusion (#2632) is retained by the worker itself —
+// runDeferredOrphanSweepIfReady still holds createSweepMu across the
+// protected-slug snapshot and the SweepOrphanContainers call. m.mu guards only
+// the launch decision and the in-flight flag; it is released before the worker
+// is spawned, so a launch never blocks the poll loop on the manager lock.
+//
+// The worker is registered with the daemon's shutdown wait group (wg) and
+// observes stopCh, so drainDaemon's wg.Wait() joins it rather than returning
+// while a destructive Docker reap is still in flight: without registration a
+// sweep started just before shutdown would outlive the terminal checkpoint and
+// could be interrupted by process exit. stopCh is checked once before the sweep
+// begins so a shutdown already in progress does not start a new destructive pass;
+// the sweep itself (SweepOrphanContainers) is not cancellable mid-flight, so the
+// wg registration — not stopCh — is what covers a sweep already running when
+// drainDaemon closes stopCh.
+func launchDeferredOrphanSweepIfReady(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	manager.mu.Lock()
+	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 || manager.deferredOrphanSweepInFlight {
+		manager.mu.Unlock()
+		return
+	}
+	manager.deferredOrphanSweepInFlight = true
+	manager.mu.Unlock()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			manager.mu.Lock()
+			manager.deferredOrphanSweepInFlight = false
+			manager.mu.Unlock()
+		}()
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+		runDeferredOrphanSweepIfReady(manager)
+	}()
 }

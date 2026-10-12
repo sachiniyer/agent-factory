@@ -187,14 +187,17 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ArchiveSession",
 		Description: "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
 		requestType: reflect.TypeOf(ArchiveSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ArchiveSession) },
+		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
+		// the teardown-requester registry — the `archive --self` caller blocked
+		// on this response is exempted from its own pane reap (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -385,7 +388,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
-		Description: "Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically).",
+		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
 	},

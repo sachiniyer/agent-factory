@@ -1035,3 +1035,99 @@ func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to save task",
 		"the task error must not be dropped when hooks also fail")
 }
+
+// TestHandleStateTasks_PendingTriggerLeakOnEscCloseReopen covers the esc-close
+// half of the #1531 contract. SetTasks (ui/task_pane_state.go:96-101) defers
+// dropping a pending run-now to the overlay-close path: it deliberately keeps
+// pendingTrigger across saveContentPaneState's mid-flush reload so the run-now
+// can still resolve by task ID after a failed-save reconcile (#1474), and
+// relies on SetFocus(false) to clear pendingTrigger/pendingTriggerID when the
+// overlay closes. The list-mode esc handler in ui/task_pane.go wrote hasFocus
+// directly, bypassing SetFocus(false), so a run-now whose pre-trigger flush
+// failed survived the close and fired on the first keypress after reopen —
+// the unsolicited-run class #1531 exists to prevent. Routing the esc close
+// through SetFocus(false) makes the documented drop actually run.
+func TestHandleStateTasks_PendingTriggerLeakOnEscCloseReopen(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(500, 1)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	runner := task.Task{
+		ID: "trigger-1531", Name: "trigger task", Prompt: "p",
+		CronExpr: "* * * * *", ProjectPath: repo.Root, Program: "claude",
+		Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(runner))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+
+	// Record every "run now" routed through the daemon trigger seam. Installed
+	// before `r` so a stray fire on the run-press itself is caught too.
+	var triggered []string
+	t.Cleanup(SetTaskTriggerForTest(func(taskID string, _ task.ProjectExpectation) error {
+		triggered = append(triggered, taskID)
+		return nil
+	}))
+
+	// showTasksOverlay drops into the selected task's edit form (#1249); one
+	// Esc steps back to the list where `x` toggles and `r` runs.
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// A dirty edit is a leak precondition: with nothing dirty the pre-trigger
+	// flush early-returns, handleTaskTrigger fires on the same keypress, and
+	// ConsumePendingTrigger clears the flag — so no leak window is left open.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, tp.IsDirty(), "toggle must mark the pane dirty")
+
+	// Force the pre-trigger flush to fail so pendingTrigger is stranded: the
+	// toggle update fails, the toggle stays dirty (#4487), handleTaskTrigger is
+	// never reached, and the flag survives the failed flush.
+	restoreUpdater := SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("daemon RPC failure")
+	})
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	require.True(t, tp.HasPendingTrigger(),
+		"the pending trigger must survive a failed pre-trigger flush")
+	assert.Empty(t, triggered,
+		"the failed flush must not fire the trigger (handleTaskTrigger is skipped)")
+
+	// Restore the seam so the esc-close flush succeeds and the close actually
+	// lands; otherwise the dirty toggle keeps failing and re-arming recovery.
+	restoreUpdater()
+
+	// Esc closes the overlay from list mode — the bypass. Pre-fix it wrote
+	// hasFocus=false directly, skipping the SetFocus(false) clear of
+	// pendingTrigger/pendingTriggerID that the SetTasks contract relies on.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
+	assert.False(t, tp.HasPendingTrigger(),
+		"Esc close must drop a pending trigger (#1531 contract, task_pane_state.go:96-101)")
+
+	// Reopen (drops into the selected task's edit form) and press any key.
+	// Pre-fix the surviving flag short-circuited handleStateTasks to the
+	// trigger branch on that next keypress, firing the originally-pressed task
+	// the user never re-requested. The key's own handling is irrelevant:
+	// HasPendingTrigger() gates the branch regardless of whether it consumed.
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	drainCmd(t, cmd, 500*time.Millisecond)
+
+	assert.Empty(t, triggered,
+		"reopening after an esc-close must NOT fire the stale pending trigger")
+	assert.False(t, tp.HasPendingTrigger(),
+		"no pending trigger must remain after the reopen keypress")
+}

@@ -81,8 +81,8 @@ they never establish that a frame completed.
 The original P1 recording was measured on 2026-09-05; its layout-shift and TUI
 entries remain unchanged. The three web latency baselines were tightened on
 2026-09-06 for #3914 using the six after samples detailed below. Bundle baselines
-were refreshed on 2026-09-07 for #4050 and on 2026-09-09 for #4018, each using
-three container samples. Measurements use Linux amd64, Node/Chromium from the
+were refreshed on 2026-09-07 for #4050, on 2026-09-09 for #4018, and on
+2026-10-01 for #5028, each using three identical deterministic samples. Measurements use Linux amd64, Node/Chromium from the
 pinned Playwright 1.56.1 Noble image, Go 1.25.0 and a 4GiB container memory limit.
 The original warm end-to-end run took about three minutes.
 
@@ -95,8 +95,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 970703.000 | 970703.000–970703.000 | 0.000 | 1019238.150 |
-| gzip_bytes | 216250.000 | 216250.000–216250.000 | 0.000 | 227062.500 |
+| raw_bytes | 1020133.000 | 1020133.000–1020133.000 | 0.000 | 1071139.650 |
+| gzip_bytes | 227625.000 | 227625.000–227625.000 | 0.000 | 239006.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -121,6 +121,28 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#5028)
+
+Measured on the PR's final tree by recomputing the identical metric locally
+(`scripts/perf/report.mjs`: raw sum and per-file `gzipSync(level: 9)` over
+`web/dist/**.{js,css}`) — raw_bytes 1,020,133, gzip_bytes 227,625. Bundle bytes
+are deterministic — `make web-build` reproduces `web/dist` byte-for-byte, a
+property the Web job verifies on every push — and the first intermediate
+refresh (1,019,608 / 227,456) matched the "Performance and visual baselines"
+job's measurement on run `36818955890` exactly, with the intermediate values
+(1,019,736 / 227,483) corroborated by Codex review recomputing the same metric.
+Only the two bundle entries were updated; every timing and layout-shift
+baseline is unchanged.
+
+The reviewed PR adds 1,635 raw JavaScript bytes over master for the
+coast-applied/stop-count/live-stop ledger the #5020 selftest asserts against;
+CSS is unchanged and the service worker changes only its generated cache
+stamp. The previous bundle baseline also predates 47,795 raw bytes merged to
+master since the #4018 refresh: master's 1,018,498-byte bundle passed the old
+1,019,238.15 budget with only 740 bytes of headroom, so the ledger could not
+fit under the old margin. This refresh records the reviewed instrumentation
+cost while preserving the 5% regression margin.
 
 ### Account handoff bundle refresh (#4018)
 

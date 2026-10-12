@@ -455,8 +455,12 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
 	return ProvisionResult{
 		Backend: &HookBackend{
-			provisioner: p,
-			cleanup:     p.cleanupData(),
+			// The command launch_cmd was handed via --program (#5108) — the
+			// hook contract is to run the agent-server bound to it, and the
+			// launch RPC records it as runtime evidence.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.environmentProgram()},
+			provisioner:        p,
+			cleanup:            p.cleanupData(),
 		},
 		Endpoint: ep,
 		Teardown: teardown,

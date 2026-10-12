@@ -1285,8 +1285,12 @@ ui/overlay/confirmationOverlay.go,371,4, or
 ui/overlay/confirmationOverlay.go,371,3,esc
 ui/overlay/confirmationOverlay.go,371,10, to cancel
 ui/overlay/confirmationOverlay.go,398,0,
-ui/overlay/confirmationOverlay.go,408,30,… 1 more line · resize to read
-ui/overlay/confirmationOverlay.go,410,32,… %d more lines · resize to read
+ui/overlay/confirmationOverlay.go,421,2,… 
+ui/overlay/confirmationOverlay.go,430,12, 1 more line
+ui/overlay/confirmationOverlay.go,432,16,%s %d more lines
+ui/overlay/confirmationOverlay.go,442,3,↑/↓
+ui/overlay/confirmationOverlay.go,451,4, or 
+ui/overlay/confirmationOverlay.go,451,1,/
 ui/overlay/searchOverlay.go,4,3,fmt
 ui/overlay/searchOverlay.go,5,7,strings
 ui/overlay/searchOverlay.go,6,7,unicode

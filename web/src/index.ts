@@ -405,8 +405,16 @@ async function connect(candidate: string): Promise<void> {
     // Either way we land on the login view exactly once — no retry loop.
     if (shouldForgetToken(e)) {
       clearToken();
+      // The credential was rejected. Flip authRequired so loginView routes to the
+      // paste form with the "Login expired" title — mirroring the resync path that
+      // calls disconnect(describeError(error), true). Without this flip a tokenless
+      // client (authRequired === false from an earlier probe) stays routed to
+      // noAuthLoginView, which re-issues the same empty-token request that just 401'd
+      // and never surfaces a token field for in-app recovery.
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -877,6 +885,7 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -956,7 +965,11 @@ function newSession(): void {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) openModal(m);
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
+                ?.focus({ preventScroll: true });
+            }
             else surfaceMutationError(e);
           });
       },
@@ -1422,6 +1435,20 @@ function openTab(index: number): void {
   focusTerminal();
 }
 
+// Issue order among awaited tab rebinds — see rebindTargetAfterAwait. The layout
+// generation alone cannot order overlapping awaited gestures: their applies land
+// through setFocusedTabAwaited, which moves no generation because a gesture's own
+// landing write is not newer user intent (#5061). tabRebindSeq is taken when the
+// RPC is issued; newestAppliedRebindBySession records the newest gesture whose
+// rebind actually landed PER SESSION, so a completion arriving after a newer
+// same-session gesture's apply refuses to clobber it while an older gesture's
+// landing vetoes nothing newer. The per-session keying is load-bearing: an apply
+// writes the focused pane of the session it targeted and each session's layout
+// tree is kept apart, so a newer gesture's landing on ANOTHER session neither
+// vetoes this one nor may overwrite this session's record (#5061 Codex).
+let tabRebindSeq = 0;
+const newestAppliedRebindBySession = new Map<string, number>();
+
 /** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
  *  two guards every such rebind needs so a new async gesture can't forget them
  *  (#2000). Both create and close await a round trip and then point the focused pane
@@ -1449,9 +1476,20 @@ function guardedTabRebind(
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
+  const seq = ++tabRebindSeq;
   void run()
-    .then((snapshot) => {
+    .then(async (snapshot) => {
       if (snapshot === null) return;
+      // A selftest seam: parks this gesture's whole post-await step until released,
+      // so web-driver.spec.ts can force the order two overlapping gestures land in
+      // rather than racing RPC round trips (#5061). Unset in production; a non-
+      // promise return means "no hold".
+      const hold = (globalThis as {
+        __afTabRebindHold?: (verb: TabRebindVerb) => Promise<void> | void;
+      }).__afTabRebindHold?.(verb);
+      if (hold) {
+        await hold;
+      }
       const {
         sessions, authoritative, generation,
         operationLockTimeoutMs, operationClockMs, daemonBootId,
@@ -1487,9 +1525,15 @@ function guardedTabRebind(
         currentSelId: store.get().selectedId,
         pinnedSessionAlive,
         targetIdx,
+        rebindSeq: seq,
+        newestAppliedSeqs: newestAppliedRebindBySession,
       });
       if (outcome.kind === "rebind") {
-        splitView.setFocusedTab(outcome.idx);
+        // Recorded before the apply: this gesture's landing is the newest intent on
+        // record, and awaited applies land without counting as layout intent — the
+        // ordering above is what keeps a stale completion from clobbering it.
+        newestAppliedRebindBySession.set(selId, seq);
+        splitView.setFocusedTabAwaited(outcome.idx);
         if (verb === "create") {
           focusTerminal();
         }
@@ -2632,6 +2676,16 @@ function startStream(tok: string): void {
       requestResync();
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
 }
@@ -2654,6 +2708,7 @@ function stopStream(): void {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

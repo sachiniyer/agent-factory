@@ -39,6 +39,7 @@ type JSONCheck struct {
 // rows".
 type JSONSummary struct {
 	Pass       int `json:"pass"`
+	Info       int `json:"info"`
 	Warn       int `json:"warn"`
 	Fail       int `json:"fail"`
 	Fixed      int `json:"fixed"`
@@ -84,6 +85,8 @@ func BuildJSONReport(r *Report, fixMode, verbose bool) JSONReport {
 		switch row.status {
 		case StatusPass:
 			out.Summary.Pass++
+		case StatusInfo:
+			out.Summary.Info++
 		case StatusWarn:
 			out.Summary.Warn++
 		case StatusFail:

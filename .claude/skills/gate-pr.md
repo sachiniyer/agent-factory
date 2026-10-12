@@ -832,7 +832,10 @@ Two things the gate insists on, and both matter:
   update-branch` produces — but a cheap pre-filter only, since a hand-written
   conflict resolution has the same parents. The full gate also reads the merge
   base and both parent trees and requires the merge commit's tree to equal the
-  path-level three-way result, or carry is refused. When the proof passes, the
+  path-level three-way result, or carry is refused. A path both sides
+  changed has no path-level result. On the gate's own update merge the gate
+  proves it line by line instead (`.github/auto-gate.md`); on any other
+  merge such a path refuses. When the proof passes, the
   anchors — the approval and every Codex artifact — bind to the merge's FIRST
   parent, the content head, because nothing about the reviewed change moved.
   Without that the gate's own update-branch voided the approval it had just

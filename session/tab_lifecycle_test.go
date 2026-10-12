@@ -137,10 +137,10 @@ func TestAddShellTab_UsesAccountScopedShellLaunch(t *testing.T) {
 		"an account-scoped terminal must not source startup files that can replace its selected identity")
 }
 
-// TestCloseTab_RemovesAndProtectsAgent verifies CloseTab removes a shell tab and
-// kills its session, but refuses to close the agent tab (index 0) or any
-// out-of-range index.
-func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
+// TestCloseTabByID_RemovesAndProtectsAgent verifies CloseTabByID removes a shell
+// tab, but refuses to close the agent tab (its id names idx 0) or any unknown tab
+// id.
+func TestCloseTabByID_RemovesAndProtectsAgent(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -149,13 +149,14 @@ func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, inst.TabCount())
 
-	require.Error(t, inst.CloseTab(0), "the agent tab must be unclosable")
+	tabs := inst.GetTabs()
+	require.Error(t, inst.CloseTabByID(tabs[0].ID), "the agent tab must be unclosable")
 	require.Equal(t, 2, inst.TabCount(), "a rejected close must not mutate the tab list")
 
-	require.Error(t, inst.CloseTab(9), "an out-of-range index must be rejected")
+	require.Error(t, inst.CloseTabByID("nonexistent"), "an unknown tab id must be rejected")
 	require.Equal(t, 2, inst.TabCount())
 
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(tabs[1].ID))
 	require.Equal(t, 1, inst.TabCount(), "closing a shell tab removes it")
 	require.False(t, inst.TabAlive(1), "the closed tab's session must be gone")
 }
@@ -314,8 +315,7 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 
 	loadStore, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
-	loaded, err := loadStore.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, loadStore)
 	require.Len(t, loaded, 1)
 
 	restored := loaded[0]
