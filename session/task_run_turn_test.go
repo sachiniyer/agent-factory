@@ -754,7 +754,8 @@ func TestTaskRunGateDoesNotSurviveRuntimeReplacement(t *testing.T) {
 
 // A turn that fits entirely between two polls and leaves the pane byte-
 // identical produces neither chrome nor churn — the quiet arm can never
-// satisfy it. The silent arm bounds the wait from the attempt itself, at a
+// satisfy it. The silent arm bounds the wait from the stillness edge — for
+// a send behind a strict-idle proof, seeded at the attempt itself — at a
 // grace long enough that a real boot cannot ride it out (#5221 review P1).
 func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
 	oldGrace := taskRunCompletionSilentGrace
@@ -764,8 +765,9 @@ func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
 	inst := taskRunSession(t)
 	// Attempt far enough back that the compressed silent grace has elapsed,
 	// with zero churn recorded at any point. The poll has been watching since
-	// the send — the window is elapsed OBSERVED silence, not wall time.
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
+	// the send — the window is elapsed OBSERVED silence, not wall time. The
+	// proven send seeds the stillness edge at the attempt (#5221 review).
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, time.Now().Add(-10*time.Second)))
 	observeContinuously(inst, time.Now().Add(-10*time.Second))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
@@ -1124,4 +1126,78 @@ func TestNotePaneCaptureStampsFenceOnBoundaryEpoch(t *testing.T) {
 	_, epoch = inst.InFlightOpAndEpoch()
 	require.False(t, inst.NotePaneCaptureObserved(t0.Add(3*time.Second), time.Second, epoch),
 		"the in-epoch stamp CONTINUES the live streak — the stale failure could not break it")
+}
+
+// The silent arm's base is the stillness edge, not the attempt (#5221
+// review): an unproven redelivery bound over an older turn's byte-identical
+// frame cannot tell stillness from a static mid-turn pane, so borrowing the
+// attempt's clock would release after five minutes while that turn still
+// blocks the queued prompt. The edge must be proven — by the send's own
+// strict-idle proof or by post-boundary unchanged captures.
+func TestTaskRunSilentArmRequiresProvenStillBase(t *testing.T) {
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = 2 * time.Second
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
+	inst := taskRunSession(t)
+	// An UNPROVEN bind: no strict-idle proof, so the stillness edge is owed.
+	// Well past the compressed silent grace with zero churn — under the old
+	// attempt-based base this released; under the owed-base contract it must
+	// not (#5221 review).
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
+	observeContinuously(inst, time.Now().Add(-10*time.Second))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"an owed stillness edge cannot borrow the attempt's clock for the silent arm")
+
+	// The edge latched long enough ago — unchanged captures earned it — and
+	// the pane stayed silent since: the SAME arm completes the run once its
+	// base is proven (#5221 review).
+	_, epoch := inst.InFlightOpAndEpoch()
+	still := time.Now().Add(-4 * time.Second)
+	require.False(t, inst.NotePaneStillAtEpoch(still, epoch), "first unchanged capture opens the candidate")
+	require.True(t, inst.NotePaneStillAtEpoch(still.Add(taskRunStillGrace+time.Second), epoch),
+		"an unchanged run past the grace latches the edge")
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"with the stillness edge proven, the silent arm measures from it and completes")
+}
+
+// A slow operator cadence is a cadence, not a hole (#5221 review): captures
+// that land on the declared schedule — however far apart — are consecutive
+// point samples and keep the observation sequence alive, so a signatureless
+// run's completion evidence keeps accumulating instead of re-anchoring every
+// poll. Only a gap past the declared cadence — a poll the daemon meant to
+// run and lost — breaks it.
+func TestNotePaneCaptureSlowCadenceKeepsSequence(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+
+	require.True(t, noteCaptureObserved(inst, t0, 30*time.Minute), "first capture anchors the sequence")
+	require.False(t, noteCaptureObserved(inst, t0.Add(30*time.Minute), 30*time.Minute),
+		"a capture landing on the declared 30-minute cadence is consecutive, not a hole")
+	require.Equal(t, t0, inst.paneObservationStreakAt,
+		"the sequence start survives on-schedule spacing — evidence accumulates")
+
+	require.True(t, noteCaptureObserved(inst, t0.Add(61*time.Minute), 30*time.Minute),
+		"a gap past the declared cadence is a missed poll — the sequence re-anchors")
+	require.Equal(t, t0.Add(61*time.Minute), inst.paneObservationStreakAt)
+}
+
+// Two horizons, two claims (#5221 review): the RECENCY a single capture
+// vouches stays capped at the floor no matter how slow the declared
+// cadence — two identical captures thirty minutes apart can never read as
+// thirty minutes of continuous watch. The DUE horizon, by contrast, honors
+// the caller's honest cadence so on-schedule samples keep the sequence.
+func TestNotePaneCaptureSplitsRecencyFromDue(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+
+	require.True(t, noteCaptureObserved(inst, t0, 30*time.Minute))
+	require.Equal(t, t0.Add(paneObservationHorizonCap+PaneObservationSlack), inst.paneObservationExpiresAt,
+		"the recency vouch caps at the floor under an hour-long declared cadence")
+	require.Equal(t, t0.Add(30*time.Minute+PaneObservationSlack), inst.paneObservationDueAt,
+		"the due horizon honors the declared cadence verbatim")
 }

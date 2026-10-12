@@ -216,20 +216,29 @@ type Instance struct {
 	// review).
 	taskRunStillCandidateAt time.Time
 	// paneObservationStreakAt is the START of the current uninterrupted
-	// observation streak: the first successful capture, or the first capture
-	// after a hole (failed snapshots, a stalled serial walk) in which churn
-	// could hide. Both release arms measure their silence from it — the
-	// quiet arm from the later of the durable churn stamp and the streak,
-	// the silent arm from the later of the attempt and the streak — because
-	// an unobserved interval is never silence (#5221 review). Zero until
-	// this process has actually seen the pane.
+	// observation sequence: the first successful capture, or the first
+	// capture after a hole (failed snapshots, a poll the caller meant to
+	// run and lost) in which churn could hide. Consecutive captures on a
+	// slow cadence are point samples, not a continuous watch, but they DO
+	// keep the sequence — a hole is only what the caller's declared cadence
+	// could not cover (#5221 review). Both release arms measure their
+	// silence from it — the quiet arm from the later of the durable churn
+	// stamp and the streak, the silent arm from the later of the attempt
+	// and the streak — because an unobserved interval is never silence
+	// (#5221 review). Zero until this process has actually seen the pane.
 	paneObservationStreakAt time.Time
-	// paneObservationExpiresAt is when the streak goes stale: the last
-	// successful capture plus the gap slack its caller declared. A release
+	// paneObservationExpiresAt is when the last capture's RECENCY vouch
+	// goes stale: its completion instant plus the caller-declared horizon,
+	// capped at paneObservationHorizonCap whatever the cadence. A release
 	// arm evaluated past it has no current observation to release on — a
 	// run of failed captures cannot inherit a satisfied window the way a
 	// never-rebased streak would (#5221 review).
 	paneObservationExpiresAt time.Time
+	// paneObservationDueAt is when the NEXT on-schedule capture is due on
+	// the caller's honest (uncapped) cadence: a capture landing past it is
+	// a missed poll — the hole that rebases paneObservationStreakAt and
+	// retires an open stillness candidate (#5221 review).
+	paneObservationDueAt time.Time
 	// lastPaneCaptureAt is the completion stamp of the latest successful
 	// capture, used to detect the observation holes that rebase
 	// paneObservationStreakAt.

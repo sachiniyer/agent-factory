@@ -276,8 +276,14 @@ func WaitForReadyAndSubmitPrompt(
 		// the earlier prompt's turn. Stamping then would retire the NEW
 		// window with the old turn's evidence, and the earlier turn's idle
 		// edge could apply on_complete before the queued prompt starts
+		// (#5221 review). It also requires the send's OWN strict-idle proof:
+		// a redelivery that passed only lenient readiness may have landed
+		// while an EARLIER turn still ticks, and the chrome in this window
+		// would then be that turn's indicator attributed to this boundary —
+		// the same pre-boundary evidence the epoch fence exists to reject
 		// (#5221 review).
 		if TurnSignaturedAgent(instance.ResolvedAgent()) &&
+			readyArg != session.NoReadinessProof &&
 			(status == session.PromptSentUnverified ||
 				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {

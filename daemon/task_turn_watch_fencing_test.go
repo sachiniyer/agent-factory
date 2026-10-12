@@ -107,21 +107,22 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 		"a fast sweep still reserves its own duration for next-pass drift")
 
 	lastStatusSweepNs.Store(int64(20 * time.Second))
-	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"an honest overrun reserves pacing plus drift, but the total still caps at the floor")
+	require.Equal(t, 40*time.Second, statusSweepExpectedInterval(time.Second),
+		"an honest overrun reserves lastSweep for pacing plus lastSweep for drift")
 
 	lastStatusSweepNs.Store(int64(10 * time.Minute))
-	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"a stalled pass is not normalized as cadence: the reserve is the floor alone")
-	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(taskRunPollBackstop),
-		"the backstop cadence plus a stall still caps the effective reserve at the floor")
+	require.Equal(t, 2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"a stalled pass is not normalized as cadence: only its capped terms count")
+	require.Equal(t, taskRunPollBackstop+statusSweepFloorCap, statusSweepExpectedInterval(taskRunPollBackstop),
+		"the backstop cadence paces the reserve; the stall adds only the drift term")
 
-	// An operator-set interval slower than the cap is the same unwatched
-	// window a stalled pass is — by configuration rather than accident — so
-	// it declares only the floor, never the operator's spacing (#5221 review).
+	// An operator-set interval slower than the cap is the caller's honest
+	// cadence — the schedule the due horizon must honor so on-schedule
+	// polls keep the sequence; position drift ADDS to it rather than
+	// hiding inside it (#5221 review).
 	lastStatusSweepNs.Store(int64(3 * time.Minute))
-	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(2*time.Minute),
-		"a configured cadence past the cap is blindness, not continuity")
+	require.Equal(t, 2*time.Minute+statusSweepFloorCap, statusSweepExpectedInterval(2*time.Minute),
+		"a configured cadence above the cap is preserved, not compressed")
 }
 
 // The honest spacing until the next capture of the same session is what is
@@ -570,12 +571,13 @@ func TestSignaturelessStillEdgeNeedsPostBoundaryChurn(t *testing.T) {
 		"unchanged frames after post-boundary churn must latch the edge")
 }
 
-// An operator-set daemon_poll_interval past the floor cap is the same
-// unwatched window a stalled sweep is — by configuration rather than
-// accident. The reserve must not honor it: a streak spanning such a gap
-// hides a whole churn-and-settle cycle, so every capture is a fresh anchor
-// (#5221 review).
-func TestPausedProbeReserveCapsOperatorInterval(t *testing.T) {
+// An operator-set daemon_poll_interval past the floor cap is the caller's
+// honest cadence, not a hole: its on-schedule probes are point samples that
+// keep the sequence alive — recency claims stay capped inside the instance,
+// but completion evidence must accumulate or a slow-poll run could never
+// finish (#5221 review). Only a gap past the declared cadence — a poll the
+// daemon meant to run and lost — re-anchors.
+func TestPausedProbeReserveFollowsOperatorInterval(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	cfg := *manager.Config()
 	cfg.DaemonPollInterval = int((60 * time.Second) / time.Millisecond)
@@ -597,8 +599,9 @@ func TestPausedProbeReserveCapsOperatorInterval(t *testing.T) {
 		lastStatusSweepGapNs.Store(oldGap)
 	})
 
-	// Under a 60s interval the reserve declares only the capped 30s+slack:
-	// a +50s re-probe is a hole the streak must not span.
+	// Under a 60s interval the declared due horizon reaches it: a +50s
+	// re-probe is on-schedule and keeps the sequence, while a gap past
+	// the cadence — a missed poll — still re-anchors (#5221 review).
 	lastStatusSweepNs.Store(0)
 	lastStatusSweepGapNs.Store(0)
 	statusSweepStartNs.Store(now.UnixNano())
@@ -611,7 +614,13 @@ func TestPausedProbeReserveCapsOperatorInterval(t *testing.T) {
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok := manager.taskRunTurnWatches[key]
-	require.False(t, ok, "a +50s gap past the floor cap re-anchors — the configured interval counts nothing")
+	require.True(t, ok, "an on-schedule probe inside the declared cadence keeps the streak")
+
+	now = now.Add(80 * time.Second)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a gap past the 60s cadence plus slack is a missed poll — it re-anchors")
 }
 
 // The paused backstop probe must drop an unanswered capture whole: settling
@@ -724,11 +733,10 @@ func TestStreakReanchorDropsTaskRunTurnWatch(t *testing.T) {
 
 // The backstop timer gates the paused probe to one per taskRunPollBackstop,
 // but the probe still only runs on a daemon poll tick: a configured
-// daemon_poll_interval slower than the backstop is the probe's real cadence.
-// That cadence may only declare the floor-capped reserve, though — an
-// interval past the cap is an unwatched window by configuration, and a
-// streak that spanned it could hide a whole churn-and-settle cycle, so the
-// honest on-cadence probe still re-anchors (#5221 review).
+// daemon_poll_interval slower than the backstop is the probe's real
+// cadence, and the due horizon it declares must reach it or every
+// on-schedule capture reads as a missed poll and re-anchors — a slow
+// operator interval is a cadence, not a hole (#5221 review).
 func TestPausedProbeReserveFollowsDaemonCadence(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	cfg := *manager.Config()
@@ -749,10 +757,9 @@ func TestPausedProbeReserveFollowsDaemonCadence(t *testing.T) {
 		statusSweepStartNs.Store(oldStart)
 	})
 
-	// A capture at the head of its pass declares only the floor-capped
-	// reserve under the two-minute cadence — the configured interval past
-	// the cap is blindness by configuration, so an honest on-tick probe a
-	// minute later is a hole the streak must not span (#5221 review).
+	// A capture at the head of its pass under the two-minute cadence
+	// declares ~2min of due horizon; the next on-tick probe an honest
+	// minute later is inside it and must stay continuous.
 	lastStatusSweepNs.Store(0)
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
@@ -764,27 +771,22 @@ func TestPausedProbeReserveFollowsDaemonCadence(t *testing.T) {
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok := manager.taskRunTurnWatches[key]
-	require.False(t, ok, "a +60s probe past the capped reserve re-anchors — the configured interval counts nothing")
+	require.True(t, ok, "a probe on the configured cadence keeps the streak and its watcher")
 
-	// Every capture is a fresh anchor, and none outlives the floor.
-	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
-		agent: inst.ResolvedAgent(), boundary: now,
-		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
-	}
+	// A gap past the declared cadence is a missed poll — the hole still
+	// re-anchors under the slower cadence.
 	now = now.Add(3 * time.Minute)
-	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok = manager.taskRunTurnWatches[key]
-	require.False(t, ok, "a further hole still re-anchors under the capped reserve")
+	require.False(t, ok, "a hole past the declared cadence still breaks the streak")
 }
 
 // The twin failure: a poll interval FASTER than the backstop that does not
 // divide it. taskRunBackstopDue is tested once per tick, so a 25s interval
-// lands a probe due at +30s at +50s — the honest spacing quantizes to the
-// smallest tick multiple at-or-past the deadline. But the reserve may only
-// declare the floor-capped window: the +50s honest spacing is still past the
-// quiet grace, an unwatched stretch a stale streak must not span, so the
-// on-tick probe re-anchors rather than claiming continuity (#5221 review).
+// lands a probe due at +30s at +50s — declaring the 30s backstop plus 10s
+// slack re-anchors every on-schedule probe, and a signatureless run's
+// fallbacks never mature (#5221 review). The due horizon must span the
+// smallest tick multiple at-or-past the deadline.
 func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	cfg := *manager.Config()
@@ -805,9 +807,9 @@ func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
 		statusSweepStartNs.Store(oldStart)
 	})
 
-	// A capture at the head of its pass declares only the capped reserve;
-	// the next on-tick probe — +50s, the tick the due-check actually lands
-	// on — is already a hole the streak must not span.
+	// A capture at the head of its pass declares the quantized due
+	// horizon; the next on-tick probe — +50s, the tick the due-check
+	// actually lands on — must stay continuous.
 	lastStatusSweepNs.Store(0)
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
@@ -819,27 +821,23 @@ func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok := manager.taskRunTurnWatches[key]
-	require.False(t, ok, "the +50s on-tick probe is past the capped reserve — honest spacing is still blindness")
+	require.True(t, ok, "the +50s on-tick probe is the honest spacing under a 25s interval")
 
-	// Every capture is a fresh anchor, and none outlives the floor.
-	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
-		agent: inst.ResolvedAgent(), boundary: now,
-		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
-	}
+	// A gap past the declared cadence is a missed poll — it still
+	// re-anchors.
 	now = now.Add(2 * time.Minute)
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok = manager.taskRunTurnWatches[key]
-	require.False(t, ok, "a further hole still re-anchors under the capped reserve")
+	require.False(t, ok, "a hole past the declared cadence still breaks the streak")
 }
 
 // The same quantization must follow the EFFECTIVE serial sweep cadence, not
 // just the configured tick: maintenance between RefreshStatuses passes runs
 // serially in the same loop, so the real probe spacing is the observed
-// start-to-start gap when that overruns the interval. But the reserve still
-// caps at the floor — a measured gap past the quiet grace is a stall in
-// which panes went genuinely unwatched, so even the on-gap probe re-anchors
-// rather than claiming continuity across it (#5221 review).
+// start-to-start gap when that overruns the interval — and the due horizon
+// must quantize the backstop onto it or every on-schedule capture
+// re-anchors (#5221 review).
 func TestPausedProbeReserveQuantizesToSweepGap(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
@@ -860,8 +858,7 @@ func TestPausedProbeReserveQuantizesToSweepGap(t *testing.T) {
 	})
 
 	// Sweeps observed 25s apart under the default 1s tick: a probe due at
-	// +30s lands on the +50s sweep start — honest spacing, but already past
-	// the floor-capped reserve, so it re-anchors rather than spanning it.
+	// +30s lands on the +50s sweep start — the due horizon must reach it.
 	lastStatusSweepNs.Store(0)
 	lastStatusSweepGapNs.Store(int64(25 * time.Second))
 	statusSweepStartNs.Store(now.UnixNano())
@@ -874,18 +871,15 @@ func TestPausedProbeReserveQuantizesToSweepGap(t *testing.T) {
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok := manager.taskRunTurnWatches[key]
-	require.False(t, ok, "the +50s on-gap probe is past the capped reserve — honest spacing is still blindness")
+	require.True(t, ok, "the +50s on-gap probe is the honest spacing when sweeps run 25s apart")
 
-	// Every capture is a fresh anchor, and none outlives the floor.
-	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
-		agent: inst.ResolvedAgent(), boundary: now,
-		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
-	}
+	// A gap past the declared cadence is a missed poll — it still
+	// re-anchors.
 	now = now.Add(2 * time.Minute)
 	statusSweepStartNs.Store(now.UnixNano())
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok = manager.taskRunTurnWatches[key]
-	require.False(t, ok, "a further hole still re-anchors under the capped reserve")
+	require.False(t, ok, "a hole past the declared cadence still breaks the streak")
 }
 
 // The pass duration understates real capture spacing whenever work BETWEEN

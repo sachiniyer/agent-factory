@@ -157,22 +157,34 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, r
 // too stale to stand as current pane evidence.
 const PaneObservationSlack = 10 * time.Second
 
+// paneObservationHorizonCap bounds the recency a single capture may claim:
+// whatever the caller's declared spacing, one capture proves the pane looked
+// one way at ONE instant — it cannot vouch a longer watch than the shortest
+// completion arm's window, so an operator-set interval of 30 minutes leaves
+// the expiry at forty seconds even though the sample sequence itself keeps
+// accumulating across on-schedule captures (#5221 review).
+const paneObservationHorizonCap = 30 * time.Second
+
 // NotePaneCaptureObserved stamps pane evidence at the completion of a
-// successful pane capture (#5221 review). expectedInterval is the expiry
-// reserve THIS capture declares — the honest spacing until the next one —
-// computed by the caller from its own schedule plus sweep-position drift, so
-// the stamped paneObservationExpiresAt already carries the worst case the
-// next gap can legitimately span. Continuity is judged by that stored expiry
-// alone: a slower cadence arriving later — the live poll's 1s tick handing
-// off to the backstop's 30s probe on attach — may NOT extend a window the
-// previous capture never vouched for, and a faster one inside it stays
-// continuous (#5221 review). An unobserved interval is not silence, however
-// short the wall-clock hole: a starved streak merely holds the run until
-// observation resumes; the release arms measure observed silence, never
-// elapsed wall time. The return reports the re-anchor — per-frame state that
-// pairs captures across the hole (a turn watcher's absence clock, a
-// previous-frame latch) must reset with the streak, the same reset a failed
-// capture forces (#5221 review).
+// successful pane capture (#5221 review). expectedInterval is the spacing
+// THIS capture declares — the honest cadence until the next one — computed
+// by the caller from its own schedule plus sweep-position drift, so the
+// stamped paneObservationDueAt already carries the worst case the next gap
+// can legitimately span. SEQUENCE membership is judged by that stored due
+// horizon alone: a slower cadence arriving later — the live poll's 1s tick
+// handing off to the backstop's 30s probe on attach — may NOT extend a
+// window the previous capture never vouched for, and a faster one inside it
+// stays continuous. Only a gap past dueAt — a poll the caller meant to run
+// and lost — re-anchors: consecutive captures on a slow operator cadence
+// are point samples, not a continuous watch, but they keep accumulating
+// completion evidence instead of re-anchoring every poll (#5221 review).
+// Separately, the RECENCY a capture vouches (paneObservationExpiresAt)
+// never exceeds paneObservationHorizonCap, however slow the cadence —
+// stillness may be proven by samples, but no sample may claim to have
+// watched the gap it sits after. The return reports the re-anchor —
+// per-frame state that pairs captures across the hole (a turn watcher's
+// absence clock, a previous-frame latch) must reset with the streak, the
+// same reset a failed capture forces (#5221 review).
 //
 // observedEpoch fences the stamp the same way the churn and stillness writes
 // are fenced: a capture that completed BEFORE a prompt boundary or lifecycle
@@ -185,13 +197,12 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	if at.IsZero() {
 		return false
 	}
-	maxGap := expectedInterval + PaneObservationSlack
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != observedEpoch {
 		return false
 	}
-	reanchored := i.paneObservationExpiresAt.IsZero() || at.After(i.paneObservationExpiresAt)
+	reanchored := i.lastPaneCaptureAt.IsZero() || at.After(i.paneObservationDueAt)
 	if reanchored {
 		i.paneObservationStreakAt = at
 		// A stillness candidate open across the hole never saw the pane
@@ -199,7 +210,17 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 		i.taskRunStillCandidateAt = time.Time{}
 	}
 	i.lastPaneCaptureAt = at
-	i.paneObservationExpiresAt = at.Add(maxGap)
+	// Two horizons, two claims (#5221 review): expiresAt is the RECENCY a
+	// single capture may vouch for — bounded at the floor cap no matter how
+	// slow the declared cadence, so an over-long interval can never make two
+	// identical captures read as one continuous watch. dueAt is when the
+	// NEXT on-schedule capture is due on the caller's honest (uncapped)
+	// cadence — only a gap past that, a poll the caller meant to run and
+	// lost, breaks the sample sequence's evidence: an operator's 30-minute
+	// interval keeps consecutive samples accumulating completion evidence
+	// rather than re-anchoring every poll.
+	i.paneObservationExpiresAt = at.Add(min(expectedInterval, paneObservationHorizonCap) + PaneObservationSlack)
+	i.paneObservationDueAt = at.Add(expectedInterval + PaneObservationSlack)
 	return reanchored
 }
 
@@ -225,5 +246,6 @@ func (i *Instance) NotePaneCaptureFailed(observedEpoch uint64) {
 	i.lastPaneCaptureAt = time.Time{}
 	i.paneObservationStreakAt = time.Time{}
 	i.paneObservationExpiresAt = time.Time{}
+	i.paneObservationDueAt = time.Time{}
 	i.taskRunStillCandidateAt = time.Time{}
 }

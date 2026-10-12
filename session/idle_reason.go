@@ -482,26 +482,30 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 
 // taskRunSilentReleaseLocked is the bounded release for a turn the poll can
 // miss completely: no chrome, and not even churn — the pane never changed
-// after the attempt. It measures from the later of the ATTEMPT and the START
-// of the current uninterrupted observation streak — elapsed wall time is not
-// silence, and a hole (restart materialization, failed probes, a stalled
-// loop) cannot complete the window because whatever it hid is precisely the
-// churn this arm exists to catch (#5221 review) — at a grace an order of
-// magnitude past the quiet arm so a slow boot cannot ride it out.
+// after the attempt. It measures from the stillness edge — seeded at the
+// send behind a strict-idle proof, or earned by post-boundary unchanged
+// captures — and the START of the current uninterrupted observation
+// sequence, whichever is later: elapsed wall time is not silence, and a hole
+// (restart materialization, failed probes, a missed poll) cannot complete
+// the window because whatever it hid is precisely the churn this arm exists
+// to catch (#5221 review) — at a grace an order of magnitude past the quiet
+// arm so a slow boot cannot ride it out.
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunSilentReleaseLocked() bool {
-	// The pane must have stayed silent since the later of the attempt and the
-	// stillness base: for a boundary bound over in-flight activity, the base
-	// is the first still frame AFTER that activity ended, and the churn that
-	// preceded it belongs to the old work — not a disqualifier, but never the
-	// silence this arm measures either. ATTRIBUTABLE churn (after the base)
-	// means the pane IS answering — that run belongs to the quiet arm, which
-	// demands its own 30s of silence after the last output (#5221 review).
-	base := i.taskRunPromptAttemptAt
-	if i.taskRunStillBaseAt.After(base) {
-		base = i.taskRunStillBaseAt
+	// The pane must have stayed silent since the stillness edge — and the
+	// edge itself must be PROVEN: for a boundary bound over in-flight
+	// activity the base is the first still frame AFTER that activity ended,
+	// so an owed base that never latched cannot borrow the attempt's clock —
+	// an unproven redelivery's byte-identical older-turn frame would
+	// otherwise release after five minutes while that turn still blocks the
+	// queued prompt (#5221 review). ATTRIBUTABLE churn (after the base)
+	// means the pane IS answering — that run belongs to the quiet arm,
+	// which demands its own 30s of silence after the last output.
+	if i.taskRunStillBaseAt.IsZero() {
+		return false
 	}
+	base := i.taskRunStillBaseAt
 	if i.lastPaneChurnAt.After(base) {
 		return false
 	}
@@ -541,10 +545,11 @@ func (i *Instance) ClearIdleEvidence() bool {
 	// spent on it — the silent arm could then satisfy its grace on wall
 	// clock that ran during the swap (#5221 review).
 	if !i.lastPaneCaptureAt.IsZero() || !i.paneObservationStreakAt.IsZero() ||
-		!i.paneObservationExpiresAt.IsZero() {
+		!i.paneObservationExpiresAt.IsZero() || !i.paneObservationDueAt.IsZero() {
 		i.lastPaneCaptureAt = time.Time{}
 		i.paneObservationStreakAt = time.Time{}
 		i.paneObservationExpiresAt = time.Time{}
+		i.paneObservationDueAt = time.Time{}
 		changed = true
 	}
 	// The task-run boundary and turn observation are pane-relative evidence of

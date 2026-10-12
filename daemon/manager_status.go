@@ -546,26 +546,28 @@ func (m *Manager) RefreshStatuses() {
 // schedule — but only this much of it is scheduling: a pass slower than the
 // shortest completion arm's window is a stall in which panes went genuinely
 // unwatched, and normalizing it as cadence would let a stale streak survive
-// blindness long enough to hide a whole turn (#5221 review). A fleet whose
-// sweeps routinely exceed it is being asked for evidence its cadence cannot
-// produce; capped at the backstop's own scale so that failure is bounded.
+// blindness long enough to hide a whole turn (#5221 review). The SCHEDULED
+// interval is exempt — it is the caller's honest cadence, and an
+// operator-set interval slower than the cap must be honored so on-schedule
+// polls keep the sample sequence alive rather than re-anchor every capture
+// (#5221 review). A fleet whose sweeps routinely exceed it is being asked
+// for evidence its cadence cannot produce; capped so failure is bounded.
 var statusSweepFloorCap = 30 * time.Second
 
-// statusSweepExpectedInterval returns the expiry reserve a capture may
-// declare for the streak — the honest spacing until the NEXT capture of the
-// same session (#5221 review). Passes run serially, so the next pass starts
-// after the observed sweep spacing — the configured tick, or the measured
-// start-to-start interval when between-sweep maintenance overran it — and
-// lands this session at position x ≤ lastSweep inside it: the gap is
-// pass−elapsed+x, and the elapsed already spent inside this pass REDUCES
-// the reserve, never adds to it — a late-capture's declared expiry must not
-// stretch past the whole next pass (#5221 review). EVERY term stays capped
-// at statusSweepFloorCap — and so does the reserve they sum to: a cycle
-// slower than that is a stall that left panes genuinely unwatched, and an
-// operator-set interval slower than the cap is the same unwatched window by
-// configuration rather than accident. Honoring either would let a streak
-// span a hole large enough to hide a whole churn-and-settle cycle
-// (#5221 review).
+// statusSweepExpectedInterval returns the honest spacing a capture may
+// declare until the NEXT capture of the same session — the schedule the
+// caller's next poll is due on (#5221 review). Passes run serially, so the
+// next pass starts after the observed sweep spacing — the configured tick,
+// or the measured start-to-start interval when between-sweep maintenance
+// overran it — and lands this session at position x ≤ lastSweep inside it:
+// the gap is pass−elapsed+x, and the elapsed already spent inside this pass
+// REDUCES the reserve, never adds to it — a late capture's declared due
+// must not stretch past the whole next pass (#5221 review). The sweep
+// duration terms stay floored at statusSweepFloorCap — a stalled pass is
+// not cadence — but the SCHEDULED interval is not compressed: the capture
+// layer needs the caller's honest cadence verbatim to tell an on-schedule
+// slow poll from a missed one; capture recency is capped inside the
+// instance (#5221 review).
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
 	gap := min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap)
@@ -573,10 +575,8 @@ func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	if start := statusSweepStartNs.Load(); start > 0 {
 		elapsed = max(nowFunc().Sub(time.Unix(0, start)), 0)
 	}
-	pass := max(min(scheduled, statusSweepFloorCap), max(last, gap))
-	// The EFFECTIVE reserve caps at the floor too, not only its terms —
-	// pass+last could otherwise span a whole unwatched window (#5221 review).
-	return min(max(pass-elapsed, 0)+last, statusSweepFloorCap)
+	pass := max(scheduled, max(last, gap))
+	return max(pass-elapsed, 0) + last
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:

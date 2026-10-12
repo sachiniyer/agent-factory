@@ -335,17 +335,15 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 	t.Cleanup(func() { postSubmitDeliveredBudget, postSubmitDeliveredPoll = oldBudget, oldPoll })
 
 	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "mid-watch-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+		Title: "mid-watch-send", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
 	})
 	if err != nil {
 		t.Fatalf("NewInstance: %v", err)
 	}
-	var calls atomic.Int32
 	bumped := false
 	inst.SetBackend(&statusReportingStartBackend{startBackend: &startBackend{previewFn: func() (string, error) {
-		n := calls.Add(1)
 		if inst.TaskRunPromptAttemptAt().IsZero() {
-			return "ready\n❯", nil
+			return ampIdleFrame, nil
 		}
 		if !bumped {
 			// The manual send: it re-arms the boundary while the only chrome
@@ -353,7 +351,7 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 			bumped = true
 			inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
 		}
-		return fmt.Sprintf("transcript\n✻ Whirring… (%ds · esc to interrupt)\n❯ ", n), nil
+		return ampWorkingFrame, nil
 	}}, sendStatus: session.PromptSentUnverified})
 	inst.SetStartedForTest(true)
 
@@ -380,6 +378,14 @@ const ampIdleFrame = "╭──────── medium ───────�
 	"│ >                                        │\n" +
 	"│                                          │\n" +
 	"╰──────── /tmp/repo (main) ────────╯\n"
+
+// ampWorkingFrame is the same live box mid-turn — the bottom rule carries
+// amp's status segment ("╰ ∼ Thinking"), the indicator IsWorkingContent and
+// submittedTurnVisible scope to the live frame (#5221 review).
+const ampWorkingFrame = "╭──────── medium ────────╮\n" +
+	"│ >                                        │\n" +
+	"│                                          │\n" +
+	"╰ ∼ Thinking ──────── /tmp/repo (main) ────╯\n"
 
 // A manual send landing between the readiness wait and the queued prompt's
 // own submission invalidates the wait's idle proof — the pane may already
@@ -500,5 +506,51 @@ func TestWaitForReadyAndSubmitPromptOwesBaseOnLenientReadiness(t *testing.T) {
 				t.Fatalf("stillness base seeded at %v — %s is not an idle observation", got, tc.name)
 			}
 		})
+	}
+}
+
+// A send that carried no strict-idle proof must not attribute post-submit
+// chrome to the boundary (#5221 review): a redelivery that passed only
+// lenient readiness may have landed while an EARLIER turn still ticks, and
+// that turn's ticking status row is indistinguishable from the new turn's —
+// stamping it would retire the new window with the old turn's evidence and
+// let the earlier idle edge apply on_complete before the queued prompt runs.
+func TestWaitForReadyAndSubmitPromptSkipsTurnStampOnUnprovenSend(t *testing.T) {
+	oldBudget, oldPoll := postSubmitDeliveredBudget, postSubmitDeliveredPoll
+	postSubmitDeliveredBudget = 400 * time.Millisecond
+	postSubmitDeliveredPoll = time.Millisecond
+	t.Cleanup(func() { postSubmitDeliveredBudget, postSubmitDeliveredPoll = oldBudget, oldPoll })
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "unproven-chrome", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	var calls atomic.Int32
+	inst.SetBackend(&statusReportingStartBackend{startBackend: &startBackend{previewFn: func() (string, error) {
+		n := calls.Add(1)
+		if inst.TaskRunPromptAttemptAt().IsZero() {
+			// Lenient-ready but never strict-idle: claude's composer is
+			// not a frame-level idle proof, so the send carries
+			// NoReadinessProof.
+			return "ready\n❯", nil
+		}
+		// The earlier turn still ticking — chrome the unproven send must
+		// NOT claim for its boundary.
+		return fmt.Sprintf("transcript\n✻ Whirring… (%ds · esc to interrupt)\n❯ ", n), nil
+	}}, sendStatus: session.PromptSentUnverified})
+	inst.SetStartedForTest(true)
+
+	status, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != session.PromptSentUnverified {
+		t.Fatalf("status = %q, want the unproven send's chrome to leave %q",
+			status, session.PromptSentUnverified)
+	}
+	if got := inst.ToInstanceData().TaskRunTurnObservedAt; !got.IsZero() {
+		t.Fatalf("turn observed at %v — an unproven send stamped chrome that may belong to an older turn", got)
 	}
 }
