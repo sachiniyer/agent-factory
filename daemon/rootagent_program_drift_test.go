@@ -368,7 +368,7 @@ func TestCreatedRootWithPaddedProgramPreservesLaunchBytesWithoutDrift(t *testing
 	repoPath := setupControlRepo(t)
 	shimDir := t.TempDir()
 	shim := filepath.Join(shimDir, "codex")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\n"+testguard.BoundedSpin(time.Second, 5*time.Minute)+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -454,7 +454,7 @@ func TestCreatedRootDefaultProfileStopsAfterTwoOverrideLookups(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	shimDir := t.TempDir()
-	readyScript := []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\nwhile :; do sleep 1; done\n")
+	readyScript := []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\n" + testguard.BoundedSpin(time.Second, 5*time.Minute) + "\n")
 	geminiShim := filepath.Join(shimDir, "gemini")
 	thirdLookup := filepath.Join(shimDir, "third-lookup")
 	for _, path := range []string{geminiShim, thirdLookup} {
