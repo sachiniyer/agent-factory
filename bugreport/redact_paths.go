@@ -348,8 +348,26 @@ func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
 // URI path, never a root boundary.
 func uriStartForPath(s string, start int) (int, bool) {
 	prefix := s[:start]
-	schemeEnd := strings.LastIndexByte(prefix, ':')
-	if schemeEnd < 0 {
+	// The scheme colon sits immediately before the hier-part: either an empty
+	// authority ("scheme:/path") or "//authority" ("scheme://host[:port]/path").
+	// The authority may itself contain ":" (port, userinfo, IPv6 literal) but
+	// never "/", so LastIndexByte cannot locate the scheme colon — it would
+	// latch onto a port or userinfo colon instead. Walk back from the path
+	// over the authority's slash-free bytes to reach the "//" marker; the
+	// scheme colon is the ":" just before it. With no "//", the only accepted
+	// no-authority form has the scheme colon immediately before the path,
+	// with an empty hier-part.
+	i := start - 1
+	for i >= 0 && prefix[i] != '/' {
+		i--
+	}
+	schemeEnd := -1
+	if i >= 1 && prefix[i] == '/' && prefix[i-1] == '/' {
+		schemeEnd = i - 2
+	} else if start > 0 && prefix[start-1] == ':' {
+		schemeEnd = start - 1
+	}
+	if schemeEnd < 0 || prefix[schemeEnd] != ':' {
 		return 0, false
 	}
 	pathPrefix := prefix[schemeEnd+1:]
