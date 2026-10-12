@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,6 +27,13 @@ var newTabChoices = []newTabChoice{
 	{label: "Terminal", kind: session.TabKindShell},
 	{label: "VS Code (web UI)", kind: session.TabKindVSCode},
 }
+
+// errRenameTabFixedLabel is the one notice `R` raises for every tab it refuses:
+// the agent tab always renders "Agent" and a shell tab always renders
+// "Terminal" (session.TabKindRenameable / session.TabLabel), so a rename would
+// write a Name nothing displays. One short sentence names the class — the
+// refusal must read as an answer, not a dead key (#5280).
+var errRenameTabFixedLabel = errors.New("Agent and Terminal tabs can't be renamed")
 
 // tabPickerRefusal reports why `t` cannot run on selected, or nil when it may
 // proceed — the TUI's front gate for the new-tab picker, shared by the
@@ -415,7 +423,7 @@ func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if idx <= 0 {
-		return m, m.handleNotice(fmt.Errorf("the agent tab can't be renamed: it always displays as %q", "Agent"))
+		return m, m.handleNotice(errRenameTabFixedLabel)
 	}
 	tabs := inst.GetTabs()
 	if idx >= len(tabs) {
@@ -424,12 +432,8 @@ func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("the selected tab no longer exists; select a tab and try again"))
 	}
 	tab := tabs[idx]
-	if tab == nil {
-		return m, nil
-	}
-	if !session.TabKindRenameable(tab.Kind) {
-		return m, m.handleNotice(fmt.Errorf("tab %q can't be renamed: it always displays as %q — only web, process and VS Code tabs show a custom name",
-			tab.Name, session.TabLabel(tab)))
+	if tab == nil || !session.TabKindRenameable(tab.Kind) {
+		return m, m.handleNotice(errRenameTabFixedLabel)
 	}
 
 	m.tabRenameTarget = tabRenameRef{

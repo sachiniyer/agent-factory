@@ -70,27 +70,28 @@ func TestRenameTabRoutesThroughDaemon(t *testing.T) {
 }
 
 // TestRenameTabAgentAndShellRefused: the daemon refuses kinds that never
-// display a name, so the TUI refuses before opening the prompt — with the same
-// reason the RPC would give, not a bare no-op.
+// display a name, so the TUI refuses before opening the prompt — with a short
+// visible notice, not a bare no-op (#5280). R is driven through Update — the
+// real key dispatch — because the bug it regresses is R itself looking dead.
 func TestRenameTabAgentAndShellRefused(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "rename-refused")
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
+	h.errBox.SetSize(200, 1)
 	calls, _ := recordRenameTab(t, "unused")
+	pressR := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}
 
 	h.store.SetActiveTab(0)
-	_, _ = h.showRenameTabPrompt()
+	_, _ = h.Update(pressR)
 	require.Nil(t, h.promptOverlay, "the agent tab must not open the prompt")
 	require.NotEqual(t, stateRenameTab, h.state)
-	h.errBox.SetSize(200, 1)
-	require.Contains(t, h.errBox.String(), "agent tab can't be renamed")
+	require.Contains(t, h.errBox.String(), "Agent and Terminal tabs can't be renamed")
 
 	h.store.SetActiveTab(1)
-	_, _ = h.showRenameTabPrompt()
+	_, _ = h.Update(pressR)
 	require.Nil(t, h.promptOverlay, "a shell tab must not open the prompt — it always displays as Terminal")
-	h.errBox.SetSize(200, 1)
-	require.Contains(t, h.errBox.String(), "Terminal")
+	require.Contains(t, h.errBox.String(), "Agent and Terminal tabs can't be renamed")
 	require.Empty(t, *calls)
 }
 
