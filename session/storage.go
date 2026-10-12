@@ -146,19 +146,20 @@ type InstanceData struct {
 	// spent and nothing re-derives it. omitempty + additive: an older record
 	// decodes to false, which holds nothing.
 	//
-	// This key keeps ONLY its original meaning (#5221 review): a daemon rolled
-	// back to a release that knows just the mission hold reads it exactly as it
-	// wrote it. The turn-gate hold lives in TaskRunTurnGateHeld so the older
-	// binary drops — rather than releases — a marker it cannot evaluate.
+	// The writer BORROWS this flag for the turn-gate hold too (#5221 review):
+	// a daemon rolled back to a release that knows just the mission hold
+	// drops the newer field, reloads LiveReady with a live run, and would
+	// hold the slot forever without a marker its rule consumes — this flag
+	// is that marker, so the older transition ends the run on its next
+	// Ready → Ready tick by its own rule. The newer binary re-evaluates its
+	// hold conditions before consulting either flag, so the borrow cannot
+	// end a run this daemon would still hold.
 	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
 	// TaskRunTurnGateHeld records that the run's idle edge was held open because
 	// the prompt had been attempted without turn evidence (#5219). Stored under
-	// its own key rather than task_run_idle_edge_held, which a previous release
-	// would misread as a resolved mission hold and end the run on the next
-	// Ready → Ready tick. An old binary drops the field entirely — that cannot
-	// re-create a turn gate it predates, and a rollback daemon ends unsatisfied
-	// runs by its own rules on the next transition regardless — but it also
-	// cannot MISread a borrowed flag into a hold it never meant (#5221 review).
+	// its own key so the newer binary can still tell the hold kinds apart on
+	// reload — the borrowed TaskRunIdleEdgeHeld above exists for the older
+	// binary that cannot read this one (#5221 review).
 	TaskRunTurnGateHeld bool `json:"task_run_turn_gate_held,omitempty"`
 	// TaskRunPromptAttemptAt is the run's OWN prompt boundary (#5221 review),
 	// scoped apart from LastPromptAttemptAt so an interactive send cannot

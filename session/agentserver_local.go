@@ -441,6 +441,9 @@ func (s *localAgentServer) InputTab(tabID string, b []byte) error {
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}
+	// Raw PTY input can submit work a sampled readiness proof never saw —
+	// invalidate the generation before the write lands (#5221 review).
+	s.inst.NoteRawPaneInput()
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
 		return err
@@ -469,6 +472,9 @@ func (s *localAgentServer) Input(tab int, b []byte) error {
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}
+	// Raw PTY input can submit work a sampled readiness proof never saw —
+	// invalidate the generation before the write lands (#5221 review).
+	s.inst.NoteRawPaneInput()
 	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err

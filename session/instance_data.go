@@ -102,7 +102,15 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
-	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
+	// The turn-gate hold borrows the older flag on disk (#5221 review): a
+	// rollback drops the field it does not know and reloads LiveReady with a
+	// live run — without a held marker its Ready → Ready polls never end the
+	// run, leaking the slot forever. Persisting the mission flag here makes
+	// the older transition logic consume the edge by its own rule instead.
+	// The new binary re-evaluates owesMission/awaitingTurn before either
+	// flag is consulted, so the borrow cannot end a run this binary would
+	// still hold.
+	data.TaskRunIdleEdgeHeld = i.taskRunActive && (i.taskRunIdleEdgeHeld || i.taskRunTurnGateHeld)
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
 	if i.taskRunActive {
 		// Same gating as the held flag: a finished run's last turn observation

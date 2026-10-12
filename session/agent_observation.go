@@ -210,12 +210,14 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 		i.taskRunStillCandidateAt = time.Time{}
 	}
 	// The DENSE watch — the run of captures each within one horizon cap of
-	// the last — re-anchors on any over-cap gap, scheduled or not. Point
-	// samples on a slow cadence keep the loose sequence above, but "thirty
-	// seconds of silence" is a claim about a watched pane: a gap that can
-	// hide a whole churn-and-settle cycle cannot carry a stale churn stamp
-	// into the quiet arm's window (#5221 review).
-	if i.paneObservationWatchAt.IsZero() ||
+	// the last — re-anchors on any over-cap gap AND on a missed poll: a gap
+	// past the declared due horizon is unobserved time however short it is
+	// in absolute terms, and "thirty seconds of silence" is a claim about a
+	// watched pane, so the churn it could hide resets the clock the same
+	// way (#5221 review). Point samples on a slow cadence keep the loose
+	// sequence above, but neither kind of hole may carry a stale churn
+	// stamp into the quiet arm's window.
+	if reanchored || i.paneObservationWatchAt.IsZero() ||
 		at.After(i.lastPaneCaptureAt.Add(paneObservationHorizonCap+PaneObservationSlack)) {
 		i.paneObservationWatchAt = at
 	}

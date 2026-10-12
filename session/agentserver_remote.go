@@ -263,6 +263,11 @@ func (s *remoteAgentServer) Input(tab int, b []byte) error {
 	if err := s.noteAdoption(); err != nil {
 		return err
 	}
+	// Raw PTY input can submit work a sampled readiness proof never saw —
+	// invalidate the generation before the write lands (#5221 review).
+	if s.inst != nil {
+		s.inst.NoteRawPaneInput()
+	}
 	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err

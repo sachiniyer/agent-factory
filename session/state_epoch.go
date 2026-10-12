@@ -70,6 +70,20 @@ func (i *Instance) PromptRecordEpoch() uint64 {
 	return i.promptRecordEpoch
 }
 
+// NoteRawPaneInput invalidates a sampled readiness proof the way a recorded
+// prompt attempt does (#5221 review): bytes written through the attached
+// terminal can submit work the strict-idle proof never saw, so a send whose
+// proof predates the write must not bind the pane the proof described.
+// Bumping the prompt-send generation makes the proof's compare fail inside
+// the next record — a keystroke that submits nothing only costs a send its
+// proof, the conservative direction. The send path itself records attempts
+// through recordPromptAttemptLocked and is untouched.
+func (i *Instance) NoteRawPaneInput() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.promptRecordEpoch++
+}
+
 // lifecycleStateLocked captures the state the epoch tracks: both axes plus the
 // usage-limit reset time. Caller holds i.mu.
 func (i *Instance) lifecycleStateLocked() (Liveness, InFlightOp, time.Time) {

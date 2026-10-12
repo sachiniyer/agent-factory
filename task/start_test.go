@@ -452,6 +452,34 @@ func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T)
 			t.Fatalf("stillness base seeded at %v — a send inside the wait's own polls was missed", got)
 		}
 	})
+
+	// A submission through the attached terminal invalidates the proof the
+	// same way (#5221 review): NoteRawPaneInput advances the generation, so
+	// raw input landing inside the (sample, record] window leaves the send
+	// owing its base rather than seeding it off a pane the user's turn owns.
+	t.Run("mid-gap-raw-input", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: "mid-gap-input", Path: t.TempDir(), Program: "amp", TaskID: "task-1",
+		})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+			return ampIdleFrame, nil
+		}})
+		inst.SetStartedForTest(true)
+
+		boundary := func() error {
+			inst.NoteRawPaneInput()
+			return nil
+		}
+		if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", boundary); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
+			t.Fatalf("stillness base seeded at %v — raw input between proof and record was missed", got)
+		}
+	})
 }
 
 // The same send with nothing racing and a strict idle frame keeps the

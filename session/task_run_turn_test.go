@@ -688,9 +688,12 @@ func TestTaskRunTurnEvidenceSurvivesRoundTrip(t *testing.T) {
 
 // The held flag is durable: a daemon restart inside the delivery window must
 // not hand the reloaded row a spendable edge. It persists under its OWN key —
-// task_run_turn_gate_held, not task_run_idle_edge_held — so a rollback to a
-// release that knows only the mission hold cannot misread it as resolved and
-// end the run on a Ready → Ready tick (#5221 review).
+// task_run_turn_gate_held — and BORROWS task_run_idle_edge_held on the way to
+// disk, so a rollback to a release that knows only the mission hold consumes
+// the edge by its own rule instead of holding the slot forever on Ready →
+// Ready ticks it cannot evaluate (#5221 review). The newer binary keeps both
+// flags on reload and re-evaluates its holds before either is consumed, so
+// the borrow cannot end a run it would still hold.
 func TestTaskRunHeldEdgeSurvivesRoundTrip(t *testing.T) {
 	inst := taskRunSession(t)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
@@ -703,8 +706,8 @@ func TestTaskRunHeldEdgeSurvivesRoundTrip(t *testing.T) {
 
 	data := inst.ToInstanceData()
 	require.True(t, data.TaskRunTurnGateHeld, "the turn-gate hold persists under its own key")
-	require.False(t, data.TaskRunIdleEdgeHeld,
-		"the mission-hold key stays clear: an older binary must not read this as its resolved-mission release")
+	require.True(t, data.TaskRunIdleEdgeHeld,
+		"the mission-hold key is borrowed on persist: an older binary must consume the held edge by its own rule rather than leak the slot (#5221 review)")
 	require.False(t, data.TaskRunPromptAttemptAt.IsZero(), "the task prompt boundary persists")
 
 	data.BackendType = "docker"
@@ -1228,4 +1231,28 @@ func TestTaskRunQuietArmReanchorsAcrossOverlongScheduledGap(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
 		"an over-cap scheduled gap cannot carry a stale churn stamp into the quiet arm")
+}
+
+// A missed poll re-anchors the dense watch even inside the absolute horizon
+// (#5221 review): on a fast cadence a stalled poll past the declared due
+// horizon is a hole however short it is in seconds — the renewal must not
+// release the quiet arm on watch time banked before it.
+func TestTaskRunQuietArmReanchorsAcrossMissedPoll(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, t0.Add(-90*time.Second)))
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.RecordPaneChurnCheckpointAtEpoch(t0.Add(-80*time.Second), epoch)
+	// A dense watch across 40s of on-schedule 1s captures…
+	for at := t0.Add(-40 * time.Second); !at.After(t0.Add(-5 * time.Second)); at = at.Add(time.Second) {
+		noteCaptureObserved(inst, at, time.Second)
+	}
+	// …then a stalled poll landing 25s later — past its due horizon (1s +
+	// slack) but inside the absolute 40s cap. The loose sequence and the
+	// dense watch BOTH re-anchor: the stall is a hole either way (#5221).
+	require.True(t, noteCaptureObserved(inst, t0.Add(20*time.Second), time.Second),
+		"a poll past its declared due horizon is a missed poll — it re-anchors")
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"watch time banked before a missed poll cannot satisfy the quiet arm")
 }
