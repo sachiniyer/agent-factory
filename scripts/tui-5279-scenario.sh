@@ -72,6 +72,10 @@ fi
 # -buildvcs=false, exactly as the entry script does.
 (cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 MASTER_SRC="$(mktemp -d /tmp/af-master.XXXXXX)"
+# Clean the extracted tree on ANY exit, not just the happy path — in a retained
+# sandbox a failed tar/build (set -e exits before a trailing rm) would strand a
+# full repo copy per attempt.
+trap 'rm -rf "$MASTER_SRC"' EXIT
 if [ -n "${AF_MASTER_TAR:-}" ]; then
     tar -xf "$AF_MASTER_TAR" -C "$MASTER_SRC"
 elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
@@ -79,9 +83,6 @@ elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
     exit 1
 fi
 (cd "$MASTER_SRC" && go build -buildvcs=false -o "$HOME/bin/af.master" .)
-# The control binary is built; the extracted tree is dead weight in a retained
-# sandbox — hundreds of MB per rerun. Drop it now.
-rm -rf "$MASTER_SRC"
 {
     echo "branch HEAD (bin/af):      $BRANCH_SHA"
     echo "control (af.master):       $MASTER_SHA (pinned: $AF_CONTROL_SHA)"
