@@ -27,6 +27,30 @@ var newTabChoices = []newTabChoice{
 	{label: "VS Code (web UI)", kind: session.TabKindVSCode},
 }
 
+// tabPickerRefusal reports why `t` cannot run on selected, or nil when it may
+// proceed — the TUI's front gate for the new-tab picker, shared by the
+// pre-modal check and the post-submit recheck. TabSpawnBlocked covers the
+// archived liveness, an in-flight teardown, and a pending account swap; the
+// resting-liveness check covers the rest — a lost/dead row owns no runtime a
+// tab could spawn into, and reads liveness rather than LifecycleAction so a
+// fenced resting row (startup-unknown, mid-restore) is refused too (#4755
+// review): a picker that could never submit never opens.
+func tabPickerRefusal(selected *session.Instance) error {
+	// The capability refusal outranks the resting one: an off-box backend
+	// (docker/ssh/hook) can never take a tab — a restore changes nothing —
+	// so it names the permanent reason, not the transient one (#4755 review).
+	if !selected.Capabilities().TabManagement {
+		return fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in")
+	}
+	if err := selected.TabSpawnBlocked(); err != nil {
+		return err
+	}
+	if selected.IsResting() {
+		return fmt.Errorf("cannot add a tab to session %q while it is not running; restore it first (af sessions restore)", selected.Title)
+	}
+	return nil
+}
+
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
 // Terminal and VS Code both need no further input, so they fit this small picker;
 // process and web tabs still need a command or URL and remain on tab-create. The
@@ -34,12 +58,16 @@ var newTabChoices = []newTabChoice{
 // while the modal owns the keyboard and may replace the instance pointer or
 // reuse its display title.
 func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil || selected.HasInFlightOp() {
 		return m, nil
 	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+	// Archived sessions keep a frozen roster for restore and a pending swap
+	// owns its own tab answer — refuse BEFORE the picker opens, since the
+	// picker could never submit (#4755's `t` dead end). The same goes for
+	// the other resting rows the footer withholds `t` from.
+	if err := tabPickerRefusal(selected); err != nil {
+		return m, m.handleNotice(err)
 	}
 
 	items := make([]string, len(newTabChoices))
@@ -101,8 +129,10 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	if selected.HasInFlightOp() {
 		return m, nil
 	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+	// Same gate as the picker, re-checked after the modal resolves its captured
+	// target: an archive or a pending swap can land while the picker is open.
+	if err := tabPickerRefusal(selected); err != nil {
+		return m, m.handleNotice(err)
 	}
 
 	target := captureSessionActionTarget(selected, m.repoID)

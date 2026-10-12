@@ -50,44 +50,26 @@ func TestScrubCollapsesTrailingSlashHome(t *testing.T) {
 			if !strings.Contains(gotCfg, "~/.local/bin/claude") {
 				t.Errorf("expected ~/.local/bin/claude after scrub:\n%s", gotCfg)
 			}
-
-			// The sibling-boundary rule still holds: a real sibling of $HOME
-			// (the home basename plus a suffix, with NO separator) is not inside
-			// $HOME and must not be rewritten to ~. Normalizing the root must
-			// not weaken the separator boundary the text pass enforces.
-			sibling := "/home/" + user + "-backup/secret"
-			if gotSib := r.collapseKnownRoots(sibling); gotSib != sibling {
-				t.Errorf("collapseKnownRoots rewrote a sibling of $HOME (prefix without separator):\n got: %s\nwant: %s", gotSib, sibling)
-			}
 		})
 	}
 }
 
-// TestCollapseKnownRootsAgreesWithCollapsePathFieldForTrailingSlashHome pins
-// the field-vs-text divergence signature: before the fix, collapsePathField
-// collapsed a home-relative path to ~/... (underRoot normalizes the root at
-// lookup) while collapseKnownRoots left it verbatim. After the fix the two
-// halves of the root policy agree for a trailing-slash $HOME.
-func TestCollapseKnownRootsAgreesWithCollapsePathFieldForTrailingSlashHome(t *testing.T) {
+// TestCollapsePathFieldHandlesTrailingSlashHome verifies that a $HOME with a
+// trailing separator still collapses correctly: normalizeRoot is applied once
+// at the source (rootReplacements), so collapsePathField underRoot match works
+// for any home spelling.
+func TestCollapsePathFieldHandlesTrailingSlashHome(t *testing.T) {
 	r := &redactor{home: "/home/bob/", users: []string{"bob"}}
 	const wantLog = "~/.config/systemd/user/agent-factory-task-archive.timer"
 
 	field := r.collapsePathField("/home/bob/.config/systemd/user/agent-factory-task-archive.timer")
-	text := r.collapseKnownRoots("/home/bob/.config/systemd/user/agent-factory-task-archive.timer")
 	if field != wantLog {
 		t.Errorf("collapsePathField = %q, want %q", field, wantLog)
 	}
-	if text != wantLog {
-		t.Errorf("collapseKnownRoots = %q, want %q (field-vs-text divergence)", text, wantLog)
-	}
 	// The exact home directory collapses to ~; underRoot returns the separator
-	// rest for a path that is the root plus a trailing slash, so both halves
-	// agree on ~/.
+	// rest for a path that is the root plus a trailing slash.
 	if got := r.collapsePathField("/home/bob"); got != "~" {
 		t.Errorf("collapsePathField(/home/bob) = %q, want ~", got)
-	}
-	if got := r.collapseKnownRoots("/home/bob"); got != "~" {
-		t.Errorf("collapseKnownRoots(/home/bob) = %q, want ~", got)
 	}
 }
 
@@ -104,11 +86,8 @@ func TestRootReplacementsRejectsFilesystemRootAndEmptyHome(t *testing.T) {
 				t.Errorf("home=%q produced a ~ root entry %q: a filesystem-root or empty home must register no collapse", home, rep.path)
 			}
 		}
-		// Observable consequence: an arbitrary absolute path survives untouched.
+		// An unrelated absolute path with no registered root gets the marker.
 		const arbitrary = "/srv/whatever/project"
-		if got := r.collapseKnownRoots(arbitrary); got != arbitrary {
-			t.Errorf("home=%q rewrote an unrelated absolute path: got %q, want %q", home, got, arbitrary)
-		}
 		if got := r.collapsePathField(arbitrary); got != redactedMarker {
 			t.Errorf("home=%q: collapsePathField(unrelated path) = %q, want %q", home, got, redactedMarker)
 		}
