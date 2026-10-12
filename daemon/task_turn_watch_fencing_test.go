@@ -294,6 +294,69 @@ func TestStaleEpochFrameDoesNotFeedTurnWatch(t *testing.T) {
 	require.False(t, ok, "no entry may be created from a frame the epoch fence rejects")
 }
 
+// The epoch the gate samples can advance while the frame waits on pausedMu
+// — an archive begin (even canceled since) mints watcher state from a frame
+// the instance already exited. The entry tag makes the fence a property of
+// the data: the next current-epoch frame rebuilds rather than pairing a
+// pre-transition mutation into the new window (#5221 review).
+func TestSupersededEpochTurnWatchRebuilds(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "superseded-epoch", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "superseded-epoch"
+	stale := task.NewTurnWatch("claude", boundary)
+	m.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: "claude", boundary: boundary, epoch: epoch - 1, watch: stale,
+	}
+
+	fed := m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: "x", Captured: true}, boundary.Add(time.Second), epoch)
+	require.False(t, fed)
+	entry := m.taskRunTurnWatches[key]
+	require.NotNil(t, entry)
+	require.NotSame(t, stale, entry.watch,
+		"a watcher fed under a superseded epoch must be rebuilt, not paired")
+	require.Equal(t, epoch, entry.epoch)
+}
+
+// The mirror image: a frame whose sampled epoch is BEHIND the entry's tag
+// must not overwrite or feed state ahead of it — the transition landed
+// between the frame's gate and the lock (#5221 review).
+func TestNewerEpochTurnWatchRejectsOlderFrame(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "newer-epoch", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "newer-epoch"
+	newer := task.NewTurnWatch("claude", boundary)
+	m.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: "claude", boundary: boundary, epoch: epoch + 1, watch: newer,
+	}
+
+	fed := m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: "x", Captured: true}, boundary.Add(time.Second), epoch)
+	require.False(t, fed, "an older-epoch frame may not touch a newer-tagged watcher")
+	require.Same(t, newer, m.taskRunTurnWatches[key].watch,
+		"the newer entry survives — its window owns the next pairing")
+}
+
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
 // the (false,false,"",false) shape a local capture-pane error produces inside
 // SnapshotAgent — until flipped to confirmed (#5221 review).
@@ -590,6 +653,55 @@ func TestPausedProbeReserveFollowsDaemonCadence(t *testing.T) {
 
 	// A genuinely blind window still re-anchors under the slower cadence.
 	now = now.Add(3 * time.Minute)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a hole past the declared reserve still breaks the streak")
+}
+
+// The twin failure: a poll interval FASTER than the backstop that does not
+// divide it. taskRunBackstopDue is tested once per tick, so a 25s interval
+// lands a probe due at +30s at +50s — declaring the 30s backstop plus 10s
+// slack re-anchors every on-schedule probe, and a signatureless run's
+// fallbacks never mature (#5221 review). The reserve must span the smallest
+// tick multiple at-or-past the deadline.
+func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	cfg := *manager.Config()
+	cfg.DaemonPollInterval = int((25 * time.Second) / time.Millisecond)
+	manager.live.Store(&cfg)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-quant", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	oldSweep := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	t.Cleanup(func() {
+		nowFunc = oldNow
+		lastStatusSweepNs.Store(oldSweep)
+		statusSweepStartNs.Store(oldStart)
+	})
+
+	// A capture at the head of its pass declares the quantized reserve;
+	// the next on-tick probe — +50s, the tick the due-check actually lands
+	// on — must stay continuous.
+	lastStatusSweepNs.Store(0)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: inst.ResolvedAgent(), boundary: now,
+		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
+	}
+	now = now.Add(50 * time.Second)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.True(t, ok, "the +50s on-tick probe is the honest spacing under a 25s interval")
+
+	// A genuinely blind window still re-anchors past the quantized reserve.
+	now = now.Add(2 * time.Minute)
 	manager.observeTaskRunWhilePaused(repoID, key, inst)
 	_, ok = manager.taskRunTurnWatches[key]
 	require.False(t, ok, "a hole past the declared reserve still breaks the streak")

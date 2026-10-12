@@ -402,12 +402,20 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// taskRunPollBackstop, but it still only runs on a daemon poll tick, so a
 	// configured daemon_poll_interval slower than the backstop is the real
 	// spacing and must pace the reserve or every on-schedule capture reads
-	// as a hole (#5221 review). The request-start `capturedAt` stays the
-	// turn-age bound below: that check needs the earliest instant the frame
-	// could exist, this one needs the moment its knowledge actually landed.
-	// A re-anchored streak means the last frame sat across an unobserved
-	// hole — the watcher pairs frames, so it resets too (#5221 review).
-	pausedCadence := max(time.Duration(m.Config().DaemonPollInterval)*time.Millisecond, taskRunPollBackstop)
+	// as a hole (#5221 review). A FASTER interval still quantizes the due
+	// check: taskRunBackstopDue is tested once per tick, so a probe due at
+	// +30s under a 25s interval actually lands at +50s — the honest spacing
+	// is the smallest tick multiple at-or-past the backstop, not the
+	// backstop itself (#5221 review). The request-start `capturedAt` stays
+	// the turn-age bound below: that check needs the earliest instant the
+	// frame could exist, this one needs the moment its knowledge actually
+	// landed. A re-anchored streak means the last frame sat across an
+	// unobserved hole — the watcher pairs frames, so it resets too (#5221
+	// review).
+	pausedCadence := taskRunPollBackstop
+	if tick := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond; tick > 0 {
+		pausedCadence = tick * ((taskRunPollBackstop + tick - 1) / tick)
+	}
 	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pausedCadence), epoch) {
 		m.dropTaskRunTurnWatch(key)
 	}

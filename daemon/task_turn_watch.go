@@ -9,12 +9,18 @@ import (
 
 // taskRunTurnWatchEntry keys a run's chrome watcher by the evidence it may
 // legitimately observe: the resolved agent (a mid-run handoff swaps the pane's
-// signatures) and the task-prompt boundary (a redelivery discards primed rows
+// signatures), the task-prompt boundary (a redelivery discards primed rows
 // that predate it, so an already-running turn cannot release the fresh window
-// as though it were the new prompt's — #5221 review).
+// as though it were the new prompt's — #5221 review), and the state epoch the
+// feeding frame was sampled under (a transition landing between that frame's
+// gate and its Observe — an archive begin, even one canceled since — must not
+// let its mutations pair into the new window: the tag survives as a property
+// of the data, so the next frame at the advanced epoch rebuilds rather than
+// reads state minted before the transition — #5221 review).
 type taskRunTurnWatchEntry struct {
 	agent    string
 	boundary time.Time
+	epoch    uint64
 	watch    *task.TurnWatch
 }
 
@@ -70,12 +76,23 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	}
 	m.pausedMu.Lock()
 	entry, ok := m.taskRunTurnWatches[key]
-	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
-		// A mid-run handoff swaps the signatures the pane can produce, and a
-		// redelivery retires primed state from the previous window — either way
-		// the watcher must be rebuilt rather than read the pane through rules
-		// or a prev frame that no longer belong to this boundary (#5221 review).
-		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
+	if ok && entry.epoch > epoch {
+		// The map holds state fed under a NEWER epoch than this frame's —
+		// the transition that advanced it landed between this frame's gate
+		// and the lock. Feeding now would let a pre-transition frame mutate
+		// (or downgrade) state the next current capture pairs against; the
+		// fenced writes reject the frame regardless (#5221 review).
+		m.pausedMu.Unlock()
+		return false
+	}
+	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) || entry.epoch != epoch {
+		// A mid-run handoff swaps the signatures the pane can produce, a
+		// redelivery retires primed state from the previous window, and an
+		// older-tagged entry was fed under an epoch the instance has since
+		// exited — in every case the watcher must be rebuilt rather than
+		// read the pane through rules, a prev frame, or post-transition
+		// mutations that no longer belong to this window (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, epoch: epoch, watch: task.NewTurnWatch(agent, boundary)}
 		m.taskRunTurnWatches[key] = entry
 	}
 	// A boundary carrying stillness proof — seeded at the send behind
