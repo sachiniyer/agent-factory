@@ -246,6 +246,54 @@ func TestLateFrameDrivesNoStatusHandling(t *testing.T) {
 		"a frame past the observation slack must not stamp churn or re-run the edge")
 }
 
+// The model diagnostic survives a stale frame (#5221 review): voiding the
+// pane fields must not feed a stale nil into SetAgentModelChangeAtEpoch, or
+// a retained warning clears on no evidence.
+func TestLateFramePreservesModelDiagnostic(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	now := time.Now()
+	backend := &slowTransportBackend{FakeBackend: session.NewFakeBackend(), now: &now, delay: 2 * session.PaneObservationSlack}
+	inst := registerStarted(t, manager, repoID, repoPath, "late-model", backend, true, session.Running)
+
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	warning := session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
+	require.True(t, inst.SetAgentModelChangeAtEpoch(warning, epoch))
+
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, warning, inst.AgentModelChange(),
+		"a stale frame must not clear the retained model warning")
+}
+
+// A frame sampled at a stale epoch must not mutate the watcher either
+// (#5221 review): a transition landing mid-snapshot (an archive begin, even
+// one canceled since) means the fenced writes all reject it, but the
+// process-local watch would still arm off it — letting the next current
+// capture pair pre-boundary chrome into the new window.
+func TestStaleEpochFrameDoesNotFeedTurnWatch(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "stale-epoch", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "stale-epoch"
+	fed := m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: "x", Captured: true}, boundary.Add(time.Second), epoch-1)
+	require.False(t, fed, "a stale-epoch frame is rejected before the watch mutates")
+	_, ok := m.taskRunTurnWatches[key]
+	require.False(t, ok, "no entry may be created from a frame the epoch fence rejects")
+}
+
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
 // the (false,false,"",false) shape a local capture-pane error produces inside
 // SnapshotAgent — until flipped to confirmed (#5221 review).

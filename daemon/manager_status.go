@@ -762,8 +762,12 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// blind window, and nothing downstream may read it (#5221 review). The
 	// whole frame is void, not just its capture bit: a stale Updated could
 	// stamp churn that suppresses idle settlement, so the late arrival takes
-	// the failed-capture shape exactly (#5221 review).
-	if obs.Captured && nowFunc().Sub(capturedAt) > session.PaneObservationSlack {
+	// the failed-capture shape exactly (#5221 review). The model diagnostic
+	// update is skipped for it too — a stale nil there would clear a
+	// retained warning on no evidence, the same read the paused path's
+	// early return already avoids (#5221 review).
+	staleFrame := obs.Captured && nowFunc().Sub(capturedAt) > session.PaneObservationSlack
+	if staleFrame {
 		obs = session.Observation{}
 	}
 	if obs.Captured {
@@ -782,7 +786,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
 	}
-	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
+	projectionChanged := false
+	if !staleFrame {
+		projectionChanged = instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
+	}
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false
 	if updated {

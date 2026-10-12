@@ -57,6 +57,17 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	if boundary.After(capturedAt) {
 		return false
 	}
+	// The sampled epoch must still be current: a lifecycle transition after
+	// the capture started (a send, an archive begin — even one canceled
+	// since) means this frame depicts a state the instance already exited.
+	// The epoch-fenced instance writes would reject it, but the watcher is
+	// process-local and unfenced — feeding it could arm a scoped absence or
+	// seed a timed baseline the NEXT current capture pairs against, putting
+	// pre-boundary chrome on the new window (#5221 review). Read under i.mu
+	// BEFORE pausedMu, same as the accessors above.
+	if _, currentEpoch := instance.InFlightOpAndEpoch(); currentEpoch != epoch {
+		return false
+	}
 	m.pausedMu.Lock()
 	entry, ok := m.taskRunTurnWatches[key]
 	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
