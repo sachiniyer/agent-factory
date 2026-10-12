@@ -1211,6 +1211,13 @@ func TestNotePaneCaptureSplitsRecencyFromDue(t *testing.T) {
 // stamp older than the gap cannot release the instant the renewal lands. The
 // renewal must first earn its own grace inside the capped recency horizon.
 func TestTaskRunQuietArmReanchorsAcrossOverlongScheduledGap(t *testing.T) {
+	// The bounded fallback must not fire inside this scenario either — the
+	// pin isolates the quiet arm's dense-watch edge from the silent arm's
+	// longer grace (#5221 review).
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = time.Hour
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
 	inst := taskRunSession(t)
 	t0 := time.Now()
 	// A proven send well in the past seeds the stillness edge; churn after it
@@ -1255,4 +1262,32 @@ func TestTaskRunQuietArmReanchorsAcrossMissedPoll(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
 		"watch time banked before a missed poll cannot satisfy the quiet arm")
+}
+
+// Under a cadence sparser than the horizon cap the quiet arm's dense watch
+// can never satisfy, but a run that DID churn after its stillness edge still
+// needs a bounded completion path (#5221 review): post-edge churn extends
+// the silent arm's base to the last observed output, so the run releases at
+// the longer grace measured over the sample sequence instead of wedging
+// open forever.
+func TestTaskRunChurnedRunCompletesOnSparseCadence(t *testing.T) {
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = 10 * time.Minute
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
+	inst := taskRunSession(t)
+	t0 := time.Now()
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, t0.Add(-30*time.Minute)))
+	_, epoch := inst.InFlightOpAndEpoch()
+	// Attributable churn 25m ago — post-edge, so it extends the silent arm's
+	// base rather than disqualifying it.
+	inst.RecordPaneChurnCheckpointAtEpoch(t0.Add(-25*time.Minute), epoch)
+	// On-schedule captures on a 30-minute cadence: the loose sequence holds,
+	// the dense watch re-anchors every poll — only the bounded arm can end
+	// this run.
+	noteCaptureObserved(inst, t0.Add(-30*time.Minute), 30*time.Minute)
+	require.False(t, noteCaptureObserved(inst, t0, 30*time.Minute))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a churned run on a sparse cadence completes via the bounded fallback — last output + the long grace")
 }

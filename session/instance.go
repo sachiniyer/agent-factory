@@ -268,6 +268,13 @@ type Instance struct {
 	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
 	// between an observation and its apply, and no such window survives a restart.
 	stateEpoch uint64
+	// paneEpoch is the liveness-stable twin of stateEpoch (#5221 review): it
+	// advances on prompt records, operations, runtime and reset-time
+	// boundaries — the mutations pane evidence may not cross — but survives
+	// poll-derived Running ↔ Ready oscillation, so evidence PAIRED across
+	// captures (the timed-row turn watch) is not rebuilt out from under its
+	// own tick when only the liveness axis moved.
+	paneEpoch uint64
 	// agentRuntimeGeneration identifies the concrete agent process currently
 	// owning the Agent tab. Async conversation capture binds to this generation,
 	// so a result from a replaced process cannot write through a later handoff or

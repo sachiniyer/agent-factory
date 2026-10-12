@@ -240,6 +240,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	}
 	i.touchLocked()
 	i.promptRecordEpoch++
+	i.paneEpoch++
 	i.stateEpoch++
 	return true
 }
@@ -502,15 +503,23 @@ func (i *Instance) taskRunSilentReleaseLocked() bool {
 	// so an owed base that never latched cannot borrow the attempt's clock —
 	// an unproven redelivery's byte-identical older-turn frame would
 	// otherwise release after five minutes while that turn still blocks the
-	// queued prompt (#5221 review). ATTRIBUTABLE churn (after the base)
-	// means the pane IS answering — that run belongs to the quiet arm,
-	// which demands its own 30s of silence after the last output.
+	// queued prompt (#5221 review). Attributable churn normally belongs to
+	// the quiet arm — but under a sparse cadence that arm's dense watch can
+	// never satisfy, and a churned run needs a bounded path too: post-edge
+	// churn therefore EXTENDS this arm's base to the last output the watch
+	// actually saw, so the fallback still releases, at the longer grace
+	// (#5221 review).
 	if i.taskRunStillBaseAt.IsZero() {
 		return false
 	}
+	// The base is the stillness edge — extended by any post-edge churn into
+	// the LAST observed movement: attributable churn belongs to the quiet
+	// arm under a dense watch, but on a cadence whose samples can never
+	// satisfy that arm the churn stamp still bounds the wait — silence
+	// counts from the last output the watch actually saw (#5221 review).
 	base := i.taskRunStillBaseAt
 	if i.lastPaneChurnAt.After(base) {
-		return false
+		base = i.lastPaneChurnAt
 	}
 	if !i.paneObservationLiveLocked() {
 		return false
@@ -576,6 +585,10 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.agentObservationGeneration.Add(1)
 	i.agentObservation = nil
 	i.stateEpoch++
+	// A runtime replacement is a pane boundary the liveness-stable epoch must
+	// also honor: evidence paired across the swap would read one process's
+	// frames through its successor's rules (#5221 review).
+	i.paneEpoch++
 	if changed {
 		i.touchLocked()
 	}

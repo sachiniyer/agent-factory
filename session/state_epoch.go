@@ -57,6 +57,20 @@ func (i *Instance) InFlightOpAndEpoch() (InFlightOp, uint64) {
 	return i.inFlightOp, i.stateEpoch
 }
 
+// InFlightOpAndPaneEpoch reads the op axis, the state epoch, and the pane
+// epoch TOGETHER under one lock (#5221 review). paneEpoch advances on
+// prompt/runtime/operation boundaries — the mutations pane evidence may not
+// cross — but survives poll-derived liveness oscillation, so a watcher that
+// pairs consecutive captures (the timed-row turn proof) is not rebuilt out
+// from under its own tick when the pane only flips Running ↔ Ready. The
+// state epoch still fences the capture itself: a frame predating ANY
+// authoritative move is dropped before it can feed the watch at all.
+func (i *Instance) InFlightOpAndPaneEpoch() (InFlightOp, uint64, uint64) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp, i.stateEpoch, i.paneEpoch
+}
+
 // PromptRecordEpoch reads the prompt-send generation alone — a fence the
 // task send path can hold across an unlocked readiness observation: sampled
 // before the wait, then re-checked inside the send's own record lock so any
@@ -93,12 +107,19 @@ func (i *Instance) lifecycleStateLocked() (Liveness, InFlightOp, time.Time) {
 // noteStateChangeLocked bumps the epoch when the tracked state differs from the
 // snapshot lifecycleStateLocked took before the mutation. Caller holds i.mu.
 // Every writer of the two axes or the reset time pairs with it, so "the epoch
-// moved" means exactly "the authoritative state changed".
+// moved" means exactly "the authoritative state changed". paneEpoch advances
+// only when the boundary is more than a poll-derived liveness move — an op or
+// reset change — because pane evidence may not cross those, while a Running ↔
+// Ready oscillation describes the SAME pane the evidence already pairs
+// (#5221 review).
 func (i *Instance) noteStateChangeLocked(lv Liveness, op InFlightOp, resetAt time.Time) {
 	if i.liveness == lv && i.inFlightOp == op && i.limitResetAt.Equal(resetAt) {
 		return
 	}
 	i.stateEpoch++
+	if i.inFlightOp != op || !i.limitResetAt.Equal(resetAt) {
+		i.paneEpoch++
+	}
 	i.runtimeEvidenceGeneration.Add(1)
 	i.touchLocked()
 }

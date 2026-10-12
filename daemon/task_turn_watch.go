@@ -70,13 +70,18 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	// process-local and unfenced — feeding it could arm a scoped absence or
 	// seed a timed baseline the NEXT current capture pairs against, putting
 	// pre-boundary chrome on the new window (#5221 review). Read under i.mu
-	// BEFORE pausedMu, same as the accessors above.
-	if _, currentEpoch := instance.InFlightOpAndEpoch(); currentEpoch != epoch {
+	// BEFORE pausedMu, same as the accessors above. The pane epoch is read in
+	// the same section: the watcher tags itself with it (below), so only
+	// boundaries pane evidence may not cross rebuild it — a liveness-only
+	// move drops stale frames via the state-epoch check but leaves the watch
+	// itself intact (#5221 review).
+	_, currentEpoch, paneEpoch := instance.InFlightOpAndPaneEpoch()
+	if currentEpoch != epoch {
 		return false
 	}
 	m.pausedMu.Lock()
 	entry, ok := m.taskRunTurnWatches[key]
-	if ok && entry.epoch > epoch {
+	if ok && entry.epoch > paneEpoch {
 		// The map holds state fed under a NEWER epoch than this frame's —
 		// the transition that advanced it landed between this frame's gate
 		// and the lock. Feeding now would let a pre-transition frame mutate
@@ -85,14 +90,18 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		m.pausedMu.Unlock()
 		return false
 	}
-	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) || entry.epoch != epoch {
+	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) || entry.epoch != paneEpoch {
 		// A mid-run handoff swaps the signatures the pane can produce, a
 		// redelivery retires primed state from the previous window, and an
 		// older-tagged entry was fed under an epoch the instance has since
 		// exited — in every case the watcher must be rebuilt rather than
 		// read the pane through rules, a prev frame, or post-transition
 		// mutations that no longer belong to this window (#5221 review).
-		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, epoch: epoch, watch: task.NewTurnWatch(agent, boundary)}
+		// The tag is the PANE epoch, not the sampled state epoch: a
+		// Running ↔ Ready oscillation describes the same pane the watcher
+		// is pairing, so rebuilding on it would drop the timed baseline
+		// the next capture needs to prove a tick (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, epoch: paneEpoch, watch: task.NewTurnWatch(agent, boundary)}
 		m.taskRunTurnWatches[key] = entry
 	}
 	// A boundary carrying stillness proof — seeded at the send behind

@@ -623,3 +623,45 @@ func TestWaitForReadyAndSubmitPromptUpgradesOnUnfencedSend(t *testing.T) {
 		t.Fatal("the observed chrome did not stamp the send's own boundary")
 	}
 }
+
+// Codex's idle proof is its composer at rest — a line-leading "›" with no
+// "esc to interrupt" hint below it (#5221 review): an uncontended task send
+// on that frame carries a turn proof and seeds the stillness base, so an
+// ordinary codex turn takes the fast chrome/fallback path instead of the
+// five-minute silent arm. A frame WITH the hint is codex mid-turn — not a
+// proof — and must owe the base.
+func TestWaitForReadyAndSubmitPromptSeedsBaseOnCodexIdleFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		frame     string
+		wantSeeds bool
+	}{
+		{"idle composer", "transcript\n› \n", true},
+		{"mid-turn hint", "transcript\n› \n\n  esc to interrupt\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := session.NewInstance(session.InstanceOptions{
+				Title: "codex-idle", Path: t.TempDir(), Program: "codex", TaskID: "task-1",
+			})
+			if err != nil {
+				t.Fatalf("NewInstance: %v", err)
+			}
+			frame := tc.frame
+			inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+				return frame, nil
+			}})
+			inst.SetStartedForTest(true)
+
+			if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := inst.TaskRunStillBaseAt()
+			if tc.wantSeeds && got.IsZero() {
+				t.Fatal("stillness base owed — a codex composer at rest is a strict idle observation")
+			}
+			if !tc.wantSeeds && !got.IsZero() {
+				t.Fatalf("stillness base seeded at %v — a mid-turn codex frame is not idle evidence", got)
+			}
+		})
+	}
+}

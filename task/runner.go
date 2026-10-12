@@ -507,6 +507,16 @@ func provenIdleContent(content, agent string) bool {
 		return isAmpPromptFrame(content)
 	case tmux.ProgramOpencode:
 		return isOpencodePromptFrame(content)
+	case tmux.ProgramCodex:
+		// Codex's idle observation is its composer at rest: a line-leading
+		// "›" with NO "esc to interrupt" hint below it — the hint is the only
+		// in-flight indicator codex draws, so composer-present plus
+		// hint-absent IS the frame-level idle proof (codexWorkingContent,
+		// which IsWorkingContent already ran above, scopes the hint to below
+		// the last composer line so scrollback prose cannot reach it;
+		// #5221 review). Without this arm an uncontended codex send could
+		// never carry a turn proof and would fall to the slowest fallback.
+		return hasLineLeadingGlyph(content, "›")
 	}
 	return false
 }

@@ -296,11 +296,11 @@ func TestStaleEpochFrameDoesNotFeedTurnWatch(t *testing.T) {
 	require.False(t, ok, "no entry may be created from a frame the epoch fence rejects")
 }
 
-// The epoch the gate samples can advance while the frame waits on pausedMu
-// — an archive begin (even canceled since) mints watcher state from a frame
-// the instance already exited. The entry tag makes the fence a property of
-// the data: the next current-epoch frame rebuilds rather than pairing a
-// pre-transition mutation into the new window (#5221 review).
+// The pane epoch the entry tags can advance while the frame waits on
+// pausedMu — an archive begin (even canceled since) mints watcher state from
+// a frame the instance already exited. The entry tag makes the fence a
+// property of the data: the next current-epoch frame rebuilds rather than
+// pairing a pre-transition mutation into the new window (#5221 review).
 func TestSupersededEpochTurnWatchRebuilds(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "superseded-epoch", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
@@ -311,13 +311,13 @@ func TestSupersededEpochTurnWatchRebuilds(t *testing.T) {
 
 	boundary := time.Now()
 	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
-	_, epoch := inst.InFlightOpAndEpoch()
+	_, epoch, paneEpoch := inst.InFlightOpAndPaneEpoch()
 
 	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
 	const key = "superseded-epoch"
 	stale := task.NewTurnWatch("claude", boundary)
 	m.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
-		agent: "claude", boundary: boundary, epoch: epoch - 1, watch: stale,
+		agent: "claude", boundary: boundary, epoch: paneEpoch - 1, watch: stale,
 	}
 
 	fed := m.noteTaskRunTurnEvidence(key, inst,
@@ -326,11 +326,11 @@ func TestSupersededEpochTurnWatchRebuilds(t *testing.T) {
 	entry := m.taskRunTurnWatches[key]
 	require.NotNil(t, entry)
 	require.NotSame(t, stale, entry.watch,
-		"a watcher fed under a superseded epoch must be rebuilt, not paired")
-	require.Equal(t, epoch, entry.epoch)
+		"a watcher fed under a superseded pane epoch must be rebuilt, not paired")
+	require.Equal(t, paneEpoch, entry.epoch)
 }
 
-// The mirror image: a frame whose sampled epoch is BEHIND the entry's tag
+// The mirror image: a frame fed while the entry carries a NEWER pane tag
 // must not overwrite or feed state ahead of it — the transition landed
 // between the frame's gate and the lock (#5221 review).
 func TestNewerEpochTurnWatchRejectsOlderFrame(t *testing.T) {
@@ -343,13 +343,13 @@ func TestNewerEpochTurnWatchRejectsOlderFrame(t *testing.T) {
 
 	boundary := time.Now()
 	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
-	_, epoch := inst.InFlightOpAndEpoch()
+	_, epoch, paneEpoch := inst.InFlightOpAndPaneEpoch()
 
 	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
 	const key = "newer-epoch"
 	newer := task.NewTurnWatch("claude", boundary)
 	m.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
-		agent: "claude", boundary: boundary, epoch: epoch + 1, watch: newer,
+		agent: "claude", boundary: boundary, epoch: paneEpoch + 1, watch: newer,
 	}
 
 	fed := m.noteTaskRunTurnEvidence(key, inst,
@@ -357,6 +357,91 @@ func TestNewerEpochTurnWatchRejectsOlderFrame(t *testing.T) {
 	require.False(t, fed, "an older-epoch frame may not touch a newer-tagged watcher")
 	require.Same(t, newer, m.taskRunTurnWatches[key].watch,
 		"the newer entry survives — its window owns the next pairing")
+}
+
+// The liveness axis alone is not a pane boundary (#5221 review): a
+// Ready ↔ Running oscillation between captures moves the strict state epoch
+// — still fenced — but the watcher pairs frames of the SAME pane, so
+// rebuilding on it would discard the timed baseline the next row needs and
+// an alternating pane could never prove a turn.
+func TestLivenessOscillationKeepsTurnWatch(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "liveness-same", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "liveness-same"
+	frame := func(elapsed string) session.Observation {
+		return session.Observation{
+			Content:  "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ ",
+			Captured: true,
+		}
+	}
+
+	// Each feed samples the CURRENT state epoch — a fresh fence per frame,
+	// the way a poll samples it before its own capture.
+	feed := func(at time.Time) bool {
+		_, epoch, _ := inst.InFlightOpAndPaneEpoch()
+		return m.noteTaskRunTurnEvidence(key, inst, frame("1s"), at, epoch)
+	}
+	require.False(t, feed(boundary.Add(1200*time.Millisecond)))
+	first := m.taskRunTurnWatches[key]
+	require.NotNil(t, first)
+
+	// The pane churns between the two captures: Running, then back to Ready —
+	// poll-derived liveness moves only. The state epoch advanced, the pane
+	// epoch did not, and the SAME watcher keeps pairing its window's rows.
+	inst.SetStatusForTest(session.Running)
+	inst.SetStatusForTest(session.Ready)
+	require.False(t, feed(boundary.Add(2200*time.Millisecond)))
+	require.Same(t, first.watch, m.taskRunTurnWatches[key].watch,
+		"a liveness-only move must not rebuild the pairing watcher")
+}
+
+// A prompt boundary, by contrast, IS a pane mutation the watcher may not
+// pair across (#5221 review): a redelivery between captures bumps the pane
+// epoch and the next frame rebuilds — the old turn's primed state cannot
+// pass as the new prompt's churn.
+func TestPromptBoundaryRebuildsTurnWatch(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "prompt-bound", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "prompt-bound"
+	frame := func(elapsed string) session.Observation {
+		return session.Observation{
+			Content:  "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ ",
+			Captured: true,
+		}
+	}
+	feed := func(at time.Time) bool {
+		_, epoch, _ := inst.InFlightOpAndPaneEpoch()
+		return m.noteTaskRunTurnEvidence(key, inst, frame("1s"), at, epoch)
+	}
+	require.False(t, feed(boundary.Add(1200*time.Millisecond)))
+	first := m.taskRunTurnWatches[key]
+	require.NotNil(t, first)
+
+	// The redelivery rebinds the run to a new boundary: the next frame —
+	// same state-epoch fence, fresh sample — must pair against the NEW
+	// window, not the watcher's old one.
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary.Add(2*time.Second)))
+	require.False(t, feed(boundary.Add(2200*time.Millisecond)))
+	require.NotSame(t, first.watch, m.taskRunTurnWatches[key].watch,
+		"a prompt boundary must rebuild the watcher against the new window")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
