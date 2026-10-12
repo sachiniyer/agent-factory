@@ -560,22 +560,23 @@ var statusSweepFloorCap = 30 * time.Second
 // pass−elapsed+x, and the elapsed already spent inside this pass REDUCES
 // the reserve, never adds to it — a late-capture's declared expiry must not
 // stretch past the whole next pass (#5221 review). EVERY term stays capped
-// at statusSweepFloorCap — a cycle slower than that is a stall that left
-// panes genuinely unwatched, and an operator-set interval slower than the
-// cap is the same unwatched window by configuration rather than accident:
-// honoring it would let a streak span a hole large enough to hide a whole
-// churn-and-settle cycle (#5221 review).
+// at statusSweepFloorCap — and so does the reserve they sum to: a cycle
+// slower than that is a stall that left panes genuinely unwatched, and an
+// operator-set interval slower than the cap is the same unwatched window by
+// configuration rather than accident. Honoring either would let a streak
+// span a hole large enough to hide a whole churn-and-settle cycle
+// (#5221 review).
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
 	gap := min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap)
 	var elapsed time.Duration
 	if start := statusSweepStartNs.Load(); start > 0 {
-		if e := nowFunc().Sub(time.Unix(0, start)); e > 0 {
-			elapsed = e
-		}
+		elapsed = max(nowFunc().Sub(time.Unix(0, start)), 0)
 	}
 	pass := max(min(scheduled, statusSweepFloorCap), max(last, gap))
-	return max(pass-elapsed, 0) + last
+	// The EFFECTIVE reserve caps at the floor too, not only its terms —
+	// pass+last could otherwise span a whole unwatched window (#5221 review).
+	return min(max(pass-elapsed, 0)+last, statusSweepFloorCap)
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
