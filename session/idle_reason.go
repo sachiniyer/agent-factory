@@ -167,15 +167,17 @@ func (i *Instance) recordPromptAttemptForObservation(
 	if i.agentObservation != runtime {
 		return 0, false
 	}
-	// The caller's idle proof binds only if the epoch it was earned under is
-	// still current at this record: a send landing inside the wait→submit
-	// gap (a manual SendPromptWithStatus — it takes no lock the caller held)
-	// already bumped the epoch and may have started a turn the pane is
-	// mid-way through, so seeding the base off the stale proof would let
-	// that older turn's chrome satisfy this prompt's window (#5221 review).
-	// A caller with no proof passes NoReadinessProof, which no real epoch
-	// can match.
-	paneIdleProven := i.stateEpoch == readyEpoch
+	// The caller's idle proof binds only if no prompt recorded inside the
+	// (sample, record] window it covers: the sample precedes the readiness
+	// wait itself, so a send landing anywhere after it — inside the wait's
+	// own polls or in the wait→submit gap — has already moved the generation
+	// past it, and that send may have started a turn the pane is mid-way
+	// through. Seeding the base off the stale proof would let that older
+	// turn's chrome satisfy this prompt's window (#5221 review). The
+	// prompt-send generation is compared, not stateEpoch — liveness churn
+	// must not fail a proof the send never touched. A caller with no proof
+	// passes NoReadinessProof, which no real epoch can match.
+	paneIdleProven := i.promptRecordEpoch == readyEpoch
 	if !i.recordPromptAttemptLocked(status, attemptedAt, paneIdleProven) {
 		return 0, false
 	}
@@ -237,6 +239,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		}
 	}
 	i.touchLocked()
+	i.promptRecordEpoch++
 	i.stateEpoch++
 	return true
 }

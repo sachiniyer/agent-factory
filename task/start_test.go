@@ -377,29 +377,60 @@ func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
 // own submission invalidates the wait's idle proof — the pane may already
 // run the manual prompt's turn. The task boundary must then owe the
 // stillness base rather than seed it off a proof sampled before the
-// interleaving send (#5221 review).
+// interleaving send (#5221 review). The race can land in either window the
+// bracket covers: inside the wait's own polls, or in the wait→submit gap.
 func TestWaitForReadyAndSubmitPromptOwesBaseWhenSendRacesReadiness(t *testing.T) {
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "mid-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
-	})
-	if err != nil {
-		t.Fatalf("NewInstance: %v", err)
-	}
-	inst.SetBackend(&startBackend{})
-	inst.SetStartedForTest(true)
+	t.Run("mid-gap", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: "mid-gap-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+		})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		inst.SetBackend(&startBackend{})
+		inst.SetStartedForTest(true)
 
-	boundary := func() error {
-		// The racing send: it takes no lock the submission path holds, and
-		// lands inside the window the idle proof predates.
-		inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
-		return nil
-	}
-	if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", boundary); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
-		t.Fatalf("stillness base seeded at %v — a proof stale at record time was kept", got)
-	}
+		boundary := func() error {
+			// The racing send: it takes no lock the submission path holds,
+			// and lands inside the window the idle proof predates.
+			inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
+			return nil
+		}
+		if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", boundary); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
+			t.Fatalf("stillness base seeded at %v — a proof stale at record time was kept", got)
+		}
+	})
+
+	t.Run("mid-wait", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: "mid-wait-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+		})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		var polls atomic.Int32
+		inst.SetBackend(&startBackend{previewFn: func() (string, error) {
+			if polls.Add(1) == 1 {
+				// The racing send lands while the wait is still polling —
+				// the idle proof it later earns postdates a send the epoch
+				// sample already covered, so the base must stay owed.
+				inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
+				return "booting…", nil
+			}
+			return "ready\n❯", nil
+		}})
+		inst.SetStartedForTest(true)
+
+		if _, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := inst.TaskRunStillBaseAt(); !got.IsZero() {
+			t.Fatalf("stillness base seeded at %v — a send inside the wait's own polls was missed", got)
+		}
+	})
 }
 
 // The same send with nothing racing keeps the wait's proof: the epoch the

@@ -235,6 +235,15 @@ type Instance struct {
 	// paneObservationStreakAt.
 	lastPaneCaptureAt   time.Time
 	loadRuntimeReplaced bool
+	// promptRecordEpoch counts prompt attempts recorded — the send generation
+	// alone, NOT the broader lifecycle epoch a liveness transition also
+	// advances (#5221 review). The task send path samples it before the
+	// readiness wait so a prompt recording anywhere inside the (sample,
+	// record] window — including one landing between the wait's last idle
+	// capture and the queued send, or inside the wait's own polls — moves it
+	// past the sample and the stillness proof fails closed.
+	promptRecordEpoch uint64
+
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;

@@ -214,16 +214,22 @@ func WaitForReadyAndSubmitPrompt(
 		return session.PromptDelivered, nil
 	}
 
+	// The readiness wait below proves the composer idle — but the observation
+	// is a text capture that carries no locked instant, so the proof is bound
+	// by BRACKETING instead: the prompt-send generation is sampled before the
+	// wait, then re-checked inside the send's own record lock. Any prompt
+	// recording inside the (sample, record] window — a manual send racing
+	// the wait's polls or the trust-dismiss/boundary gap after it — has
+	// already moved the generation past the sample, so the record owes the
+	// stillness base rather than seeding it from a proof that predates that
+	// send (#5221 review). Sampling inside or after the wait would capture a
+	// racing send's NEWER generation and wrongly report the stale proof
+	// current.
+	readyEpoch := instance.PromptRecordEpoch()
+
 	if err := WaitForReady(ctx, instance); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
-	// The readiness wait just proved the composer idle — bind that proof to
-	// the epoch it was earned under. The trust dismissal and boundary below
-	// run without the runtime observation lock, so a manual send can land in
-	// the gap and start its own turn: the record must then see the epoch
-	// moved and owe the stillness base instead of seeding it from a stale
-	// proof (#5221 review).
-	_, readyEpoch := instance.InFlightOpAndEpoch()
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)

@@ -57,6 +57,19 @@ func (i *Instance) InFlightOpAndEpoch() (InFlightOp, uint64) {
 	return i.inFlightOp, i.stateEpoch
 }
 
+// PromptRecordEpoch reads the prompt-send generation alone — a fence the
+// task send path can hold across an unlocked readiness observation: sampled
+// before the wait, then re-checked inside the send's own record lock so any
+// prompt that recorded in between fails the proof instead of inheriting a
+// stale idle edge (#5221 review). A state-epoch sample cannot serve here —
+// liveness transitions advance it too, which would fail the proof on churn
+// the send never caused.
+func (i *Instance) PromptRecordEpoch() uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.promptRecordEpoch
+}
+
 // lifecycleStateLocked captures the state the epoch tracks: both axes plus the
 // usage-limit reset time. Caller holds i.mu.
 func (i *Instance) lifecycleStateLocked() (Liveness, InFlightOp, time.Time) {
