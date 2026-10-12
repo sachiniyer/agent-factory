@@ -44,6 +44,13 @@ func TestURIStartForPathAcceptsPortBearingAuthorities(t *testing.T) {
 		{name: "suffix after path prefix", in: "vscode://host:8080/prefix/srv/repo", want: false},
 		{name: "suffix after path prefix malformed", in: "vscode://host:notaport/prefix/srv/repo", want: false},
 		{name: "four slashes path-then-authority", in: "file:////srv/repo", want: false},
+		// A slash inside a query or fragment is not the URI path's first slash:
+		// the authority scan must stop at "?" or "#" rather than cross it and
+		// relabel fragment/query data as the repository root.
+		{name: "root suffix in fragment", in: "vscode://host:8080#prefix/srv/repo", want: false},
+		{name: "root suffix in fragment empty host", in: "vscode://#prefix/srv/repo", want: false},
+		{name: "root suffix in query", in: "vscode://host:8080?prefix/srv/repo", want: false},
+		{name: "root suffix in query no port", in: "vscode://host?prefix/srv/repo", want: false},
 		// Text before the scheme must not be absorbed into the scheme run.
 		{name: "prose before port uri", in: "recovery failed: vscode://host:notaport/srv/repo", want: true},
 		// No scheme at all.
@@ -287,6 +294,39 @@ func TestScrubbersDoNotOverRedactRootSuffixInsidePortURI(t *testing.T) {
 				got := tc.scrub(in)
 				if strings.Contains(got, "[repo:1]") {
 					t.Fatalf("scrubber over-redacted a non-boundary root suffix inside a port URI:\n%s", got)
+				}
+			})
+		}
+	}
+}
+
+// TestScrubbersDoNotRedactRootSuffixInsideFragmentOrQuery pins the boundary
+// invariant from the Codex review of #5277: when a port-bearing URI has no
+// path but its query or fragment contains the registered root as a suffix
+// (e.g. "vscode://host:8080#prefix/srv/repo"), the backward authority scan must
+// stop at the "?" or "#" delimiter instead of crossing it and relabeling the
+// fragment/query data as the repository root.
+func TestScrubbersDoNotRedactRootSuffixInsideFragmentOrQuery(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	for _, in := range []string{
+		"vscode://host:8080#prefix" + siblingLeakRepo,
+		"vscode://host:notaport#prefix" + siblingLeakRepo,
+		"vscode://host:8080?prefix" + siblingLeakRepo,
+		"vscode://host:notaport?prefix" + siblingLeakRepo,
+	} {
+		for _, tc := range []struct {
+			name  string
+			scrub func(string) string
+		}{
+			{name: "generic", scrub: r.scrub},
+			{name: "log", scrub: r.scrubLog},
+			{name: "diagnostic", scrub: r.scrubDiagnostic},
+		} {
+			t.Run(tc.name+"/"+in, func(t *testing.T) {
+				got := tc.scrub(in)
+				if strings.Contains(got, "[repo:1]") {
+					t.Fatalf("scrubber redacted a fragment/query root suffix as a boundary:\n%s", got)
 				}
 			})
 		}

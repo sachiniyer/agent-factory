@@ -356,10 +356,15 @@ func uriStartForPath(s string, start int) (int, bool) {
 	// over the authority's slash-free bytes to reach the "//" marker; the
 	// scheme colon is the ":" just before it. With no "//", the only accepted
 	// no-authority form has the scheme colon immediately before the path,
-	// with an empty hier-part.
+	// with an empty hier-part. The authority ends at "?", "#", or the first
+	// "/" after "//"; a "?" or "#" before "//" means the slash at start lives
+	// in a query or fragment, not the URI path, so it is not a root boundary.
 	i := start - 1
-	for i >= 0 && prefix[i] != '/' {
+	for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
 		i--
+	}
+	if i >= 0 && (prefix[i] == '?' || prefix[i] == '#') {
+		return 0, false
 	}
 	schemeEnd := -1
 	if i >= 1 && prefix[i] == '/' && prefix[i-1] == '/' {
