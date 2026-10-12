@@ -707,6 +707,54 @@ func TestPausedProbeReserveQuantizesToDaemonTicks(t *testing.T) {
 	require.False(t, ok, "a hole past the declared reserve still breaks the streak")
 }
 
+// The pass duration understates real capture spacing whenever work BETWEEN
+// sweeps overruns the tick — the maintenance passes after RefreshStatuses
+// run serially, and one that blocks (a handoff retry inside its readiness
+// wait) delays the next sweep on every iteration. The reserve must follow
+// the observed start-to-start gap or every on-schedule capture re-anchors
+// and a signatureless run's fallbacks never mature (#5221 review).
+func TestStatusSweepReserveFollowsInterSweepGap(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "sweep-gap", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	oldSweep := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	oldGap := lastStatusSweepGapNs.Load()
+	t.Cleanup(func() {
+		nowFunc = oldNow
+		lastStatusSweepNs.Store(oldSweep)
+		statusSweepStartNs.Store(oldStart)
+		lastStatusSweepGapNs.Store(oldGap)
+	})
+
+	// A 35s between-sweep stall under the default 1s tick: captured frames
+	// honestly land that far apart, and the measured gap (floored at the
+	// stall cap) must keep them continuous — the pass duration alone
+	// declared ~1s plus slack.
+	lastStatusSweepNs.Store(0)
+	lastStatusSweepGapNs.Store(int64(35 * time.Second))
+	manager.refreshInstanceStatus(repoID, inst)
+	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: inst.ResolvedAgent(), boundary: now,
+		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
+	}
+	now = now.Add(35 * time.Second)
+	manager.refreshInstanceStatus(repoID, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.True(t, ok, "a capture landing on the observed sweep gap stays continuous")
+
+	// Past the floored reserve plus slack, the hole still re-anchors.
+	now = now.Add(2 * time.Minute)
+	manager.refreshInstanceStatus(repoID, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a hole past the floored reserve still breaks the streak")
+}
+
 // A boundary that bound over proven stillness — a fresh task's first bind
 // seeds the still base at the send behind WaitForReady — already observed
 // the absent half of the scoped contract: the watcher the feed builds for

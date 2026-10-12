@@ -40,6 +40,23 @@ var lastStatusSweepNs atomic.Int64
 // elapsed position in the in-flight pass, not just lastSweep (#5221 review).
 var statusSweepStartNs atomic.Int64
 
+// lastStatusSweepGapNs is the observed start-to-start spacing of the last
+// two sweeps — what one session's captures actually wait between siblings.
+// The pass duration understates it whenever work BETWEEN sweeps exceeds the
+// tick: the poll loop's maintenance passes run serially after RefreshStatuses,
+// and one that blocks (a handoff retry inside its readiness wait) delays the
+// next sweep on every iteration — a reserve that ignores it reads every
+// on-schedule capture as a hole (#5221 review). Same package-var shape as the
+// pass duration, and bounded the same way at read time: a cycle longer than
+// the shortest completion arm's window is a stall that left panes genuinely
+// unwatched, not a schedule to normalize.
+var lastStatusSweepGapNs atomic.Int64
+
+// prevStatusSweepStartNs is the previous sweep's start instant, retained
+// past statusSweepStartNs's end-of-pass reset so the next pass can measure
+// start-to-start spacing.
+var prevStatusSweepStartNs atomic.Int64
+
 // taskRunPollBackstop bounds how long an attached TUI may hide a task run's
 // COMPLETION from the watch-task concurrency cap (#1892).
 //
@@ -478,6 +495,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 // runs with that lock released so it cannot block unrelated manager RPCs.
 func (m *Manager) RefreshStatuses() {
 	sweepStart := nowFunc()
+	if prev := prevStatusSweepStartNs.Swap(sweepStart.UnixNano()); prev > 0 {
+		lastStatusSweepGapNs.Store(int64(sweepStart.Sub(time.Unix(0, prev))))
+	}
 	statusSweepStartNs.Store(sweepStart.UnixNano())
 	type entry struct {
 		repoID   string
@@ -523,24 +543,26 @@ var statusSweepFloorCap = 30 * time.Second
 // statusSweepExpectedInterval returns the expiry reserve a capture may
 // declare for the streak — the honest spacing until the NEXT capture of the
 // same session (#5221 review). Passes run serially, so the next pass starts
-// max(scheduled, lastSweep) after this one began and lands this session at
-// position x ≤ lastSweep inside it: the gap is pass−elapsed+x, and the
-// elapsed already spent inside this pass REDUCES the reserve, never adds to
-// it — a late-capture's declared expiry must not stretch past the whole next
-// pass (#5221 review). Sweep terms stay capped at statusSweepFloorCap — a
-// pass slower than that is a stall that left panes genuinely unwatched, not
-// a schedule — so the total is bounded by max(scheduled, cap)+cap; an
-// operator-set interval slower than the cap is the pacing term, not
-// compressed away.
+// after the observed sweep spacing — the configured tick, or the measured
+// start-to-start interval when between-sweep maintenance overran it — and
+// lands this session at position x ≤ lastSweep inside it: the gap is
+// pass−elapsed+x, and the elapsed already spent inside this pass REDUCES
+// the reserve, never adds to it — a late-capture's declared expiry must not
+// stretch past the whole next pass (#5221 review). Sweep terms stay capped
+// at statusSweepFloorCap — a cycle slower than that is a stall that left
+// panes genuinely unwatched, not a schedule — so the total is bounded by
+// max(scheduled, cap)+cap; an operator-set interval slower than the cap is
+// the pacing term, not compressed away.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
+	gap := min(time.Duration(lastStatusSweepGapNs.Load()), statusSweepFloorCap)
 	var elapsed time.Duration
 	if start := statusSweepStartNs.Load(); start > 0 {
 		if e := nowFunc().Sub(time.Unix(0, start)); e > 0 {
 			elapsed = e
 		}
 	}
-	pass := max(scheduled, last)
+	pass := max(scheduled, max(last, gap))
 	return max(pass-elapsed, 0) + last
 }
 

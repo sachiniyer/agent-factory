@@ -246,11 +246,19 @@ func WaitForReadyAndSubmitPrompt(
 		// so chrome in this window is this submission's work starting. A miss
 		// claims nothing; signatureless agents have no chrome to find, so
 		// they skip the watch as well.
+		//
+		// The stamp is fenced to the epoch sampled after this send: a manual
+		// SendPromptWithStatus can land mid-watch — it takes no lock this path
+		// holds — and advance the boundary while the watch still reads the
+		// earlier prompt's chrome. Stamping then would retire the NEW window
+		// with the old turn's evidence, and the earlier turn's idle edge could
+		// apply on_complete before the queued prompt starts (#5221 review).
+		_, watchEpoch := instance.InFlightOpAndEpoch()
 		if turnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
 				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
-			instance.RecordTaskRunTurn(time.Now())
+			instance.RecordTaskRunTurnAtEpoch(time.Now(), watchEpoch)
 			if status == session.PromptSentUnverified {
 				return session.PromptDelivered, nil
 			}

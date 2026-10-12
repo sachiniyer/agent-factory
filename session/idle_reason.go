@@ -288,9 +288,10 @@ var taskRunCompletionSilentGrace = 5 * time.Minute
 
 // RecordTaskRunTurn records that the agent's own in-turn chrome was observed
 // on this runtime — the positive "a turn on the prompt began" evidence a
-// booting or echoing pane cannot produce (#5219). The unfenced form for the
-// send path: the post-submit watch sees the chrome synchronously inside
-// delivery, so there is no snapshot epoch to fence against.
+// booting or echoing pane cannot produce (#5219). Callers whose evidence can
+// straddle a lifecycle or prompt boundary — the status poll's snapshot, the
+// post-submit watch a concurrent manual send can outlive — use the
+// epoch-fenced form below instead.
 func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
 	if observedAt.IsZero() {
 		return false

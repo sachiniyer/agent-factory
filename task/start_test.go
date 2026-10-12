@@ -3,7 +3,9 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ type startBackend struct {
 	sentPrompt   string
 	previewErr   error
 	sendErr      error
+	previewFn    func() (string, error)
 }
 
 func (b *startBackend) Start(instance *session.Instance, _ bool) error {
@@ -43,10 +46,16 @@ func (b *startBackend) Kill(instance *session.Instance, _ bool) error {
 func (b *startBackend) CloseAttachOnly(*session.Instance) error { return nil }
 
 func (b *startBackend) Preview(*session.Instance) (string, error) {
+	if b.previewFn != nil {
+		return b.previewFn()
+	}
 	return "ready\n❯", b.previewErr
 }
 
 func (b *startBackend) PreviewFullHistory(*session.Instance) (string, error) {
+	if b.previewFn != nil {
+		return b.previewFn()
+	}
 	return "ready\n❯", nil
 }
 
@@ -67,9 +76,23 @@ func (b *startBackend) CheckAndHandleTrustPrompt(*session.Instance) bool {
 	return true
 }
 func (b *startBackend) AgentModelChange(*session.Instance) *session.AgentModelChange { return nil }
-func (b *startBackend) Recover(*session.Instance) error                              { return nil }
-func (b *startBackend) Respawn(*session.Instance) error                              { return nil }
-func (b *startBackend) Type() string                                                 { return "local" }
+
+// statusReportingStartBackend adds the observation-bearing send form
+// (promptDeliveryStatusBackend) so tests can drive the sent-unverified
+// verdict the bare command path can never produce.
+type statusReportingStartBackend struct {
+	*startBackend
+	sendStatus session.PromptDeliveryStatus
+}
+
+func (b *statusReportingStartBackend) SendPromptCommandWithStatus(_ *session.Instance, prompt string) (session.PromptDeliveryStatus, error) {
+	b.sentPrompt = prompt
+	return b.sendStatus, b.sendErr
+}
+
+func (b *startBackend) Recover(*session.Instance) error { return nil }
+func (b *startBackend) Respawn(*session.Instance) error { return nil }
+func (b *startBackend) Type() string                    { return "local" }
 func (b *startBackend) Capabilities() session.Capabilities {
 	return session.Capabilities{
 		Workspace:        session.WorkspaceLocalWorktree,
@@ -297,5 +320,55 @@ func TestWaitForReadyAndSubmitPromptRefusedBoundarySendsNothing(t *testing.T) {
 	}
 	if status != session.PromptNotDelivered {
 		t.Fatalf("delivery status = %q, want %q: nothing was submitted", status, session.PromptNotDelivered)
+	}
+}
+
+// The post-submit watch fences its turn stamp to the epoch it opened under
+// (#5221 review): a manual send landing mid-watch re-arms the prompt
+// boundary while the pane still ticks the earlier prompt's turn — stamping
+// then would retire the NEW window with the old turn's chrome, letting the
+// earlier turn's idle edge apply on_complete before the queued prompt runs.
+func TestWaitForReadyAndSubmitPromptFencesTurnStampToWatchEpoch(t *testing.T) {
+	oldBudget, oldPoll := postSubmitDeliveredBudget, postSubmitDeliveredPoll
+	postSubmitDeliveredBudget = 400 * time.Millisecond
+	postSubmitDeliveredPoll = time.Millisecond
+	t.Cleanup(func() { postSubmitDeliveredBudget, postSubmitDeliveredPoll = oldBudget, oldPoll })
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "mid-watch-send", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	var calls atomic.Int32
+	bumped := false
+	inst.SetBackend(&statusReportingStartBackend{startBackend: &startBackend{previewFn: func() (string, error) {
+		n := calls.Add(1)
+		if inst.TaskRunPromptAttemptAt().IsZero() {
+			return "ready\n❯", nil
+		}
+		if !bumped {
+			// The manual send: it re-arms the boundary while the only chrome
+			// the watch can see is the earlier prompt's turn still ticking.
+			bumped = true
+			inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now())
+		}
+		return fmt.Sprintf("transcript\n✻ Whirring… (%ds · esc to interrupt)\n❯ ", n), nil
+	}}, sendStatus: session.PromptSentUnverified})
+	inst.SetStartedForTest(true)
+
+	status, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != session.PromptDelivered {
+		t.Fatalf("status = %q, want the observed chrome to keep upgrading to %q",
+			status, session.PromptDelivered)
+	}
+	if !bumped {
+		t.Fatal("precondition: the mid-watch send never landed")
+	}
+	if got := inst.ToInstanceData().TaskRunTurnObservedAt; !got.IsZero() {
+		t.Fatalf("turn observed at %v — the earlier prompt's chrome stamped the NEW boundary", got)
 	}
 }
