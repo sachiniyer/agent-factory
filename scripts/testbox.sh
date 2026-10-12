@@ -627,6 +627,12 @@ scenario)
         [ -n "$branch_sha" ] && exec_env+=(-e "AF_BRANCH_SHA=$branch_sha")
         if [ -n "$master_sha" ]; then
             master_tar="$(mktemp "${TMPDIR:-/tmp}/af-master.XXXXXX.tar")"
+            # mktemp makes the tar 0600 and docker cp preserves the host uid
+            # numerically, so on a host whose user is not uid 1000 the tar lands
+            # unreadable by the container's dev user (1000) — "Permission
+            # denied" inside the scenario. It is a public-source archive; open
+            # the mode before the copy.
+            chmod 0644 "$master_tar"
             if git -C "$REPO_ROOT" archive --format=tar "$master_sha" > "$master_tar"; then
                 "$ENGINE" cp "$master_tar" "$PLAYTEST_NAME:/tmp/af-master-src.tar" >/dev/null
                 exec_env+=(-e "AF_MASTER_SHA=$master_sha" -e "AF_MASTER_TAR=/tmp/af-master-src.tar")
