@@ -172,6 +172,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Title:                          title,
 		TaskID:                         req.TaskID,
 		Path:                           workspace,
+		RepoIdentityPath:               repo.IdentityPath(),
 		Program:                        req.Program,
 		Account:                        req.Account,
 		AccountSource:                  req.AccountSource,
