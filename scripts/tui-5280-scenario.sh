@@ -24,6 +24,14 @@ source /src/scripts/tui-driver.sh
 export AF_DRIVER_COLS=100 AF_DRIVER_ROWS=30
 export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
+# The control must stay a KNOWN-CLIPPING revision: once this fix merges,
+# archiving the moving origin/master would build a fixed control that can
+# never show the truncated per-tab refusal, and the master leg would fail
+# forever after. `testbox.sh scenario` archives this pinned SHA in place of
+# origin/master; a manual run passes the same SHA as AF_MASTER_SHA with a tar
+# of it. bd7b89b7 is v1.0.311 — the master the issue was filed against.
+AF_CONTROL_SHA=bd7b89b700d3343ef575c540789d5966f91f6079
+
 EVID="$HOME/sandbox/rename-5280"
 # Start empty: under `AF_SELFTEST_NAME` reuse the sandbox (and this dir) can
 # survive from a previous run, and record_r APPENDS — stale verdict rows
@@ -37,14 +45,22 @@ mkdir -p "$EVID"
 # here. `testbox.sh scenario` sees this script consume them and supplies the
 # two SHAs and the master source as a tar:
 #   AF_BRANCH_SHA  — `git rev-parse HEAD` of the worktree mounted at /src
-#   AF_MASTER_SHA  — `git rev-parse origin/master` at run time
-#   AF_MASTER_TAR  — container path of `git archive <master-sha>` output
+#   AF_MASTER_SHA  — the control revision: the script's pinned AF_CONTROL_SHA
+#                    when declared, else `git rev-parse origin/master`
+#   AF_MASTER_TAR  — container path of `git archive <control-sha>` output
 git config --global --add safe.directory /src 2>/dev/null || true
 BRANCH_SHA="${AF_BRANCH_SHA:-$(git -C /src rev-parse HEAD 2>/dev/null || true)}"
 MASTER_SHA="${AF_MASTER_SHA:-$(git -C /src rev-parse origin/master 2>/dev/null || true)}"
 [ -n "$BRANCH_SHA" ] || { _af_fail "branch SHA unknown — pass AF_BRANCH_SHA"; exit 1; }
 [ -n "$MASTER_SHA" ] || { _af_fail "master SHA unknown — pass AF_MASTER_SHA"; exit 1; }
+if [ "$MASTER_SHA" != "$AF_CONTROL_SHA" ]; then
+    _af_log "note: control SHA is $MASTER_SHA, not the pinned $AF_CONTROL_SHA — running anyway"
+fi
 MASTER_SRC="$(mktemp -d /tmp/af-master.XXXXXX)"
+# Clean the extracted tree on ANY exit, not just the happy path — in a
+# retained sandbox a failed tar/build (set -e exits before a trailing rm)
+# would strand a full repo copy per attempt.
+trap 'rm -rf "$MASTER_SRC"' EXIT
 if [ -n "${AF_MASTER_TAR:-}" ]; then
     tar -xf "$AF_MASTER_TAR" -C "$MASTER_SRC"
 elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
@@ -60,7 +76,7 @@ fi
 (cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 {
     echo "branch HEAD (bin/af):      $BRANCH_SHA"
-    echo "origin/master (af.master): $MASTER_SHA"
+    echo "control (af.master):       $MASTER_SHA (pinned: $AF_CONTROL_SHA)"
     sha256sum "$HOME/bin/af" "$HOME/bin/af.master"
 } | tee "$EVID/provenance.txt"
 
