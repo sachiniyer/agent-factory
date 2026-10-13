@@ -542,6 +542,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	description := branch
 	restoreFailed := false
+	restoreWaiting := false
 	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
@@ -550,19 +551,22 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			descS = descS.Foreground(archiveWarningColor)
 		}
 		if reason == session.IdleReasonRestoreWaitingOnEnvironment && restoreWait != nil {
-			// A waiting row is not terminal — it reports like any other idle
-			// detail (branch leads, no warning color) and clears itself the
-			// moment a restore attempt goes through or the failure turns
-			// structural.
+			// A waiting row is not terminal — it keeps the plain color and
+			// clears itself the moment a restore attempt goes through or the
+			// failure turns structural — but its detail is as long as the
+			// gave-up one, so it takes the same detail-first layout: trailed
+			// behind the branch it would never fit at real rail widths.
 			detail = restoreWait.Detail()
+			restoreWaiting = true
 		}
 		if branch == "" {
 			description = detail
-		} else if restoreFailed {
-			// A restore-gave-up row exists to report the failure — it renders
-			// warning-colored and stays visible even unselected — so the
-			// actionable detail leads and the branch trails it, the one
-			// exception to the branch-first order.
+		} else if restoreFailed || restoreWaiting {
+			// A restore-outcome row exists to report that outcome — the
+			// gave-up row warning-colored and permanent, the waiting row in
+			// the plain color until it resolves — so the actionable detail
+			// leads and the branch trails it, the exception to the
+			// branch-first order.
 			description = detail + " · " + branch
 		} else {
 			// The branch leads so right-truncation eats the idle detail
@@ -577,7 +581,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && !restoreFailed {
+	if !selected && !expanded && archiveWarning == "" && !restoreFailed && !restoreWaiting {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)

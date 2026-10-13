@@ -70,7 +70,12 @@ mkdir -p "$EVID"
 WT_TMPFS=/home/dev/wt-tmpfs
 WT_LINK="$AGENT_FACTORY_HOME/worktrees"
 DAEMON_LOG="$AGENT_FACTORY_HOME/agent-factory.log"
-WAIT_PHRASE='restore is waiting on the environment'
+# The row renders the wait detail-FIRST with `…` truncation (the structured
+# detail can never trail a branch at rail width), so the asserted phrase is
+# the leading fragment a ~20-cell detail budget still carries; the full
+# "restore is waiting on the environment (N …): <error>" text only fits a
+# rail wider than the sandbox ever grows.
+WAIT_PHRASE='restore is waiting'
 
 # --- provenance --------------------------------------------------------------
 # /src is a linked worktree: its .git is a FILE pointing at the host's gitdir,
