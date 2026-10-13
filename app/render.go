@@ -82,7 +82,14 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 		}
 		if r == before && !(r.W == 1 && r.H == 1) {
 			if tooWide || tooTall {
-				return layout.ClampToRect(fg, layout.Rect{W: m.termWidth, H: m.termHeight})
+				cw, ch := m.termWidth, m.termHeight
+				if !tooWide {
+					cw = fgW
+				}
+				if !tooTall {
+					ch = fgH
+				}
+				return layout.ClampToRect(fg, layout.Rect{W: cw, H: ch})
 			}
 			return fg
 		}
