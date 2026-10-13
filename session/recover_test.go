@@ -283,10 +283,52 @@ func TestRecover_UnresolvableClaimKeepsRecordAndRefuses(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
 	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
-		"an unresolvable claim is af's wait-for-retry verdict, and the restore loop classifies it as environmental")
+		"a bare identity-mismatch verdict is definitive: it carries no errno, so the restore loop keeps it on the structural budget")
 	assert.Equal(t, 0, newSessions, "no spawn may happen while the directory identity is unestablished")
 	_, hasRecovery := worktree.GetRelocationRecovery()
 	assert.True(t, hasRecovery, "the durable record must survive a failed resolution for the next operation")
+}
+
+// TestRecover_RefusesRepairOwedRelocationRecord pins the repair boundary:
+// a two-candidate record (move_unknown — a timed-out `git worktree move`)
+// can owe `git worktree repair` and submodule gitdir repair, work that
+// belongs to the relocation-capable consumers. Recover must refuse WITHOUT
+// touching the claim machinery: spawning into an un-repaired worktree, or
+// settling the record that would drive the missing repair, both fail.
+func TestRecover_RefusesRepairOwedRelocationRecord(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_move_unknown"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	// The record a timed-out move leaves: two identity-qualified candidates.
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryMoveUnknown,
+		AlternatePath: filepath.Join(t.TempDir(), "moved-candidate"),
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+	}))
+
+	err = restored.Recover()
+	require.Error(t, err, "a repair-owed record must refuse until a relocation-capable consumer resolves it")
+	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
+	assert.Equal(t, 0, newSessions, "no spawn may happen while a move's repair obligation is unestablished")
+	recovery, hasRecovery := worktree.GetRelocationRecovery()
+	require.True(t, hasRecovery, "the move record must stay durable for the repair-capable consumer")
+	assert.Equal(t, sessiongit.RelocationRecoveryMoveUnknown, recovery.State)
 }
 
 // TestRecover_RetryAfterFailureInjectsFlagsOnce: a failed first attempt (the

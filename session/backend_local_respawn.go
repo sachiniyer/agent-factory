@@ -55,11 +55,28 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				location += " and " + recovery.AlternatePath
 			}
 			// A durable record says an interrupted relocation left this
-			// worktree's directory identity unestablished. Resolve it here —
-			// the bounded claim machinery is exactly the designed consumer —
-			// rather than stranding the session until some unrelated
-			// archive/restore happens to claim the record (#5295). Every
-			// probe inside is deadline-bounded, so a still-stalled
+			// worktree's directory identity unestablished. Single-candidate
+			// records (claim_stale or stalled with no alternate) provably owe
+			// no repair: the claim they preserve was either record-free or
+			// resolved to the recorded primary, and a move start writes its
+			// own move_unknown record before any bytes relocate — so identity
+			// confirmation is the only thing left to establish. Resolve
+			// those here through the bounded claim machinery rather than
+			// stranding the session until some unrelated archive/restore
+			// claims the record (#5295). Two-candidate records (a timed-out
+			// move) can additionally owe `git worktree repair` and submodule
+			// gitdir repair — that repair belongs to the relocation-capable
+			// consumers, not a respawn, so they keep the refusal below.
+			resolvable := recovery.AlternatePath == "" &&
+				(recovery.State == git.RelocationRecoveryClaimStale ||
+					recovery.State == git.RelocationRecoveryStalled)
+			if !resolvable {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
+			// Every probe inside is deadline-bounded, so a still-stalled
 			// filesystem fails without wedging this goroutine, and a record
 			// that cannot be established keeps its durable evidence and
 			// still refuses.
@@ -76,9 +93,8 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					i.Title, claim.Path, err,
 				)
 			}
-			// Re-snapshot: resolution may have selected the recorded
-			// alternate path, or a concurrent operation may have installed
-			// a fresh record the next retry must resolve.
+			// Re-snapshot: a concurrent operation may have installed a fresh
+			// record the next retry must resolve.
 			workDir, recovery, unresolved = gw.RelocationSnapshot()
 			if unresolved {
 				location = workDir

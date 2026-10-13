@@ -15,10 +15,11 @@ import (
 )
 
 // TestLostRestoreEnvironmentalErr pins the #5295 classification: transient
-// resource-exhaustion errnos and af's own waiting verdicts are environmental;
-// a session defect, a permissions fault, or a string that merely SAYS "no
-// space left" is not — classification runs through errors.Is on the wrapped
-// chain, never through message text.
+// resource-exhaustion errnos and deadline verdicts are environmental; a
+// session defect, a permissions fault, a bare "state unknown" sentinel (a
+// definitive verdict — the worktree is at no candidate), or a string that
+// merely SAYS "no space left" is not — classification runs through
+// errors.Is on the wrapped chain, never through message text.
 func TestLostRestoreEnvironmentalErr(t *testing.T) {
 	cases := []struct {
 		name string
@@ -35,8 +36,13 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"enfile", fmt.Errorf("open: %w", syscall.ENFILE), true},
 		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), true},
 		{"deadline exceeded", fmt.Errorf("probe: %w", context.DeadlineExceeded), true},
-		{"relocate state unknown", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), true},
-		{"deadline joined with relocate unknown", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), true},
+		{"relocate unknown carrying deadline", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), true},
+		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), true},
+
+		// The bare sentinel is a definitive verdict — "the recorded worktree
+		// is at no candidate" — not a waiting one; retrying cannot change it.
+		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), false},
+		{"relocate unknown carrying non-errno text", errors.Join(errors.New("identity mismatch"), sessiongit.ErrRelocateStateUnknown), false},
 
 		{"nil", nil, false},
 		{"plain structural error", errors.New("worktree unavailable"), false},

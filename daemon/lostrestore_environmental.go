@@ -5,8 +5,6 @@ import (
 	"errors"
 	"syscall"
 	"time"
-
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The environmental half of the restore retry policy (#5295).
@@ -41,19 +39,21 @@ func lostRestoreEnvironmentalErr(err error) bool {
 			return true
 		}
 	}
-	// Two non-errno sentinels belong to the same class:
+	// context.DeadlineExceeded joins the errnos on purpose: every bounded
+	// probe af runs (relocation identity checks, git command wrappers)
+	// produces it when the environment did not answer inside the bound — a
+	// waiting verdict by construction at every producer site, never evidence
+	// of a session defect.
 	//
-	//   - context.DeadlineExceeded, produced by every bounded probe af runs
-	//     (relocation identity checks, git command wrappers): the environment
-	//     did not answer inside the bound — a waiting verdict by construction
-	//     at every producer site, never evidence of a session defect.
-	//   - sessiongit.ErrRelocateStateUnknown, af's own fail-closed "the state
-	//     could not be established" verdict. Every producer designs for retry:
-	//     an interrupted relocation's record is RESOLVED by the next claim,
-	//     an "already in use" claim names an operation still in flight, and an
-	//     unverifiable candidate keeps its evidence for the next attempt.
-	return errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, sessiongit.ErrRelocateStateUnknown)
+	// ErrRelocateStateUnknown is deliberately NOT here as a bare sentinel: it
+	// is joined both into "the probe could not answer" failures — whose
+	// chains already carry the deadline or errno above — and into definitive
+	// verdicts like "this path no longer identifies the recorded worktree"
+	// or "neither candidate was established", which arrive bare. A bare
+	// sentinel is a permanent answer about the SESSION (its directory was
+	// replaced or deleted), and retrying cannot change it — exactly the
+	// defect the structural budget exists to terminate on (#5295 review).
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // Resource-exhaustion errnos — the failure is a kernel-level resource limit,
