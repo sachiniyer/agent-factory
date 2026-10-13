@@ -56,7 +56,7 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"restore failure snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreFailure(&LostRestoreFailure{Attempts: 3, Error: "gone"})
 		}},
-		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, 0, errors.New("enospc")) }},
+		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, 0, 2, errors.New("enospc")) }},
 		{"clear restore wait", func(t *testing.T, i *Instance) { i.lostRestoreWait = LostRestoreWait{Attempts: 2, Error: "enospc"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreWait() }},
 		{"restore wait snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "enospc"})

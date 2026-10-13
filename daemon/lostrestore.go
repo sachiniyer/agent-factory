@@ -370,7 +370,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		if persistedWait != nil {
 			st.environmentalFailures = persistedWait.Attempts
 			st.environmentalDeadlineFailures = persistedWait.DeadlineWaits
-			st.totalAttempts = persistedWait.Attempts
+			st.totalAttempts = persistedWait.TotalAttempts
 		}
 		m.lostRestoreStates[stateKey] = st
 	}
@@ -549,9 +549,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 				}
 				attempts, backoff, absorbed := st.armEnvironmentalRetry(class)
 				deadlineShare := st.environmentalDeadlineFailures
+				totalShare := st.totalAttempts
 				if absorbed {
 					m.mu.Unlock()
-					if inst.SetLostRestoreWait(attempts, deadlineShare, err) {
+					if inst.SetLostRestoreWait(attempts, deadlineShare, totalShare, err) {
 						// A checkpoint write, NOT a settlement: the wait is
 						// re-derivable — the next environmental arm re-arms
 						// and re-writes it at the same capped backoff — while
@@ -867,13 +868,14 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 		}
 		attempts, backoff, absorbed := st.armEnvironmentalRetry(class)
 		deadlineShare := st.environmentalDeadlineFailures
+		totalShare := st.totalAttempts
 		if absorbed {
 			m.mu.Unlock()
 			// The wait is a session fact the same way the gave-up verdict is:
 			// clients must see the retry is armed on the environment, with the
 			// error that earned it, until the condition or a structural
 			// failure ends it (#5295 maintainer review).
-			if inst.SetLostRestoreWait(attempts, deadlineShare, err) {
+			if inst.SetLostRestoreWait(attempts, deadlineShare, totalShare, err) {
 				// A checkpoint write, NOT a settlement: the wait is
 				// re-derivable — the next environmental arm re-arms and
 				// re-writes it at the same capped backoff — while the
@@ -972,11 +974,13 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 			// arm — restore them, or every restart would hand the bounded
 			// deadline class a fresh share: a permanently wedged probe could
 			// spend the bound once per restart forever while holding the
-			// watch slot (#5295 review). The streak is additive on the
-			// cumulative total — every armed wait was a real try.
+			// watch slot (#5295 review). Its TotalAttempts is cumulative like
+			// the failure's — the later one subsumes the earlier.
 			st.environmentalFailures = persistedWait.Attempts
 			st.environmentalDeadlineFailures = persistedWait.DeadlineWaits
-			st.totalAttempts += persistedWait.Attempts
+			if persistedWait.TotalAttempts > st.totalAttempts {
+				st.totalAttempts = persistedWait.TotalAttempts
+			}
 		}
 		m.lostRestoreStates[stateKey] = st
 	}

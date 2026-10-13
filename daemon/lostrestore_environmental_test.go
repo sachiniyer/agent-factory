@@ -483,18 +483,26 @@ func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
 	probeNoAnswer := errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown)
 	backend := &recoverFakeBackend{
 		FakeBackend: session.NewFakeBackend(),
-		failWith:    probeNoAnswer,
+		failWith:    errors.New("recover: agent exited at startup"),
 	}
 	inst := registerStarted(t, manager, repoID, repoPath, "restart-wedged", backend, true, session.Lost)
 
-	// Spend the whole bounded share: six absorbed environmental waits, each
-	// writing its deadline count onto the session's durable wait.
+	// A structural failure first — the cumulative count must still carry it
+	// across the restart below even though the wait records only the
+	// environmental streak.
+	manager.RestoreLostSessions()
+
+	// Then spend the whole bounded share: six absorbed environmental waits,
+	// each writing its deadline count onto the session's durable wait.
+	backend.mu.Lock()
+	backend.failWith = probeNoAnswer
+	backend.mu.Unlock()
 	for i := 0; i < lostRestoreMaxAttempts; i++ {
 		manager.RestoreLostSessions()
 	}
 	wait := inst.LostRestoreWaitSnapshot()
-	if wait == nil || wait.DeadlineWaits != lostRestoreMaxAttempts {
-		t.Fatalf("durable wait = %#v, want %d deadline waits recorded", wait, lostRestoreMaxAttempts)
+	if wait == nil || wait.DeadlineWaits != lostRestoreMaxAttempts || wait.TotalAttempts != lostRestoreMaxAttempts+1 {
+		t.Fatalf("durable wait = %#v, want %d deadline waits and %d cumulative attempts recorded", wait, lostRestoreMaxAttempts, lostRestoreMaxAttempts+1)
 	}
 	if rec := recordFor(t, repoID, "restart-wedged"); rec == nil || rec.LostRestoreWait == nil || rec.LostRestoreWait.DeadlineWaits != lostRestoreMaxAttempts {
 		t.Fatalf("persisted wait = %#v, want the spent deadline share durable", rec)
@@ -510,9 +518,9 @@ func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
-	var consecutive, deadline int
+	var consecutive, deadline, total int
 	if st != nil {
-		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
+		consecutive, deadline, total = st.consecutiveFailures, st.environmentalDeadlineFailures, st.totalAttempts
 	}
 	manager.mu.Unlock()
 	if st == nil {
@@ -523,6 +531,9 @@ func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
 	}
 	if deadline != 0 {
 		t.Fatalf("environmentalDeadlineFailures = %d after the charge, want the spent share retired", deadline)
+	}
+	if total != lostRestoreMaxAttempts+2 {
+		t.Fatalf("totalAttempts = %d, want %d — the seeded cumulative count must keep the pre-restart structural failure plus every armed wait", total, lostRestoreMaxAttempts+2)
 	}
 }
 

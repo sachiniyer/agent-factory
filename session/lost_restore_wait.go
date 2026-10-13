@@ -21,7 +21,12 @@ type LostRestoreWait struct {
 	// give-up bound must survive a daemon restart, or every restart would
 	// grant a permanently wedged probe another full share of free waits
 	// (#5295 review).
-	DeadlineWaits int    `json:"deadline_waits"`
+	DeadlineWaits int `json:"deadline_waits"`
+	// TotalAttempts is the episode's cumulative attempt count at the last
+	// arm — distinct from Attempts, which is only the environmental streak.
+	// Without it a restart would seed the cumulative counter from the streak
+	// alone and under-report a mixed episode's real try count (#5295 review).
+	TotalAttempts int    `json:"total_attempts"`
 	Error         string `json:"error"`
 }
 
@@ -45,6 +50,11 @@ func lostRestoreWaitFromData(w *LostRestoreWait) LostRestoreWait {
 	if clone.DeadlineWaits < 0 {
 		clone.DeadlineWaits = 0
 	}
+	if clone.TotalAttempts < clone.Attempts {
+		// Rows written before the field existed carry zero; the cumulative
+		// count can never be smaller than the streak inside it.
+		clone.TotalAttempts = clone.Attempts
+	}
 	clone.Error = sanitizeLostRestoreError(clone.Error)
 	return clone
 }
@@ -65,14 +75,14 @@ func (w LostRestoreWait) Detail() string {
 // SetLostRestoreWait commits the automatic restore loop's environmental wait
 // to the live session record. Persistence and client notification are owned by
 // the daemon after this in-memory edge.
-func (i *Instance) SetLostRestoreWait(attempts, deadlineWaits int, restoreErr error) bool {
-	if attempts <= 0 || deadlineWaits < 0 || restoreErr == nil {
+func (i *Instance) SetLostRestoreWait(attempts, deadlineWaits, totalAttempts int, restoreErr error) bool {
+	if attempts <= 0 || deadlineWaits < 0 || totalAttempts < attempts || restoreErr == nil {
 		return false
 	}
 	// Same trust boundary as SetLostRestoreFailure: the durable copy lands in
 	// instances.json, API responses, and a one-line TUI row, so collapse
 	// controls/whitespace and bound it.
-	next := LostRestoreWait{Attempts: attempts, DeadlineWaits: deadlineWaits, Error: sanitizeLostRestoreError(restoreErr.Error())}
+	next := LostRestoreWait{Attempts: attempts, DeadlineWaits: deadlineWaits, TotalAttempts: totalAttempts, Error: sanitizeLostRestoreError(restoreErr.Error())}
 	if !next.valid() {
 		return false
 	}

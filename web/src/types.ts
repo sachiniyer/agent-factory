@@ -89,6 +89,9 @@ export interface LostRestoreWait {
   /** The bounded deadline class's share of attempts — durable so the bound
    * survives a daemon restart (#5295 review). */
   deadline_waits: number;
+  /** The episode's cumulative attempt count at the last arm — distinct from
+   * attempts, which is only the environmental streak (#5295 review). */
+  total_attempts: number;
   error: string;
 }
 

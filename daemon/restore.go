@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -418,6 +419,21 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
+			// The failure is the session's newest evidence even though it is an
+			// operator's, not the episode's. A structural one — rejected auth, an
+			// empty branch — means the row must stop claiming the environment,
+			// the same clear the automatic arm applies when its own failure goes
+			// structural; an environmental one leaves the armed wait's claim
+			// intact. Same call-site deadline rule as the automatic arm: the
+			// only deadline this push produces is the remote transport's
+			// (#5295 review).
+			class := lostRestoreEnvironmentalClass(err)
+			if class == lostRestoreEnvNone && errors.Is(err, context.DeadlineExceeded) {
+				class = lostRestoreEnvDeadline
+			}
+			if class == lostRestoreEnvNone {
+				m.clearLostRestoreWaitDurable(repoID, instance)
+			}
 			return "", err
 		}
 		// The push landed: reset the push-failure episode budget so that a later
