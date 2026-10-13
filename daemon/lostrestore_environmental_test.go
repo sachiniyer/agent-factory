@@ -33,6 +33,13 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"enospc wrapped", fmt.Errorf("recover: %w", syscall.ENOSPC), lostRestoreEnvErrno},
 		{"enospc in PathError", &os.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, lostRestoreEnvErrno},
 		{"enospc joined", errors.Join(errors.New("git failed"), fmt.Errorf("inner: %w", syscall.ENOSPC)), lostRestoreEnvErrno},
+		// The worktree-rebuild shape: respawn wraps the missing-worktree ENOENT
+		// AND the still-full-disk rebuild cause — the classifier must see the
+		// second %w verb's errno, not just the first (#5295 review).
+		{"enospc rebuild cause alongside enoent", &session.WorktreeUnavailableError{
+			Title: "t", WorktreePath: "/x",
+			Err: fmt.Errorf("%w (rebuild from existing branch failed: %w)", syscall.ENOENT, fmt.Errorf("mkdir: %w", syscall.ENOSPC)),
+		}, lostRestoreEnvErrno},
 		{"edquot", fmt.Errorf("persist: %w", syscall.EDQUOT), lostRestoreEnvErrno},
 		{"enomem", fmt.Errorf("spawn: %w", syscall.ENOMEM), lostRestoreEnvErrno},
 		{"emfile", fmt.Errorf("open: %w", syscall.EMFILE), lostRestoreEnvErrno},

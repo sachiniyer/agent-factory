@@ -145,10 +145,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				// The fresh-rebuild fallback below is an EXACT-RESUME command, which
 				// is the one thing this path must not launch. Refuse instead: the
 				// swap's caller stops the replacement and retries the whole boundary.
+				// rebuildErr stays wrapped: its errno is what lets the restore
+				// loop tell a still-full disk from a session defect (#5295 review).
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %w)", err, rebuildErr),
 				}
 			}
 			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
@@ -156,7 +158,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild requires a recorded conversation id for the resolved agent)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild requires a recorded conversation id for the resolved agent)",
 						err, rebuildErr),
 				}
 			}
@@ -164,7 +166,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild from recorded base failed: %v)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild from recorded base failed: %w)",
 						err, rebuildErr, freshErr),
 				}
 			}
