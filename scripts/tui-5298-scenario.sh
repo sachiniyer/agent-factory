@@ -179,21 +179,32 @@ claude = "bash"'
     # sits immediately below alpha's last tab row.
     af_new_instance beta
 
+    # park_slot2 — put the cursor on alpha's slot-1 tab row (the `2` row),
+    # position-independently. af_select is idempotent — when alpha is already
+    # display-selected it returns early leaving the cursor on WHATEVER alpha
+    # row it was on, so j/k from there is unreliable (a j off the last tab
+    # row overshoots into the NEXT session). The `2` digit-jump instead sets
+    # ActiveTab=1 and SyncCursorToActiveTab lands the cursor on that exact
+    # row — provided the tree holds focus (af_focus_tree), since with a pane
+    # focused the digit rebinds the pane instead of moving the cursor.
+    park_slot2() {
+        af_select alpha || return 1
+        af_focus_tree || return 1
+        af_send 2
+        sleep "$AF_DRIVER_POLL"
+    }
+
     # CASE A — middle tab: cursor on alpha's FIRST terminal (slot 1 of
     # [agent, T, T2]); after the delete the remaining terminal slides into
     # that slot, so the cursor belongs on the `2 Terminal` row INSIDE alpha.
-    af_select alpha              # cursor parks on alpha's Agent tab row
-    af_send j                    # -> alpha's first Terminal row (slot 1)
-    sleep "$AF_DRIVER_POLL"
+    park_slot2 || return 1       # -> `├ 2 › Terminal` (slot 1 of 3)
     record_delete "$leg" a-middle || return 1
 
     # CASE B — last tab: alpha is now [agent, Terminal]; select that last tab
     # and delete it — the issue's verbatim repro. The cursor belongs on the
     # previous sibling: alpha's `1 Agent` row. On master the stale flat index
     # lands on beta's instance row and the selection jumps sessions.
-    af_select alpha              # back onto alpha's Agent row
-    af_send j                    # -> alpha's last remaining Terminal row
-    sleep "$AF_DRIVER_POLL"
+    park_slot2 || return 1       # -> `└ 2 › Terminal` (slot 1 of 2)
     record_delete "$leg" b-last || return 1
 
     # CASE C — out-of-band delete (approved plan addition): alpha is now
@@ -210,9 +221,7 @@ claude = "bash"'
         >"$EVID/$leg-c-tab-create.json" 2>&1 \
         || { _af_fail "$leg/c: af sessions tab-create failed"; cat "$EVID/$leg-c-tab-create.json" >&2; return 1; }
     af_wait_for 'oob-tab' "$AF_DRIVER_TIMEOUT" "$leg/c: snapshot projects the new tab" || return 1
-    af_select alpha              # cursor parks on alpha's Agent row
-    af_send j                    # -> alpha's `2 › oob-tab` row (the last tab)
-    sleep "$AF_DRIVER_POLL"
+    park_slot2 || return 1       # -> `└ 2 › oob-tab` (alpha's last tab)
     af_capture >"$EVID/$leg-c-oob-before.txt"
     (cd "$AF_DRIVER_REPO" && "$2" sessions tab-delete alpha --name oob-tab) \
         >"$EVID/$leg-c-tab-delete.json" 2>&1 \
@@ -259,7 +268,10 @@ done
 # the cursor lands on the same-session sibling: the tab that slid into the
 # deleted slot for the middle case, the previous sibling (Agent) for the last
 # tab — whether the delete came from the TUI (a, b) or the daemon socket (c).
-awk -F'\t' '$1=="a-middle" && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+2[[:space:]]+Terminal/){print "branch a-middle: expected alpha/`2 Terminal`, got "$2"/`"$3"`"; bad=1}
+# Note: shell-tab rows render "<slot> › Terminal" and the label can truncate
+# to "Termin…" at the 100-col geometry, so match the slot number + glyph +
+# "Termin" prefix rather than the full word.
+awk -F'\t' '$1=="a-middle" && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+2[[:space:]]+›[[:space:]]+Termin/){print "branch a-middle: expected alpha/`2 › Terminal`, got "$2"/`"$3"`"; bad=1}
            $1=="b-last"   && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+1[[:space:]]+Agent/){print "branch b-last: expected alpha/`1 Agent`, got "$2"/`"$3"`"; bad=1}
            $1=="c-oob"    && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+1[[:space:]]+Agent/){print "branch c-oob: expected alpha/`1 Agent`, got "$2"/`"$3"`"; bad=1}
            END{exit bad}' "$EVID/branch-results.tsv" || { cat "$EVID/branch-results.tsv" >&2; exit 1; }
