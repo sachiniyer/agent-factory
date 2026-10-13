@@ -108,6 +108,36 @@ tui_provenance() {
     [ "$sha" = "$want" ] || { _af_fail "$label: running TUI sha256 != $bin"; return 1; }
 }
 
+# af_capture_styled — af_capture with SGR escapes kept. The tree's cursor row
+# is marked by STYLE only (selectedTitleStyle / tabRowSelectedStyle paint the
+# selection background), which plain af_capture drops, so cursor position can
+# only be proven from the styled frame.
+af_capture_styled() { tmux capture-pane -p -e -t "$AF_DRIVER_SESSION" 2>/dev/null; }
+
+# verify_row_cursor <line-re> <split-marker> <selected|unselected> <label> —
+# pass iff the first line matching <line-re> carries a background SGR ('48;')
+# before <split-marker> exactly when <want> is 'selected'. The marker sits
+# inside the row's styled span, so a cursor-selected row emits its selection
+# background ahead of the marker while an unselected row emits only its
+# foreground. The styled frame is saved as evidence either way.
+verify_row_cursor() {
+    local line_re="$1" marker="$2" want="$3" label="$4" e lno line before
+    e="$(af_capture_styled)"
+    lno="$(printf '%s\n' "$e" | grep -nE "$line_re" | head -1 | cut -d: -f1)"
+    [ -n "$lno" ] || { _af_fail "$label: no row matching /$line_re/"; return 1; }
+    line="$(printf '%s\n' "$e" | sed -n "${lno}p")"
+    before="${line%%"$marker"*}"
+    printf '%s\n' "$e" >"$EVID/$label-styled.txt"
+    if printf '%s' "$before" | grep -q '48;'; then
+        [ "$want" = selected ] && return 0
+        _af_fail "$label: row IS cursor-selected (unexpected '48;' before '$marker')"
+        return 1
+    fi
+    [ "$want" = unselected ] && return 0
+    _af_fail "$label: row is NOT cursor-selected (no '48;' before '$marker')"
+    return 1
+}
+
 # record_r <leg> <state> — wait for any previous notice to clear (isolation,
 # not an expiry assertion), press R, capture, and record one TSV row:
 # <state>\t<notice|prompt|silent>\t<status-bar row>. A prompt is dismissed
@@ -157,12 +187,21 @@ claude = "bash"'
     af_ensure_nav           # Ctrl-]: the host owns the keyboard (no interactive pane)
     sleep 4                 # let any create/select notice expire out of the bar
 
-    # (a) tree focus, cursor on the SESSION row — af_select leaves the cursor
-    # there with the instance's sticky active tab (the agent tab, idx 0).
+    # (a) tree focus, cursor on the SESSION (instance-title) row — af_select
+    # parks on a TAB row because Up/Down nav skips instance-title rows, so a
+    # click is the only way onto the parent row. Prove the cursor is really
+    # there before R: the styled frame must show the selection background on
+    # the '▾ rename' line and NOT on the '├ 1 Agent' line.
+    af_click_instance rename || return 1
+    af_focus_tree || return 1    # defensive: a preview pane may have focus
+    verify_row_cursor '▾[[:space:]]+rename' '▾' selected a-session-row || return 1
+    verify_row_cursor '[├└][[:space:]]+[0-9]+[[:space:]]+Agent' 'Agent' unselected a-agent-row-off || return 1
     record_r "$leg" a-session-row || return 1
 
     # (b) tree focus, cursor on the AGENT tab row — the issue's verbatim repro.
-    af_send j                    # session row -> first tab row (Agent)
+    af_send j                    # session row -> first live tab stop (Agent)
+    sleep "$AF_DRIVER_POLL"
+    verify_row_cursor '[├└][[:space:]]+[0-9]+[[:space:]]+Agent' 'Agent' selected b-agent-row || return 1
     record_r "$leg" b-agent-row || return 1
 
     # (c) tree focus, cursor on the TERMINAL tab row.
