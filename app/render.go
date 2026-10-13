@@ -54,6 +54,7 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 		r.H = 1
 	}
 	for {
+		before := r
 		contentRect := paneOverlayContentRect(r)
 		setSize(contentRect.W, contentRect.H)
 		fg := ui.RenderDialog(sizedOverlayStyle(hooksOverlayStyle, r), renderContent())
@@ -78,6 +79,19 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 			if r.H < 1 {
 				r.H = 1
 			}
+		}
+		if r == before && !(r.W == 1 && r.H == 1) {
+			if tooWide || tooTall {
+				cw, ch := m.termWidth, m.termHeight
+				if !tooWide {
+					cw = fgW
+				}
+				if !tooTall {
+					ch = fgH
+				}
+				return layout.ClampToRect(fg, layout.Rect{W: cw, H: ch})
+			}
+			return fg
 		}
 	}
 }
