@@ -191,12 +191,22 @@ func TestActivity_UserKilledOutranksPendingHandoff(t *testing.T) {
 // TestPendingHandoffMissionActivityMirrorsRecord pins the contract this bug
 // broke: LifecycleView.Activity() must carry the undelivered-takeover-mission
 // marker through to ClassifyActivity's PendingHandoffMission arm, which is
-// ordered before the liveness switch. Without the propagation a session owing
-// a mission falls through to the liveness-derived answer — Idle for LiveReady,
-// Terminal for LiveLost/Dead/Archived — so the live view the #1892 cap reads
-// disagrees with the record path and frees (or fails to hold) a concurrency
+// ordered before the liveness switch — but only for a verdict that still owns
+// an in-flight obligation the daemon resolves itself. Without the propagation a
+// session owing a mission falls through to the liveness-derived answer — Idle for
+// LiveReady, Terminal for LiveLost/Dead/Archived — so the live view the #1892 cap
+// reads disagrees with the record path and frees (or fails to hold) a concurrency
 // slot. The companion TestPendingAccountSwapActivityRemainsPending covers the
 // analogous PendingAccountSwap propagation; this is its handoff half.
+//
+// A fence-requiring verdict (PromptNotDelivered/PromptDelivered) holds the slot
+// across every liveness, because the daemon owns the resend or the crash-window
+// settle. A known ambiguous verdict (PromptSentUnverified/PromptCouldNotConfirm)
+// deliberately releases it: recovery will not resolve it automatically, so
+// holding it would wedge max_concurrent_runs on a run that reached LiveReady or
+// an unrecoverable lost state after an ambiguous delivery. LoadedActivity gates
+// the raw-record path the same way (handoffCouldHoldSlot), so the live view and
+// the record never disagree.
 func TestPendingHandoffMissionActivityMirrorsRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -217,21 +227,46 @@ func TestPendingHandoffMissionActivityMirrorsRecord(t *testing.T) {
 		{"LiveLimitReached", LiveLimitReached},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			view := LifecycleView{Liveness: tc.liveness, PendingHandoffMission: true}
-
-			// The record path feeds ClassifyActivity the real mission string.
-			record, _ := ClassifyActivity(InstanceData{
+			// A fence-requiring verdict holds the slot across every liveness:
+			// the live view re-raises the mission (handoffCouldHoldSlot), and
+			// LoadedActivity reconstructs OpReplacing. Both fence before the
+			// liveness switch, so the cap never frees a slot for a mission the
+			// daemon will itself settle.
+			view := LifecycleView{
+				Liveness:              tc.liveness,
+				PendingHandoffMission: true,
+				HandoffDeliveryStatus: PromptNotDelivered,
+			}
+			record, _ := LoadedActivity(InstanceData{
 				Liveness:              tc.liveness,
 				PendingHandoffMission: "continue inherited work",
+				HandoffDeliveryStatus: PromptNotDelivered,
 			})
-			// The arm fires before the liveness switch, so an owed mission fences
-			// the record onto Pending across every liveness.
 			require.Equal(t, ActivityPending, record,
-				"the record path fences an owed mission across every liveness")
-			// The live projection must agree — the bug dropped the marker so the
-			// live path fell through to the liveness-derived answer.
+				"a fence-requiring mission fences the record onto Pending across every liveness")
 			require.Equal(t, record, view.Activity(),
-				"the live and record paths must agree for a session owing a handoff mission")
+				"the live and record paths must agree for a session owing a fence-requiring mission")
+
+			// An ambiguous verdict releases at the idle and terminal edges:
+			// neither the live view nor LoadedActivity re-raises the mission,
+			// so both fall to the liveness-derived answer. The run marker
+			// (TaskRunActive) still holds the run open, but the cap frees the
+			// slot because no automatic edge will clear an ambiguous delivery.
+			ambiguous := LifecycleView{
+				Liveness:              tc.liveness,
+				PendingHandoffMission: true,
+				HandoffDeliveryStatus: PromptSentUnverified,
+			}
+			ambiguousRecord, _ := LoadedActivity(InstanceData{
+				Liveness:              tc.liveness,
+				PendingHandoffMission: "continue inherited work",
+				HandoffDeliveryStatus: PromptSentUnverified,
+			})
+			livenessDerived, _ := ClassifyActivity(InstanceData{Liveness: tc.liveness})
+			require.Equal(t, livenessDerived, ambiguousRecord,
+				"an ambiguous mission loads without the fence, so the record is the liveness answer")
+			require.Equal(t, ambiguousRecord, ambiguous.Activity(),
+				"the live and record paths must agree for a session with an ambiguous handoff verdict")
 		})
 	}
 }
@@ -243,28 +278,74 @@ func TestPendingHandoffMissionActivityMirrorsRecord(t *testing.T) {
 // #1892 watch-task cap reads v.Activity(); if it diverges from the record path
 // here it can release a slot for a session whose handoff mission is still
 // undelivered.
+//
+// The verdict decides whether the cap holds the slot at the idle edge: a
+// fence-requiring mission (PromptNotDelivered — automatic replay owns the
+// resend) holds it, because the daemon will resolve it itself; an ambiguous
+// mission (PromptSentUnverified) releases it, because recovery will not, and
+// holding it would wedge max_concurrent_runs until an operator acts. The run
+// marker (TaskRunActive) stays held for both; it is the cap's activity arm that
+// the verdict gates, mirroring LoadedActivity's handoffCouldHoldSlot.
 func TestLifecycleViewActivityAgreesWithRecordOnOwedHandoffMission(t *testing.T) {
-	inst := missionOwingInstance(t) // LiveRunning, OpNone, mission owed, taskRunActive
-	require.Equal(t, LiveRunning, inst.GetLiveness())
-	require.Equal(t, OpNone, inst.GetInFlightOp())
-	require.True(t, inst.TaskRunActive(), "precondition: the run is in flight")
+	const mission = "continue the inherited work"
 
-	// The idle edge the owed mission holds open; the cap reads this exact view.
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.Equal(t, LiveReady, inst.GetLiveness())
-	require.True(t, inst.TaskRunActive(),
-		"an idle pane with an unresolved mission has not finished its run")
+	// A fence-requiring mission is the breach this fix exists for: the op axis
+	// has cleared (the fence settled on the incoming runtime, #4429), so the
+	// durable marker is the only thing holding the run open. The cap must hold
+	// the slot across the idle edge, agreeing with the record path that
+	// reconstructs OpReplacing for the same verdict.
+	t.Run("fence-requiring holds the slot across the idle edge", func(t *testing.T) {
+		inst := missionOwingInstance(t) // LiveRunning, OpNone, mission owed, taskRunActive
+		require.NoError(t, inst.RecordPendingHandoffMissionDelivery(mission, PromptNotDelivered))
+		require.Equal(t, LiveRunning, inst.GetLiveness())
+		require.Equal(t, OpNone, inst.GetInFlightOp())
+		require.True(t, inst.TaskRunActive(), "precondition: the run is in flight")
 
-	v := inst.LifecycleView()
-	require.True(t, v.PendingHandoffMission, "the live view carries the marker")
-	require.True(t, v.TaskRunActive, "and the cap's precondition holds")
+		// The idle edge the owed mission holds open; the cap reads this exact view.
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.Equal(t, LiveReady, inst.GetLiveness())
+		require.True(t, inst.TaskRunActive(),
+			"an idle pane with an unresolved mission has not finished its run")
 
-	// The contract the file's docstring states: live and record never disagree.
-	record, _ := ClassifyActivity(inst.ToInstanceData())
-	require.Equal(t, ActivityPending, record,
-		"the record path fences an owed mission at idle liveness")
-	require.Equal(t, record, v.Activity(),
-		"the live and record paths must agree for a session owing a handoff mission")
+		v := inst.LifecycleView()
+		require.True(t, v.PendingHandoffMission, "the live view carries the marker")
+		require.True(t, v.TaskRunActive, "and the cap's precondition holds")
+
+		// The contract the file's docstring states: live and record never disagree.
+		record, _ := LoadedActivity(inst.ToInstanceData())
+		require.Equal(t, ActivityPending, record,
+			"the record path fences a fence-requiring mission at idle liveness")
+		require.Equal(t, record, v.Activity(),
+			"the live and record paths must agree for a session owing a fence-requiring mission")
+	})
+
+	// An ambiguous mission releases the slot at the idle edge: the operator owns
+	// the confirm-or-retry, so no automatic edge will clear it, and holding it
+	// would wedge the cap. The run marker still holds the run open (an idle pane
+	// with an unresolved mission has not finished its run), but the cap frees the
+	// slot the way an idle pane without a mission does — exactly as LoadedActivity
+	// releases a raw record with an ambiguous verdict.
+	t.Run("ambiguous releases the slot at the idle edge", func(t *testing.T) {
+		inst := missionOwingInstance(t) // PromptSentUnverified — an ambiguous verdict
+		require.Equal(t, LiveRunning, inst.GetLiveness())
+		require.Equal(t, OpNone, inst.GetInFlightOp())
+		require.True(t, inst.TaskRunActive(), "precondition: the run is in flight")
+
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.Equal(t, LiveReady, inst.GetLiveness())
+		require.True(t, inst.TaskRunActive(),
+			"the run marker still holds an owed mission open at the idle edge")
+
+		v := inst.LifecycleView()
+		require.True(t, v.PendingHandoffMission, "the live view carries the marker")
+		require.True(t, v.TaskRunActive, "and the cap's precondition holds")
+
+		record, _ := LoadedActivity(inst.ToInstanceData())
+		require.Equal(t, ActivityIdle, record,
+			"an ambiguous mission loads without the fence, so the record releases at idle liveness")
+		require.Equal(t, record, v.Activity(),
+			"the live and record paths must agree for a session with an ambiguous handoff verdict")
+	})
 }
 
 // TestLifecycleViewIsInternallyConsistent: the whole point of the view is that
