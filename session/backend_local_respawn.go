@@ -54,10 +54,42 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			if recovery.AlternatePath != "" {
 				location += " and " + recovery.AlternatePath
 			}
-			return fmt.Errorf(
-				"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
-				i.Title, recovery.State, location,
-			)
+			// A durable record says an interrupted relocation left this
+			// worktree's directory identity unestablished. Resolve it here —
+			// the bounded claim machinery is exactly the designed consumer —
+			// rather than stranding the session until some unrelated
+			// archive/restore happens to claim the record (#5295). Every
+			// probe inside is deadline-bounded, so a still-stalled
+			// filesystem fails without wedging this goroutine, and a record
+			// that cannot be established keeps its durable evidence and
+			// still refuses.
+			claim, claimErr := i.ClaimWorktreeRelocationForRetry()
+			if claimErr != nil {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s: %w",
+					i.Title, recovery.State, location, claimErr,
+				)
+			}
+			if err := i.SettleWorktreeRelocationClaim(claim); err != nil {
+				return fmt.Errorf(
+					"recover: session %q resolved worktree recovery at %s but could not settle its identity: %w",
+					i.Title, claim.Path, err,
+				)
+			}
+			// Re-snapshot: resolution may have selected the recorded
+			// alternate path, or a concurrent operation may have installed
+			// a fresh record the next retry must resolve.
+			workDir, recovery, unresolved = gw.RelocationSnapshot()
+			if unresolved {
+				location = workDir
+				if recovery.AlternatePath != "" {
+					location += " and " + recovery.AlternatePath
+				}
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
 		}
 	}
 	if workDir == "" {

@@ -23,6 +23,8 @@ import (
 // failures. The terminal failure is both logged and stored on the Lost session,
 // so an outage cannot disappear into a silent retry gap and clients can show why
 // automatic recovery stopped. An explicit restore remains the operator off-ramp.
+// Environmental failures (a full disk, an unanswerable probe) retry on their
+// own capped schedule and never reach give-up — lostrestore_environmental.go.
 //
 // REMOTE sessions are not "restored in place" and never were: docker/ssh/hook
 // advertise Recover, but theirs is recoverSandbox — provision a NEW sandbox and
@@ -116,8 +118,13 @@ var errRestoreFlapped = errors.New("the re-spawned agent answered a liveness pol
 // retry it should have gotten in ten seconds. Same rule and same reason as
 // remoteLossState; see stableSessionKey.
 type lostRestoreState struct {
+	// consecutiveFailures is the structural-failure streak the #3347 budget
+	// terminates on; environmental failures neither feed nor reset it.
 	consecutiveFailures int
-	nextAttempt         time.Time
+	// environmentalFailures is the environmental streak: its own counter and
+	// capped backoff, never a path to give-up (#5295).
+	environmentalFailures int
+	nextAttempt           time.Time
 	// awaitingConfirm marks a restore whose spawn RETURNED SUCCESS but whose
 	// replacement runtime has not yet been OBSERVED alive. The state is
 	// deliberately retained across that window (#1910): if the session goes Lost
@@ -239,7 +246,7 @@ func (m *Manager) RestoreLostSessions() {
 		if st.awaitingConfirm {
 			restored = append(restored, restoredEntry{
 				entry:    entry{key: key, repoID: repoID, instance: inst},
-				attempts: st.consecutiveFailures + 1,
+				attempts: st.restoreAttempts(),
 			})
 		}
 		delete(m.lostRestoreStates, stateKey)
@@ -365,7 +372,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// the runtime was dead the whole time (#1917 round 6).
 	confirmedPriorAttempts := 0
 	if st.awaitingConfirm && m.confirmedAliveSinceSpawnLocked(repoID, inst, st) {
-		confirmedPriorAttempts = st.consecutiveFailures + 1
+		confirmedPriorAttempts = st.restoreAttempts()
 		st = &lostRestoreState{}
 		m.lostRestoreStates[stateKey] = st
 	}
@@ -499,6 +506,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
 			m.mu.Lock()
+			if lostRestoreEnvironmentalErr(err) {
+				attempts, backoff := st.armEnvironmentalRetry()
+				m.mu.Unlock()
+				m.warn().Printf("preserve of lost remote session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s: %v", inst.Title, repoID, attempts, backoff, err)
+				return
+			}
+			st.environmentalFailures = 0
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and
 			// later answered — with an actionable push failure like a rejected origin
@@ -548,6 +562,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// episode separation lostRestoreFailed gives the Recover branch.
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
+		st.environmentalFailures = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
 	}
@@ -657,7 +672,7 @@ func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) 
 	}
 	st.awaitingConfirm = true
 	st.observedAtSpawn = m.aliveObservations[key]
-	return st.consecutiveFailures + 1
+	return st.restoreAttempts()
 }
 
 // observationsSinceSpawnLocked reports how many ANSWERS polls have gotten out of
@@ -690,6 +705,7 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 	if st := m.lostRestoreStates[stateKey]; st != nil {
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
+		st.environmentalFailures = 0
 		st.nextAttempt = time.Time{}
 	}
 	m.mu.Unlock()
@@ -723,6 +739,7 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 		m.lostRestoreStates[stateKey] = st
 	}
 	st.consecutiveFailures = 0
+	st.environmentalFailures = 0
 	st.awaitingConfirm = false
 	// Clear per-episode diagnostic dedupe flags so that the replacement sandbox's
 	// failures log at their natural first occurrence rather than being suppressed
@@ -740,6 +757,13 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 // reason automatic recovery stopped.
 func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, inst *session.Instance, err error) {
 	m.mu.Lock()
+	if lostRestoreEnvironmentalErr(err) {
+		attempts, backoff := st.armEnvironmentalRetry()
+		m.mu.Unlock()
+		m.warn().Printf("restore of lost session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s (this failure class never reaches the %d-attempt give-up): %v", inst.Title, repoID, attempts, backoff, lostRestoreMaxAttempts, err)
+		return
+	}
+	st.environmentalFailures = 0
 	st.consecutiveFailures++
 	attempts := st.consecutiveFailures
 	if attempts >= lostRestoreMaxAttempts {
