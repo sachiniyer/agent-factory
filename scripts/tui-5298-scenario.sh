@@ -12,6 +12,9 @@
 # the master leg's last-tab delete is expected to move the ▾ selection marker
 # off the acting session entirely — if it does not, the run reports
 # CONTROL-INCONCLUSIVE rather than attesting a fix that cannot be told apart.
+# State (c) adds the out-of-band path: `af sessions tab-delete` against the
+# sandbox daemon while the cursor sits on the last tab — master's result there
+# is recorded but not gated (approved plan addition).
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -192,6 +195,37 @@ claude = "bash"'
     af_send j                    # -> alpha's last remaining Terminal row
     sleep "$AF_DRIVER_POLL"
     record_delete "$leg" b-last || return 1
+
+    # CASE C — out-of-band delete (approved plan addition): alpha is now
+    # [agent]. Create a named process tab over the daemon control socket —
+    # same leg binary, same sandbox AGENT_FACTORY_HOME — wait for the
+    # snapshot poll to project its row, park the cursor on it (alpha's last
+    # tab), then remove it with `af sessions tab-delete`, again with no TUI
+    # keystroke involved. The roster drop rides reconcileSnapshot; the
+    # selection must stay on alpha on the previous sibling (`1 Agent`).
+    # Master's behavior here is recorded for the report but does NOT gate.
+    af_select alpha              # master leg jumped to beta — re-pin alpha
+    (cd "$AF_DRIVER_REPO" && "$2" sessions tab-create alpha \
+        --command 'sleep 600' --name oob-tab) \
+        >"$EVID/$leg-c-tab-create.json" 2>&1 \
+        || { _af_fail "$leg/c: af sessions tab-create failed"; cat "$EVID/$leg-c-tab-create.json" >&2; return 1; }
+    af_wait_for 'oob-tab' "$AF_DRIVER_TIMEOUT" "$leg/c: snapshot projects the new tab" || return 1
+    af_select alpha              # cursor parks on alpha's Agent row
+    af_send j                    # -> alpha's `2 › oob-tab` row (the last tab)
+    sleep "$AF_DRIVER_POLL"
+    af_capture >"$EVID/$leg-c-oob-before.txt"
+    (cd "$AF_DRIVER_REPO" && "$2" sessions tab-delete alpha --name oob-tab) \
+        >"$EVID/$leg-c-tab-delete.json" 2>&1 \
+        || { _af_fail "$leg/c: af sessions tab-delete failed"; cat "$EVID/$leg-c-tab-delete.json" >&2; return 1; }
+    af_wait_gone 'oob-tab' "$AF_DRIVER_TIMEOUT" "$leg/c: roster drop reconciled" || return 1
+    sleep 1 # let the reconcile + re-pin frame paint
+    af_capture >"$EVID/$leg-c-oob-after.txt"
+    af_capture_styled >"$EVID/$leg-c-oob-after-styled.txt"
+    local sel cur
+    sel="$(selected_name)"
+    cur="$(cursor_row)"
+    printf '%s\t%s\t%s\n' "c-oob" "$sel" "$cur" >>"$EVID/$leg-results.tsv"
+    _af_log "$leg/c-oob -> selected='$sel' cursor='$cur'"
     return 0
 }
 
@@ -214,13 +248,20 @@ for leg in master branch; do
             cat "$f"
         done
     done
+    for f in "$EVID/$leg"-c-oob-before.txt "$EVID/$leg"-c-oob-after.txt; do
+        [ -f "$f" ] || continue
+        echo "=== raw frame: $leg / c-oob / $(basename "$f") ==="
+        cat "$f"
+    done
 done
 
-# The branch's contract — both deletes keep the ▾ selection on alpha, and the
-# cursor lands on the same-session sibling: the tab that slid into the deleted
-# slot for the middle case, the previous sibling (Agent) for the last tab.
+# The branch's contract — all three deletes keep the ▾ selection on alpha, and
+# the cursor lands on the same-session sibling: the tab that slid into the
+# deleted slot for the middle case, the previous sibling (Agent) for the last
+# tab — whether the delete came from the TUI (a, b) or the daemon socket (c).
 awk -F'\t' '$1=="a-middle" && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+2[[:space:]]+Terminal/){print "branch a-middle: expected alpha/`2 Terminal`, got "$2"/`"$3"`"; bad=1}
            $1=="b-last"   && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+1[[:space:]]+Agent/){print "branch b-last: expected alpha/`1 Agent`, got "$2"/`"$3"`"; bad=1}
+           $1=="c-oob"    && ($2!="alpha" || $3 !~ /^(├|└)[[:space:]]+1[[:space:]]+Agent/){print "branch c-oob: expected alpha/`1 Agent`, got "$2"/`"$3"`"; bad=1}
            END{exit bad}' "$EVID/branch-results.tsv" || { cat "$EVID/branch-results.tsv" >&2; exit 1; }
 
 # The control must actually reproduce the reported failure: master's last-tab
@@ -232,4 +273,10 @@ if [ "$master_sel" = "alpha" ]; then
     exit 3
 fi
 
-echo "PASS: master's last-tab delete jumped the selection to '$master_sel'; branch keeps every delete on alpha's sibling tab"
+# Case (c) on master is informational per the approved plan: the snapshot
+# reconcile drift is subtler than the local-delete one, so master's result is
+# recorded above for the report without gating the verdict on it.
+master_oob="$(awk -F'\t' '$1=="c-oob"{print $2" / "$3}' "$EVID/master-results.tsv")"
+echo "control c-oob (recorded, not gated): $master_oob" | tee -a "$EVID/summary.txt"
+
+echo "PASS: master's last-tab delete jumped the selection to '$master_sel'; branch keeps every delete on alpha's sibling tab (TUI w/y AND out-of-band af sessions tab-delete)"
