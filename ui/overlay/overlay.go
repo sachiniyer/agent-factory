@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/sachiniyer/agent-factory/ui/theme"
 
 	"github.com/muesli/termenv"
@@ -352,11 +351,20 @@ func PlaceOverlay(
 
 	// Build the output string.
 	//
-	// The compositor writes background cells after the foreground on every row, so
-	// a foreground row that leaves styling open would colour that row's background
-	// tail — and, at the end of the frame, everything after it. Each row therefore
-	// closes what it opened before the background is written. See closeSequences
-	// for why this closes rather than carries.
+	// On a row the modal occupies, the cells either side of it are BLANK
+	// backdrop — never the background's own cells (#5297). Writing the
+	// background there chopped it at the modal's edges: the left margin showed
+	// rail glyphs clipped mid-row (▾ beta╭, ⎇-de│), and the right margin showed
+	// the tail ends of whatever the pane preview had behind the modal — a strip
+	// of fragments that read as layout garbage, especially at 80 columns where
+	// a centered modal leaves only ~14 columns of it. Rows the modal does not
+	// touch still render the faded backdrop, so the frame keeps its context;
+	// the modal just never shares a row with background content.
+	//
+	// A foreground row that leaves styling open would colour whatever follows
+	// it — the blank margin, and at the end of the frame everything after — so
+	// each row closes what it opened first. See closeSequences for why this
+	// closes rather than carries.
 	var b strings.Builder
 	for i, bgLine := range bgLines {
 		if i > 0 {
@@ -367,76 +375,9 @@ func PlaceOverlay(
 			continue
 		}
 
-		pos := 0
-		if placeX > 0 {
-			// Budget the prefix in the measure `pos` is then READ in (#723). It
-			// used to be truncate.String, which counts rune by rune with
-			// runewidth while everything around it is grapheme-aware — the last
-			// hold-out against the one-measure invariant #3610 declared, and the
-			// defect moved rather than went away when that landed. Measured on
-			// bg = "A" + <ZWJ family> + 18*"b" at placeX 10:
-			//
-			//	pre-#3610   overlay drawn at visual column 4, not 10 — misplaced by 6
-			//	post-#3610  overlay correctly at 10; SIX background cells blanked
-			//
-			// The prefix consumed 10 cells by runewidth and 4 by Cells, so `pos`
-			// under-reported it, the padding below filled the difference with
-			// blanks, and TruncateLeft then skipped the background those blanks
-			// were standing in for. Both failures are one disagreement.
-			//
-			// A cluster that would STRADDLE placeX is never split: TruncateToCells
-			// cuts before it and the pad below carries the prefix to placeX
-			// exactly. That is the decision on #723 — the overlay's column must
-			// equal the origin its mouse zones were registered at (#3585), so
-			// placing it a cell early or late reopens exactly the mismatch that PR
-			// closed, whereas blanking the cells a straddling grapheme would have
-			// occupied is the honest rendering of "this cell is half under an
-			// opaque overlay". The blanking is bounded by one cluster's width.
-			//
-			// # Which space this is exact in, and why it is that one
-			//
-			// Cells, deliberately — NOT the rectangle contract's bounding measure
-			// (ui/layout/contract.go). So the prefix is exact in APP space, and on a
-			// terminal that draws a cluster wider than Cells reports (tmux 3.4
-			// advances 4 for a chained family where Cells says 2) the overlay's
-			// drawn edge on that one row sits right of placeX by the disagreement.
-			//
-			// Budgeting the prefix by the bound instead would make the drawn edge
-			// land at or LEFT of placeX rather than at it — no more exact, just
-			// wrong in the other direction — and it would be exact in a space
-			// nothing else on the row uses. overlayOrigin measures with Cells,
-			// RegisterZones registers with Cells, and every pane on that row was
-			// laid out with Cells, so a clustered row is displaced by the same
-			// amount everywhere; the overlay and its zones stay together, which is
-			// the property #3585 is about. Moving the prefix alone onto a second
-			// measure would displace it by a DIFFERENT amount than its own zones.
-			//
-			// The rail makes the opposite trade (contract.go) because a rectangle
-			// that overflows WRAPS, and a wrapped row is not a few cells of
-			// displacement — it is every height budget above it becoming a lie
-			// (#3430). Nothing wraps here: the compositor writes one row per screen
-			// row and clips.
-			left := layout.TruncateToCells(bgLine, placeX)
-			pos = lineWidth(left)
-			b.WriteString(left)
-			// CLOSE what the prefix left open, before anything else is written.
-			//
-			// A cut lands wherever the width budget runs out, which can be after an
-			// SGR that the discarded suffix would have closed: "AAAA\x1b[31mBBBB"
-			// truncated to 4 keeps the escape and drops the text it applied to. The
-			// foreground is written next, so without this it renders in the
-			// BACKGROUND's colour — and after the fade pass that is the faded gray,
-			// on a modal row whose own styling has not started yet.
-			//
-			// truncate.String appended a reset itself, so this was free until #723
-			// moved the cut to TruncateToCells; it is not a new hazard, only a newly
-			// unhandled one. Before the pad rather than after it, which is where the
-			// old reset sat: the blanks stay unstyled.
-			b.WriteString(closeSequences(left))
-			if pos < placeX {
-				b.WriteString(ws.render(placeX - pos))
-				pos = placeX
-			}
+		pos := placeX
+		if pos > 0 {
+			b.WriteString(ws.render(pos))
 		}
 
 		fgLine := fgLines[i-placeY]
@@ -444,23 +385,9 @@ func PlaceOverlay(
 		pos += lineWidth(fgLine)
 		b.WriteString(closeSequences(fgLine))
 
-		right := xansi.TruncateLeft(bgLine, pos, "")
-		bgLineWidth := lineWidth(bgLine)
-		rightWidth := lineWidth(right)
-		remainingWidth := bgLineWidth - pos
-		if rightWidth > remainingWidth {
-			// TruncateLeft returned more than fits because pos landed in the
-			// middle of a wide (CJK/emoji) grapheme and the whole cluster was
-			// preserved. Re-truncate from the right with the ANSI-aware helper
-			// so we don't render past bgLineWidth. The dropped half-cell shows
-			// as the leading pad below. (#647)
-			right = xansi.Truncate(right, remainingWidth, "")
-			rightWidth = lineWidth(right)
+		if remaining := lineWidth(bgLine) - pos; remaining > 0 {
+			b.WriteString(ws.render(remaining))
 		}
-		if rightWidth < remainingWidth {
-			b.WriteString(ws.render(remainingWidth - rightWidth))
-		}
-		b.WriteString(right)
 	}
 
 	return b.String()

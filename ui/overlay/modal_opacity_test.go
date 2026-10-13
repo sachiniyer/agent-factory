@@ -322,11 +322,15 @@ func TestEveryModalOccludesBackgroundPane(t *testing.T) {
 	}
 }
 
-// TestPlaceOverlayLeavesBackgroundOutsideTheRectangle guards the other
-// direction: making the modal opaque must not widen it. Cells outside the
-// foreground rectangle still come from the background, and a foreground that
-// is already rectangular composes exactly as before.
-func TestPlaceOverlayLeavesBackgroundOutsideTheRectangle(t *testing.T) {
+// TestPlaceOverlayBlanksTheBackgroundBesideTheModal guards the #5297 contract,
+// the other direction from opacity: making the modal opaque must not widen it
+// into background territory either. On a row the modal occupies, every cell
+// outside its rectangle is BLANK backdrop — never a chopped slice of the
+// background's own text (the strip of pane-preview fragments the issue shows
+// bleeding past the modal's right edge, and the rail glyphs clipped mid-cell
+// at its left). Rows the modal does not touch still render the background, so
+// the frame keeps its faded context above and below.
+func TestPlaceOverlayBlanksTheBackgroundBesideTheModal(t *testing.T) {
 	fg := strings.Join([]string{"+---+", "|   |", "+---+"}, "\n")
 	bg := backgroundFrame(20, 5)
 
@@ -336,13 +340,23 @@ func TestPlaceOverlayLeavesBackgroundOutsideTheRectangle(t *testing.T) {
 	plainBg := rasterize(bg, 20)
 
 	for row := range composed {
+		onModalRow := row >= y && row < y+h
 		for col := 0; col < 20; col++ {
-			inModal := row >= y && row < y+h && col >= x && col < x+w
+			inModal := onModalRow && col >= x && col < x+w
 			if inModal {
 				continue
 			}
+			if onModalRow {
+				if composed[row][col] != blankCell {
+					t.Fatalf("a modal's row must be blank outside its rectangle — "+
+						"row %d col %d shows %q (chopped background beside the box is #5297)",
+						row, col, string(composed[row][col]))
+				}
+				continue
+			}
 			if composed[row][col] != plainBg[row][col] {
-				t.Fatalf("overlay overwrote background outside its rectangle at row %d col %d: got %q, want %q",
+				t.Fatalf("a row the modal does not touch must keep its background — "+
+					"row %d col %d: got %q, want %q",
 					row, col, string(composed[row][col]), string(plainBg[row][col]))
 			}
 		}
