@@ -257,9 +257,18 @@ for leg in master branch; do
             cat "$f"
         done
     done
-    for f in "$EVID/$leg"-c-oob-before.txt "$EVID/$leg"-c-oob-after.txt; do
+    for f in "$EVID/$leg"-c-oob-before.txt "$EVID/$leg"-c-oob-after.txt \
+             "$EVID/$leg"-c-oob-after-styled.txt; do
         [ -f "$f" ] || continue
         echo "=== raw frame: $leg / c-oob / $(basename "$f") ==="
+        cat "$f"
+    done
+    # The cursor's selection background is STYLE-only — dump the styled
+    # captures too so the `48;`-marked selection line survives in the
+    # transcript (the plain frames alone cannot show where the cursor was).
+    for f in "$EVID/$leg"-b-last-after-wy-styled.txt; do
+        [ -f "$f" ] || continue
+        echo "=== raw frame: $leg / b-last / $(basename "$f") ==="
         cat "$f"
     done
 done
