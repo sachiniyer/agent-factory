@@ -286,32 +286,14 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 	tabs := inst.GetTabs()
 	tab := tabs[idx]
 	tabName := tab.Name
-	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
-	// the open panes' bindings across the change by stable tab id (#1088/#1886).
+	// Capture the slot→identity list before the drop. BOTH bindings into the
+	// roster need it: reconcilePanesForTabs maps the open panes across the
+	// change by stable tab id (#1088/#1886), and remapActiveTabForTabs carries
+	// the tree's selection the same way — a pane-focused close can remove a
+	// tab that is NOT the tree's active tab, so the tree's own tab is
+	// re-resolved by identity, never by arithmetic on the closed index (#1884
+	// follow-up).
 	oldKeys := paneTabKeys(inst)
-	// Remember which tab the TREE is on, by identity. A pane-focused close can
-	// remove a tab that is NOT the tree's active tab, and the tree must keep
-	// pointing at its own tab across the shift (#1884 follow-up) — resolving it by
-	// id afterwards is what keeps the arithmetic from guessing.
-	// The ordinal rides along with the id for mixed-version compatibility: an
-	// older daemon omits CreateTabResponse.ID, so that projection remains ID-less
-	// until the next snapshot and the ordinal is the only key it has.
-	treeActiveID := ""
-	treeActiveIdx := -1
-	// Whose tab is store.ActiveTab()? The STORE's selected instance's — so that is
-	// what decides whether the tree's active tab needs preserving across this
-	// close, not the sidebar cursor. The cursor is nil on a section header and
-	// points at the archived instance on an archived row, while the store's
-	// display selection stays deliberately sticky on the live instance; reading
-	// the cursor there made this false and left ActiveTab un-shifted, so returning
-	// to the tree landed on a different surviving tab.
-	treeIsSelected := inst == m.store.GetSelectedInstance()
-	if treeIsSelected {
-		if a := m.store.ActiveTab(); a >= 0 && a < len(tabs) {
-			treeActiveIdx = a
-			treeActiveID = tabs[a].ID
-		}
-	}
 
 	target := captureSessionActionTarget(inst, m.repoID)
 	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
@@ -330,6 +312,19 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 		return m, m.handleError(dropErr)
 	}
 
+	// Re-resolve the tree's selection BEFORE the pane reconcile below. That
+	// reconcile relayouts, and relayout re-reads the sidebar for the footer's
+	// row-verb target — a rebuild running while the cursor still holds the
+	// pre-delete flat index lands it on the NEXT row, which for a closed LAST
+	// tab is the following session's instance row, and pushSelection commits
+	// that drifted row as the new display selection (#5298). The remap picks
+	// the nearest remaining sibling — the tab now occupying the closed slot,
+	// else the new last tab — and the re-pin runs while the store still
+	// selects this session, so every later sync in this handler is a no-op.
+	if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+		m.sidebar.SyncCursorToActiveTab()
+	}
+
 	// The kill shifts every higher tab slot down by one, so the open panes
 	// bound to this instance must follow (#1088): the killed tab's pane
 	// leaves the workspace, higher-slot panes re-bind so they keep showing
@@ -337,40 +332,6 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 	// the identical semantics when a tab disappears out-of-band.
 	if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
 		m.relayout()
-	}
-
-	// Re-point the tree at the tab it was already on, found by its id in the
-	// shrunk roster — so a pane-focused close of a DIFFERENT tab leaves the tree's
-	// tab alone (closing tab 3 must not move a tree sitting on tab 1), and a close
-	// below it still follows the shift. Only when the tree's own tab is the one
-	// that died does it fall back to the left/previous neighbour (#930 PR 4).
-	if treeIsSelected {
-		// Adjust the tree's OWN ordinal for the closed slot first. This is the answer
-		// during the id-less window, and it is why `idx - 1` cannot be the fallback:
-		// idx is the FOCUSED PANE's closed tab, so on a pane-focused close of some
-		// other tab it names a neighbour of the wrong tab entirely — the tree would
-		// jump even though its tab merely shifted (or did not move at all).
-		next := treeActiveIdx
-		switch {
-		case treeActiveIdx == idx:
-			next = idx - 1 // the tree's own tab is the one that died
-		case treeActiveIdx > idx:
-			next = treeActiveIdx - 1 // it shifted down one
-		}
-		// The id is authoritative whenever there IS one: it survives the reorder a
-		// concurrent snapshot could apply between the capture and here, which the
-		// ordinal arithmetic above cannot see.
-		if treeActiveID != "" {
-			if at, ok := inst.TabIndexByID(treeActiveID); ok {
-				next = at
-			}
-		}
-		if next < 0 {
-			next = 0
-		}
-		m.store.SetActiveTab(next)
-		m.clampSelectionTab()
-		m.sidebar.SyncCursorToActiveTab()
 	}
 	return m, m.selectionChanged()
 }
