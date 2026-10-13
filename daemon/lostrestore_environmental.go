@@ -116,11 +116,15 @@ var lostRestoreEnvironmentalErrnos = []error{
 	// the descriptor pressure does.
 	syscall.EMFILE,
 	syscall.ENFILE,
-	// A fork/clone that hits the user's RLIMIT_NPROC or the system task
-	// limit fails with EAGAIN — the same machine-wide resource window as
-	// EMFILE, surfacing through tmux and backend process starts. The
-	// nonblocking-I/O sense of EAGAIN cannot reach this classifier: Go's
-	// poll runtime retries it internally on blocking descriptors.
+	// A fork/clone that hits the user's RLIMIT_NPROC or the cgroup
+	// pids.max/TasksMax limit fails with EAGAIN — the same machine-wide
+	// resource window as EMFILE, with the same external relief. The
+	// producers are every exec.Cmd this path spawns: the tmux new-session
+	// and send-keys calls behind a respawn, and the git worktree-repair
+	// and preserve-push subprocesses; os.StartProcess surfaces the clone
+	// errno wrapped, so errors.Is sees it. The nonblocking-I/O sense of
+	// EAGAIN cannot reach this classifier: Go's poll runtime retries it
+	// internally on blocking descriptors.
 	syscall.EAGAIN,
 	// A socket-level timeout is the network not answering — the same
 	// verdict shape the remote-safety arms already treat as "keep holding,

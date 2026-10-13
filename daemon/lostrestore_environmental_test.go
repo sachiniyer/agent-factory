@@ -66,7 +66,7 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"eperm", syscall.EPERM, lostRestoreEnvNone},
 		{"eio", syscall.EIO, lostRestoreEnvNone},
 		{"erofs", syscall.EROFS, lostRestoreEnvNone},
-		{"eagain", syscall.EAGAIN, lostRestoreEnvErrno}, // fork/clone rlimit exhaustion; Go retries nonblocking EAGAIN internally
+		{"eagain", syscall.EAGAIN, lostRestoreEnvErrno}, // fork/clone under RLIMIT_NPROC/pids.max via the tmux+git exec.Cmd producers; Go retries nonblocking EAGAIN internally
 		{"context canceled", context.Canceled, lostRestoreEnvNone},
 		{"flap sentinel", errRestoreFlapped, lostRestoreEnvNone},
 		{"died before confirm sentinel", errRestoreDiedBeforeConfirm, lostRestoreEnvNone},
