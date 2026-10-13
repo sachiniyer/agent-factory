@@ -407,6 +407,13 @@ func TestRestoreLostSessions_StructuralFailureClearsEnvironmentWait(t *testing.T
 	if inst.LostRestoreWaitSnapshot() != nil {
 		t.Fatalf("LostRestoreWaitSnapshot = %#v after a structural failure, want cleared", inst.LostRestoreWaitSnapshot())
 	}
+	// And the retirement is durable: the ENOSPC pass persisted the wait, so
+	// only a fresh write can retire it — a restart on the stale row would
+	// resurrect "waiting on the environment" for a failure that was the
+	// session's own (#5295 review).
+	if rec := recordFor(t, repoID, "turns-structural"); rec != nil && rec.LostRestoreWait != nil {
+		t.Fatalf("persisted LostRestoreWait = %#v after a structural failure, want the stale wait retired on disk", rec.LostRestoreWait)
+	}
 }
 
 // TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing is
@@ -461,5 +468,113 @@ func TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing(t *t
 	manager.RestoreLostSessions()
 	if got := backend.recoverCalls(); got != lostRestoreMaxAttempts {
 		t.Fatalf("recover calls = %d, want still %d — gave-up stays terminal", got, lostRestoreMaxAttempts)
+	}
+}
+
+// TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset pins the durable
+// half of the bounded deadline class (#5295 review): the share the class has
+// already spent is recorded on the session's durable wait, so a restart —
+// simulated here by dropping the in-memory retry map — cannot hand a
+// permanently wedged probe a fresh six free waits on every boot. The first
+// post-restart non-answer must charge the structural budget immediately.
+func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+	probeNoAnswer := errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    probeNoAnswer,
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "restart-wedged", backend, true, session.Lost)
+
+	// Spend the whole bounded share: six absorbed environmental waits, each
+	// writing its deadline count onto the session's durable wait.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	wait := inst.LostRestoreWaitSnapshot()
+	if wait == nil || wait.DeadlineWaits != lostRestoreMaxAttempts {
+		t.Fatalf("durable wait = %#v, want %d deadline waits recorded", wait, lostRestoreMaxAttempts)
+	}
+	if rec := recordFor(t, repoID, "restart-wedged"); rec == nil || rec.LostRestoreWait == nil || rec.LostRestoreWait.DeadlineWaits != lostRestoreMaxAttempts {
+		t.Fatalf("persisted wait = %#v, want the spent deadline share durable", rec)
+	}
+
+	// A daemon restart drops the in-memory retry map but keeps the row.
+	manager.mu.Lock()
+	delete(manager.lostRestoreStates, stableSessionKey(repoID, inst))
+	manager.mu.Unlock()
+
+	// The next non-answer must charge the structural budget immediately:
+	// the restarted daemon owes no fresh share.
+	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	var consecutive, deadline int
+	if st != nil {
+		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
+	}
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("retry state vanished after the simulated restart")
+	}
+	if consecutive != 1 {
+		t.Fatalf("consecutiveFailures = %d after restart with the bounded share spent, want 1 — a restart must not grant a fresh deadline share", consecutive)
+	}
+	if deadline != 0 {
+		t.Fatalf("environmentalDeadlineFailures = %d after the charge, want the spent share retired", deadline)
+	}
+}
+
+// TestRestoreLostSessions_EnvironmentalWaitPersistFailureStaysOffSettleOwed
+// pins the write class of the wait (#5295 review): the wait is a re-derivable
+// advisory fact — the next arm re-arms and re-writes it at the restore's own
+// backoff — while the generic settleOwed retry runs on every poll tick. A
+// failed wait write must warn and drop, never join the per-poll retry, or a
+// full disk gets hammered by settlement retries during the very incident the
+// arm exists to tolerate.
+func TestRestoreLostSessions_EnvironmentalWaitPersistFailureStaysOffSettleOwed(t *testing.T) {
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	zeroRestoreBackoff(t)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    fmt.Errorf("recover: %w", syscall.ENOSPC),
+	}
+	registerStarted(t, manager, repoID, repoPath, "unpersisted-wait", backend, true, session.Lost)
+
+	// Every write for this row fails — the disk-full shape the wait exists
+	// for — so each arm's persist is dropped.
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	persistAttempts := 0
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "unpersisted-wait" {
+			persistAttempts++
+			return fmt.Errorf("forced persist failure: %w", syscall.ENOSPC)
+		}
+		return nil
+	}
+
+	manager.RestoreLostSessions()
+	manager.RestoreLostSessions()
+	manager.RestoreLostSessions()
+
+	manager.mu.Lock()
+	owed := len(manager.settleOwed)
+	manager.mu.Unlock()
+	if owed != 0 {
+		t.Fatalf("settleOwed = %d, want 0 — a dropped environmental-wait write must not join the every-poll settlement retry", owed)
+	}
+	if !strings.Contains(ownLogs.warnings.String(), "not yet durable") {
+		t.Fatalf("a dropped wait write must still surface in the warn log:\n%s", ownLogs.warnings.String())
+	}
+
+	// The flush has nothing to retry for this row: no hidden poll-cadence
+	// re-writes beyond what the arms themselves attempted.
+	before := persistAttempts
+	manager.FlushOwedSettlements()
+	manager.FlushOwedSettlements()
+	if persistAttempts != before {
+		t.Fatalf("FlushOwedSettlements retried %d writes for the row — the dropped wait persist must not be owed", persistAttempts-before)
 	}
 }

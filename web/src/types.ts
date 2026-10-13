@@ -86,6 +86,9 @@ export interface LostRestoreFailure {
  * — the last failure was a resource limit external to the session (#5295). */
 export interface LostRestoreWait {
   attempts: number;
+  /** The bounded deadline class's share of attempts — durable so the bound
+   * survives a daemon restart (#5295 review). */
+  deadline_waits: number;
   error: string;
 }
 

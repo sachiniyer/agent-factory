@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -167,4 +168,49 @@ func statusLabel(s session.Status) string {
 	default:
 		return "Status(" + strconv.Itoa(int(s)) + ")"
 	}
+}
+
+func attemptNoun(attempts int) string {
+	if attempts == 1 {
+		return "attempt"
+	}
+	return "attempts"
+}
+
+// clearLostRestoreWaitDurable retires an environmental wait AND makes the
+// retirement durable when the wait was actually armed — a checkpoint write,
+// not a settlement, the same class the arm's own write uses: the clear is
+// advisory and the next state-changing write will carry it, while an owed
+// settlement would retry the write every poll tick during the very resource
+// incident this code exists to tolerate (#5295 review). Use it wherever the
+// clear is not already swept into a settlement write on the same path — the
+// give-up and heal arms write the row themselves right after clearing. The
+// caller must not hold m.mu (the write takes it through the repo start lock).
+func (m *Manager) clearLostRestoreWaitDurable(repoID string, inst *session.Instance) {
+	if !inst.ClearLostRestoreWait() {
+		return
+	}
+	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
+		m.warn().Printf("lost session %q: the ended environmental wait is cleared in memory but its stale copy is not yet durable: %v", inst.Title, err)
+	}
+}
+
+// info is the restoring Manager's INFO logger. This helper is package-level and
+// its message ("restored after") is asserted on, so leaving it reaching for the
+// global would let those assertions read a sink any Manager writes into — the
+// #3795 trap, one level down (#3797).
+func logLostRestoreSuccess(info *stdlog.Logger, title, repoID string, attempts int) {
+	info.Printf("restore of lost session %q (repo %s): restored after %d %s", title, repoID, attempts, attemptNoun(attempts))
+}
+
+func lostRestoreBackoff(attempt int) time.Duration {
+	backoff := lostRestoreBackoffMax
+	// Guard the shift: past ~16 doublings the exponential form has no meaning
+	// and would overflow.
+	if shift := attempt - 1; shift >= 0 && shift < 16 {
+		if b := lostRestoreBackoffBase << shift; b < backoff {
+			backoff = b
+		}
+	}
+	return backoff
 }

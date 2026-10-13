@@ -15,8 +15,14 @@ import (
 // LostRestoreFailure uses — so every client can tell a session af is still
 // automatically retrying from one it has stopped on.
 type LostRestoreWait struct {
-	Attempts int    `json:"attempts"`
-	Error    string `json:"error"`
+	Attempts int `json:"attempts"`
+	// DeadlineWaits is the bounded deadline class's share of Attempts at the
+	// last arm. It is durable for the same reason the wait is: the class's
+	// give-up bound must survive a daemon restart, or every restart would
+	// grant a permanently wedged probe another full share of free waits
+	// (#5295 review).
+	DeadlineWaits int    `json:"deadline_waits"`
+	Error         string `json:"error"`
 }
 
 func (w LostRestoreWait) valid() bool {
@@ -36,6 +42,9 @@ func lostRestoreWaitFromData(w *LostRestoreWait) LostRestoreWait {
 		return LostRestoreWait{}
 	}
 	clone := *w
+	if clone.DeadlineWaits < 0 {
+		clone.DeadlineWaits = 0
+	}
 	clone.Error = sanitizeLostRestoreError(clone.Error)
 	return clone
 }
@@ -56,14 +65,14 @@ func (w LostRestoreWait) Detail() string {
 // SetLostRestoreWait commits the automatic restore loop's environmental wait
 // to the live session record. Persistence and client notification are owned by
 // the daemon after this in-memory edge.
-func (i *Instance) SetLostRestoreWait(attempts int, restoreErr error) bool {
-	if attempts <= 0 || restoreErr == nil {
+func (i *Instance) SetLostRestoreWait(attempts, deadlineWaits int, restoreErr error) bool {
+	if attempts <= 0 || deadlineWaits < 0 || restoreErr == nil {
 		return false
 	}
 	// Same trust boundary as SetLostRestoreFailure: the durable copy lands in
 	// instances.json, API responses, and a one-line TUI row, so collapse
 	// controls/whitespace and bound it.
-	next := LostRestoreWait{Attempts: attempts, Error: sanitizeLostRestoreError(restoreErr.Error())}
+	next := LostRestoreWait{Attempts: attempts, DeadlineWaits: deadlineWaits, Error: sanitizeLostRestoreError(restoreErr.Error())}
 	if !next.valid() {
 		return false
 	}

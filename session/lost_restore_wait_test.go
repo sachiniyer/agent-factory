@@ -21,7 +21,7 @@ func TestLostRestoreWaitPersistsAndProjectsWaitingReason(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
-	require.True(t, inst.SetLostRestoreWait(3, errors.New("recover: no space left on device")))
+	require.True(t, inst.SetLostRestoreWait(3, 2, errors.New("recover: no space left on device")))
 
 	stored := inst.ToInstanceData().ForStorage()
 	stored.Worktree = GitWorktreeData{
@@ -30,6 +30,7 @@ func TestLostRestoreWaitPersistsAndProjectsWaitingReason(t *testing.T) {
 	}
 	require.NotNil(t, stored.LostRestoreWait)
 	require.Equal(t, 3, stored.LostRestoreWait.Attempts)
+	require.Equal(t, 2, stored.LostRestoreWait.DeadlineWaits)
 	require.Equal(t, "recover: no space left on device", stored.LostRestoreWait.Error)
 	require.Equal(t, IdleReasonRestoreWaitingOnEnvironment, stored.ProjectIdleReason().IdleReason)
 
@@ -50,7 +51,7 @@ func TestLostRestoreWaitPersistsAndProjectsWaitingReason(t *testing.T) {
 func TestLostRestoreWaitDetailIsStructuredAndClearable(t *testing.T) {
 	inst, err := NewInstance(InstanceOptions{Title: "waiting", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	require.True(t, inst.SetLostRestoreWait(1, errors.New("disk full")))
+	require.True(t, inst.SetLostRestoreWait(1, 0, errors.New("disk full")))
 
 	wait := inst.LostRestoreWaitSnapshot()
 	require.NotNil(t, wait)
@@ -65,7 +66,7 @@ func TestLostRestoreWaitSanitizesDurableError(t *testing.T) {
 	inst, err := NewInstance(InstanceOptions{Title: "waiting", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	raw := "spawn failed:\n\x1b[31mno space left on device\x1b[0m\r\n\t" + strings.Repeat("x", 2048)
-	require.True(t, inst.SetLostRestoreWait(2, errors.New(raw)))
+	require.True(t, inst.SetLostRestoreWait(2, 0, errors.New(raw)))
 
 	wait := inst.LostRestoreWaitSnapshot()
 	require.NotNil(t, wait)
@@ -84,7 +85,7 @@ func TestLostRestoreWaitYieldsToTerminalFailure(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
-	require.True(t, inst.SetLostRestoreWait(2, errors.New("enospc")))
+	require.True(t, inst.SetLostRestoreWait(2, 0, errors.New("enospc")))
 	require.True(t, inst.SetLostRestoreFailure(6, errors.New("agent exited")))
 
 	reason, _, _, _ := inst.IdleReasonDetailSnapshot()
