@@ -198,6 +198,18 @@ type Instance struct {
 	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
+	// taskRunPromptProvenIdle records that the current taskRunPromptAttemptAt
+	// was set behind a readiness proof — WaitForReady confirmed the composer
+	// still before the send, so no turn was in flight at the boundary (#5221
+	// review). The daemon's chrome watcher reads it to stand the timed-row
+	// elapsed-fit down (see task.TurnWatch.PrimeProvenIdle): a turn starting
+	// sub-second after a proven-idle boundary would fail the fit on every
+	// capture, forever. Ephemeral and in-memory only: a daemon restart loses
+	// it and the watcher falls back to the fit / quiet arm, which still
+	// completes the run. Cleared by every recordPromptAttemptLocked (a new
+	// boundary is unproven until the readiness path re-marks it) and by
+	// ClearIdleEvidence (a replaced runtime's pane was never proven still).
+	taskRunPromptProvenIdle bool
 	// paneObservationStreakAt is the START of the current uninterrupted
 	// observation streak: the first successful capture, or the first capture
 	// after a hole (failed snapshots, a stalled serial walk) in which churn

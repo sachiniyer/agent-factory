@@ -279,6 +279,18 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 	return &TurnWatch{agent: agent, boundary: boundary}
 }
 
+// PrimeProvenIdle marks the boundary as proven idle — the pane provably held no
+// turn when the prompt went out: a fresh session's prompt was delivered behind
+// WaitForReady, whose readiness wait confirmed the composer still. For the
+// timed-row agents (claude, devin) this stands the elapsed-fit check down: a
+// row ticking after a proven-idle boundary can only be the new turn, and a turn
+// starting sub-second after the prompt would fail the fit on every capture,
+// forever — its whole-second elapsed is the boundary's age minus the sub-second
+// offset, permanently one second short (#5221 review). Idempotent; the daemon
+// calls it lazily once the proven-idle flag is observable, so a watcher built
+// during the send (before the flag lands) still primes on the next poll.
+func (w *TurnWatch) PrimeProvenIdle() { w.armed = true }
+
 // Observe folds one captured frame into the watch and reports whether it
 // proves a turn began after the boundary. `at` must be the frame's CAPTURE
 // (or request-start) instant, not the caller's apply time: for a remote
@@ -300,6 +312,14 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 		cur := timedTurnRowsByIdentity(content)
 		row, ticked := tickingTimedRow(w.prev, cur)
 		w.prev = cur
+		if w.armed {
+			// A proven-idle boundary needs no fit: no turn could have been
+			// running when the pane proved still, so any ticking row
+			// postdates it — and a turn starting sub-second after the
+			// prompt would fail the fit on every capture, forever (#5221
+			// review). See PrimeProvenIdle.
+			return ticked
+		}
 		// rowElapsed reads a whole-second display, so its truncation leaves a
 		// sub-second gap: a turn started a fraction of a second before the
 		// boundary could otherwise satisfy elapsed <= age. The margin is the

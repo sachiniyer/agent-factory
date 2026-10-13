@@ -538,6 +538,18 @@ func (i *Instance) TaskRunPromptAttemptAt() time.Time {
 	return i.taskRunPromptAttemptAt
 }
 
+// TaskRunPromptProvenIdle reports whether the current task-run prompt boundary
+// was set behind a readiness proof — WaitForReady confirmed the composer still
+// before the send (#5221 review). The daemon's chrome watcher reads this to
+// stand the timed-row elapsed-fit down: a turn starting sub-second after a
+// proven-idle boundary would fail the fit on every capture, forever. See
+// MarkTaskRunPromptProvenIdle and task.TurnWatch.PrimeProvenIdle.
+func (i *Instance) TaskRunPromptProvenIdle() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunPromptProvenIdle
+}
+
 // GetGitWorktree returns the git worktree for the instance
 func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
 	i.mu.RLock()

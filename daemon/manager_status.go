@@ -325,6 +325,18 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
 		m.taskRunTurnWatches[key] = entry
 	}
+	// A boundary set behind WaitForReady carries proven-idle proof: the pane
+	// held no turn when the prompt went out, so a ticking row can only be the
+	// new turn — including one starting sub-second after the boundary, whose
+	// whole-second elapsed would fail the fit on every capture, forever
+	// (#5221 review). PrimeProvenIdle is idempotent, so calling it each tick
+	// is safe and handles the race where the watcher was built during the
+	// send (before the readiness path's re-mark landed): the first poll may
+	// apply the strict fit to a row that has not painted yet, and the second
+	// primes once the flag is observable.
+	if instance.TaskRunPromptProvenIdle() {
+		entry.watch.PrimeProvenIdle()
+	}
 	turning := entry.watch.Observe(content, capturedAt)
 	m.pausedMu.Unlock()
 	if !turning {

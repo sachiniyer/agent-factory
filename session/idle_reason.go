@@ -163,6 +163,16 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if !i.lastPaneChurnAt.IsZero() && !i.lastPaneChurnAt.Before(attemptedAt) {
 		i.lastPaneChurnAt = time.Time{}
 	}
+	// A new boundary is unproven until the readiness path re-marks it. This
+	// clears any stale proof from a previous (readiness-proven) send before
+	// the current send establishes its own boundary, so a direct send — which
+	// bypasses WaitForReady — cannot inherit the prior boundary's proof and
+	// prime a watcher that would attribute an in-flight turn to it (#5221
+	// review). The readiness path re-marks via MarkTaskRunPromptProvenIdle
+	// after the send returns; the daemon primes lazily, so the brief
+	// unproven window between the send and the re-mark costs at most one
+	// poll tick of the strict fit (the turn has not painted chrome yet).
+	i.taskRunPromptProvenIdle = false
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
 	// The task run's completion gate binds to the run's own prompt boundary,
@@ -231,6 +241,22 @@ var taskRunCompletionQuietGrace = 30 * time.Second
 // sit silent well past 30s, so only a grace long enough to outlast a real
 // boot may stand in for evidence. A var so tests can compress it.
 var taskRunCompletionSilentGrace = 5 * time.Minute
+
+// MarkTaskRunPromptProvenIdle records that the current task-run prompt boundary
+// was set behind a readiness proof — WaitForReady confirmed the composer still
+// before the send, so no turn was in flight at the boundary (#5221 review). The
+// daemon's chrome watcher reads it (via TaskRunPromptProvenIdle) to stand the
+// timed-row elapsed-fit down, so a turn starting sub-second after the boundary
+// is recognizable instead of being permanently rejected — see
+// task.TurnWatch.PrimeProvenIdle. Call only from the readiness-proven send
+// path, after the send that recorded the boundary; recordPromptAttemptLocked
+// clears the flag for every new boundary, so a direct send (which bypasses
+// WaitForReady) stays unproven and keeps the protective fit.
+func (i *Instance) MarkTaskRunPromptProvenIdle() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.taskRunPromptProvenIdle = true
+}
 
 // RecordTaskRunTurn records that the agent's own in-turn chrome was observed
 // on this runtime — the positive "a turn on the prompt began" evidence a
@@ -389,6 +415,10 @@ func (i *Instance) ClearIdleEvidence() bool {
 		i.taskRunTurnObservedAt = time.Time{}
 		changed = true
 	}
+	// A replaced runtime's pane was never proven still; drop any proof the
+	// prior runtime's readiness wait established for its boundary (#5221
+	// review).
+	i.taskRunPromptProvenIdle = false
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
 	// the generation invalidation fences daemon-owned side effects while the epoch

@@ -228,6 +228,16 @@ func WaitForReadyAndSubmitPrompt(
 
 	if prompt != "" {
 		status, err := instance.SendPromptWithEvidence(prompt, time.Now)
+		// Readiness proved the composer still before the send, so the boundary
+		// the send just recorded carries proven-idle proof — the pane held no
+		// turn when the prompt went out (#5221 review). Marking lets the
+		// daemon's chrome watcher stand the timed-row elapsed-fit down for a
+		// turn that started sub-second after the boundary (its whole-second
+		// elapsed would fail the fit on every capture, forever); see
+		// task.TurnWatch.PrimeProvenIdle. recordPromptAttemptLocked cleared
+		// the flag inside the send; the daemon primes lazily, so this re-mark
+		// needs only to land before the second post-boundary poll.
+		instance.MarkTaskRunPromptProvenIdle()
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}

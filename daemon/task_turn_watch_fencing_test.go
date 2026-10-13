@@ -207,3 +207,121 @@ func TestRefreshInstanceStatusPersistsReadyToReadyRunEnd(t *testing.T) {
 	require.False(t, rows[0].TaskRunActive,
 		"the marker flip must reach disk even though the poll moved no liveness")
 }
+
+// A boundary set behind WaitForReady carries proven-idle proof, so the daemon
+// primes the watcher (PrimeProvenIdle) and a turn starting sub-second after the
+// boundary is recognized on its first ticking capture — instead of being
+// permanently rejected by the elapsed fit, whose whole-second display is
+// forever one second short of the boundary's age in the affected capture phase
+// (#5221 review). This is the daemon-side wiring of the fix: the readiness
+// path marks the boundary proven-idle, and noteTaskRunTurnEvidence primes from
+// it lazily each poll.
+func TestNoteTaskRunTurnEvidencePrimesProvenIdleBoundary(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-prime", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.TaskRunActive(), "precondition: a task-spawned session starts with its run in flight")
+
+	boundary := time.Now()
+	// RecordPromptAttempt establishes the boundary and CLEARS the proven-idle
+	// flag (a new boundary is unproven until the readiness path re-marks it).
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, boundary))
+	require.False(t, inst.TaskRunPromptProvenIdle(),
+		"a fresh prompt attempt is unproven until the readiness path marks it")
+	// The readiness-proven send path re-marks the boundary proven-idle.
+	inst.MarkTaskRunPromptProvenIdle()
+	require.True(t, inst.TaskRunPromptProvenIdle(), "the readiness path marks the boundary proven-idle")
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "turn-prime"
+	// A turn starting ~200ms after the boundary: at boundary+1.2s the row
+	// shows 1s, at boundary+2.2s it shows 2s (ticking). The fit 2+1=3 <= 2.2
+	// fails, so without priming this would never fire.
+	row := func(elapsed string) string {
+		return "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ "
+	}
+	// First capture establishes the row; it cannot already be a tick.
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("1s"), Captured: true}, boundary.Add(1200*time.Millisecond), epoch),
+		"the first capture establishes the row; it cannot already be a tick")
+	_, watched := m.taskRunTurnWatches[key]
+	require.True(t, watched, "a post-boundary capture arms the watcher")
+	// Second capture: the row ticked. Primed, it fires despite the fit
+	// being unsatisfiable for this sub-second turn start.
+	require.True(t, m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("2s"), Captured: true}, boundary.Add(2200*time.Millisecond), epoch),
+		"a ticking row after a proven-idle boundary fires — the fit stands down")
+}
+
+// A boundary NOT proven idle (a direct send that bypassed WaitForReady) keeps
+// the elapsed fit, so a sub-second-post-boundary turn still cannot fire — the
+// protective fit that blocks pre-boundary turns stays in place for sends whose
+// pane may have been mid-turn. This is the conservative path the direct
+// daemon delivery paths (manual RPC, limit resume without readiness) take.
+func TestNoteTaskRunTurnEvidenceUnprovenBoundaryKeepsElapsedFit(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-unproven", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.TaskRunActive(), "precondition: a task-spawned session starts with its run in flight")
+
+	boundary := time.Now()
+	// A direct send (no readiness): RecordPromptAttempt alone, no
+	// MarkTaskRunPromptProvenIdle. The boundary is unproven.
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, boundary))
+	require.False(t, inst.TaskRunPromptProvenIdle(), "a direct send leaves the boundary unproven")
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "turn-unproven"
+	row := func(elapsed string) string {
+		return "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ "
+	}
+	// Establish the row, then tick it on the next capture at a sub-second
+	// post-boundary offset the fit cannot satisfy.
+	m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("1s"), Captured: true}, boundary.Add(1200*time.Millisecond), epoch)
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("2s"), Captured: true}, boundary.Add(2200*time.Millisecond), epoch),
+		"an unproven boundary keeps the fit: a sub-second-post-boundary turn cannot fire without proof")
+	// Once the turn is old enough that the fit IS satisfiable (elapsed+1 <=
+	// age), the unproven watcher still fires — the fit blocks only the
+	// sub-second-start regime, not turns ≥ 1s old at capture.
+	m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("2s"), Captured: true}, boundary.Add(3500*time.Millisecond), epoch)
+	require.True(t, m.noteTaskRunTurnEvidence(key, inst,
+		session.Observation{Content: row("3s"), Captured: true}, boundary.Add(4500*time.Millisecond), epoch),
+		"an unproven boundary still fires once the fit is satisfiable — the fit is the proof for unproven boundaries")
+}
+
+// A redelivery clears the proven-idle proof: RecordPromptAttempt wipes the
+// flag for every new boundary, so a watcher built for the redelivery does not
+// inherit the prior boundary's readiness proof — the new boundary must earn
+// its own priming (or keep the fit). This keeps a direct redelivery from
+// laundering an in-flight turn through a stale readiness proof.
+func TestNoteTaskRunTurnEvidenceRedeliveryClearsProvenIdle(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-redeliver", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.TaskRunActive())
+
+	first := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, first))
+	inst.MarkTaskRunPromptProvenIdle()
+	require.True(t, inst.TaskRunPromptProvenIdle(), "the first boundary is proven-idle")
+
+	// A redelivery records a fresh boundary and clears the proof.
+	second := first.Add(time.Second)
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, second))
+	require.False(t, inst.TaskRunPromptProvenIdle(),
+		"a redelivery clears the proven-idle proof; the new boundary is unproven")
+}

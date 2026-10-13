@@ -1,6 +1,7 @@
 package task
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -161,5 +162,110 @@ func TestTurnWatch_PreBoundaryTurnRejectsAtCaptureTime(t *testing.T) {
 	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc to interrupt)\n❭ ", boundary.Add(5*time.Second))
 	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc to interrupt)\n❭ ", boundary.Add(6*time.Second)) {
 		t.Fatal("a turn younger than the boundary's capture-age still fires")
+	}
+}
+
+// A proven-idle boundary stands the elapsed fit down (#5221 review): the
+// pane provably held no turn at the prompt (WaitForReady confirmed the
+// composer still), so a ticking row can only be the new turn — including
+// one whose own clock started a fraction of a second after the boundary,
+// which the fit could never prove: its elapsed is always the boundary's age
+// minus the sub-second offset, permanently just short. This is the exact
+// scenario the squash merge of #5219/#5221 dropped the PrimeProvenIdle
+// mitigation for.
+func TestTurnWatch_PrimedTimedRowSkipsElapsedFit(t *testing.T) {
+	boundary := time.Now()
+	// A turn starting ~200ms post-boundary shows a row whose elapsed trails
+	// the boundary's age by that offset — 2s elapsed against 2.2s of age
+	// fails the +1s margin, on every tick, forever.
+	frame := func(elapsed string) string {
+		return "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ "
+	}
+	unprimed := NewTurnWatch("claude", boundary)
+	unprimed.Observe(frame("1s"), boundary.Add(1200*time.Millisecond))
+	if unprimed.Observe(frame("2s"), boundary.Add(2200*time.Millisecond)) {
+		t.Fatal("unprimed: a sub-second-post-boundary turn cannot satisfy the elapsed fit")
+	}
+	primed := NewTurnWatch("claude", boundary)
+	primed.PrimeProvenIdle()
+	primed.Observe(frame("1s"), boundary.Add(1200*time.Millisecond))
+	if !primed.Observe(frame("2s"), boundary.Add(2200*time.Millisecond)) {
+		t.Fatal("a ticking row after a proven-idle boundary is the turn — no fit needed")
+	}
+}
+
+// The bug's arithmetic: a turn starting d seconds (0 < d < 1) after the
+// boundary, captured on a phase-locked poll tick (default 1s) whose constant
+// fractional phase δ exceeds frac(d), fails the +1s margin on EVERY capture,
+// forever — the whole-second display is permanently one second ahead of what
+// the fit demands. This drives 120 consecutive phase-locked captures to prove
+// the unprimed watch never fires in the affected regime, while a primed one
+// fires on the first eligible tick. The failing regime (δ >= φ) is the
+// normal case: capture phases are effectively fixed per daemon boot.
+func TestTurnWatch_SubSecondTurnStartPhaseLocked(t *testing.T) {
+	cases := []struct {
+		name         string
+		turnOffset   time.Duration // d: turn starts at boundary + d, 0 < d < 1s
+		capturePhase time.Duration // δ: each capture lands at n+δ seconds past boundary
+	}{
+		{"200ms start / 700ms phase", 200 * time.Millisecond, 700 * time.Millisecond},
+		{"300ms start / 800ms phase", 300 * time.Millisecond, 800 * time.Millisecond},
+		{"50ms start / 950ms phase", 50 * time.Millisecond, 950 * time.Millisecond},
+	}
+	frame := func(elapsed int) string {
+		return "✻ Whirring… (" + strconv.Itoa(elapsed) + "s · esc to interrupt)\n❯ "
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			boundary := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			// run drives 120 phase-locked captures: capture n lands at
+			// boundary + n*1s + δ, and the row's displayed elapsed is
+			// floor((n+δ) - d) — the whole-second truncation of the turn's
+			// true age at that capture. Consecutive captures show strictly
+			// growing elapsed, so the row is genuinely ticking. Returns the
+			// 1-based capture index the watch fired on, else 0.
+			run := func(w *TurnWatch) int {
+				for n := 1; n <= 120; n++ {
+					at := boundary.Add(time.Duration(n)*time.Second + tc.capturePhase)
+					elapsed := int((at.Sub(boundary) - tc.turnOffset) / time.Second)
+					if w.Observe(frame(elapsed), at) {
+						return n
+					}
+				}
+				return 0
+			}
+			unprimed := NewTurnWatch("claude", boundary)
+			if n := run(unprimed); n != 0 {
+				t.Fatalf("unprimed watch fired at capture %d in the failing regime (δ >= φ) — the elapsed fit should never be satisfiable", n)
+			}
+			primed := NewTurnWatch("claude", boundary)
+			primed.PrimeProvenIdle()
+			if n := run(primed); n == 0 {
+				t.Fatal("primed watch never fired — a proven-idle boundary must recognize a ticking row")
+			}
+		})
+	}
+}
+
+// A primed watch does NOT lower the bar for the boot/echo/new-row rejections:
+// the row must still TICK (appear in two consecutive captures with growing
+// elapsed) before it counts — PrimeProvenIdle only stands the elapsed fit
+// down, not the ticking contract.
+func TestTurnWatch_PrimedStillRequiresTicking(t *testing.T) {
+	boundary := time.Now().Add(-time.Minute)
+	primed := NewTurnWatch("devin", boundary)
+	primed.PrimeProvenIdle()
+	// A row that merely appears (new in this capture) has no earlier self to
+	// have ticked from.
+	if primed.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ", time.Now()) {
+		t.Fatal("primed or not, a row with no earlier self that ticked is transcript text")
+	}
+	// A row that stands still has not ticked.
+	if primed.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ", time.Now()) {
+		t.Fatal("primed or not, a row that stood still has not ticked")
+	}
+	// Boot churn never resembles a timed row.
+	if primed.Observe("❭ run the nightly lint\nACP session ready\n❭ ", time.Now()) {
+		t.Fatal("primed or not, boot churn is not a running turn")
 	}
 }
