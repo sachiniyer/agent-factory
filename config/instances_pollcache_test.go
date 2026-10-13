@@ -418,22 +418,3 @@ func BenchmarkRepoInstancesFileCacheLoadAllUnchanged(b *testing.B) {
 		}
 	}
 }
-
-// BenchmarkRepoInstancesPollLegacyBaseline is the pre-#5169 pair this change
-// fuses and caches over: a full migration sweep plus a full reporting load of
-// every repo file, every tick.
-func BenchmarkRepoInstancesPollLegacyBaseline(b *testing.B) {
-	b.Setenv("AGENT_FACTORY_HOME", b.TempDir())
-	raw := pollBenchRows(b, 3400)
-	require.NoError(b, SaveRepoInstances("repo-alpha", raw))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-			b.Fatal(err)
-		}
-		if _, _, _, err := LoadAllRepoInstancesReportingMissing(); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
