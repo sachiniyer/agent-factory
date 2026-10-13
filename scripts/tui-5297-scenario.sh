@@ -138,8 +138,10 @@ tui_provenance() {
 # the background left past the modal's right edge. The bottom is the mirror
 # walk down to '╰'.
 #
-# Prints the band geometry and every offending fragment; exit 1 when a margin
-# is non-blank (the strip), 0 when clean, 2 when the box cannot be located.
+# Prints the band geometry, every offending fragment, and a BACKDROP-ROWS
+# count: rows OUTSIDE the modal's vertical span that still carry non-blank
+# background (the faded rail / pane / status bar). exit 1 when a margin is
+# non-blank (the strip), 0 when clean, 2 when the box cannot be located.
 modal_margins() {
     python3 - "$1" "$2" <<'PY'
 import re, sys
@@ -181,6 +183,13 @@ for r in range(top, bot + 1):
             bad += n
             print(f"  row {r:2d} {side:5s} margin ({n} non-blank cells): {frag.rstrip()!r}")
 print(f"OFFENDING-CELLS {bad}")
+# Backdrop-survival probe (approval amendment 1): a fix that blanked the WHOLE
+# frame would pass OFFENDING-CELLS 0 vacuously. Count rows outside the modal's
+# span that still render background cells — the branch leg requires >= 1.
+outside = [i for i, l in enumerate(lines) if not top <= i <= bot and l.strip()]
+for i in outside[:3]:
+    print(f"  backdrop row {i:2d} outside band: {lines[i].rstrip()!r}")
+print(f"BACKDROP-ROWS {len(outside)}")
 sys.exit(1 if bad else 0)
 PY
 }
@@ -294,9 +303,11 @@ claude = "bash"'
 }
 
 # modal_margins_capture <anchor> <name> — capture + check, bookkeeping the
-# offending cell count into the leg's verdict.
+# offending-cell and surviving-backdrop counts into $EVID/$LEG-cells.txt so the
+# verdict can gate per-overlay (amendment 2: the control must show the strip on
+# session-created AND search specifically).
 modal_margins_capture() {
-    local anchor="$1" name="$2" rc cells
+    local anchor="$1" name="$2" rc cells backdrop
     sleep 1 # settle past the capture tick so the frame is the steady state
     af_capture >"$EVID/$LEG-$name.txt"
     set +e
@@ -308,32 +319,57 @@ modal_margins_capture() {
         af_capture >&2
         return 1
     fi
-    if [ "$rc" -eq 0 ]; then
+    cells="$(sed -nE 's/^OFFENDING-CELLS ([0-9]+).*/\1/p' "$EVID/$LEG-$name-margins.txt")"
+    backdrop="$(sed -nE 's/^BACKDROP-ROWS ([0-9]+).*/\1/p' "$EVID/$LEG-$name-margins.txt")"
+    echo "$name ${cells:-0} ${backdrop:-0}" >>"$EVID/$LEG-cells.txt"
+    STRIP_CELLS=$((STRIP_CELLS + ${cells:-0}))
+    if [ "${cells:-0}" -eq 0 ]; then
         _af_log "$LEG/$name: clean — no background cells beside the modal"
     else
-        cells="$(sed -nE 's/^OFFENDING-CELLS ([0-9]+).*/\1/p' "$EVID/$LEG-$name-margins.txt")"
-        STRIP_CELLS=$((STRIP_CELLS + ${cells:-0}))
         _af_log "$LEG/$name: $cells non-blank background cells beside the modal (see $EVID/$LEG-$name-margins.txt)"
+    fi
+    # Amendment 1 gates the PR leg: a fully-blanked frame would pass
+    # OFFENDING-CELLS 0 vacuously, so each PR-leg capture must show at least
+    # one non-blank backdrop row outside the modal's span. Master only
+    # reports — its margins are expected to carry background anyway.
+    if [ "$LEG" = branch ] && [ "${backdrop:-0}" -eq 0 ]; then
+        _af_fail "$LEG/$name: no non-blank backdrop row outside the modal's span — frame may be fully blanked"
+        af_capture >&2 || true
+        return 1
     fi
     return 0
 }
 
 STRIP_CELLS=0
+: >"$EVID/master-cells.txt"
 run_leg master "$HOME/bin/af.master"
 master_cells="$STRIP_CELLS"
 STRIP_CELLS=0
+: >"$EVID/branch-cells.txt"
 run_leg branch "$HOME/bin/af"
 branch_cells="$STRIP_CELLS"
 
+cells_of() { # <leg-cells-file> <overlay name>
+    awk -v n="$2" '$1 == n { print $2 }' "$1"
+}
+
 {
-    echo "master leg: $master_cells non-blank background cells beside modal boxes"
-    echo "branch leg: $branch_cells non-blank background cells beside modal boxes"
+    echo "per-capture offending cells / surviving backdrop rows:"
+    paste <(awk '{print $1}' "$EVID/master-cells.txt") \
+          <(awk '{print "master="$2"/"$3}' "$EVID/master-cells.txt") \
+          <(awk '{print "branch="$2"/"$3}' "$EVID/branch-cells.txt")
+    echo "master leg: $master_cells non-blank background cells beside modal boxes (total)"
+    echo "branch leg: $branch_cells non-blank background cells beside modal boxes (total)"
 } | tee "$EVID/verdict.txt"
 
-# The control MUST reproduce the defect — else the scenario cannot see it and
-# the branch leg proves nothing.
-if [ "$master_cells" -eq 0 ]; then
-    _af_fail "control leg: expected chopped background beside at least one modal on master — got none"
+# Amendment 2: the control MUST reproduce the defect on the two frames the
+# issue actually shows — session-created and search. The other three are
+# reported either way (their strips depend on what the background happened to
+# hold at that moment).
+master_sc="$(cells_of "$EVID/master-cells.txt" session-created)"
+master_srch="$(cells_of "$EVID/master-cells.txt" search)"
+if [ "${master_sc:-0}" -eq 0 ] || [ "${master_srch:-0}" -eq 0 ]; then
+    _af_fail "control leg: master must show the strip beside session-created AND search — got ${master_sc:-0} and ${master_srch:-0} cells"
     exit 1
 fi
 if [ "$branch_cells" -ne 0 ]; then
@@ -342,4 +378,4 @@ if [ "$branch_cells" -ne 0 ]; then
     exit 1
 fi
 
-printf 'PASS #5297: master control shows the chopped-background strip (%d cells); branch renders blank margins beside every modal\n' "$master_cells"
+printf 'PASS #5297: master control shows the strip beside session-created (%d cells) and search (%d cells); branch renders blank margins beside every modal with the backdrop intact\n' "$master_sc" "$master_srch"
