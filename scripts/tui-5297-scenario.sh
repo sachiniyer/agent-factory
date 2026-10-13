@@ -310,6 +310,11 @@ modal_margins_capture() {
     local anchor="$1" name="$2" rc cells backdrop
     sleep 1 # settle past the capture tick so the frame is the steady state
     af_capture >"$EVID/$LEG-$name.txt"
+    # Echo the raw frame into the transcript too — the sandbox is ephemeral
+    # (--rm), so the run log is the only durable copy for the attestation.
+    echo "--- raw 80x24 frame: $LEG/$name ---"
+    cat "$EVID/$LEG-$name.txt"
+    echo "--- end frame ---"
     set +e
     modal_margins "$EVID/$LEG-$name.txt" "$anchor" | tee "$EVID/$LEG-$name-margins.txt"
     rc=${PIPESTATUS[0]}
