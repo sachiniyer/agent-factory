@@ -218,6 +218,27 @@ func closeSequences(line string) string {
 	return closers
 }
 
+// openState tracks what the written background stream leaves open, using
+// closeSequences' last-match model carried across rows: a sequence that opens
+// leaves its channel open, a closer shuts it, and a row with no sequences
+// inherits the carry unchanged — exactly how the terminal interprets the
+// stream. The carry matters because the backdrop CAN leave styling open: a
+// pane preview holds whatever its PTY emitted, and a curses app may run one
+// colour across a whole screenful of rows.
+func openState(line string, sgrOpen, osc8Open bool) (bool, bool) {
+	if matches := sgrRegex.FindAllString(line, -1); len(matches) > 0 {
+		if last := matches[len(matches)-1]; last != "\x1b[0m" && last != "\x1b[m" {
+			sgrOpen = true
+		} else {
+			sgrOpen = false
+		}
+	}
+	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
+		osc8Open = matches[len(matches)-1][1] != ""
+	}
+	return sgrOpen, osc8Open
+}
+
 // Split a string into lines, additionally returning the size of the widest
 // line.
 //
@@ -366,13 +387,30 @@ func PlaceOverlay(
 	// each row closes what it opened first. See closeSequences for why this
 	// closes rather than carries.
 	var b strings.Builder
+	bgSgrOpen, bgOsc8Open := false, false
 	for i, bgLine := range bgLines {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
 		if i < placeY || i >= placeY+fgHeight {
 			b.WriteString(bgLine)
+			bgSgrOpen, bgOsc8Open = openState(bgLine, bgSgrOpen, bgOsc8Open)
 			continue
+		}
+
+		// The dropped background row can carry the closer for a style a row
+		// above the modal opened — a pane preview mid-colour-run, a hyperlink
+		// left open. Without it that state bleeds into the blank margins, an
+		// unstyled modal, and every row below (Codex review on #5297). Close
+		// whatever the backdrop stream has left open BEFORE the margin, so the
+		// margins are truly blank and the rows under the modal stay clean.
+		if bgSgrOpen {
+			b.WriteString("\x1b[0m")
+			bgSgrOpen = false
+		}
+		if bgOsc8Open {
+			b.WriteString("\x1b]8;;\x1b\\")
+			bgOsc8Open = false
 		}
 
 		pos := placeX

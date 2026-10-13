@@ -370,3 +370,45 @@ func TestPlaceOverlayBlanksTheBackgroundBesideTheModal(t *testing.T) {
 		}
 	}
 }
+
+// The backdrop a modal replaces can carry the closer for a style a row above
+// opened — a pane preview mid-colour-run or a hyperlink still open. Dropping
+// the row drops the reset too, and without one the style bleeds into the
+// blank margins, an unstyled modal, and every row below (Codex review on
+// #5297). The compositor must close backdrop state before the blank margin.
+func TestPlaceOverlayClosesBackdropStateOnModalRows(t *testing.T) {
+	tests := []struct {
+		name     string
+		bg       string
+		wantRow1 string
+	}{
+		{
+			name:     "sgr span closed on the dropped row",
+			bg:       "\x1b[31mAAAA\nBBBB\x1b[0m\nCCCC",
+			wantRow1: "\x1b[0mMM  ",
+		},
+		{
+			name:     "sgr span never closed",
+			bg:       "\x1b[31mAAAA\nBBBB\nCCCC",
+			wantRow1: "\x1b[0mMM  ",
+		},
+		{
+			name:     "hyperlink closed on the dropped row",
+			bg:       "\x1b]8;;https://x\x1b\\AAAA\nBBBB\x1b]8;;\x1b\\\nCCCC",
+			wantRow1: "\x1b]8;;\x1b\\MM  ",
+		},
+	}
+	for _, tc := range tests {
+		out := strings.Split(PlaceOverlay(0, 1, "MM", tc.bg, false), "\n")
+		if len(out) != 3 {
+			t.Fatalf("%s: expected 3 rows, got %d: %q", tc.name, len(out), out)
+		}
+		if out[1] != tc.wantRow1 {
+			t.Fatalf("%s: modal row must open with the backdrop closer — got %q, want %q",
+				tc.name, out[1], tc.wantRow1)
+		}
+		if out[2] != "CCCC" {
+			t.Fatalf("%s: the row below the modal must be clean — got %q", tc.name, out[2])
+		}
+	}
+}
