@@ -47,6 +47,15 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), lostRestoreEnvErrno},
 		{"deadline carrying relocate sentinel", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), lostRestoreEnvDeadline},
 		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvErrno},
+		// The #5295 play-test producer: `git worktree add` fails with ENOSPC
+		// trapped in *exec.ExitError stderr text — invisible to errors.Is. The
+		// Go-side write probe supplies the errno; errors.Join carries both.
+		{"subprocess exiterr joined with probe enospc", errors.Join(
+			errors.New("git command failed: fatal: could not write (exit status 128)"),
+			fmt.Errorf("write probe of /wt: %w", syscall.ENOSPC)), lostRestoreEnvErrno},
+		{"subprocess exiterr joined with nonspace probe", errors.Join(
+			errors.New("git command failed: exit status 128"),
+			fmt.Errorf("write probe of /wt: %w", syscall.ENOENT)), lostRestoreEnvNone},
 
 		// A bare deadline is ambiguous — a permanently hung launch_cmd wraps
 		// it too, and that is a session defect, not an outage.
