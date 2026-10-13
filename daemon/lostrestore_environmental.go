@@ -5,6 +5,8 @@ import (
 	"errors"
 	"syscall"
 	"time"
+
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The environmental half of the restore retry policy (#5295).
@@ -39,21 +41,19 @@ func lostRestoreEnvironmentalErr(err error) bool {
 			return true
 		}
 	}
-	// context.DeadlineExceeded joins the errnos on purpose: every bounded
-	// probe af runs (relocation identity checks, git command wrappers)
-	// produces it when the environment did not answer inside the bound — a
-	// waiting verdict by construction at every producer site, never evidence
-	// of a session defect.
-	//
-	// ErrRelocateStateUnknown is deliberately NOT here as a bare sentinel: it
-	// is joined both into "the probe could not answer" failures — whose
-	// chains already carry the deadline or errno above — and into definitive
-	// verdicts like "this path no longer identifies the recorded worktree"
-	// or "neither candidate was established", which arrive bare. A bare
-	// sentinel is a permanent answer about the SESSION (its directory was
-	// replaced or deleted), and retrying cannot change it — exactly the
-	// defect the structural budget exists to terminate on (#5295 review).
-	return errors.Is(err, context.DeadlineExceeded)
+	// Neither half of the environmental non-answer signature is exempt on its
+	// own. context.DeadlineExceeded alone is ambiguous — a permanently hung
+	// user launch_cmd wraps it too, and that is a session defect, not an
+	// outage. ErrRelocateStateUnknown alone is a definitive verdict — "this
+	// path no longer identifies the recorded worktree", "neither candidate
+	// was established" — a session fact retry cannot change. Together they
+	// are exactly what af's bounded relocation probes report when the
+	// environment did not answer inside the bound: the deadline names the
+	// non-answer and the sentinel names the probe that could not establish
+	// state. Every other timeout and every definitive verdict stays on the
+	// structural budget (#5295 review).
+	return errors.Is(err, context.DeadlineExceeded) &&
+		errors.Is(err, sessiongit.ErrRelocateStateUnknown)
 }
 
 // Resource-exhaustion errnos — the failure is a kernel-level resource limit,
@@ -111,15 +111,19 @@ func lostRestoreEnvironmentalBackoff(attempt int) time.Duration {
 // m.mu.
 func (st *lostRestoreState) armEnvironmentalRetry() (int, time.Duration) {
 	st.environmentalFailures++
+	st.totalAttempts++
 	backoff := lostRestoreEnvironmentalBackoff(st.environmentalFailures)
 	st.nextAttempt = time.Now().Add(backoff)
 	return st.environmentalFailures, backoff
 }
 
 // restoreAttempts is the 1-based count of restore ATTEMPTS the episode has
-// made: every failure of either class plus the spawn that just landed, so a
-// session recovered through an environmental window still reports the tries
-// it actually took ("restored after N attempts"). Caller holds m.mu.
+// made: every failure recorded on the state plus the spawn that just
+// landed. It reads the cumulative counter rather than the streaks — a
+// structural failure resets the environmental streak, so summing streaks
+// would under-report a mixed episode ("restored after 2 attempts" for a
+// recovery that took seven) — while still counting the tries it actually
+// took (#5295 review). Caller holds m.mu.
 func (st *lostRestoreState) restoreAttempts() int {
-	return st.consecutiveFailures + st.environmentalFailures + 1
+	return st.totalAttempts + 1
 }

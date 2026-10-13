@@ -3,14 +3,10 @@ package daemon
 import (
 	"errors"
 	stdlog "log"
-	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The Lost-session restore loop (#1108 PR 2): the general form of the
@@ -124,7 +120,11 @@ type lostRestoreState struct {
 	// environmentalFailures is the environmental streak: its own counter and
 	// capped backoff, never a path to give-up (#5295).
 	environmentalFailures int
-	nextAttempt           time.Time
+	// totalAttempts is the cumulative failure count this episode has
+	// absorbed across both classes — the numerator user-visible "attempt N"
+	// diagnostics report, so a mixed episode cannot undercount (#5295).
+	totalAttempts int
+	nextAttempt   time.Time
 	// awaitingConfirm marks a restore whose spawn RETURNED SUCCESS but whose
 	// replacement runtime has not yet been OBSERVED alive. The state is
 	// deliberately retained across that window (#1910): if the session goes Lost
@@ -530,6 +530,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			// "release capacity at terminal give-up" contract #3347 applied to the
 			// Recover branch but never reached this pre-#3347 arm.
 			st.preserveFailureAttempts++
+			st.totalAttempts++
 			attempts := st.preserveFailureAttempts
 			if attempts >= lostRestoreMaxAttempts {
 				st.nextAttempt = time.Time{}
@@ -563,6 +564,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.environmentalFailures = 0
+		st.totalAttempts = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
 	}
@@ -706,6 +708,7 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.environmentalFailures = 0
+		st.totalAttempts = 0
 		st.nextAttempt = time.Time{}
 	}
 	m.mu.Unlock()
@@ -740,6 +743,7 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	}
 	st.consecutiveFailures = 0
 	st.environmentalFailures = 0
+	st.totalAttempts = 0
 	st.awaitingConfirm = false
 	// Clear per-episode diagnostic dedupe flags so that the replacement sandbox's
 	// failures log at their natural first occurrence rather than being suppressed
@@ -756,8 +760,19 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 // fact as well as an ERROR log, so daemon restart and every client retain the
 // reason automatic recovery stopped.
 func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, inst *session.Instance, err error) {
+	// The durable terminal verdict is a session fact, safe to read before the
+	// state lock. Arming an environmental retry for a session the entry gate
+	// refuses would log "retrying in …" for a retry that can never run — the
+	// honest report is that an explicit restore remains the way back (#5295
+	// review).
+	durableGaveUp := inst.LifecycleView().LostRestoreGaveUp
 	m.mu.Lock()
 	if lostRestoreEnvironmentalErr(err) {
+		if durableGaveUp {
+			m.mu.Unlock()
+			m.warn().Printf("restore of lost session %q (repo %s) failed on the environment — but the session already carries its durable give-up, so automatic retry stays stopped; another explicit restore is required once the condition clears: %v", inst.Title, repoID, err)
+			return
+		}
 		attempts, backoff := st.armEnvironmentalRetry()
 		m.mu.Unlock()
 		m.warn().Printf("restore of lost session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s (this failure class never reaches the %d-attempt give-up): %v", inst.Title, repoID, attempts, backoff, lostRestoreMaxAttempts, err)
@@ -765,6 +780,7 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 	}
 	st.environmentalFailures = 0
 	st.consecutiveFailures++
+	st.totalAttempts++
 	attempts := st.consecutiveFailures
 	if attempts >= lostRestoreMaxAttempts {
 		st.nextAttempt = time.Time{}
@@ -837,6 +853,7 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 			// that attempt also fails, continue the attempt count and remain terminal
 			// instead of promising an automatic retry the durable gate will refuse.
 			st.consecutiveFailures = persistedFailure.Attempts
+			st.totalAttempts = persistedFailure.Attempts
 		}
 		m.lostRestoreStates[stateKey] = st
 	}
@@ -846,153 +863,4 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 	teardownInFlight := operationInFlight && trigger != lostRestoreManual
 	m.logVanishedWorktreeOnce(repoID, st, inst, restoreErr, teardownInFlight)
 	m.lostRestoreFailed(key, repoID, st, inst, restoreErr)
-}
-
-func (m *Manager) logVanishedWorktreeOnce(repoID string, st *lostRestoreState, inst *session.Instance, restoreErr error, teardownInFlight bool) {
-	worktreePath, ok := missingWorktreePath(restoreErr)
-	if !ok {
-		return
-	}
-
-	m.mu.Lock()
-	alreadyLogged := st.vanishedWorktreeWasLogged(worktreePath)
-	if !alreadyLogged {
-		if st.vanishedWorktreesLogged == nil {
-			st.vanishedWorktreesLogged = make(map[string]struct{})
-		}
-		st.vanishedWorktreesLogged[worktreePath] = struct{}{}
-	}
-	m.mu.Unlock()
-	if alreadyLogged {
-		return
-	}
-
-	gw, _ := inst.GetGitWorktree()
-	diag := sessiongit.MissingWorktreeDiagnosis{
-		WorktreePath: worktreePath,
-		ParentPath:   filepath.Dir(worktreePath),
-	}
-	if gw != nil {
-		diag = gw.DiagnoseMissingWorktree()
-	}
-	branch := inst.GetBranch()
-	if branch == "" {
-		branch = diag.BranchName
-	}
-	liveness := inst.GetLiveness()
-	op := inst.GetInFlightOp()
-	userKilled := inst.UserKilled()
-	teardownIntent := userKilled || teardownInFlight || op == session.OpKilling || op == session.OpArchiving
-	classification := classifyMissingWorktree(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered, teardownIntent)
-
-	m.err().Printf(
-		"WORKTREE_MISSING_DETECTED classification=%q title=%q instance_id=%q repo_id=%q repo_path=%q worktree_path=%q branch=%q liveness=%q status=%q started=%t user_killed=%t kill_in_flight=%t in_flight_op=%d external_worktree=%t branch_created_by_us=%t observed_at=%q parent_path=%q parent_exists=%t parent_stat_error=%q repo_exists=%t repo_stat_error=%q git_worktree_registered=%q git_worktree_list_error=%q branch_exists=%q branch_probe_error=%q recover_error=%q",
-		classification,
-		inst.Title,
-		inst.ID,
-		repoID,
-		diag.RepoPath,
-		worktreePath,
-		branch,
-		livenessLabel(liveness),
-		statusLabel(inst.GetStatus()),
-		inst.Started(),
-		userKilled,
-		teardownInFlight,
-		op,
-		diag.ExternalWorktree,
-		diag.BranchCreatedByUs,
-		time.Now().UTC().Format(time.RFC3339Nano),
-		diag.ParentPath,
-		diag.ParentExists,
-		diag.ParentStatError,
-		diag.RepoExists,
-		diag.RepoStatError,
-		triBool(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered),
-		diag.WorktreeListError,
-		triBool(diag.BranchKnown, diag.BranchExists),
-		diag.BranchError,
-		restoreErr.Error(),
-	)
-}
-
-func missingWorktreePath(err error) (string, bool) {
-	var wtErr *session.WorktreeUnavailableError
-	if !errors.As(err, &wtErr) || !errors.Is(err, os.ErrNotExist) {
-		return "", false
-	}
-	if wtErr.WorktreePath == "" {
-		return "<empty>", true
-	}
-	return wtErr.WorktreePath, true
-}
-
-func (st *lostRestoreState) vanishedWorktreeWasLogged(path string) bool {
-	if st == nil || st.vanishedWorktreesLogged == nil {
-		return false
-	}
-	_, ok := st.vanishedWorktreesLogged[path]
-	return ok
-}
-
-func classifyMissingWorktree(registrationKnown, registered, teardownIntent bool) string {
-	if teardownIntent {
-		return "expected_teardown"
-	}
-	if registrationKnown && registered {
-		return "unexpected_external_removal"
-	}
-	if registrationKnown {
-		return "missing_unregistered_live_worktree"
-	}
-	return "missing_worktree_registration_unknown"
-}
-
-func triBool(known, value bool) string {
-	if !known {
-		return "unknown"
-	}
-	return strconv.FormatBool(value)
-}
-
-func livenessLabel(lv session.Liveness) string {
-	switch lv {
-	case session.LivenessUnset:
-		return "LivenessUnset"
-	case session.LiveRunning:
-		return "LiveRunning"
-	case session.LiveReady:
-		return "LiveReady"
-	case session.LiveLost:
-		return "LiveLost"
-	case session.LiveDead:
-		return "LiveDead"
-	case session.LiveArchived:
-		return "LiveArchived"
-	case session.LiveLimitReached:
-		return "LiveLimitReached"
-	default:
-		return "Liveness(" + strconv.Itoa(int(lv)) + ")"
-	}
-}
-
-func statusLabel(s session.Status) string {
-	switch s {
-	case session.Running:
-		return "Running"
-	case session.Ready:
-		return "Ready"
-	case session.Loading:
-		return "Loading"
-	case session.Deleting:
-		return "Deleting"
-	case session.Dead:
-		return "Dead"
-	case session.Lost:
-		return "Lost"
-	case session.Archived:
-		return "Archived"
-	default:
-		return "Status(" + strconv.Itoa(int(s)) + ")"
-	}
 }

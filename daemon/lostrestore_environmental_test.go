@@ -15,8 +15,10 @@ import (
 )
 
 // TestLostRestoreEnvironmentalErr pins the #5295 classification: transient
-// resource-exhaustion errnos and deadline verdicts are environmental; a
-// session defect, a permissions fault, a bare "state unknown" sentinel (a
+// resource-exhaustion errnos are environmental, as is the deadline +
+// relocate-sentinel pair af's bounded probes produce for a non-answer. A
+// session defect, a permissions fault, a bare deadline (a hung launch_cmd
+// wraps it too — a session defect), a bare "state unknown" sentinel (a
 // definitive verdict — the worktree is at no candidate), or a string that
 // merely SAYS "no space left" is not — classification runs through
 // errors.Is on the wrapped chain, never through message text.
@@ -35,10 +37,13 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"emfile", fmt.Errorf("open: %w", syscall.EMFILE), true},
 		{"enfile", fmt.Errorf("open: %w", syscall.ENFILE), true},
 		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), true},
-		{"deadline exceeded", fmt.Errorf("probe: %w", context.DeadlineExceeded), true},
-		{"relocate unknown carrying deadline", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), true},
+		{"deadline carrying relocate sentinel", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), true},
 		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), true},
 
+		// A bare deadline is ambiguous — a permanently hung launch_cmd wraps
+		// it too, and that is a session defect, not an outage.
+		{"deadline exceeded bare", fmt.Errorf("probe: %w", context.DeadlineExceeded), false},
+		{"deadline exceeded launch_cmd style", fmt.Errorf("backend=hook: launch_cmd failed for %q: %w", "t", context.DeadlineExceeded), false},
 		// The bare sentinel is a definitive verdict — "the recorded worktree
 		// is at no candidate" — not a waiting one; retrying cannot change it.
 		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), false},
@@ -121,9 +126,9 @@ func TestRestoreLostSessions_EnvironmentalFailuresNeverGiveUp(t *testing.T) {
 	}
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
-	var consecutive, environmental int
+	var consecutive, environmental, total int
 	if st != nil {
-		consecutive, environmental = st.consecutiveFailures, st.environmentalFailures
+		consecutive, environmental, total = st.consecutiveFailures, st.environmentalFailures, st.totalAttempts
 	}
 	manager.mu.Unlock()
 	if st == nil {
@@ -134,6 +139,9 @@ func TestRestoreLostSessions_EnvironmentalFailuresNeverGiveUp(t *testing.T) {
 	}
 	if environmental != passes {
 		t.Fatalf("environmentalFailures = %d, want %d", environmental, passes)
+	}
+	if total != passes {
+		t.Fatalf("totalAttempts = %d, want %d — the cumulative counter must count every failure class", total, passes)
 	}
 	if !strings.Contains(ownLogs.warnings.String(), "waiting on the environment") {
 		t.Fatalf("the wait must say what it is waiting on; warn logs:\n%s", ownLogs.warnings.String())
@@ -150,19 +158,28 @@ func TestRestoreLostSessions_EnvironmentalFailuresNeverGiveUp(t *testing.T) {
 
 // TestRestoreLostSessions_EnvironmentalClearsToRecover is the recovery half
 // of #5295: once the condition clears, the next pass restores the session
-// with no manual action — no operator re-archive needed.
+// with no manual action — no operator re-archive needed. A structural
+// failure interleaved in the window must neither derail the recovery nor
+// shrink the reported attempt count: the log counts every try the episode
+// actually made.
 func TestRestoreLostSessions_EnvironmentalClearsToRecover(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	zeroRestoreBackoff(t)
+	environmental := fmt.Errorf("recover: %w", syscall.ENOSPC)
+	structural := errors.New("recover: agent exited at startup")
 	backend := &recoverFakeBackend{
 		FakeBackend: session.NewFakeBackend(),
-		failWith:    fmt.Errorf("recover: %w", syscall.ENOSPC),
+		failWith:    environmental,
 	}
 	inst := registerStarted(t, manager, repoID, repoPath, "disk-frees", backend, true, session.Lost)
 
-	for i := 0; i < lostRestoreMaxAttempts+3; i++ {
+	for i := 0; i < lostRestoreMaxAttempts-1; i++ {
 		manager.RestoreLostSessions()
 	}
+	backend.mu.Lock()
+	backend.failWith = structural
+	backend.mu.Unlock()
+	manager.RestoreLostSessions()
 
 	backend.mu.Lock()
 	backend.failWith = nil
@@ -179,6 +196,12 @@ func TestRestoreLostSessions_EnvironmentalClearsToRecover(t *testing.T) {
 	manager.mu.Unlock()
 	if hasState {
 		t.Fatal("a confirmed-alive recovery must drop the whole episode state, environmental streak included")
+	}
+	// 5 environmental + 1 structural failure + the spawn that landed = 7
+	// attempts; summing the streaks would report 2.
+	want := fmt.Sprintf("restored after %d attempts", lostRestoreMaxAttempts+1)
+	if !strings.Contains(ownLogs.info.String(), want) {
+		t.Fatalf("attempt log must count every failure class cumulatively; want %q in info logs:\n%s", want, ownLogs.info.String())
 	}
 }
 
@@ -220,9 +243,9 @@ func TestRestoreLostSessions_StructuralStillGivesUpAmidEnvironmental(t *testing.
 	}
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
-	envStreak := 0
+	envStreak, total := 0, 0
 	if st != nil {
-		envStreak = st.environmentalFailures
+		envStreak, total = st.environmentalFailures, st.totalAttempts
 	}
 	manager.mu.Unlock()
 	if st == nil {
@@ -230,6 +253,9 @@ func TestRestoreLostSessions_StructuralStillGivesUpAmidEnvironmental(t *testing.
 	}
 	if envStreak != 0 {
 		t.Fatalf("environmentalFailures = %d after a structural failure, want the streak ended", envStreak)
+	}
+	if total != 2*lostRestoreMaxAttempts {
+		t.Fatalf("totalAttempts = %d, want %d — the cumulative counter must count both classes", total, 2*lostRestoreMaxAttempts)
 	}
 
 	// And the terminal session stays stopped even though the environment is
@@ -263,5 +289,57 @@ func TestRestoreLostSessions_EnvironmentalBackoffDefers(t *testing.T) {
 
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("passes inside the environmental backoff window must not re-attempt: want 1, got %d", got)
+	}
+}
+
+// TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing is
+// the honesty half of the durable gate: a manual restore on a session that
+// already carries its terminal verdict cannot arm an automatic retry —
+// lostSessionWantsRestore refuses it — so the log must name the real
+// off-ramp (another explicit restore) instead of promising "retrying in …"
+// (#5295 review).
+func TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing(t *testing.T) {
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	zeroRestoreBackoff(t)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    errors.New("recover: agent exited at startup"),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "terminal", backend, true, session.Lost)
+
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	if !inst.LifecycleView().LostRestoreGaveUp {
+		t.Fatal("setup: six structural failures must reach the durable give-up")
+	}
+
+	manager.recordLostRestoreFailure(daemonInstanceKey(repoID, "terminal"), repoID, inst,
+		fmt.Errorf("recover: %w", syscall.ENOSPC), lostRestoreManual)
+
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("retry state vanished: the recorded failure must stay tracked")
+	}
+	if st.environmentalFailures != 0 {
+		t.Fatalf("environmentalFailures = %d: a gave-up session must not accumulate an environmental streak", st.environmentalFailures)
+	}
+	if !st.nextAttempt.IsZero() {
+		t.Fatal("an environmental retry was armed for a session the entry gate refuses — the promised retry can never run")
+	}
+	warnings := ownLogs.warnings.String()
+	if strings.Contains(warnings, "retrying in") {
+		t.Fatalf("the log promised a retry the durable gate refuses; warn logs:\n%s", warnings)
+	}
+	if !strings.Contains(warnings, "explicit restore") {
+		t.Fatalf("the honest report names the real off-ramp; warn logs:\n%s", warnings)
+	}
+
+	// And the loop itself still refuses the session — nothing re-armed it.
+	manager.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != lostRestoreMaxAttempts {
+		t.Fatalf("recover calls = %d, want still %d — gave-up stays terminal", got, lostRestoreMaxAttempts)
 	}
 }

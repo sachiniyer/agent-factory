@@ -892,7 +892,7 @@ func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, set
 			g.recordStaleClaimLocked(claim)
 		}
 		return errors.Join(fmt.Errorf(
-			"worktree path %s changed after identity resolution: %v", claim.Path, err,
+			"worktree path %s changed after identity resolution: %w", claim.Path, err,
 		), ErrRelocateStateUnknown)
 	}
 	if !claim.identity.same(identity) {
