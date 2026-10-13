@@ -186,13 +186,76 @@ func attemptNoun(attempts int) string {
 // clear is not already swept into a settlement write on the same path — the
 // give-up and heal arms write the row themselves right after clearing. The
 // caller must not hold m.mu (the write takes it through the repo start lock).
-func (m *Manager) clearLostRestoreWaitDurable(repoID string, inst *session.Instance) {
-	if !inst.ClearLostRestoreWait() {
+//
+// deadlineShareSpent is the structural charge that follows an exhausted
+// deadline-class share: the spent marker is written alongside the clear so a
+// restart cannot re-grant the class a fresh share of free waits (#5295
+// review).
+func (m *Manager) clearLostRestoreWaitDurable(repoID string, inst *session.Instance, deadlineShareSpent bool) {
+	marked := deadlineShareSpent && inst.MarkLostRestoreDeadlineSpent()
+	cleared := inst.ClearLostRestoreWait()
+	if !marked && !cleared {
 		return
 	}
 	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
 		m.warn().Printf("lost session %q: the ended environmental wait is cleared in memory but its stale copy is not yet durable: %v", inst.Title, err)
 	}
+}
+
+// retireLostRestoreEnvironment clears BOTH the armed wait and a spent
+// deadline marker at an episode-end edge — a landed push, a force-replaced
+// sandbox, a fresh budget — persisting when either changed. The same write
+// class as clearLostRestoreWaitDurable, and the same lock contract.
+func (m *Manager) retireLostRestoreEnvironment(repoID string, inst *session.Instance) {
+	cleared := inst.ClearLostRestoreWait()
+	unmarked := inst.ClearLostRestoreDeadlineSpent()
+	if !cleared && !unmarked {
+		return
+	}
+	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
+		m.warn().Printf("lost session %q: the ended environmental wait is cleared in memory but its stale copy is not yet durable: %v", inst.Title, err)
+	}
+}
+
+// resetPreserveBudget clears the push-failure episode counter for the session
+// identified by repoID and inst after a successful preserve. This mirrors what
+// the automatic probeAnsweredDead path does in-line, so that the manual restore
+// path also resets the budget when its own preserveSandboxBeforeReap lands — a
+// successful push ends the episode regardless of which path ran it.
+func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if st := m.lostRestoreStates[stateKey]; st != nil {
+		st.preserveFailureAttempts = 0
+		st.remoteUnknownAttempts = 0
+		st.environmentalFailures = 0
+		st.environmentalDeadlineFailures = 0
+		// consecutiveFailures — and therefore the cumulative totalAttempts —
+		// deliberately survives: this is the preserve episode's reset, not
+		// the Recover episode's (#5295 review).
+		st.nextAttempt = time.Time{}
+	}
+	m.mu.Unlock()
+	m.retireLostRestoreEnvironment(repoID, inst)
+}
+
+// observationsSinceSpawnLocked reports how many ANSWERS polls have gotten out of
+// this session's runtime since its last respawn. Caller holds m.mu.
+func (m *Manager) observationsSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) uint64 {
+	observed := m.aliveObservations[stableSessionKey(repoID, inst)]
+	if observed < st.observedAtSpawn {
+		// The counter only moves forward, but a state rebuilt against a different
+		// runtime must never read as confirmed through unsigned arithmetic.
+		return 0
+	}
+	return observed - st.observedAtSpawn
+}
+
+// confirmedAliveSinceSpawnLocked reports whether the replacement runtime has
+// answered enough polls to count as restored — the definition of "confirmed alive"
+// (#1917 round 6), sustained rather than single-shot (#3412). Caller holds m.mu.
+func (m *Manager) confirmedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
+	return m.observationsSinceSpawnLocked(repoID, inst, st) >= lostRestoreConfirmObservations
 }
 
 // info is the restoring Manager's INFO logger. This helper is package-level and

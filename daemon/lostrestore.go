@@ -356,8 +356,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// recordLostRestoreFailure reads the durable failure: a restart drops the
 	// in-memory streaks but keeps the session fact, and the bounded deadline
 	// share must come back with it or every restart would grant a fresh one
-	// (#5295 review).
+	// (#5295 review). The spent marker covers the case where the wait already
+	// retired on a structural charge.
 	persistedWait := inst.LostRestoreWaitSnapshot()
+	deadlineSpent := inst.LostRestoreDeadlineSpent()
 
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
@@ -371,6 +373,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			st.environmentalFailures = persistedWait.Attempts
 			st.environmentalDeadlineFailures = persistedWait.DeadlineWaits
 			st.totalAttempts = persistedWait.TotalAttempts
+		}
+		if deadlineSpent {
+			st.environmentalDeadlineFailures = lostRestoreMaxAttempts
 		}
 		m.lostRestoreStates[stateKey] = st
 	}
@@ -482,6 +487,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 		inst.ClearLostRestoreFailure()
 		inst.ClearLostRestoreWait()
+		inst.ClearLostRestoreDeadlineSpent()
 		// Clear before the persist, same ordering rule as the recovery path below:
 		// the answered probe already ended the loss episode, and leaving the stale
 		// count in place across a disk write lets a blip in that window re-mark the
@@ -610,6 +616,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 					m.warn().Printf("preserve of lost remote session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
 				}
 				inst.ClearLostRestoreWait()
+				inst.ClearLostRestoreDeadlineSpent()
 				inst.SetLostRestoreFailure(total, err)
 				m.err().Printf("restore of lost session %q (repo %s): giving up after %d preserve-push failures: %v", inst.Title, repoID, attempts, err)
 				if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
@@ -622,7 +629,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			if deadlineBoundedSpent {
 				m.warn().Printf("preserve of lost remote session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
 			}
-			m.clearLostRestoreWaitDurable(repoID, inst)
+			m.clearLostRestoreWaitDurable(repoID, inst, deadlineBoundedSpent)
 			if logIt {
 				m.warn().Printf("%v", err)
 			}
@@ -641,7 +648,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		st.environmentalDeadlineFailures = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
-		m.clearLostRestoreWaitDurable(repoID, inst)
+		m.retireLostRestoreEnvironment(repoID, inst)
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
@@ -709,7 +716,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	}
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
-	attempt := m.armRestoreConfirmation(repoID, inst)
+	// persistedWait survives noteRuntimeReplaced's clear only in the local copy,
+	// which is what keeps the cumulative count honest across the swap.
+	restoredAttempts := 0
+	if persistedWait != nil {
+		restoredAttempts = persistedWait.TotalAttempts
+	}
+	attempt := m.armRestoreConfirmation(repoID, inst, restoredAttempts)
 	m.info().Printf("restore of lost session %q (repo %s) started attempt %d: agent re-spawned; awaiting liveness confirmation", inst.Title, repoID, attempt)
 }
 
@@ -730,7 +743,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 // look like a first-time loss on every poll.
 //
 // The entry is created if absent: the manual path may run with no prior automatic
-// attempts on record. Takes m.mu itself; the caller must not already hold it.
+// attempts on record. restoredAttempts is the cumulative count the caller
+// snapshotted BEFORE the runtime replacement cleared the durable wait — without
+// it a manual restore that followed persisted environmental waits reports
+// "restored after 1 attempt" for what was really the sixth (#5295 review).
+// Takes m.mu itself; the caller must not already hold it.
 //
 // The entry and the observation counter it snapshots are keyed the SAME way — by
 // stable identity — which is the invariant #2868 broke: observedAtSpawn was read
@@ -738,12 +755,14 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 // so a successor's zeroed counter could never advance past a value its
 // predecessor had earned, and the sweep kept a state that belonged to a session
 // the user had already discarded.
-func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) int {
+func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance, restoredAttempts int) int {
 	// A spawn that returned proves the environment answered this attempt —
 	// any environmental wait it was showing is stale regardless of how the
 	// confirmation window ends. Make the clear durable: the caller's write
-	// ran before the arm, so nothing else carries it.
-	m.clearLostRestoreWaitDurable(repoID, inst)
+	// ran before the arm, so nothing else carries it. The deadline marker
+	// survives: a death inside the window continues this same episode, whose
+	// spent share is not repaid by one answered spawn.
+	m.clearLostRestoreWaitDurable(repoID, inst, false)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := stableSessionKey(repoID, inst)
@@ -752,50 +771,12 @@ func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) 
 		st = &lostRestoreState{}
 		m.lostRestoreStates[key] = st
 	}
+	if restoredAttempts > st.totalAttempts {
+		st.totalAttempts = restoredAttempts
+	}
 	st.awaitingConfirm = true
 	st.observedAtSpawn = m.aliveObservations[key]
 	return st.restoreAttempts()
-}
-
-// observationsSinceSpawnLocked reports how many ANSWERS polls have gotten out of
-// this session's runtime since its last respawn. Caller holds m.mu.
-func (m *Manager) observationsSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) uint64 {
-	observed := m.aliveObservations[stableSessionKey(repoID, inst)]
-	if observed < st.observedAtSpawn {
-		// The counter only moves forward, but a state rebuilt against a different
-		// runtime must never read as confirmed through unsigned arithmetic.
-		return 0
-	}
-	return observed - st.observedAtSpawn
-}
-
-// confirmedAliveSinceSpawnLocked reports whether the replacement runtime has
-// answered enough polls to count as restored — the definition of "confirmed alive"
-// (#1917 round 6), sustained rather than single-shot (#3412). Caller holds m.mu.
-func (m *Manager) confirmedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
-	return m.observationsSinceSpawnLocked(repoID, inst, st) >= lostRestoreConfirmObservations
-}
-
-// resetPreserveBudget clears the push-failure episode counter for the session
-// identified by repoID and inst after a successful preserve. This mirrors what
-// the automatic probeAnsweredDead path does in-line, so that the manual restore
-// path also resets the budget when its own preserveSandboxBeforeReap lands — a
-// successful push ends the episode regardless of which path ran it.
-func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
-	stateKey := stableSessionKey(repoID, inst)
-	m.mu.Lock()
-	if st := m.lostRestoreStates[stateKey]; st != nil {
-		st.preserveFailureAttempts = 0
-		st.remoteUnknownAttempts = 0
-		st.environmentalFailures = 0
-		st.environmentalDeadlineFailures = 0
-		// consecutiveFailures — and therefore the cumulative totalAttempts —
-		// deliberately survives: this is the preserve episode's reset, not
-		// the Recover episode's (#5295 review).
-		st.nextAttempt = time.Time{}
-	}
-	m.mu.Unlock()
-	m.clearLostRestoreWaitDurable(repoID, inst)
 }
 
 // resetRecoverBudget clears the Recover-flap episode counter for the session
@@ -841,7 +822,7 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	// A force-replaced sandbox owns none of the predecessor's wait — the row
 	// must not keep claiming the environment is to blame once the episode is
 	// deliberately reset.
-	m.clearLostRestoreWaitDurable(repoID, inst)
+	m.retireLostRestoreEnvironment(repoID, inst)
 }
 
 // lostRestoreFailed records a failed restore attempt, backing off until the
@@ -917,6 +898,7 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 			m.warn().Printf("restore of lost session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
 		}
 		inst.ClearLostRestoreWait()
+		inst.ClearLostRestoreDeadlineSpent()
 		inst.SetLostRestoreFailure(total, err)
 		m.err().Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, total, err)
 		if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
@@ -933,9 +915,11 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 	// A structural charge ends the wait: the row stops claiming the loop is
 	// waiting on the environment the moment the failure is the session's own.
 	// Persist it — nothing else on this path writes, so a restart would
-	// otherwise resurrect the stale "waiting on the environment" row
+	// otherwise resurrect the stale "waiting on the environment" row. And when
+	// the charge follows an exhausted deadline share, mark that share durably
+	// spent so the restart cannot re-grant the class fresh waits
 	// (#5295 review).
-	m.clearLostRestoreWaitDurable(repoID, inst)
+	m.clearLostRestoreWaitDurable(repoID, inst, deadlineBoundedSpent)
 	m.warn().Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", inst.Title, total, backoff, err)
 }
 
@@ -957,6 +941,7 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 	stateKey := stableSessionKey(repoID, inst)
 	persistedFailure := inst.LostRestoreFailureSnapshot()
 	persistedWait := inst.LostRestoreWaitSnapshot()
+	deadlineSpent := inst.LostRestoreDeadlineSpent()
 	m.mu.Lock()
 	st := m.lostRestoreStates[stateKey]
 	if st == nil {
@@ -981,6 +966,9 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 			if persistedWait.TotalAttempts > st.totalAttempts {
 				st.totalAttempts = persistedWait.TotalAttempts
 			}
+		}
+		if deadlineSpent {
+			st.environmentalDeadlineFailures = lostRestoreMaxAttempts
 		}
 		m.lostRestoreStates[stateKey] = st
 	}

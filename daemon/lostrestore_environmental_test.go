@@ -589,3 +589,103 @@ func TestRestoreLostSessions_EnvironmentalWaitPersistFailureStaysOffSettleOwed(t
 		t.Fatalf("FlushOwedSettlements retried %d writes for the row — the dropped wait persist must not be owed", persistAttempts-before)
 	}
 }
+
+// TestRestoreLostSessions_DeadlineSpentMarkerSurvivesWaitClear is the gap the
+// durable spent marker closes (#5295 review): once the bounded deadline class
+// exhausts its share and the next non-answer charges the structural budget,
+// the wait retires — and with it the only durable copy of the spent share. A
+// restart in the structural-backoff window must NOT hand the wedged probe a
+// fresh share of free waits.
+func TestRestoreLostSessions_DeadlineSpentMarkerSurvivesWaitClear(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+	probeNoAnswer := errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    probeNoAnswer,
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "spent-marker", backend, true, session.Lost)
+
+	// Spend the whole bounded share, then take the structural charge that
+	// retires the wait.
+	for i := 0; i < lostRestoreMaxAttempts+1; i++ {
+		manager.RestoreLostSessions()
+	}
+	if inst.LostRestoreWaitSnapshot() != nil {
+		t.Fatalf("wait = %#v after the charge, want retired", inst.LostRestoreWaitSnapshot())
+	}
+	if !inst.LostRestoreDeadlineSpent() {
+		t.Fatal("the structural charge did not mark the deadline share spent")
+	}
+	if rec := recordFor(t, repoID, "spent-marker"); rec == nil || !rec.LostRestoreDeadlineSpent || rec.LostRestoreWait != nil {
+		t.Fatalf("persisted record = %#v — want the spent marker durable alongside the retired wait", rec)
+	}
+
+	// A restart inside the structural-backoff window drops the retry state
+	// and finds no wait row: only the marker says the share is spent.
+	manager.mu.Lock()
+	delete(manager.lostRestoreStates, stableSessionKey(repoID, inst))
+	manager.mu.Unlock()
+
+	// The next non-answer charges structural immediately — the restarted
+	// daemon owes no fresh share.
+	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	var consecutive, deadline int
+	if st != nil {
+		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
+	}
+	manager.mu.Unlock()
+	if consecutive != 1 {
+		t.Fatalf("consecutiveFailures = %d after a restart on the spent marker, want 1 — the marker must not re-grant a fresh deadline share", consecutive)
+	}
+	if deadline != 0 {
+		t.Fatalf("environmentalDeadlineFailures = %d after the charge — the marker must have seeded the share as already spent", deadline)
+	}
+}
+
+// TestArmRestoreConfirmationSeedsRestoredAttempts is the manual-restore half of
+// cumulative accounting (#5295 review): noteRuntimeReplaced retires the durable
+// wait as a predecessor fact before the confirmation arm runs, so the caller
+// snapshots its cumulative count first and the arm seeds the state with it.
+// Without the seed a restore after five persisted environmental waits reports
+// "restored after 1 attempt".
+func TestArmRestoreConfirmationSeedsRestoredAttempts(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "carried-count", nil, true, session.Lost)
+
+	// The wait the manual path snapshots before noteRuntimeReplaced clears it.
+	inst.SetLostRestoreWait(5, 0, 5, fmt.Errorf("recover: %w", syscall.ENOSPC))
+	wait := inst.LostRestoreWaitSnapshot()
+	if wait == nil {
+		t.Fatal("setup: the armed wait must snapshot")
+	}
+
+	attempt := manager.armRestoreConfirmation(repoID, inst, wait.TotalAttempts)
+	if attempt != 6 {
+		t.Fatalf("armRestoreConfirmation = attempt %d, want 6 — the five persisted waits plus this spawn", attempt)
+	}
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	total := 0
+	if st != nil {
+		total = st.totalAttempts
+	}
+	manager.mu.Unlock()
+	if total != 5 {
+		t.Fatalf("seeded totalAttempts = %d, want 5", total)
+	}
+	// And a death inside the confirmation window keeps charging the carried
+	// count, not a fresh one.
+	manager.recordLostRestoreFailure(daemonInstanceKey(repoID, "carried-count"), repoID, inst,
+		errors.New("recover: agent exited at startup"), lostRestoreManual)
+	manager.mu.Lock()
+	if st = manager.lostRestoreStates[stableSessionKey(repoID, inst)]; st != nil {
+		total = st.totalAttempts
+	}
+	manager.mu.Unlock()
+	if total != 6 {
+		t.Fatalf("totalAttempts = %d after the post-spawn death, want 6 — the carried count must keep charging", total)
+	}
+}

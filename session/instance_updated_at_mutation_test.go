@@ -61,6 +61,8 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"restore wait snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "enospc"})
 		}},
+		{"deadline spent mark", nil, func(t *testing.T, i *Instance) { i.MarkLostRestoreDeadlineSpent() }},
+		{"deadline spent clear", func(t *testing.T, i *Instance) { i.lostRestoreDeadlineSpent = true }, func(t *testing.T, i *Instance) { i.ClearLostRestoreDeadlineSpent() }},
 		{"root context", nil, func(t *testing.T, i *Instance) { i.ReconcileRootRecreateContext(RootRecreateContextFresh) }},
 		{"root acknowledgement", func(t *testing.T, i *Instance) { i.rootRecreateContext = RootRecreateContextFresh }, func(t *testing.T, i *Instance) { i.AcknowledgeRootRecreateContext() }},
 		{"conversation", nil, func(t *testing.T, i *Instance) {

@@ -185,6 +185,10 @@ export interface SessionData {
   lost_restore_failure?: LostRestoreFailure;
   /** Present while the restore loop defers a retry on the environment (#5295). */
   lost_restore_wait?: LostRestoreWait;
+  /** Set once the bounded deadline class spent its share this episode and the
+   *  wait retired on a structural charge — keeps a restart from re-granting
+   *  the class a fresh share of free waits (#5295). */
+  lost_restore_deadline_spent?: boolean;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */

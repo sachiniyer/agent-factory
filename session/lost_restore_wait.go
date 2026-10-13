@@ -151,3 +151,62 @@ func (i *Instance) ReconcileLostRestoreWait(wait *LostRestoreWait) bool {
 	i.touchLocked()
 	return true
 }
+
+// MarkLostRestoreDeadlineSpent records that the bounded deadline class already
+// spent its environmental share this episode and charged the structural
+// budget. Unlike the wait — which must clear the moment the failure is the
+// session's own — this marker survives that clear, so a daemon restart in the
+// structural-backoff window cannot re-grant the wedged probe a fresh share of
+// free waits (#5295 review). It retires at the same episode-end edges the wait
+// does.
+func (i *Instance) MarkLostRestoreDeadlineSpent() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.lostRestoreDeadlineSpent {
+		return false
+	}
+	i.lostRestoreDeadlineSpent = true
+	i.touchLocked()
+	return true
+}
+
+// LostRestoreDeadlineSpent reports whether the marker is set — the daemon
+// reads it before its own state lock to seed the bounded share across
+// restarts.
+func (i *Instance) LostRestoreDeadlineSpent() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.lostRestoreDeadlineSpent
+}
+
+// ClearLostRestoreDeadlineSpent retires the marker at an episode-end edge: a
+// landed preserve push, a force-replaced sandbox, a confirmed replacement, or
+// a terminal give-up (#5295 review).
+func (i *Instance) ClearLostRestoreDeadlineSpent() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.lostRestoreDeadlineSpent {
+		return false
+	}
+	i.lostRestoreDeadlineSpent = false
+	i.touchLocked()
+	return true
+}
+
+// ClearLostRestoreDeadlineSpentAtObservation is the observed-alive edge of
+// ClearLostRestoreDeadlineSpent — the same generation fence
+// ClearLostRestoreWaitAtObservation uses, so a late predecessor answer cannot
+// clear a successor's marker.
+func (i *Instance) ClearLostRestoreDeadlineSpentAtObservation(generation AgentObservationGeneration) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if generation.value == 0 || i.agentObservationGeneration.Load() != generation.value {
+		return false
+	}
+	if !i.lostRestoreDeadlineSpent {
+		return false
+	}
+	i.lostRestoreDeadlineSpent = false
+	i.touchLocked()
+	return true
+}
