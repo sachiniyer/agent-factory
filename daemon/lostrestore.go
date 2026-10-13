@@ -513,6 +513,12 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
+			// The durable terminal verdict is a session fact, safe to read
+			// before the state lock — the same discipline lostRestoreFailed
+			// applies: arming an environmental retry for a session the entry
+			// gate refuses would log "retrying in …" for a retry that can
+			// never run (#5295 review).
+			durableGaveUp := inst.LifecycleView().LostRestoreGaveUp
 			m.mu.Lock()
 			// A bare deadline IS the bounded-class signature at this call
 			// site: the only deadline producer inside preserveSandboxBeforeReap
@@ -526,6 +532,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			}
 			deadlineBoundedSpent := false
 			if class != lostRestoreEnvNone {
+				if durableGaveUp {
+					m.mu.Unlock()
+					m.warn().Printf("preserve of lost remote session %q (repo %s) failed on the environment — but the session already carries its durable give-up, so automatic retry stays stopped; another explicit restore is required once the condition clears: %v", inst.Title, repoID, err)
+					return
+				}
 				attempts, backoff, absorbed := st.armEnvironmentalRetry(class)
 				deadlineShare := st.environmentalDeadlineFailures
 				if absorbed {
