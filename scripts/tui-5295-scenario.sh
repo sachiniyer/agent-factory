@@ -309,6 +309,20 @@ elif [ "$BRANCH_WAIT_SEEN" = no ]; then
     rc=1
 fi
 
+# --- raw evidence dump -------------------------------------------------------
+# The evidence dir dies with the container, so the attestation's raw captures
+# have to ride the scenario log: screens (wait armed, persistent, cleared, the
+# master control), the df proofs, provenance, and the daemon restore lines.
+for f in provenance.txt df-master.txt df-branch.txt \
+         master-1.txt master-2.txt \
+         branch-wait-1.txt branch-wait-2.txt branch-cleared.txt branch-nowait.txt \
+         master-daemon-restore.log branch-daemon-restore.log; do
+    if [ -f "$EVID/$f" ]; then
+        printf '\n===== %s =====\n' "$f"
+        cat "$EVID/$f"
+    fi
+done
+
 if [ "$rc" -eq 0 ]; then
     printf 'PASS #5295: branch renders the environmental wait under real ENOSPC and clears it on relief; master control shows none\n'
 else
