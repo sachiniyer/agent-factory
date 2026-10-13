@@ -316,6 +316,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.info().Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
+		instance.ClearLostRestoreWait()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)

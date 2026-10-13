@@ -32,13 +32,42 @@ import (
 // unresolved, and still wanted back, so the obligation survives restart by
 // construction.
 //
+// The wait is unbounded only for the errno class: a kernel resource limit is
+// external to the session and so is its relief, so the loop waits as long as
+// the condition lasts. The deadline class is bounded — a probe that never
+// answers is indistinguishable from a permanently wedged relocation over the
+// long haul — so it gets the same lostRestoreMaxAttempts share as the
+// structural budget and then falls through to it (#5295 maintainer review).
+
+// lostRestoreEnvClass is which environmental wait — if any — a restore
+// failure earns.
+type lostRestoreEnvClass int
+
+const (
+	// lostRestoreEnvNone is a structural failure: the bounded #3347 budget
+	// owns it.
+	lostRestoreEnvNone lostRestoreEnvClass = iota
+	// lostRestoreEnvErrno is a kernel resource limit. The condition is
+	// external and so is its relief, so the wait is unbounded — the #5295
+	// property. Accepted worst case: a permanently full disk (or an fd
+	// table or rlimit that never frees) waits forever instead of giving up.
+	lostRestoreEnvErrno
+	// lostRestoreEnvDeadline is a bounded probe that could not answer —
+	// af's relocation probe pair (deadline + relocate-state sentinel), or
+	// the remote preserve push's transport deadline at that call site. The
+	// same verdict shape a permanently stuck condition produces, so the
+	// wait is bounded by lostRestoreMaxAttempts and then charged to the
+	// structural budget.
+	lostRestoreEnvDeadline
+)
+
 // Classification is by errors.Is through the wrapped chain — never by
 // message text, which both misses wrapped errnos and false-matches prose
 // ("no space left on device" in a string error must NOT classify).
-func lostRestoreEnvironmentalErr(err error) bool {
+func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	for _, errno := range lostRestoreEnvironmentalErrnos {
 		if errors.Is(err, errno) {
-			return true
+			return lostRestoreEnvErrno
 		}
 	}
 	// Neither half of the environmental non-answer signature is exempt on its
@@ -52,16 +81,24 @@ func lostRestoreEnvironmentalErr(err error) bool {
 	// non-answer and the sentinel names the probe that could not establish
 	// state. Every other timeout and every definitive verdict stays on the
 	// structural budget (#5295 review).
-	return errors.Is(err, context.DeadlineExceeded) &&
-		errors.Is(err, sessiongit.ErrRelocateStateUnknown)
+	if errors.Is(err, context.DeadlineExceeded) &&
+		errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+		return lostRestoreEnvDeadline
+	}
+	return lostRestoreEnvNone
+}
+
+// lostRestoreEnvironmentalErr is the bool form of
+// lostRestoreEnvironmentalClass for call sites that only need the verdict.
+func lostRestoreEnvironmentalErr(err error) bool {
+	return lostRestoreEnvironmentalClass(err) != lostRestoreEnvNone
 }
 
 // Resource-exhaustion errnos — the failure is a kernel-level resource limit,
 // external to the session, which external relief resolves. Deliberately NOT
 // included: EIO, EROFS, EACCES, EPERM (a permissions or media fault needs an
-// operator, and waiting forever would hide it), EAGAIN ("would block" is a
-// nonblocking-API artifact, not resource exhaustion), and any errno reached
-// only through message text.
+// operator, and waiting forever would hide it), and any errno reached only
+// through message text.
 var lostRestoreEnvironmentalErrnos = []error{
 	// A full filesystem is the #5295 incident itself: every write a restore
 	// needs — gitdir repair, instance settlement, tmux's spawn — fails until
@@ -79,6 +116,12 @@ var lostRestoreEnvironmentalErrnos = []error{
 	// the descriptor pressure does.
 	syscall.EMFILE,
 	syscall.ENFILE,
+	// A fork/clone that hits the user's RLIMIT_NPROC or the system task
+	// limit fails with EAGAIN — the same machine-wide resource window as
+	// EMFILE, surfacing through tmux and backend process starts. The
+	// nonblocking-I/O sense of EAGAIN cannot reach this classifier: Go's
+	// poll runtime retries it internally on blocking descriptors.
+	syscall.EAGAIN,
 	// A socket-level timeout is the network not answering — the same
 	// verdict shape the remote-safety arms already treat as "keep holding,
 	// the answer may come later".
@@ -107,14 +150,25 @@ func lostRestoreEnvironmentalBackoff(attempt int) time.Duration {
 }
 
 // armEnvironmentalRetry books the deferred retry for an environmental
-// failure and returns the streak count and the delay chosen. Caller holds
+// failure and returns the streak count and the delay chosen. absorbed is
+// false when the failure belongs to the deadline class and that class has
+// already spent its lostRestoreMaxAttempts share of the episode — the caller
+// then charges the structural budget instead of arming another wait, so a
+// probe that never answers still reaches the durable give-up. Caller holds
 // m.mu.
-func (st *lostRestoreState) armEnvironmentalRetry() (int, time.Duration) {
+func (st *lostRestoreState) armEnvironmentalRetry(class lostRestoreEnvClass) (attempts int, backoff time.Duration, absorbed bool) {
+	if class == lostRestoreEnvDeadline &&
+		st.environmentalDeadlineFailures >= lostRestoreMaxAttempts {
+		return 0, 0, false
+	}
 	st.environmentalFailures++
 	st.totalAttempts++
-	backoff := lostRestoreEnvironmentalBackoff(st.environmentalFailures)
+	if class == lostRestoreEnvDeadline {
+		st.environmentalDeadlineFailures++
+	}
+	backoff = lostRestoreEnvironmentalBackoff(st.environmentalFailures)
 	st.nextAttempt = time.Now().Add(backoff)
-	return st.environmentalFailures, backoff
+	return st.environmentalFailures, backoff, true
 }
 
 // restoreAttempts is the 1-based count of restore ATTEMPTS the episode has

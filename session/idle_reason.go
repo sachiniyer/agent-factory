@@ -9,15 +9,16 @@ import "time"
 type IdleReason string
 
 const (
-	IdleReasonNone                      IdleReason = ""
-	IdleReasonUsageLimit                IdleReason = "usage-limit"
-	IdleReasonProcessExited             IdleReason = "process-exited"
-	IdleReasonRestoreGaveUp             IdleReason = "restore-gave-up"
-	IdleReasonRecreatePending           IdleReason = "recreate-pending"
-	IdleReasonPromptNotDelivered        IdleReason = "prompt-not-delivered"
-	IdleReasonDeliveryUnconfirmed       IdleReason = "delivery-unconfirmed"
-	IdleReasonNoPaneChangeSinceDelivery IdleReason = "no-pane-change-since-delivery"
-	IdleReasonSettledAfterPaneChange    IdleReason = "settled-after-pane-change"
+	IdleReasonNone                        IdleReason = ""
+	IdleReasonUsageLimit                  IdleReason = "usage-limit"
+	IdleReasonProcessExited               IdleReason = "process-exited"
+	IdleReasonRestoreGaveUp               IdleReason = "restore-gave-up"
+	IdleReasonRestoreWaitingOnEnvironment IdleReason = "restore-waiting-on-environment"
+	IdleReasonRecreatePending             IdleReason = "recreate-pending"
+	IdleReasonPromptNotDelivered          IdleReason = "prompt-not-delivered"
+	IdleReasonDeliveryUnconfirmed         IdleReason = "delivery-unconfirmed"
+	IdleReasonNoPaneChangeSinceDelivery   IdleReason = "no-pane-change-since-delivery"
+	IdleReasonSettledAfterPaneChange      IdleReason = "settled-after-pane-change"
 )
 
 // Label is the short human wording shared by row renderers. Unknown future
@@ -30,6 +31,8 @@ func (r IdleReason) Label() string {
 		return "process exited"
 	case IdleReasonRestoreGaveUp:
 		return "restore gave up"
+	case IdleReasonRestoreWaitingOnEnvironment:
+		return "restore waiting on environment"
 	case IdleReasonRecreatePending:
 		return "recreate notice pending"
 	case IdleReasonPromptNotDelivered:
@@ -60,6 +63,9 @@ func IdleReasonFor(data InstanceData) IdleReason {
 	case LiveLost, LiveDead:
 		if data.LostRestoreFailure != nil && data.LostRestoreFailure.valid() {
 			return IdleReasonRestoreGaveUp
+		}
+		if data.LostRestoreWait != nil && data.LostRestoreWait.valid() {
+			return IdleReasonRestoreWaitingOnEnvironment
 		}
 		return IdleReasonProcessExited
 	case LiveReady:
@@ -502,13 +508,14 @@ func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in
 // one lock hold for row renderers.
 func (i *Instance) IdleReasonSnapshot() (IdleReason, time.Time) {
-	reason, _, churnAt := i.IdleReasonDetailSnapshot()
+	reason, _, _, churnAt := i.IdleReasonDetailSnapshot()
 	return reason, churnAt
 }
 
-// IdleReasonDetailSnapshot adds the structured terminal restore failure needed
-// by row renderers, under the same lock as the derived reason.
-func (i *Instance) IdleReasonDetailSnapshot() (IdleReason, *LostRestoreFailure, time.Time) {
+// IdleReasonDetailSnapshot adds the structured restore outcome needed by row
+// renderers — the terminal failure and the environmental wait — under the same
+// lock as the derived reason.
+func (i *Instance) IdleReasonDetailSnapshot() (IdleReason, *LostRestoreFailure, *LostRestoreWait, time.Time) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	data := InstanceData{
@@ -516,10 +523,12 @@ func (i *Instance) IdleReasonDetailSnapshot() (IdleReason, *LostRestoreFailure, 
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
+		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
 		RootRecreateContext:      i.rootRecreateContext,
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
 	}
-	return IdleReasonFor(data), cloneLostRestoreFailure(i.lostRestoreFailure), i.lastPaneChurnAt
+	return IdleReasonFor(data), cloneLostRestoreFailure(i.lostRestoreFailure),
+		cloneLostRestoreWait(i.lostRestoreWait), i.lastPaneChurnAt
 }

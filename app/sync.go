@@ -710,6 +710,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
 		changed = true
 	}
+	// The environmental wait is the same axis at the non-terminal end: it
+	// appears while the loop defers a retry and disappears when an attempt
+	// goes through or the failure turns structural (#5295).
+	if inst.ReconcileLostRestoreWait(d.LostRestoreWait) {
+		changed = true
+	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
 	// daemon heals a root and clears when any client opens that session's pane,
 	// both while the liveness sits at Ready. Reconciling it here is what makes an

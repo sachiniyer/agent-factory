@@ -15,58 +15,62 @@ import (
 )
 
 // TestLostRestoreEnvironmentalErr pins the #5295 classification: transient
-// resource-exhaustion errnos are environmental, as is the deadline +
-// relocate-sentinel pair af's bounded probes produce for a non-answer. A
-// session defect, a permissions fault, a bare deadline (a hung launch_cmd
-// wraps it too — a session defect), a bare "state unknown" sentinel (a
-// definitive verdict — the worktree is at no candidate), or a string that
-// merely SAYS "no space left" is not — classification runs through
-// errors.Is on the wrapped chain, never through message text.
+// resource-exhaustion errnos are environmental AND wait unbounded, while the
+// deadline + relocate-sentinel pair af's bounded probes produce for a
+// non-answer is environmental but bounded. A session defect, a permissions
+// fault, a bare deadline (a hung launch_cmd wraps it too — a session defect),
+// a bare "state unknown" sentinel (a definitive verdict — the worktree is at
+// no candidate), or a string that merely SAYS "no space left" is structural —
+// classification runs through errors.Is on the wrapped chain, never through
+// message text.
 func TestLostRestoreEnvironmentalErr(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		want bool
+		want lostRestoreEnvClass
 	}{
-		{"enospc bare", syscall.ENOSPC, true},
-		{"enospc wrapped", fmt.Errorf("recover: %w", syscall.ENOSPC), true},
-		{"enospc in PathError", &os.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, true},
-		{"enospc joined", errors.Join(errors.New("git failed"), fmt.Errorf("inner: %w", syscall.ENOSPC)), true},
-		{"edquot", fmt.Errorf("persist: %w", syscall.EDQUOT), true},
-		{"enomem", fmt.Errorf("spawn: %w", syscall.ENOMEM), true},
-		{"emfile", fmt.Errorf("open: %w", syscall.EMFILE), true},
-		{"enfile", fmt.Errorf("open: %w", syscall.ENFILE), true},
-		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), true},
-		{"deadline carrying relocate sentinel", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), true},
-		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), true},
+		{"enospc bare", syscall.ENOSPC, lostRestoreEnvErrno},
+		{"enospc wrapped", fmt.Errorf("recover: %w", syscall.ENOSPC), lostRestoreEnvErrno},
+		{"enospc in PathError", &os.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, lostRestoreEnvErrno},
+		{"enospc joined", errors.Join(errors.New("git failed"), fmt.Errorf("inner: %w", syscall.ENOSPC)), lostRestoreEnvErrno},
+		{"edquot", fmt.Errorf("persist: %w", syscall.EDQUOT), lostRestoreEnvErrno},
+		{"enomem", fmt.Errorf("spawn: %w", syscall.ENOMEM), lostRestoreEnvErrno},
+		{"emfile", fmt.Errorf("open: %w", syscall.EMFILE), lostRestoreEnvErrno},
+		{"enfile", fmt.Errorf("open: %w", syscall.ENFILE), lostRestoreEnvErrno},
+		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), lostRestoreEnvErrno},
+		{"deadline carrying relocate sentinel", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), lostRestoreEnvDeadline},
+		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvErrno},
 
 		// A bare deadline is ambiguous — a permanently hung launch_cmd wraps
 		// it too, and that is a session defect, not an outage.
-		{"deadline exceeded bare", fmt.Errorf("probe: %w", context.DeadlineExceeded), false},
-		{"deadline exceeded launch_cmd style", fmt.Errorf("backend=hook: launch_cmd failed for %q: %w", "t", context.DeadlineExceeded), false},
+		{"deadline exceeded bare", fmt.Errorf("probe: %w", context.DeadlineExceeded), lostRestoreEnvNone},
+		{"deadline exceeded launch_cmd style", fmt.Errorf("backend=hook: launch_cmd failed for %q: %w", "t", context.DeadlineExceeded), lostRestoreEnvNone},
 		// The bare sentinel is a definitive verdict — "the recorded worktree
 		// is at no candidate" — not a waiting one; retrying cannot change it.
-		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), false},
-		{"relocate unknown carrying non-errno text", errors.Join(errors.New("identity mismatch"), sessiongit.ErrRelocateStateUnknown), false},
+		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvNone},
+		{"relocate unknown carrying non-errno text", errors.Join(errors.New("identity mismatch"), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvNone},
 
-		{"nil", nil, false},
-		{"plain structural error", errors.New("worktree unavailable"), false},
-		{"string says no space but no errno", errors.New("no space left on device"), false},
-		{"enoent", syscall.ENOENT, false},
-		{"enoent wrapped", fmt.Errorf("stat: %w", syscall.ENOENT), false},
-		{"eacces", syscall.EACCES, false},
-		{"eperm", syscall.EPERM, false},
-		{"eio", syscall.EIO, false},
-		{"erofs", syscall.EROFS, false},
-		{"eagain", syscall.EAGAIN, false},
-		{"context canceled", context.Canceled, false},
-		{"flap sentinel", errRestoreFlapped, false},
-		{"died before confirm sentinel", errRestoreDiedBeforeConfirm, false},
+		{"nil", nil, lostRestoreEnvNone},
+		{"plain structural error", errors.New("worktree unavailable"), lostRestoreEnvNone},
+		{"string says no space but no errno", errors.New("no space left on device"), lostRestoreEnvNone},
+		{"enoent", syscall.ENOENT, lostRestoreEnvNone},
+		{"enoent wrapped", fmt.Errorf("stat: %w", syscall.ENOENT), lostRestoreEnvNone},
+		{"eacces", syscall.EACCES, lostRestoreEnvNone},
+		{"eperm", syscall.EPERM, lostRestoreEnvNone},
+		{"eio", syscall.EIO, lostRestoreEnvNone},
+		{"erofs", syscall.EROFS, lostRestoreEnvNone},
+		{"eagain", syscall.EAGAIN, lostRestoreEnvErrno}, // fork/clone rlimit exhaustion; Go retries nonblocking EAGAIN internally
+		{"context canceled", context.Canceled, lostRestoreEnvNone},
+		{"flap sentinel", errRestoreFlapped, lostRestoreEnvNone},
+		{"died before confirm sentinel", errRestoreDiedBeforeConfirm, lostRestoreEnvNone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := lostRestoreEnvironmentalErr(tc.err); got != tc.want {
-				t.Fatalf("lostRestoreEnvironmentalErr(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := lostRestoreEnvironmentalClass(tc.err); got != tc.want {
+				t.Fatalf("lostRestoreEnvironmentalClass(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+			if got := lostRestoreEnvironmentalErr(tc.err); got != (tc.want != lostRestoreEnvNone) {
+				t.Fatalf("lostRestoreEnvironmentalErr(%v) = %v, want %v", tc.err, got, tc.want != lostRestoreEnvNone)
 			}
 		})
 	}
@@ -123,6 +127,18 @@ func TestRestoreLostSessions_EnvironmentalFailuresNeverGiveUp(t *testing.T) {
 	}
 	if data := inst.ToInstanceData(); data.LostRestoreFailure != nil {
 		t.Fatalf("durable terminal failure written for an environmental episode: %#v", data.LostRestoreFailure)
+	}
+	// The wait is visible on the session the same way the gave-up verdict
+	// is: the row reports what it is waiting on, with the error that armed
+	// it, for as long as the condition lasts (#5295 maintainer review).
+	if !inst.LifecycleView().RestoreWaitingOnEnvironment {
+		t.Fatal("RestoreWaitingOnEnvironment = false: an armed environmental retry must be visible on the session")
+	}
+	if wait := inst.LostRestoreWaitSnapshot(); wait == nil || wait.Attempts != passes {
+		t.Fatalf("LostRestoreWaitSnapshot = %#v, want the armed wait with %d attempts", wait, passes)
+	}
+	if reason, _, _, _ := inst.IdleReasonDetailSnapshot(); reason != session.IdleReasonRestoreWaitingOnEnvironment {
+		t.Fatalf("idle reason = %q, want %q while the environment-wait is armed", reason, session.IdleReasonRestoreWaitingOnEnvironment)
 	}
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -188,6 +204,11 @@ func TestRestoreLostSessions_EnvironmentalClearsToRecover(t *testing.T) {
 
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running once the environmental condition cleared", got)
+	}
+	// A spawn that returned proves the environment answered: the wait the
+	// ENOSPC armed is stale the moment the attempt goes through (#5295).
+	if inst.LifecycleView().RestoreWaitingOnEnvironment {
+		t.Fatal("RestoreWaitingOnEnvironment still set after a spawn returned — the wait must clear on success")
 	}
 	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
@@ -292,6 +313,102 @@ func TestRestoreLostSessions_EnvironmentalBackoffDefers(t *testing.T) {
 	}
 }
 
+// TestRestoreLostSessions_DeadlineClassFallsThroughAfterBoundedShare pins the
+// bound the maintainer required on the deadline class (#5295 maintainer
+// review): a probe that never answers is indistinguishable from a permanently
+// wedged relocation over the long haul, so after lostRestoreMaxAttempts
+// environmental waits the next deadline-class failure charges the structural
+// budget — only the errno class waits unbounded.
+func TestRestoreLostSessions_DeadlineClassFallsThroughAfterBoundedShare(t *testing.T) {
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	zeroRestoreBackoff(t)
+	probeNoAnswer := errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    probeNoAnswer,
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "wedged-probe", backend, true, session.Lost)
+
+	// The class's full bounded share is absorbed environmentally first.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	var consecutive, deadline int
+	if st != nil {
+		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
+	}
+	manager.mu.Unlock()
+	if consecutive != 0 || deadline != lostRestoreMaxAttempts {
+		t.Fatalf("after %d absorbed waits: consecutiveFailures = %d, environmentalDeadlineFailures = %d — the bounded share must be tracked separately", lostRestoreMaxAttempts, consecutive, deadline)
+	}
+
+	// The next non-answer charges the structural budget: the environmental
+	// streak ends, the structural one starts, and the session stops claiming
+	// it is waiting on the environment.
+	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	st = manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	if st != nil {
+		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
+	}
+	manager.mu.Unlock()
+	if consecutive != 1 {
+		t.Fatalf("consecutiveFailures = %d after the bounded share was spent, want 1 — the non-answer must charge the structural budget", consecutive)
+	}
+	if deadline != 0 {
+		t.Fatalf("environmentalDeadlineFailures = %d after the structural charge, want the bounded streak ended", deadline)
+	}
+	if inst.LifecycleView().RestoreWaitingOnEnvironment {
+		t.Fatal("RestoreWaitingOnEnvironment still set after the failure went structural — the wait must clear")
+	}
+	if !strings.Contains(ownLogs.warnings.String(), "charges the structural budget") {
+		t.Fatalf("the deadline-class exhaustion must be visible in the warn log:\n%s", ownLogs.warnings.String())
+	}
+
+	// And the structural budget still terminates: five more non-answers —
+	// each earning one fresh bounded share that also exhausts — reach the
+	// durable give-up instead of waiting forever.
+	for i := 0; i < lostRestoreMaxAttempts*(lostRestoreMaxAttempts+1); i++ {
+		manager.RestoreLostSessions()
+	}
+	if !inst.LifecycleView().LostRestoreGaveUp {
+		t.Fatal("a deadline-class probe that never answers must still reach the durable give-up")
+	}
+}
+
+// TestRestoreLostSessions_StructuralFailureClearsEnvironmentWait: the wait is
+// a claim about why the loop is deferring — the moment a failure is the
+// session's own, the row stops claiming the environment (#5295 maintainer
+// review).
+func TestRestoreLostSessions_StructuralFailureClearsEnvironmentWait(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+	backend := &recoverFakeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    fmt.Errorf("recover: %w", syscall.ENOSPC),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "turns-structural", backend, true, session.Lost)
+
+	manager.RestoreLostSessions()
+	if !inst.LifecycleView().RestoreWaitingOnEnvironment {
+		t.Fatal("setup: the ENOSPC failure must have armed the environmental wait")
+	}
+
+	backend.mu.Lock()
+	backend.failWith = errors.New("recover: agent exited at startup")
+	backend.mu.Unlock()
+	manager.RestoreLostSessions()
+
+	if inst.LifecycleView().RestoreWaitingOnEnvironment {
+		t.Fatal("RestoreWaitingOnEnvironment still set after a structural failure")
+	}
+	if inst.LostRestoreWaitSnapshot() != nil {
+		t.Fatalf("LostRestoreWaitSnapshot = %#v after a structural failure, want cleared", inst.LostRestoreWaitSnapshot())
+	}
+}
+
 // TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing is
 // the honesty half of the durable gate: a manual restore on a session that
 // already carries its terminal verdict cannot arm an automatic retry —
@@ -314,6 +431,9 @@ func TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing(t *t
 		t.Fatal("setup: six structural failures must reach the durable give-up")
 	}
 
+	// Drop the setup's own warnings (the give-up arm logs "retrying in …"
+	// for attempts 1-5) so the checks below see only this failure's report.
+	ownLogs.warnings.Reset()
 	manager.recordLostRestoreFailure(daemonInstanceKey(repoID, "terminal"), repoID, inst,
 		fmt.Errorf("recover: %w", syscall.ENOSPC), lostRestoreManual)
 
@@ -330,8 +450,8 @@ func TestRestoreLostSessions_EnvironmentalFailureAfterGiveUpPromisesNothing(t *t
 		t.Fatal("an environmental retry was armed for a session the entry gate refuses — the promised retry can never run")
 	}
 	warnings := ownLogs.warnings.String()
-	if strings.Contains(warnings, "retrying in") {
-		t.Fatalf("the log promised a retry the durable gate refuses; warn logs:\n%s", warnings)
+	if strings.Contains(warnings, "waiting on the environment") {
+		t.Fatalf("the env arm promised a retry the durable gate refuses; warn logs:\n%s", warnings)
 	}
 	if !strings.Contains(warnings, "explicit restore") {
 		t.Fatalf("the honest report names the real off-ramp; warn logs:\n%s", warnings)

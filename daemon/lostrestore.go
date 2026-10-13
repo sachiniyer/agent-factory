@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	stdlog "log"
 	"sort"
@@ -118,8 +119,14 @@ type lostRestoreState struct {
 	// terminates on; environmental failures neither feed nor reset it.
 	consecutiveFailures int
 	// environmentalFailures is the environmental streak: its own counter and
-	// capped backoff, never a path to give-up (#5295).
+	// capped backoff, never a path to give-up on its own (#5295).
 	environmentalFailures int
+	// environmentalDeadlineFailures is the bounded class's share of that
+	// streak: deadline/probe non-answers may arm at most
+	// lostRestoreMaxAttempts environmental waits before the next one charges
+	// the structural budget — the errno class alone waits unbounded (#5295
+	// maintainer review). Resets wherever environmentalFailures does.
+	environmentalDeadlineFailures int
 	// totalAttempts is the cumulative failure count this episode has
 	// absorbed across both classes — the numerator user-visible "attempt N"
 	// diagnostics report, so a mixed episode cannot undercount (#5295).
@@ -464,6 +471,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.info().Printf("restore of lost session %q (repo %s): restored after 0 attempts; its existing remote sandbox answered alive, so the Lost mark was cleared without re-provisioning", inst.Title, repoID)
 		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 		inst.ClearLostRestoreFailure()
+		inst.ClearLostRestoreWait()
 		// Clear before the persist, same ordering rule as the recovery path below:
 		// the answered probe already ended the loss episode, and leaving the stale
 		// count in place across a disk write lets a blip in that window re-mark the
@@ -506,13 +514,38 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
 			m.mu.Lock()
-			if lostRestoreEnvironmentalErr(err) {
-				attempts, backoff := st.armEnvironmentalRetry()
-				m.mu.Unlock()
-				m.warn().Printf("preserve of lost remote session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s: %v", inst.Title, repoID, attempts, backoff, err)
-				return
+			// A bare deadline IS the bounded-class signature at this call
+			// site: the only deadline producer inside preserveSandboxBeforeReap
+			// is the bounded remote push — the network did not answer inside
+			// its bound. (The Recover path cannot make the same claim: a
+			// permanently hung user launch_cmd wraps the same sentinel, so
+			// there the relocate-sentinel pair is required — #5295 review.)
+			class := lostRestoreEnvironmentalClass(err)
+			if class == lostRestoreEnvNone && errors.Is(err, context.DeadlineExceeded) {
+				class = lostRestoreEnvDeadline
+			}
+			deadlineBoundedSpent := false
+			if class != lostRestoreEnvNone {
+				attempts, backoff, absorbed := st.armEnvironmentalRetry(class)
+				deadlineShare := st.environmentalDeadlineFailures
+				if absorbed {
+					m.mu.Unlock()
+					if inst.SetLostRestoreWait(attempts, err) {
+						if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
+							m.warn().Printf("preserve of lost remote session %q waits on the environment but that state is not yet durable: %v", inst.Title, persistErr)
+						}
+					}
+					if class == lostRestoreEnvDeadline {
+						m.warn().Printf("preserve of lost remote session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s (bounded: wait %d of %d before this class charges the structural budget): %v", inst.Title, repoID, attempts, backoff, deadlineShare, lostRestoreMaxAttempts, err)
+					} else {
+						m.warn().Printf("preserve of lost remote session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s: %v", inst.Title, repoID, attempts, backoff, err)
+					}
+					return
+				}
+				deadlineBoundedSpent = true
 			}
 			st.environmentalFailures = 0
+			st.environmentalDeadlineFailures = 0
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and
 			// later answered — with an actionable push failure like a rejected origin
@@ -534,6 +567,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			attempts := st.preserveFailureAttempts
 			if attempts >= lostRestoreMaxAttempts {
 				st.nextAttempt = time.Time{}
+				total := st.totalAttempts
 				// Mark the Recover budget terminal too. The preserve give-up leaves
 				// st non-nil, so a subsequent manual Recover failure reaches
 				// recordLostRestoreFailure with st != nil and skips the
@@ -543,7 +577,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 				// LostRestoreGaveUp is already suppressing every automatic retry.
 				st.consecutiveFailures = lostRestoreMaxAttempts
 				m.mu.Unlock()
-				inst.SetLostRestoreFailure(attempts, err)
+				if deadlineBoundedSpent {
+					m.warn().Printf("preserve of lost remote session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
+				}
+				inst.ClearLostRestoreWait()
+				inst.SetLostRestoreFailure(total, err)
 				m.err().Printf("restore of lost session %q (repo %s): giving up after %d preserve-push failures: %v", inst.Title, repoID, attempts, err)
 				if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
 					m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
@@ -552,6 +590,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			}
 			st.nextAttempt = time.Now().Add(lostRestoreBackoff(attempts))
 			m.mu.Unlock()
+			if deadlineBoundedSpent {
+				m.warn().Printf("preserve of lost remote session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
+			}
+			inst.ClearLostRestoreWait()
 			if logIt {
 				m.warn().Printf("%v", err)
 			}
@@ -561,12 +603,16 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// The push landed, so this push-failure episode is over: a later blip earns
 		// a fresh budget rather than inheriting this one's escalation, the same
 		// episode separation lostRestoreFailed gives the Recover branch.
+		// totalAttempts survives: consecutiveFailures is deliberately kept
+		// here (the Recover episode continues), so the cumulative count must
+		// keep describing the same episode too (#5295 review).
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.environmentalFailures = 0
-		st.totalAttempts = 0
+		st.environmentalDeadlineFailures = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
+		inst.ClearLostRestoreWait()
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
@@ -664,6 +710,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 // predecessor had earned, and the sweep kept a state that belonged to a session
 // the user had already discarded.
 func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) int {
+	// A spawn that returned proves the environment answered this attempt —
+	// any environmental wait it was showing is stale regardless of how the
+	// confirmation window ends.
+	inst.ClearLostRestoreWait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := stableSessionKey(repoID, inst)
@@ -708,10 +758,14 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.environmentalFailures = 0
-		st.totalAttempts = 0
+		st.environmentalDeadlineFailures = 0
+		// consecutiveFailures — and therefore the cumulative totalAttempts —
+		// deliberately survives: this is the preserve episode's reset, not
+		// the Recover episode's (#5295 review).
 		st.nextAttempt = time.Time{}
 	}
 	m.mu.Unlock()
+	inst.ClearLostRestoreWait()
 }
 
 // resetRecoverBudget clears the Recover-flap episode counter for the session
@@ -743,6 +797,7 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	}
 	st.consecutiveFailures = 0
 	st.environmentalFailures = 0
+	st.environmentalDeadlineFailures = 0
 	st.totalAttempts = 0
 	st.awaitingConfirm = false
 	// Clear per-episode diagnostic dedupe flags so that the replacement sandbox's
@@ -753,6 +808,10 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	st.remoteUnknownLogged = false
 	st.preserveFailureLogged = false
 	m.mu.Unlock()
+	// A force-replaced sandbox owns none of the predecessor's wait — the row
+	// must not keep claiming the environment is to blame once the episode is
+	// deliberately reset.
+	inst.ClearLostRestoreWait()
 }
 
 // lostRestoreFailed records a failed restore attempt, backing off until the
@@ -766,28 +825,62 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 	// honest report is that an explicit restore remains the way back (#5295
 	// review).
 	durableGaveUp := inst.LifecycleView().LostRestoreGaveUp
+	// deadlineBoundedSpent notes the deadline class exhausting its bounded
+	// wait so the transition log and the wait-state clear can run after the
+	// accounting unlock without splitting the m.mu critical section.
+	deadlineBoundedSpent := false
 	m.mu.Lock()
-	if lostRestoreEnvironmentalErr(err) {
+	if class := lostRestoreEnvironmentalClass(err); class != lostRestoreEnvNone {
 		if durableGaveUp {
 			m.mu.Unlock()
 			m.warn().Printf("restore of lost session %q (repo %s) failed on the environment — but the session already carries its durable give-up, so automatic retry stays stopped; another explicit restore is required once the condition clears: %v", inst.Title, repoID, err)
 			return
 		}
-		attempts, backoff := st.armEnvironmentalRetry()
-		m.mu.Unlock()
-		m.warn().Printf("restore of lost session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s (this failure class never reaches the %d-attempt give-up): %v", inst.Title, repoID, attempts, backoff, lostRestoreMaxAttempts, err)
-		return
+		attempts, backoff, absorbed := st.armEnvironmentalRetry(class)
+		deadlineShare := st.environmentalDeadlineFailures
+		if absorbed {
+			m.mu.Unlock()
+			// The wait is a session fact the same way the gave-up verdict is:
+			// clients must see the retry is armed on the environment, with the
+			// error that earned it, until the condition or a structural
+			// failure ends it (#5295 maintainer review).
+			if inst.SetLostRestoreWait(attempts, err) {
+				if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
+					m.warn().Printf("restore of lost session %q waits on the environment but that state is not yet durable: %v", inst.Title, persistErr)
+				}
+			}
+			if class == lostRestoreEnvDeadline {
+				m.warn().Printf("restore of lost session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s (bounded: wait %d of %d before this class charges the structural budget): %v", inst.Title, repoID, attempts, backoff, deadlineShare, lostRestoreMaxAttempts, err)
+			} else {
+				m.warn().Printf("restore of lost session %q (repo %s): environmental failure %d — waiting on the environment, retrying in %s: %v", inst.Title, repoID, attempts, backoff, err)
+			}
+			return
+		}
+		// absorbed=false: stay under m.mu — this failure drops into the
+		// structural accounting below. The deadline class waited its whole
+		// bounded share without the environment answering, which is what a
+		// permanently stuck condition looks like: the wait is over (#5295
+		// maintainer review).
+		deadlineBoundedSpent = true
 	}
 	st.environmentalFailures = 0
+	st.environmentalDeadlineFailures = 0
 	st.consecutiveFailures++
 	st.totalAttempts++
+	// The budget and the backoff stay on the structural streak — that is
+	// the #3347 contract — while the numbers an operator reads count the
+	// tries the episode actually made across both classes (#5295 review).
 	attempts := st.consecutiveFailures
+	total := st.totalAttempts
 	if attempts >= lostRestoreMaxAttempts {
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
-
-		inst.SetLostRestoreFailure(attempts, err)
-		m.err().Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, attempts, err)
+		if deadlineBoundedSpent {
+			m.warn().Printf("restore of lost session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
+		}
+		inst.ClearLostRestoreWait()
+		inst.SetLostRestoreFailure(total, err)
+		m.err().Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, total, err)
 		if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
 			m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
 		}
@@ -796,7 +889,13 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 	backoff := lostRestoreBackoff(attempts)
 	st.nextAttempt = time.Now().Add(backoff)
 	m.mu.Unlock()
-	m.warn().Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", inst.Title, attempts, backoff, err)
+	if deadlineBoundedSpent {
+		m.warn().Printf("restore of lost session %q (repo %s): the environment never answered inside %d bounded waits — this failure charges the structural budget", inst.Title, repoID, lostRestoreMaxAttempts)
+	}
+	// A structural charge ends the wait: the row stops claiming the loop is
+	// waiting on the environment the moment the failure is the session's own.
+	inst.ClearLostRestoreWait()
+	m.warn().Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", inst.Title, total, backoff, err)
 }
 
 func attemptNoun(attempts int) string {

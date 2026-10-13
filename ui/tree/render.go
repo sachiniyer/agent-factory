@@ -542,12 +542,19 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	description := branch
 	restoreFailed := false
-	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
+	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
 			restoreFailed = true
 			descS = descS.Foreground(archiveWarningColor)
+		}
+		if reason == session.IdleReasonRestoreWaitingOnEnvironment && restoreWait != nil {
+			// A waiting row is not terminal — it reports like any other idle
+			// detail (branch leads, no warning color) and clears itself the
+			// moment a restore attempt goes through or the failure turns
+			// structural.
+			detail = restoreWait.Detail()
 		}
 		if branch == "" {
 			description = detail
