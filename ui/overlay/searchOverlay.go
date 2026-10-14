@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -18,6 +19,7 @@ import (
 // SearchResult holds a matched instance.
 type SearchResult struct {
 	Instance *session.Instance
+	rank     searchTier
 }
 
 // SearchOverlay provides fuzzy search across sessions.
@@ -111,10 +113,15 @@ func (s *SearchOverlay) updateResults() {
 	s.results = nil
 
 	for _, inst := range s.all {
-		if s.matches(inst, s.query) {
-			s.results = append(s.results, SearchResult{Instance: inst})
+		if rank := s.matchRank(inst); rank != tierNone {
+			s.results = append(s.results, SearchResult{Instance: inst, rank: rank})
 		}
 	}
+	// Reorder only: the match set is unchanged, and SliceStable keeps the
+	// incoming (sidebar) order inside a tier (#5299).
+	sort.SliceStable(s.results, func(i, j int) bool {
+		return s.results[i].rank < s.results[j].rank
+	})
 
 	// Clamp selection
 	if s.selectedIdx >= len(s.results) {
@@ -125,13 +132,99 @@ func (s *SearchOverlay) updateResults() {
 	}
 }
 
-func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
-	if query == "" {
+// matchRank returns the strongest tier inst earns against the query on either
+// its title or its branch, or tierNone when neither matches at all.
+func (s *SearchOverlay) matchRank(inst *session.Instance) searchTier {
+	rank := searchTierOf(s.query, inst.Title)
+	if branchRank := searchTierOf(s.query, inst.GetBranch()); branchRank < rank {
+		rank = branchRank
+	}
+	return rank
+}
+
+// searchTier orders matches by how the query sits inside the candidate: an
+// exact match outranks a prefix, which outranks a contiguous substring (at a
+// word boundary or mid-word), which outranks a scattered subsequence (#5299).
+type searchTier int
+
+const (
+	tierExact searchTier = iota
+	tierPrefix
+	tierSubstring
+	tierScattered
+	tierNone
+)
+
+// searchTierOf classifies the match between pattern and str, using the same
+// NFC normalization and per-rune case folding as fuzzyMatch so ranking never
+// disagrees with the match test. Empty patterns rank as a prefix of every
+// non-empty string (exact for the empty one), which preserves the old
+// "empty query lists everything in sidebar order" behaviour through the
+// stable sort.
+func searchTierOf(pattern, str string) searchTier {
+	patternRunes := []rune(norm.NFC.String(pattern))
+	strRunes := []rune(norm.NFC.String(str))
+	switch {
+	case foldEqual(strRunes, patternRunes):
+		return tierExact
+	case foldHasPrefix(strRunes, patternRunes):
+		return tierPrefix
+	case foldContains(strRunes, patternRunes):
+		return tierSubstring
+	case subsequenceMatch(patternRunes, strRunes):
+		return tierScattered
+	default:
+		return tierNone
+	}
+}
+
+// foldEqual reports whether two rune slices are equal under per-rune case
+// folding.
+func foldEqual(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !runeEqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// foldHasPrefix reports whether str starts with prefix under per-rune case
+// folding.
+func foldHasPrefix(str, prefix []rune) bool {
+	return len(prefix) <= len(str) && foldEqual(str[:len(prefix)], prefix)
+}
+
+// foldContains reports whether sub appears contiguously in str under per-rune
+// case folding.
+func foldContains(str, sub []rune) bool {
+	for i := 0; i+len(sub) <= len(str); i++ {
+		if foldEqual(str[i:i+len(sub)], sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// subsequenceMatch reports whether all runes in pattern appear in str in
+// order, under per-rune case folding.
+func subsequenceMatch(pattern, str []rune) bool {
+	if len(pattern) == 0 {
 		return true
 	}
-
-	// Simple fuzzy: check if all query chars appear in order in the title or branch
-	return fuzzyMatch(query, inst.Title) || fuzzyMatch(query, inst.GetBranch())
+	pIdx := 0
+	for _, r := range str {
+		if runeEqualFold(r, pattern[pIdx]) {
+			pIdx++
+			if pIdx == len(pattern) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fuzzyMatch returns true if all runes in pattern appear in str in order,
@@ -139,20 +232,7 @@ func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
 // equivalent input (e.g. a decomposed "é" typed on macOS vs a composed one
 // from copy-paste) still matches.
 func fuzzyMatch(pattern, str string) bool {
-	patternRunes := []rune(norm.NFC.String(pattern))
-	if len(patternRunes) == 0 {
-		return true
-	}
-	pIdx := 0
-	for _, r := range norm.NFC.String(str) {
-		if runeEqualFold(r, patternRunes[pIdx]) {
-			pIdx++
-			if pIdx == len(patternRunes) {
-				return true
-			}
-		}
-	}
-	return false
+	return subsequenceMatch([]rune(norm.NFC.String(pattern)), []rune(norm.NFC.String(str)))
 }
 
 // runeEqualFold reports whether two runes are equal under Unicode simple

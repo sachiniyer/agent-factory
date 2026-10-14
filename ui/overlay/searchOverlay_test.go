@@ -4,7 +4,10 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // Explicit forms so the source encoding can't silently change what is tested:
@@ -61,6 +64,133 @@ func TestFuzzyMatch(t *testing.T) {
 			if got := fuzzyMatch(tt.pattern, tt.str); got != tt.want {
 				t.Errorf("fuzzyMatch(%q, %q) = %v, want %v", tt.pattern, tt.str, got, tt.want)
 			}
+		})
+	}
+}
+
+// TestSearchTierOf classifies the match tiers the overlay ranks by (#5299):
+// exact > prefix > contiguous substring (word boundary or mid-word) >
+// scattered subsequence > no match.
+func TestSearchTierOf(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		str     string
+		want    searchTier
+	}{
+		{"exact", "beta", "beta", tierExact},
+		{"exact folds case", "BETA", "beta", tierExact},
+		{"exact across NFC/NFD", cafeNFD, cafeNFC, tierExact},
+
+		{"prefix", "bet", "beta", tierPrefix},
+		{"prefix folds case", "BET", "beta", tierPrefix},
+		{"empty pattern is a prefix of all", "", "alpha", tierPrefix},
+		{"empty pattern is exact on empty", "", "", tierExact},
+
+		{"word-boundary substring", "bet", "alpha-bet-soup", tierSubstring},
+		{"mid-word substring", "bet", "alphabetic", tierSubstring},
+		{"substring folds case", "BET", "alphabetic", tierSubstring},
+
+		{"scattered subsequence", "bet", "bright-newt", tierScattered},
+		{"scattered folds case", "BET", "bright-newt", tierScattered},
+
+		{"no match", "bet", "alpha", tierNone},
+		{"out-of-order is no match", "teb", "beta", tierNone},
+		{"pattern longer than str", "betanetwork", "beta", tierNone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, searchTierOf(tt.pattern, tt.str))
+		})
+	}
+}
+
+// TestSearchOverlayRanksByMatchTier pins #5299 on the overlay itself: ranking
+// reorders matches by tier — Enter lands on the top row — while the match set
+// and the intra-tier (sidebar) order are untouched.
+func TestSearchOverlayRanksByMatchTier(t *testing.T) {
+	tests := []struct {
+		name      string
+		instances []*session.Instance
+		query     string
+		want      []string // expected titles, top to bottom
+	}{
+		{
+			name: "issue #5299: prefix match beats a scattered one",
+			instances: []*session.Instance{
+				{Title: "bright-newt", Branch: "dev/bright-newt"},
+				{Title: "alpha"},
+				{Title: "beta", Branch: "dev/beta"},
+			},
+			query: "bet",
+			want:  []string{"beta", "bright-newt"},
+		},
+		{
+			name: "exact beats prefix",
+			instances: []*session.Instance{
+				{Title: "betamax"},
+				{Title: "beta"},
+			},
+			query: "beta",
+			want:  []string{"beta", "betamax"},
+		},
+		{
+			name: "prefix beats substring",
+			instances: []*session.Instance{
+				{Title: "alphabetic"},
+				{Title: "beta"},
+			},
+			query: "bet",
+			want:  []string{"beta", "alphabetic"},
+		},
+		{
+			name: "substring beats scattered",
+			instances: []*session.Instance{
+				{Title: "bright-newt"},
+				{Title: "alphabet"},
+			},
+			query: "bet",
+			want:  []string{"alphabet", "bright-newt"},
+		},
+		{
+			name: "branch match participates in ranking",
+			instances: []*session.Instance{
+				{Title: "bright-newt"},
+				{Title: "gamma", Branch: "dev/beta-deploy"},
+				{Title: "beta"},
+			},
+			query: "bet",
+			want:  []string{"beta", "gamma", "bright-newt"},
+		},
+		{
+			name: "ties keep sidebar order",
+			instances: []*session.Instance{
+				{Title: "bet-two"},
+				{Title: "bet-one"},
+			},
+			query: "bet",
+			want:  []string{"bet-two", "bet-one"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSearchOverlay(tt.instances)
+			for _, r := range tt.query {
+				s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			}
+
+			got := s.ResultInstances()
+			require.Len(t, got, len(tt.want))
+			for i, inst := range got {
+				assert.Equal(t, tt.want[i], inst.Title, "result %d", i)
+			}
+
+			// The user habit from the issue: /, type, Enter — lands on the
+			// top row.
+			require.True(t, s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+			assert.Equal(t, tt.want[0], s.GetSelectedInstance().Title)
 		})
 	}
 }
