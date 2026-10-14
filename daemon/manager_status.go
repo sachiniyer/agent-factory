@@ -929,13 +929,26 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			instance.ClearLostRestoreWaitAtObservation(observationGeneration) {
 			settlementCheckpoint = true
 		}
-		// The spent deadline-share marker is NOT retired here: one accepted
-		// observation is the first of the three answers restore confirmation
-		// requires, and a runtime that dies inside that window continues the
-		// same episode — a restart that found the marker gone would re-grant
-		// the wedged probe a fresh share of free waits. It retires with the
-		// retry state at the full-confirmation edge in RestoreLostSessions
-		// (#5295 review).
+		// The durable episode accounting retires with the wait on a self-heal —
+		// UNLESS a live confirmation episode is armed for this session: a
+		// runtime proving itself inside the three-observation window keeps its
+		// spent share and cumulative count until the full-confirmation edge in
+		// RestoreLostSessions retires them. When no in-memory episode exists —
+		// a restart between the last arm and this answer dropped it — nothing
+		// later retires the counters: the confirm sweep only visits sessions
+		// with a retry-state entry, so a stale structural streak or spent
+		// deadline share would seed the NEXT loss episode and could reach
+		// give-up on its first failure (#5295 review).
+		m.mu.Lock()
+		episodeArmed := false
+		if st := m.lostRestoreStates[stableSessionKey(repoID, instance)]; st != nil && st.awaitingConfirm {
+			episodeArmed = true
+		}
+		m.mu.Unlock()
+		if accepted && instance.GetLiveness() != session.LiveLost && !episodeArmed &&
+			(instance.ClearLostRestoreDeadlineSpent() || instance.ClearLostRestoreAttempts()) {
+			settlementCheckpoint = true
+		}
 	}
 
 	// The run-marker flip is durable on its own: a held gate releasing on a
