@@ -420,11 +420,32 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			// stale one (#4888 review).
 			if row.RegistryID == "" && row.RepoID != "" {
 				if at, ok := staleRegistryRepoIDs[row.RepoID]; ok {
+					// The incoming row's counts win only when it has them: a
+					// synthesized zero-count fallback (the snapshot failed
+					// alongside the registry) must not erase the preserved
+					// row's last-known tallies (#4888 review).
 					row.RegistryID = merged[at].RegistryID
 					row.RegistryRoot = merged[at].RegistryRoot
 					row.RegistryCheckoutID = merged[at].RegistryCheckoutID
 					row.MissingPath = merged[at].MissingPath
+					if row.SessionCount == 0 && row.InPlaceCount == 0 {
+						row.SessionCount = merged[at].SessionCount
+						row.InPlaceCount = merged[at].InPlaceCount
+					}
 					merged[at] = row
+					continue
+				}
+				if !seenRepoIDs[row.RepoID] {
+					// The collision is on ROOT alone: a preserved stale
+					// registry row claims this path for a DIFFERENT repo
+					// (the checkout was replaced by another repository).
+					// The live session row is authority on what runs there
+					// and must land; the stale row keeps its registration
+					// claim beside it until a healthy read settles it
+					// (#4888 review).
+					merged = append(merged, row)
+					seenRepoIDs[row.RepoID] = true
+					continue
 				}
 			}
 			continue

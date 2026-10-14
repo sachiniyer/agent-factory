@@ -1100,3 +1100,66 @@ func registryBackedOnly(rows []Project) []Project {
 	}
 	return out
 }
+
+// TestMergePreservingSessionRowsReplacedRootKeepsTheLiveSession pins the #4888
+// review finding on the root-only collision: with the registry read degraded
+// and the session snapshot landed, a preserved registry row can claim a root
+// that now hosts a DIFFERENT repository (the checkout was re-cloned onto a new
+// remote). The live session row must still land beside the stale claim —
+// dedupe on Root alone would hide live work behind an unproven registration.
+func TestMergePreservingSessionRowsReplacedRootKeepsTheLiveSession(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_old", RegistryRoot: "/repo", RegistryCheckoutID: "chk_o", SessionCount: 4, InPlaceCount: 1},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", SessionCount: 2},
+	}
+	merged := MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+
+	var oldRow, newRow *Project
+	for i := range merged {
+		switch merged[i].RepoID {
+		case "repo-old":
+			oldRow = &merged[i]
+		case "repo-new":
+			newRow = &merged[i]
+		}
+	}
+	if newRow == nil || newRow.SessionCount != 2 {
+		t.Fatalf("the live session row at the replaced root must land, got %+v", merged)
+	}
+	if newRow.RegistryID != "" {
+		t.Fatalf("a different repo must not graft the stale registration, got %+v", *newRow)
+	}
+	if oldRow == nil || oldRow.RegistryID != "prj_old" || oldRow.SessionCount != 0 {
+		t.Fatalf("the stale registration claim survives with zeroed counts until a healthy read settles it, got %+v", merged)
+	}
+}
+
+// TestMergePreservingSessionRowsBothFailedKeepsLastKnownCounts pins the #4888
+// review finding on the zero-count graft: when the session snapshot AND the
+// registry read both fail, fresh carries synthesized zero-count fallback rows
+// (root_agents, the active workspace). If one shares a preserved row's RepoID,
+// the graft must graft the IDENTITY while keeping the preserved row's
+// last-known counts — no successful snapshot exists to prove them zero.
+func TestMergePreservingSessionRowsBothFailedKeepsLastKnownCounts(t *testing.T) {
+	old := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_a", SessionCount: 4, InPlaceCount: 1},
+	}
+	fresh := []Project{
+		// The synthesized fallback row root_agents/active produced — no
+		// registry identity, no real counts.
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, true)
+	if len(merged) != 1 {
+		t.Fatalf("one row — the fallback grafts onto the preserved record, got %+v", merged)
+	}
+	row := merged[0]
+	if row.RegistryID != "prj_aaa" || row.RegistryRoot != "/repos/alpha" {
+		t.Fatalf("the registry identity grafts across, got %+v", row)
+	}
+	if row.SessionCount != 4 || row.InPlaceCount != 1 {
+		t.Fatalf("zero-count fallback must not erase last-known counts, got %+v", row)
+	}
+}
