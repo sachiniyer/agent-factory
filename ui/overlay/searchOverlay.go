@@ -157,12 +157,15 @@ const (
 
 // searchTierOf classifies the match between pattern and str, using the same
 // NFC normalization and per-rune case folding as fuzzyMatch so ranking never
-// disagrees with the match test. Empty patterns rank as a prefix of every
-// non-empty string (exact for the empty one), which preserves the old
-// "empty query lists everything in sidebar order" behaviour through the
-// stable sort.
+// disagrees with the match test. An empty pattern returns one tier for every
+// candidate — including the empty string — so an empty query can never
+// reorder the list: uniform tiers plus the stable sort preserve the old
+// "empty query lists everything in sidebar order" behaviour.
 func searchTierOf(pattern, str string) searchTier {
 	patternRunes := []rune(norm.NFC.String(pattern))
+	if len(patternRunes) == 0 {
+		return tierPrefix
+	}
 	strRunes := []rune(norm.NFC.String(str))
 	switch {
 	case foldEqual(strRunes, patternRunes):

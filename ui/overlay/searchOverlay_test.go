@@ -84,8 +84,11 @@ func TestSearchTierOf(t *testing.T) {
 
 		{"prefix", "bet", "beta", tierPrefix},
 		{"prefix folds case", "BET", "beta", tierPrefix},
+		// The empty pattern must give EVERY candidate the same tier, or an
+		// empty query would float empty-titled/empty-branched sessions to the
+		// top of the list (searchTierOf("", "") used to be tierExact).
 		{"empty pattern is a prefix of all", "", "alpha", tierPrefix},
-		{"empty pattern is exact on empty", "", "", tierExact},
+		{"empty pattern is uniform on empty", "", "", tierPrefix},
 
 		{"word-boundary substring", "bet", "alpha-bet-soup", tierSubstring},
 		{"mid-word substring", "bet", "alphabetic", tierSubstring},
@@ -171,6 +174,19 @@ func TestSearchOverlayRanksByMatchTier(t *testing.T) {
 			},
 			query: "bet",
 			want:  []string{"bet-two", "bet-one"},
+		},
+		{
+			// Regression: an empty query must leave the sidebar order
+			// untouched — the branched-with-branch sessions and the
+			// empty-branch "pending" one all earn the same tier.
+			name: "empty query keeps sidebar order",
+			instances: []*session.Instance{
+				{Title: "with-branch", Branch: "dev/with-branch"},
+				{Title: "no-branch"},
+				{Title: "another", Branch: "dev/another"},
+			},
+			query: "",
+			want:  []string{"with-branch", "no-branch", "another"},
 		},
 	}
 
