@@ -40,9 +40,28 @@ func (d InstanceData) restoreMissingHandoffMissionEvidence() InstanceData {
 // ambiguousHandoffDelivery reports whether a mission verdict leaves it unknown
 // whether the mission landed. It is the one list of those verdicts: the retry,
 // confirm, and rollback-projection gates all read it rather than keeping their
-// own copy.
+// own copy. HandoffDeliveryUnresolved is its exported mirror, so the daemon's
+// raw ghost predicate (rawTaskRunHoldsSlot) reads the same list rather than
+// keeping its own.
 func ambiguousHandoffDelivery(status PromptDeliveryStatus) bool {
 	return status == PromptCouldNotConfirm || status == PromptSentUnverified
+}
+
+// HandoffDeliveryUnresolved reports whether a pending handoff mission's
+// delivery verdict leaves it unknown whether the mission landed. It is the
+// exported mirror of ambiguousHandoffDelivery so daemon code that decides on a
+// raw persisted row — which has no Instance and so cannot call the unexported
+// helper — still reads the one verdict list rather than duplicating it.
+//
+// projectPendingHandoffForPreviousRelease projects StartupStateUnknown=true
+// onto any row whose PendingHandoffMission carries one of these verdicts, with
+// no backend gate, so the projection reaches local rows mid-mission exactly as
+// it reaches sandbox rows. A current reader restores the fence before deciding
+// (RestoreHandoffRollbackFence); a raw reader that does not would short-circuit
+// on the projected value and release a ghost whose loaded form holds, which is
+// the divergence this helper exists to close — see rawTaskRunHoldsSlot.
+func HandoffDeliveryUnresolved(status PromptDeliveryStatus) bool {
+	return ambiguousHandoffDelivery(status)
 }
 
 // confirmableHandoffDelivery reports whether an operator may retire a pending
