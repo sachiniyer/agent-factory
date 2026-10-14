@@ -28,7 +28,7 @@ export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
 # The control is the base of this branch (the #5298 fix commit, which still has
 # the swap-path window open). Replaced by testbox.sh with --archive of this SHA.
-AF_CONTROL_SHA=78d03145
+AF_CONTROL_SHA=78d031456fa890b943a89524a8d3d0adff92883d
 
 EVID="$HOME/sandbox/swap-pane-repin"
 rm -rf "$EVID"
