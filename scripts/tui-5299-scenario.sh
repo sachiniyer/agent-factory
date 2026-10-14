@@ -28,11 +28,15 @@
 #               list bright-newt above beta (proves the scenario detects it)
 #   af        — the playtest entry's branch build, which must list beta first
 #               and land on beta when Enter is pressed.
-# Per leg the scenario opens `/`, types `bet`, captures the 80x24 frame, and
-# compares the row numbers of the `name (dev/name)` result lines — the
-# ` (dev/…)` suffix appears only on overlay rows, never on the rail behind.
-# Provenance (git SHAs + binary sha256 + the running TUI's /proc/<pid>/exe
-# sha256) is recorded so every capture can be tied to exact code.
+# Per leg the scenario opens `/`, captures the EMPTY-query frame first (every
+# session must appear, in sidebar order — approval amendment), then types
+# `bet`, captures again, and compares the row numbers of the
+# `name (dev/name)` result lines — the ` (dev/…)` suffix appears only on
+# overlay rows, never on the rail behind. Enter is then pressed and the
+# landed frame captured: the master leg must land on bright-newt (the buggy
+# top row), the branch leg on beta. Provenance (git SHAs + binary sha256 +
+# the running TUI's /proc/<pid>/exe sha256) is recorded so every capture can
+# be tied to exact code.
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -153,20 +157,18 @@ purge_archived() {
     fi
 }
 
-# search_rows <capture-file> — locate the two result rows the overlay drew.
+# search_rows <capture-file> — locate the result rows the overlay drew.
 # Overlay rows render `● ▸ title (dev/branch)`; the rail behind never prints
-# the ` (dev/…)` suffix, so matching on it isolates the overlay. Prints the
-# row numbers; exit 2 when either row is missing (the capture is unusable).
+# the ` (dev/…)` suffix, so matching on it isolates the overlay. Prints one
+# "name row: N" line per session (-1 when absent) and always exits 0 — the
+# callers decide which rows each frame must contain.
 search_rows() {
     python3 - "$1" <<'PY'
 import sys
 lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
-bn = next((i for i, l in enumerate(lines) if 'bright-newt (dev/' in l), -1)
-bt = next((i for i, l in enumerate(lines) if 'beta (dev/' in l), -1)
-print(f"bright-newt row: {bn}\nbeta row: {bt}")
-if 'alpha (dev/' in '\n'.join(lines):
-    print("note: alpha matched 'bet' — the match SET changed")
-sys.exit(0 if bn >= 0 and bt >= 0 else 2)
+for name in ('bright-newt', 'alpha', 'beta'):
+    row = next((i for i, l in enumerate(lines) if f'{name} (dev/' in l), -1)
+    print(f"{name} row: {row}")
 PY
 }
 
@@ -204,27 +206,63 @@ claude = "bash"'
     af_focus_tree || return 1
     af_send '/'
     af_wait_for 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay' || return 1
+
+    # Approval amendment: the EMPTY query must list every session in sidebar
+    # order — ranking may only ever reorder non-empty results.
+    sleep 1 # settle past the capture tick so the frame is the steady state
+    af_capture >"$EVID/$LEG-open.txt"
+    echo "--- raw 80x24 frame: $LEG/open ---" # the sandbox is ephemeral; the
+    cat "$EVID/$LEG-open.txt"                  # run log is the durable copy
+    echo "--- end frame ---"
+    search_rows "$EVID/$LEG-open.txt" | tee "$EVID/$LEG-open-rows.txt"
+    local o_bn o_al o_bt
+    o_bn="$(row_of "$EVID/$LEG-open-rows.txt" bright-newt)"
+    o_al="$(row_of "$EVID/$LEG-open-rows.txt" alpha)"
+    o_bt="$(row_of "$EVID/$LEG-open-rows.txt" beta)"
+    if [ "$o_bn" -lt 0 ] || [ "$o_al" -lt 0 ] || [ "$o_bt" -lt 0 ]; then
+        _af_fail "$LEG: empty query must list all three sessions — got bright-newt=$o_bn alpha=$o_al beta=$o_bt"
+        return 1
+    fi
+    if ! [ "$o_bn" -lt "$o_al" ] || ! [ "$o_al" -lt "$o_bt" ]; then
+        _af_fail "$LEG: empty query reordered the list (want bright-newt < alpha < beta; got $o_bn $o_al $o_bt)"
+        return 1
+    fi
+
     af_send_literal "bet"
     af_wait_for '/ bet' "$AF_DRIVER_TIMEOUT" 'query landed' || return 1
     sleep 1 # settle past the capture tick so the frame is the steady state
     af_capture >"$EVID/$LEG-search.txt"
-    echo "--- raw 80x24 frame: $LEG/search ---" # the sandbox is ephemeral; the
-    cat "$EVID/$LEG-search.txt"                # run log is the durable copy
+    echo "--- raw 80x24 frame: $LEG/search ---"
+    cat "$EVID/$LEG-search.txt"
     echo "--- end frame ---"
     search_rows "$EVID/$LEG-search.txt" | tee "$EVID/$LEG-rows.txt"
+    if [ "$(row_of "$EVID/$LEG-rows.txt" bright-newt)" -lt 0 ] \
+        || [ "$(row_of "$EVID/$LEG-rows.txt" beta)" -lt 0 ]; then
+        _af_fail "$LEG: 'bet' must match bright-newt and beta — capture is unusable"
+        return 1
+    fi
+    if [ "$(row_of "$EVID/$LEG-rows.txt" alpha)" -ge 0 ]; then
+        _af_fail "$LEG: alpha must NOT match 'bet' — the match set changed"
+        return 1
+    fi
 
+    # The user habit from the issue: /, type, Enter — lands on the top row.
+    af_send Enter
+    sleep 1
+    af_capture >"$EVID/$LEG-landed.txt"
+    echo "--- raw 80x24 frame: $LEG/landed ---"
+    cat "$EVID/$LEG-landed.txt"
+    echo "--- end frame ---"
     if [ "$LEG" = branch ]; then
-        # The user habit from the issue: /, type, Enter — must land on beta.
-        af_send Enter
-        sleep 1
-        af_capture >"$EVID/$LEG-landed.txt"
-        echo "--- raw 80x24 frame: $LEG/landed ---"
-        cat "$EVID/$LEG-landed.txt"
-        echo "--- end frame ---"
         grep -qE '▾[[:space:]]+beta([[:space:]]|$)' "$EVID/$LEG-landed.txt" \
             || { _af_fail "$LEG: Enter did not land the selection on beta"; return 1; }
         ! grep -qE '▾[[:space:]]+bright-newt([[:space:]]|$)' "$EVID/$LEG-landed.txt" \
             || { _af_fail "$LEG: Enter landed the selection on bright-newt"; return 1; }
+    else
+        # The control must fail the way the user experiences it: Enter on the
+        # buggy top row lands on bright-newt.
+        grep -qE '▾[[:space:]]+bright-newt([[:space:]]|$)' "$EVID/$LEG-landed.txt" \
+            || { _af_fail "$LEG: Enter did not land the selection on bright-newt — the buggy top row did not take it"; return 1; }
     fi
 
     af_quit || return 1
