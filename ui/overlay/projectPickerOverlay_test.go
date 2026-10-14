@@ -978,3 +978,28 @@ func TestProjectPickerRebindConflictKeepsADistinctSessionWorkspace(t *testing.T)
 		t.Fatalf("the fresh row lands under the new repo with no borrowed counts, got %+v", *newRow)
 	}
 }
+
+// TestProjectPickerRebindConflictDropsARegistrationOnlyRowOnRepoChange: when
+// the competing rebind moves a record onto another repository and the old row
+// carried no live sessions (registry-backed only, SessionCount 0), nothing
+// retains the old repository — preserving a session-only row would show a
+// phantom project at the obsolete root forever (#4888 review).
+func TestProjectPickerRebindConflictDropsARegistrationOnlyRowOnRepoChange(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/repo-old", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo-old", RegistryCheckoutID: "chk_old"},
+	}, "/repo-old")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo-new · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo-new", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo-new", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 1 || p.all[0].RepoID != "repo-new" || p.all[0].RegistryID != "prj_aaa" {
+		t.Fatalf("a registration-only row with no sessions leaves no phantom behind, got %+v", p.all)
+	}
+}
