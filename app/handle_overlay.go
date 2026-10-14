@@ -139,8 +139,8 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 // selection, Enter opens the manager overlay on it, Esc returns focus to the
 // tree. Advertised global bindings (Tab/Shift-Tab focus ring, task manager,
 // hooks, ? help, q quit) keep working, while pane-management and tab-mutation
-// verbs are consumed here so hidden `s`/`S`/`x`/pane-switch/`</>` keys cannot
-// mutate workspace panes or the roster from Automations focus (#1417).
+// verbs are consumed here so hidden `s`/`S`/`x`/pane-switch/`</>`/`w`/`t` keys
+// cannot mutate workspace panes or the roster from Automations focus (#1417).
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
@@ -259,11 +259,11 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 }
 
 // automationsConsumesMutationVerb reports whether msg is a binding that must
-// stay inert while the Automations rail owns focus: pane management AND the
-// </> tab move. The rail's footer does not advertise these verbs, and a key
-// that fell through to the global dispatcher would mutate a session or pane
-// the user is not looking at (#1417). Named for what it protects, not the key
-// list it started with.
+// stay inert while the Automations rail owns focus: pane management, the </>
+// tab move, and the close/new tab lifecycle pair (w/t). The rail's footer does
+// not advertise these verbs, and a key that fell through to the global
+// dispatcher would mutate a session or pane the user is not looking at (#1417).
+// Named for what it protects, not the key list it started with.
 func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyOpenPane,
@@ -273,6 +273,12 @@ func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 		keys.KeyPaneNext,
 		keys.KeyMoveTabLeft,
 		keys.KeyMoveTabRight,
+		// w closes the store's sticky last tree selection and t spawns a tab
+		// on the sidebar cursor's row — neither of which the rail displays.
+		// The handlers gate on workspace focus too (#3067); this keeps the
+		// pair captive at the rail so the key never falls through.
+		keys.KeyCloseTab,
+		keys.KeyNewTab,
 	} {
 		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
 			return true
