@@ -721,3 +721,68 @@ func TestFailedCreateRestoreRefetchesTheDefaultAccount(t *testing.T) {
 	assert.Equal(t, "work", h.pendingAccount,
 		"the restored form shows the default the retry will apply")
 }
+
+// TestFailedCreateRestoreKeepsAChosenAmbientAccount pins the ambient half of
+// the draft-flags finding (#4889 review): "Ambient identity" deliberately
+// picked sends Account="" — the same wire encoding as an untouched field —
+// so the draft's AccountChosen flag is the only thing distinguishing them.
+// A restore that inferred chosen-ness from the wire would re-preselect the
+// configured default over the user's deliberate ambient pick.
+func TestFailedCreateRestoreKeepsAChosenAmbientAccount(t *testing.T) {
+	h := configFollowingHome(t)
+	recordStartRequest(t)
+	calls, _ := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
+
+	inst := newLoadingInstance(t, "demo")
+	inst.Path = h.repoRoot
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+
+	// The failed submit carried an explicit ambient choice: Account="" on the
+	// wire, AccountChosen=true beside it.
+	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "", Account: "", AccountChosen: true}
+	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
+	require.True(t, h.pendingAccountChosen,
+		"a deliberate ambient pick restores as chosen — never re-preselected")
+	require.Empty(t, h.pendingAccount, "ambient")
+	assert.Equal(t, 0, *calls,
+		"no default-account fetch runs for a field the user already decided")
+}
+
+// TestFailedCreateRestoreUnpinsAnAccountPinnedProgram is the program half of
+// the draft-flags finding (#4889 review): a program that reached the wire only
+// because a chosen account pinned it is NOT a program choice — restoring it
+// as chosen would freeze the retry onto the program the account happened to
+// display. With the flag restored false, flipping the account back to ambient
+// returns the retry to config-following: Program "" on the wire.
+func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
+	h := configFollowingHome(t)
+	got := recordStartRequest(t)
+	stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
+
+	inst := newLoadingInstance(t, "demo")
+	inst.Path = h.repoRoot
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+
+	// The failed submit: account "work" chosen, the program on the wire only
+	// because the pairing pinned it — ProgramChosen stays false.
+	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "claude", Account: "work", AccountChosen: true}
+	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	require.Equal(t, stateNew, h.state)
+	require.True(t, h.pendingAccountChosen)
+	require.False(t, h.pendingProgramChosen,
+		"an account-pinned program restores config-following, not chosen")
+	require.Equal(t, "work", h.pendingAccount)
+
+	// The user reconsiders: ambient identity. The program pairing dissolves
+	// and the retry resolves the live default_program instead of replaying
+	// the pinned agent.
+	h.clearPendingAccount()
+	require.NoError(t, h.namingInstance.SetTitle("demo2"))
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Program,
+		"with the account back at ambient, the retry follows the config default again")
+	assert.Empty(t, got.Account)
+}

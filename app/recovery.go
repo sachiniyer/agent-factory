@@ -42,8 +42,15 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// away, and replaying it as a pick would retry the same dead program.
 	m.pendingProgram, m.pendingPrompt = instance.Program, failed.rawPrompt
 	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
-	m.pendingAccountChosen = req.Account != ""
-	m.pendingProgramChosen = req.Program != ""
+	// The wire values can't tell a user choice from a derived one: a program
+	// the account-pairing pinned is indistinguishable from a pick, and a
+	// deliberate "Ambient identity" is indistinguishable from an untouched
+	// field. The draft carries the original chosen flags for exactly this
+	// (#4889 review): restore the flags so an account-pinned program goes back
+	// to config-following and a chosen ambient account is not overwritten by
+	// the refetched default.
+	m.pendingAccountChosen = req.AccountChosen
+	m.pendingProgramChosen = req.ProgramChosen
 	if !m.pendingProgramChosen {
 		// Re-resolve the live default for the restored field's seed: the
 		// displayed program is what a retry's implicit "" will resolve to, so
