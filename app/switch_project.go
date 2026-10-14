@@ -368,6 +368,19 @@ func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
 	return projects
 }
 
+// registryBackedRows filters a row set to the registry-backed half — the rows
+// a degraded registry read cannot prove absent, for a merge where the session
+// snapshot is live truth and the old session rows would only shadow it.
+func registryBackedRows(rows []overlay.Project) []overlay.Project {
+	registry := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		if r.RegistryID != "" {
+			registry = append(registry, r)
+		}
+	}
+	return registry
+}
+
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously).
@@ -406,8 +419,10 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 // indefinitely while the poll stays unhealthy (#4888 review). Returns whether
 // the visible rows changed.
 func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
-	if fetchErr != nil {
-		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+	if fetchErr != nil || registryDegraded {
+		if fetchErr != nil {
+			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+		}
 		old := m.sidebarProjects
 		if len(old) == 0 {
 			// The pane can already hold rows the shadow never recorded —
@@ -416,6 +431,12 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 			// list behind a warning it cannot confirm (#4888 review); the
 			// pane's current rows are the last-known set either way.
 			old = sidebarProjectRows(m.projects.Projects())
+		}
+		if fetchErr == nil {
+			// The session snapshot landed — only the registry read degraded.
+			// Old session rows are stale duplicates of the fresh live ones;
+			// only registry-backed rows have absence left unproven.
+			old = registryBackedRows(old)
 		}
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
 	}
