@@ -261,7 +261,8 @@ func TestProjectsSection_FailedSnapshotMergesFreshRegistryRows(t *testing.T) {
 // list holds live session rows and no registry records. Installing wholesale
 // would drop every registry-backed row behind a read that cannot prove
 // absence; the merge preserves them and grafts a same-repo session row onto
-// the stale identity so live counts win.
+// the stale identity so live counts win. The preserved row's own counts clear
+// though — the landed snapshot is the count authority and proved them zero.
 func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/repos/active"
@@ -287,8 +288,8 @@ func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
 		"the live session row wins the count — the stale registry row must not shadow it")
 	require.Contains(t, rows, "repo-gone",
 		"absence unproven under a degraded read — the registry row stays")
-	assert.Equal(t, 2, rows["repo-gone"].SessionCount,
-		"an uncovered registry row keeps its last-known tallies")
+	assert.Equal(t, 0, rows["repo-gone"].SessionCount,
+		"the landed session snapshot is the count authority — an uncovered repo's tally clears (#4888 review)")
 
 	// And the graft restored alpha's registration identity: the shadow list
 	// keeps the rebind affordance the pane rows cannot carry.
