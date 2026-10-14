@@ -81,6 +81,36 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // exactly as before. The trailing UserKilled and IdleReasonRestoreGaveUp guards
 // still release a tombstoned or unrecoverable row even when the fence is up, so a
 // handoff ghost the loaded form would release through those markers is not wedged.
+//
+// The fence re-raises the hold ONLY for the shape the loaded form would hold after
+// restoring the fence, so a ghost the materialized form releases is not wedged on
+// the cap forever (no in-memory Instance exists to run the lifecycle edge that
+// would clear TaskRunActive for a row that failed to materialize). Two shapes
+// diverge from a blind "any ambiguous mission holds" and must NOT re-raise:
+//
+//  1. A row whose startup was already unknown BEFORE the handoff. The projection
+//     captures the original in HandoffOriginalStartupStateUnknown; when that
+//     original was already true, the loaded form restores StartupStateUnknown=true
+//     and ClassifyActivity returns ActivityTerminal (the startup-unknown return is
+//     before the liveness switch), so the materialized form releases its slot. A
+//     blind handoffFence would hold it anyway and, with no Instance to clear
+//     TaskRunActive, wedge the capped task forever. The fence is therefore gated on
+//     the marker proving the original state was false — the one shape the
+//     projection actually raised from false to true and the loaded form restores to
+//     a liveness that can still be active.
+//
+//  2. A row whose loaded form releases on the liveness axis after the fence is
+//     restored. The fence restores StartupStateUnknown=false and reconstructs no op
+//     (an ambiguous verdict never rebuilds OpReplacing), so the loaded form's hold
+//     is its liveness alone: a stored LiveRunning is ActivityPending and a
+//     recoverable LiveLost is held by canAutoRestoreLostSession, but a LiveReady
+//     row classifies ActivityIdle (no op, the run went idle) and a LiveArchived
+//     row is ActivityTerminal with no restore path, so the loaded form releases
+//     both. A blind handoffFence would hold them and wedge the cap. The fence
+//     therefore mirrors the loaded form's activity (handoffFenceLoadedFormHolds,
+//     which replays FromInstanceData's fence restoration and liveness
+//     classification through LoadedActivity) rather than treating every ambiguous
+//     mission as active.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if item.TaskID == "" || !item.TaskRunActive {
 		return false
@@ -93,10 +123,55 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	// not short-circuit on the projected value before the fence a current
 	// reader would restore. HandoffDeliveryUnresolved keeps the one verdict
 	// list (session/handoff_storage.go) rather than duplicating it here.
+	//
+	// The marker gate (shape 1 above) bypasses the StartupStateUnknown guard
+	// only when the rollback marker proves the original state was false; a row
+	// whose startup was already unknown restores to a terminal loaded form and
+	// must not be held. The loaded-form gate (shape 2) holds only the liveness
+	// the loaded form would hold after restoring the fence, so an idle
+	// LiveReady or a non-restorable LiveArchived row the loaded form releases
+	// is not wedged. The trailing IdleReasonRestoreGaveUp guard still releases
+	// a LiveLost/LiveDead row the restore loop gave up on, mirroring the
+	// canAutoRestoreLostSession arm the loaded form uses for Lost.
 	handoffFence := item.PendingHandoffMission != "" &&
-		session.HandoffDeliveryUnresolved(item.HandoffDeliveryStatus)
+		session.HandoffDeliveryUnresolved(item.HandoffDeliveryStatus) &&
+		item.HandoffOriginalStartupStateUnknown != nil &&
+		!*item.HandoffOriginalStartupStateUnknown &&
+		handoffFenceLoadedFormHolds(item)
 	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || handoffFence) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
+}
+
+// handoffFenceLoadedFormHolds reports whether a local row whose handoff rollback
+// fence restored its original startup state would still hold its task-run slot
+// through the materialized form's activity. It is the liveness term of the
+// handoffFence: the fence restores StartupStateUnknown=false and reconstructs no
+// op (an ambiguous verdict never rebuilds OpReplacing), so the loaded form's hold
+// is its liveness alone. LoadedActivity replays FromInstanceData's fence
+// restoration and liveness classification so the raw arm sees the same Activity a
+// materialized Instance would — ActivityPending for a stored LiveRunning (the
+// local backend does not rewrite liveness) or a row whose liveness a newer
+// release wrote this binary does not recognize (ClassifyActivity fails it closed
+// onto ActivityPending), and ActivityIdle for a LiveReady row whose run went idle.
+//
+// The one loaded-form hold LoadedActivity does not report is a recoverable
+// LiveLost row: ClassifyActivity calls LiveLost terminal, but holdsTaskRunSlot
+// keeps counting it through canAutoRestoreLostSession while the restore loop is
+// still reviving it. The trailing IdleReasonRestoreGaveUp guard in
+// rawTaskRunHoldsSlot is the raw arm's mirror of that arm — it releases a LiveLost
+// row the loop gave up on — so the fence holds a LiveLost/LiveDead row the loop is
+// still reviving (EffectiveLiveness folds Dead into Lost the same way the loader
+// does) and the trailing guard releases the unrecoverable half. A LiveArchived row
+// is ActivityTerminal with no restore path, so LoadedActivity reports it terminal
+// and EffectiveLiveness is not LiveLost, and the fence does not re-raise it.
+func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
+	if activity, _ := session.LoadedActivity(item); activity == session.ActivityPending {
+		return true
+	}
+	// canAutoRestoreLostSession's restore-eligibility term: a LiveLost/LiveDead
+	// row the loop is still reviving holds; the trailing IdleReasonRestoreGaveUp
+	// guard in rawTaskRunHoldsSlot releases the half the loop gave up on.
+	return session.EffectiveLiveness(item) == session.LiveLost
 }
 
 // releasesLostSandboxGhost reports whether a row that failed to materialize is a

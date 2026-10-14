@@ -208,3 +208,144 @@ func TestLocalPendingHandoffGhostUndercountEndToEnd(t *testing.T) {
 		t.Fatalf("a local ghost mid-handoff must still refuse admission; the pending mission keeps its run in flight, so the cap must bind: got %v", admitErr)
 	}
 }
+
+// TestLocalPendingHandoffGhostStartupAlreadyUnknownReleases is the finding the
+// handoffFence must not re-raise a hold the loaded form releases: when the
+// startup state was already unknown BEFORE the handoff (MarkStartupStateUnknown
+// ran before the ambiguous delivery), ForStorage captures the original true in
+// HandoffOriginalStartupStateUnknown and leaves StartupStateUnknown=true. A
+// current reader restores the fence to true, and ClassifyActivity returns
+// ActivityTerminal for a StartupStateUnknown row before it ever consults
+// liveness — so the materialized form releases its slot (holdsTaskRunSlot:
+// ActivityTerminal, and canAutoRestoreLostSession is false because
+// ValidateRuntimeAction refuses a StartupStateUnknown row). An unconditional
+// handoffFence would hold the ghost solely because the mission is ambiguous,
+// and with no Instance to run the lifecycle edge that clears TaskRunActive the
+// capped task wedges forever. The marker gate (HandoffOriginalStartupStateUnknown
+// proving the original was false) is exactly what separates this shape from the
+// mid-handoff ghost the fence is for: the projection did not raise
+// StartupStateUnknown here, so the loaded form is terminal and the raw arm must
+// agree.
+func TestLocalPendingHandoffGhostStartupAlreadyUnknownReleases(t *testing.T) {
+	cases := []struct {
+		name     string
+		liveness session.Liveness
+	}{
+		// ClassifyActivity returns ActivityTerminal for StartupStateUnknown
+		// before the liveness switch, so the liveness does not change the
+		// verdict — a LiveRunning row restores to the same terminal the loaded
+		// form would settle on for any liveness.
+		{name: "live-running", liveness: session.LiveRunning},
+		{name: "live-lost", liveness: session.LiveLost},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The in-memory shape before a storage write whose startup was
+			// already marked unknown when the ambiguous handoff landed:
+			// MarkStartupStateUnknown ran before the delivery verdict, so
+			// StartupStateUnknown is the real true, and the run is still in
+			// flight. ForStorage captures that true in the rollback marker and
+			// leaves StartupStateUnknown=true — the on-disk shape a ghost
+			// carries while the mission is outstanding.
+			before := session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              tc.liveness,
+				BackendType:           "local",
+				PendingHandoffMission: "continue the inherited work",
+				HandoffDeliveryStatus: session.PromptCouldNotConfirm,
+				StartupStateUnknown:   true, // the original state, already unknown
+			}
+			row := before.ForStorage()
+			if row.HandoffOriginalStartupStateUnknown == nil || *row.HandoffOriginalStartupStateUnknown != true {
+				t.Fatalf("precondition: ForStorage did not capture the original true startup state for %s; the marker gate reads this value, got %v", tc.name, row.HandoffOriginalStartupStateUnknown)
+			}
+			if row.StartupStateUnknown != true {
+				t.Fatalf("precondition: ForStorage left StartupStateUnknown=%v for %s; the projection of an already-unknown state must keep it true", row.StartupStateUnknown, tc.name)
+			}
+			// The materialized oracle: restoring the fence recovers the original
+			// true, so the loaded form is terminal (ClassifyActivity returns
+			// ActivityTerminal for StartupStateUnknown before the liveness switch),
+			// and canAutoRestoreLostSession is false for a StartupStateUnknown row
+			// (ValidateRuntimeAction refuses it). The raw arm must not re-raise the
+			// hold a terminal loaded form releases, or the cap wedges on a ghost
+			// no lifecycle edge can clear.
+			if activity, _ := session.LoadedActivity(row); activity != session.ActivityTerminal {
+				t.Fatalf("LoadedActivity reported %v for a StartupStateUnknown=true %s row; restoring the fence must surface the terminal the loaded form settles on, not the held idle edge a false-original row keeps", activity, tc.name)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a local %v row whose startup was already unknown before the handoff for %s; the marker proves the original state was true, so the loaded form is terminal and the fence must not re-raise the hold (a ghost that never materializes would wedge the cap forever)", tc.liveness, tc.name)
+			}
+		})
+	}
+}
+
+// TestLocalPendingHandoffGhostReleasesOnIdleOrTerminalLiveness is the second
+// shape the handoffFence must not re-raise: a row whose loaded form RELEASES after
+// the fence is restored. The projection raised StartupStateUnknown from false to
+// true (the marker proves the original was false), so a blind handoffFence would
+// hold the row — but the loaded form restores the fence, reconstructs no op (an
+// ambiguous verdict never rebuilds OpReplacing), and the local backend does not
+// rewrite liveness, so ClassifyActivity reaches the liveness switch and the
+// materialized form releases:
+//   - LiveReady: the run went idle (no op, the mission is not an in-flight
+//     obligation), so ActivityIdle releases the slot.
+//   - LiveArchived: ActivityTerminal with no restore path (canAutoRestoreLostSession
+//     is for Lost only), so the slot frees.
+//
+// A blind handoffFence would hold the same row if it failed to materialize, and
+// no in-memory lifecycle edge can clear TaskRunActive for a ghost, so the capped
+// task wedges forever. The fence mirrors the loaded form's activity
+// (handoffFenceLoadedFormHolds replays the fence restoration through LoadedActivity
+// and only re-raises a hold the loaded form would keep), so the raw arm releases
+// the same row the materialized form releases.
+func TestLocalPendingHandoffGhostReleasesOnIdleOrTerminalLiveness(t *testing.T) {
+	cases := []struct {
+		name     string
+		liveness session.Liveness
+		activity session.Activity
+	}{
+		{name: "live-ready", liveness: session.LiveReady, activity: session.ActivityIdle},
+		{name: "live-archived", liveness: session.LiveArchived, activity: session.ActivityTerminal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The in-memory shape before a storage write: the run is in flight,
+			// the local agent is mid-handoff with an ambiguous verdict, and the
+			// startup state is the real false (the projection will raise it).
+			// ForStorage normalizes the verdict to PromptCouldNotConfirm and
+			// projects StartupStateUnknown=true, capturing the original false in
+			// the rollback marker — exactly the on-disk shape a ghost carries.
+			before := session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              tc.liveness,
+				BackendType:           "local",
+				PendingHandoffMission: "continue the inherited work",
+				HandoffDeliveryStatus: session.PromptCouldNotConfirm,
+				StartupStateUnknown:   false,
+			}
+			row := before.ForStorage()
+			if row.HandoffOriginalStartupStateUnknown == nil || *row.HandoffOriginalStartupStateUnknown != false {
+				t.Fatalf("precondition: ForStorage did not project the handoff fence for %s; the marker must capture the original false so the fence restores a loadable state, got %v", tc.name, row.HandoffOriginalStartupStateUnknown)
+			}
+			if row.StartupStateUnknown != true {
+				t.Fatalf("precondition: ForStorage left StartupStateUnknown=%v for %s; the projected value is what the raw arm must not short-circuit on", row.StartupStateUnknown, tc.name)
+			}
+			// The materialized oracle: restoring the fence recovers the original
+			// false, the ambiguous verdict reconstructs no op, and the local
+			// backend does not rewrite liveness, so LoadedActivity classifies the
+			// row by its liveness — ActivityIdle for a LiveReady row whose mission
+			// went idle, ActivityTerminal for a LiveArchived row with no restore
+			// path. holdsTaskRunSlot releases both (ActivityIdle is not Pending,
+			// and canAutoRestoreLostSession is for Lost only), so the raw arm must
+			// not re-raise a hold the loaded form releases.
+			if activity, _ := session.LoadedActivity(row); activity != tc.activity {
+				t.Fatalf("LoadedActivity reported %v for a local %v row with a pending handoff (%s); restoring the fence must surface the %v the loaded form settles on, not the held idle edge a LiveRunning row keeps", activity, tc.liveness, tc.name, tc.activity)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a local %v row whose loaded form releases (%v) for %s; the handoffFence must mirror the loaded form's activity and not re-raise a hold a %v row releases, or a ghost that never materializes wedges the cap forever", tc.liveness, tc.activity, tc.name, tc.liveness)
+			}
+		})
+	}
+}
