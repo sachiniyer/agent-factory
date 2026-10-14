@@ -78,6 +78,52 @@ func TestLostRestoreWaitSanitizesDurableError(t *testing.T) {
 	require.True(t, strings.HasSuffix(wait.Error, "…"), "truncated error = %q", wait.Error)
 }
 
+// TestLostRestoreAttemptsPersistsAcrossStorage pins the #5295 restart
+// property: the durable accounting record survives a cleared wait (the
+// structural-charge window the record exists for), round-trips through
+// instances.json, and clears on the zero tuple.
+func TestLostRestoreAttemptsPersistsAcrossStorage(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "attempts", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
+
+	require.True(t, inst.SetLostRestoreAttempts(LostRestoreAttempts{Structural: 2, Preserve: 1, Total: 5}))
+	stored := inst.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: stored.Path, WorktreePath: stored.Path, SessionName: stored.Title,
+		ExternalWorktree: true,
+	}
+	require.NotNil(t, stored.LostRestoreAttempts)
+	require.Equal(t, LostRestoreAttempts{Structural: 2, Preserve: 1, Total: 5}, *stored.LostRestoreAttempts)
+
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var decoded InstanceData
+	require.NoError(t, json.Unmarshal(payload, &decoded))
+	restored, err := FromInstanceData(decoded)
+	require.NoError(t, err)
+	snap := restored.LostRestoreAttemptsSnapshot()
+	require.NotNil(t, snap)
+	require.Equal(t, LostRestoreAttempts{Structural: 2, Preserve: 1, Total: 5}, *snap)
+
+	// The zero tuple retires the record and reports a change once.
+	require.True(t, restored.ClearLostRestoreAttempts())
+	require.Nil(t, restored.LostRestoreAttemptsSnapshot())
+	require.False(t, restored.ClearLostRestoreAttempts())
+}
+
+// TestLostRestoreAttemptsAbsentRecordStaysAbsent — a session that never saw a
+// restore episode stores no record and reports no snapshot (the omitempty
+// contract the restart seeder relies on).
+func TestLostRestoreAttemptsAbsentRecordStaysAbsent(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "fresh", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.Nil(t, inst.LostRestoreAttemptsSnapshot())
+	require.Nil(t, inst.ToInstanceData().ForStorage().LostRestoreAttempts)
+	require.False(t, inst.SetLostRestoreAttempts(LostRestoreAttempts{}), "clearing an absent record is a no-op")
+}
+
 // The give-up reason is terminal and the wait is not: a record carrying both —
 // possible only across a sanitize/mirror boundary — must read as gave-up, the
 // same precedence IdleReasonFor applies.

@@ -89,6 +89,51 @@ func TestAnnotateWorktreeAddError_NonSpaceProbeFailure(t *testing.T) {
 	}
 }
 
+// TestAnnotateGitWriteError_CommonDirProbe — the worktree parent is writable
+// but the repository's Git common dir sits on a FULL second filesystem
+// (#5295 review): `worktree add` registers under worktrees/<name>/ there, and
+// a probe of only the checkout parent would miss it. The common-dir probe's
+// errno must still land in the chain.
+func TestAnnotateGitWriteError_CommonDirProbe(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(dir string) error {
+		if dir == "/common" {
+			return &os.PathError{Op: "write", Path: dir + "/.af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	defer func() { writeSpaceProbe = old }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) { return "/common", nil }
+	defer func() { gitCommonDir = oldCommon }()
+
+	g := &GitWorktree{worktreePath: filepath.Join(t.TempDir(), "wt")}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed (exit status 128)"))
+	if !errors.Is(out, syscall.ENOSPC) {
+		t.Fatalf("full common dir must put ENOSPC in the chain even when the worktree parent writes fine: %v", out)
+	}
+}
+
+// TestAnnotateGitWriteError_CommonDirUnresolvable — when `rev-parse
+// --git-common-dir` itself fails with a resource errno (a fork under
+// RLIMIT_NPROC), that failure is evidence too and stays in the chain.
+func TestAnnotateGitWriteError_CommonDirUnresolvable(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(string) error { return nil }
+	defer func() { writeSpaceProbe = old }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) {
+		return "", &os.PathError{Op: "fork/exec", Path: "git", Err: syscall.EAGAIN}
+	}
+	defer func() { gitCommonDir = oldCommon }()
+
+	g := &GitWorktree{worktreePath: filepath.Join(t.TempDir(), "wt")}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	if !errors.Is(out, syscall.EAGAIN) {
+		t.Fatalf("unresolvable common dir must join its own errno: %v", out)
+	}
+}
+
 // TestWriteSpaceProbe_RealWrite — the production probe against a real writable
 // dir writes a byte and cleans up after itself.
 func TestWriteSpaceProbe_RealWrite(t *testing.T) {

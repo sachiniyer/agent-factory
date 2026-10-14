@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -70,22 +71,45 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 			return lostRestoreEnvErrno
 		}
 	}
-	// Neither half of the environmental non-answer signature is exempt on its
+	// A remote agent-server that verified a kernel resource limit inside the
+	// sandbox says so with a machine-readable envelope code, reconstructed
+	// client-side as this sentinel — the errno itself cannot cross the wire,
+	// but its class can (#5295 review).
+	if errors.Is(err, apiproto.ErrRemoteResourceExhausted) {
+		return lostRestoreEnvErrno
+	}
+	// Neither half of an environmental non-answer signature is exempt on its
 	// own. context.DeadlineExceeded alone is ambiguous — a permanently hung
 	// user launch_cmd wraps it too, and that is a session defect, not an
-	// outage. ErrRelocateStateUnknown alone is a definitive verdict — "this
-	// path no longer identifies the recorded worktree", "neither candidate
-	// was established" — a session fact retry cannot change. Together they
-	// are exactly what af's bounded relocation probes report when the
-	// environment did not answer inside the bound: the deadline names the
-	// non-answer and the sentinel names the probe that could not establish
-	// state. Every other timeout and every definitive verdict stays on the
+	// outage. And each sentinel alone is a definitive verdict a retry cannot
+	// change: ErrRelocateStateUnknown is "this path no longer identifies the
+	// recorded worktree" — a session fact — while ErrWorktreeSetupStalled
+	// without its deadline marks a stall detected some other way. Paired with
+	// the deadline they are exactly what af's own bounded probes report when
+	// the environment did not answer inside the bound: the deadline names the
+	// non-answer and the sentinel names the bounded probe that could not
+	// establish state — the relocation identity probe, or the setup cleanup
+	// step killed at its deadline by clearStaleWorktreePath on the rebuild
+	// path. Every other timeout and every definitive verdict stays on the
 	// structural budget (#5295 review).
 	if errors.Is(err, context.DeadlineExceeded) &&
-		errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+		(errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
+			errors.Is(err, sessiongit.ErrWorktreeSetupStalled)) {
 		return lostRestoreEnvDeadline
 	}
 	return lostRestoreEnvNone
+}
+
+// lostRestoreResourceErrno reports whether the chain carries one of the
+// kernel resource limits — exported within the package so the HTTP layer can
+// emit the matching envelope code when an error crosses the wire.
+func lostRestoreResourceErrno(err error) bool {
+	for _, errno := range lostRestoreEnvironmentalErrnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
 }
 
 // lostRestoreEnvironmentalErr is the bool form of

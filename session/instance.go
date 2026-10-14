@@ -80,6 +80,12 @@ type Instance struct {
 	// charged the structural budget, so a restart must not re-grant the class a
 	// fresh share of free waits (#5295 review).
 	lostRestoreDeadlineSpent bool
+	// lostRestoreAttempts is the durable copy of the episode's retry
+	// accounting — the structural and preserve streaks plus the cumulative
+	// total — kept so a restart in a wait-free window (structural backoff,
+	// the confirmation window) cannot zero an episode that is in fact
+	// nearly exhausted (#5295 review).
+	lostRestoreAttempts LostRestoreAttempts
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT

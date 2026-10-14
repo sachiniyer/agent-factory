@@ -493,6 +493,15 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
 		return
 	}
+	// A verified resource errno is worth a machine-readable code on the wire:
+	// the errno's errors.Is identity dies in serialization, so the code is how
+	// a client-side classifier still sees "the remote ran out of a kernel
+	// resource" rather than a generic message string (#5295 review).
+	if lostRestoreResourceErrno(err) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeResourceExhausted))
+		return
+	}
 	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))
 }
 

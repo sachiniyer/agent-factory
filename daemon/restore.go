@@ -319,6 +319,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		instance.ClearLostRestoreFailure()
 		instance.ClearLostRestoreWait()
 		instance.ClearLostRestoreDeadlineSpent()
+		instance.ClearLostRestoreAttempts()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
@@ -433,7 +434,11 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				class = lostRestoreEnvDeadline
 			}
 			if class == lostRestoreEnvNone {
-				m.clearLostRestoreWaitDurable(repoID, instance, false)
+				// nil for the attempts record: it was written at the last arm
+				// and already carries this wait's contribution — the operator's
+				// push failure is not an episode event and must not perturb the
+				// counts (#5295 review).
+				m.clearLostRestoreWaitDurable(repoID, instance, false, nil)
 			}
 			return "", err
 		}

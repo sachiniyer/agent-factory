@@ -498,12 +498,12 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		}
 		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 			return RelocationClaim{}, errors.Join(fmt.Errorf(
-				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %v)",
+				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 				primary, primaryErr, recovery.AlternatePath, alternateFailure,
 			), ErrRelocateStateUnknown)
 		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
-			"cannot resolve interrupted relocation: neither candidate was established (%s: %v; %s: %v)",
+			"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 			primary, primaryFailure, recovery.AlternatePath, alternateFailure,
 		), ErrRelocateStateUnknown)
 	}

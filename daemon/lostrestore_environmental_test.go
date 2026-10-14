@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -46,6 +47,16 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"enfile", fmt.Errorf("open: %w", syscall.ENFILE), lostRestoreEnvErrno},
 		{"etimedout", fmt.Errorf("probe: %w", syscall.ETIMEDOUT), lostRestoreEnvErrno},
 		{"deadline carrying relocate sentinel", errors.Join(context.DeadlineExceeded, sessiongit.ErrRelocateStateUnknown), lostRestoreEnvDeadline},
+		// clearStaleWorktreePath's real producer shape: the stalled sentinel and
+		// the killed step's deadline wrapped in one fmt.Errorf chain (#5295 review).
+		{"deadline carrying setup-stalled sentinel", fmt.Errorf(
+			"clear stale worktree path: %w: killed at its deadline: %w",
+			sessiongit.ErrWorktreeSetupStalled, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"setup-stalled sentinel bare", fmt.Errorf("cleanup: %w", sessiongit.ErrWorktreeSetupStalled), lostRestoreEnvNone},
+		// The remote archive RPC's machine-readable class: the sandbox's agent
+		// server verified a resource errno and the client reconstructed the
+		// sentinel — the errno itself cannot cross the wire (#5295 review).
+		{"remote resource-exhaustion sentinel", fmt.Errorf("%s: %w", "archive failed", apiproto.ErrRemoteResourceExhausted), lostRestoreEnvErrno},
 		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvErrno},
 		// The #5295 play-test producer: `git worktree add` fails with ENOSPC
 		// trapped in *exec.ExitError stderr text — invisible to errors.Is. The

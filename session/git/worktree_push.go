@@ -42,6 +42,13 @@ const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 // must not hang the archive forever). Credentials are the sandbox image's/host's
 // responsibility — the same `origin` the sandbox cloned from must be pushable
 // (documented in docs/backends.md).
+//
+// Every git-subprocess failure is annotated with a Go-side write probe over
+// the worktree and common-dir filesystems: inside a sandbox these calls are
+// subprocesses, so a disk-full failure arrives as an *exec.ExitError whose
+// errno survives only as stderr text. The probe re-verifies the environment
+// so the archive RPC's error envelope can carry the resource-exhaustion class
+// across the wire (#5295 review).
 func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	if g.externalWorktree {
 		return "", fmt.Errorf("cannot push an in-place/external worktree branch (it is user-owned)")
@@ -67,14 +74,14 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// beneath it, which is the same answer for less work on a big tree.
 	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
-		return "", fmt.Errorf("failed to check worktree status before archive push: %w", err)
+		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), g.worktreePath)
 	}
 	if strings.TrimSpace(status) != "" {
 		if _, err := g.runGitCommand(g.worktreePath, "add", "-A"); err != nil {
-			return "", fmt.Errorf("failed to stage uncommitted work before archive push: %w", err)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", err), g.worktreePath)
 		}
 		if _, err := g.runGitCommand(g.worktreePath, "commit", "--no-verify", "-m", archiveSnapshotMessage); err != nil {
-			return "", fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err), g.worktreePath)
 		}
 	}
 
@@ -87,8 +94,8 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// here too, with git's stderr folded in.
 	refspec := "HEAD:refs/heads/" + branch
 	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
-		return "", fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
-			branch, strings.TrimSpace(out), err)
+		return "", g.annotateGitWriteError(fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
+			branch, strings.TrimSpace(out), err), g.worktreePath)
 	}
 	return branch, nil
 }

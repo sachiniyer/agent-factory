@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // writeSpaceProbe is the production probe (and the test seam): create a file
@@ -26,35 +27,87 @@ var writeSpaceProbe = func(dir string) error {
 	return cerr
 }
 
-// annotateWorktreeAddError joins a failed `git worktree add` with the result of
-// a Go-side write probe against the worktree's parent directory.
+// gitCommonDir resolves the repository's Git common directory — the place
+// `worktree add` writes its registration (worktrees/<name>/) and `commit`/
+// `push` write objects — which may live on a different filesystem than the
+// worktree itself (#5295 review). It is a test seam so a probe test can pin
+// the second filesystem without a real repository layout.
+var gitCommonDir = func(g *GitWorktree) (string, error) {
+	out, err := g.runGitLocalCommand(g.repoPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	dir := strings.TrimSpace(out)
+	if dir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(g.repoPath, dir)
+	}
+	return dir, nil
+}
+
+// annotateGitWriteError re-verifies the environment behind a failed git
+// subprocess: a Go-side write probe into each of dirs plus the repository's
+// Git common directory. A subprocess failure loses its errno identity —
+// ENOSPC arrives only as text on the *exec.ExitError's stderr, so a
+// classifier that reads errors.Is through the chain (and never matches
+// message text) cannot see disk exhaustion. The probe produces the evidence
+// from THIS process instead of trusting git's words, and needs no locale
+// assumptions.
 //
-// A subprocess failure loses its errno identity: ENOSPC arrives only as text
-// on the *exec.ExitError's stderr, so a classifier that reads errors.Is through
-// the chain — and never matches message text — cannot see disk exhaustion.
-// The #5295 play-test proved exactly that: `worktree add` was the first real
-// write under the filled filesystem, every attempt charged the structural
-// budget, and the lost session gave up while the disk stayed full.
+// Both targets are probed because a worktree write spans them: `worktree add`
+// creates the checkout under the worktree root AND registers it under the
+// common dir's worktrees/; `add`/`commit` write the index and objects in the
+// worktree's gitdir under the common dir. When the worktree parent and the
+// common dir sit on different filesystems, probing only one misses a full
+// other. If the common dir cannot be resolved at all, that failure is joined
+// too — an unanswerable `rev-parse` is itself evidence about the
+// environment (a fork that fails carries its resource errno).
 //
-// The probe produces the evidence from THIS process instead of trusting git's
-// words (no locale assumptions): when writing to the target's filesystem ALSO
-// fails, the joined error carries the probe's errno — ENOSPC/EDQUOT then
-// classify environmental — and when the probe succeeds the git error returns
-// unchanged, so an ordinary failure on a writable filesystem stays structural.
+// The joined error classifies environmental only when a probe actually
+// fails: a write to that filesystem just failed with the errno. When every
+// probe succeeds the git error returns unchanged, so an ordinary failure on
+// writable filesystems stays structural.
 //
 // False positive: a permanent non-space failure (bad ref, stale registration)
-// while the filesystem is coincidentally full waits environmentally — but no
-// worktree add could have succeeded on that filesystem anyway, and the first
-// probe to succeed (space freed) routes the same git failure back to the
-// structural budget.
-func (g *GitWorktree) annotateWorktreeAddError(err error) error {
+// while a covered filesystem is coincidentally full waits environmentally —
+// but no write could have succeeded there anyway, and the first probe to
+// succeed routes the same git failure back to the structural budget.
+func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	if err == nil {
 		return nil
 	}
-	parent := filepath.Dir(g.worktreePath)
-	if probeErr := writeSpaceProbe(parent); probeErr != nil {
-		return errors.Join(err,
-			fmt.Errorf("write probe of %s also failed: %w", parent, probeErr))
+	joined := err
+	probed := map[string]bool{}
+	probe := func(dir string) {
+		if dir == "" || probed[dir] {
+			return
+		}
+		probed[dir] = true
+		if probeErr := writeSpaceProbe(dir); probeErr != nil {
+			joined = errors.Join(joined,
+				fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
+		}
 	}
-	return err
+	for _, dir := range dirs {
+		probe(dir)
+	}
+	common, cerr := gitCommonDir(g)
+	if cerr != nil {
+		joined = errors.Join(joined,
+			fmt.Errorf("could not resolve the repository's common dir to probe it: %w", cerr))
+	} else {
+		probe(common)
+	}
+	return joined
+}
+
+// annotateWorktreeAddError is annotateGitWriteError for a failed `git
+// worktree add` — the checkout writes under the worktree's parent directory.
+// The #5295 play-test proved the gap this closes: `worktree add` was the
+// first real write under the filled filesystem, every attempt charged the
+// structural budget, and the lost session gave up while the disk stayed full.
+func (g *GitWorktree) annotateWorktreeAddError(err error) error {
+	return g.annotateGitWriteError(err, filepath.Dir(g.worktreePath))
 }
