@@ -328,13 +328,15 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			if fresh.RepoID != row.RepoID {
 				// RepoID changed: split rather than graft — counts tallied
 				// against one repo must never be attributed to another. But a
-				// session row is only worth keeping when it still navigates to
-				// a workspace of its own: if the fresh registration claims the
-				// same Root, that path now hosts the OTHER repository's
-				// checkout, so the preserved row would open the replacement
-				// repo while displaying the old one's name and counts. Drop it
-				// rather than show two rows at one live path (#4888 review).
-				if row.Root != fresh.Root {
+				// session row is only worth keeping when the OLD repo still
+				// has independent provenance behind it: live sessions at a
+				// workspace the fresh registration does not claim. A same-Root
+				// record means that path now hosts the other repository's
+				// checkout, and a zero-session registry-only row has nothing
+				// left to describe — either shape preserved would show a
+				// phantom project that opens a checkout the registration no
+				// longer names (#4888 review).
+				if row.Root != fresh.Root && row.SessionCount > 0 {
 					sessionRow := row
 					sessionRow.RegistryID = ""
 					sessionRow.RegistryRoot = ""
