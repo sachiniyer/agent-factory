@@ -194,6 +194,23 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.pendingProgramChosen || !m.programFollowsConfig || isRemoteTarget() {
 			sendProgram = m.pendingProgram
 		}
+		// The account belongs to one agent's registry, so it must travel with
+		// the program it was chosen or preselected for (#4889 review). When the
+		// program goes out implicitly ("" resolves the live default on the
+		// daemon) a stale pairing is possible: an account the daemon PRESELECTED
+		// for the displayed program would be read as explicit for whatever
+		// program the daemon resolves now — refuse-worthy or silently wrong. A
+		// CHOSEN account is a commitment to the displayed program, so it pins
+		// that program explicit; an unchosen preselect stays implicit alongside
+		// the program and lets the daemon resolve both.
+		sendAccount := m.pendingAccount
+		if sendProgram == "" && sendAccount != "" {
+			if m.pendingAccountChosen && m.pendingProgram != "" {
+				sendProgram = m.pendingProgram
+			} else {
+				sendAccount = ""
+			}
+		}
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -207,9 +224,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		backend := m.pendingBackend
 		m.pendingBackend = ""
 		m.backendPickerPending = false
-		// And for the ctrl+o account field (#3844), on the loop for the same reason.
-		account := m.pendingAccount
+		// And for the ctrl+o account field (#3844), on the loop for the same
+		// reason — sendAccount already captured its value above.
 		m.pendingAccount = ""
+		m.pendingAccountChosen = false
 		m.pendingProgramChosen = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
@@ -243,7 +261,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
 				// before this field existed.
-				Account: account,
+				Account: sendAccount,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -255,7 +273,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the daemon reports on the session it created (#3844 constraint 5).
 				// Read off the request rather than the model: by the time this lands
 				// the form has been reset, and a later create may hold a different one.
-				account: account,
+				account: sendAccount,
 			}
 		}
 

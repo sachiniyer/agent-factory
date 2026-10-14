@@ -448,3 +448,157 @@ func TestRefreshKeepsTheCacheOnAReadFailure(t *testing.T) {
 		"a failed re-read keeps the last-known default")
 	require.Equal(t, tmux.ProgramClaude, h.defaultProgram())
 }
+
+// TestImplicitProgramDropsAnUnchosenAccountPreselect is the account half of the
+// implicit-send contract (#4889 review): an account the daemon PRESELECTED for
+// the displayed program belongs to that program's registry, so when the
+// program goes out as "" — resolved live on the daemon — the unchosen preselect
+// must go out as "" too. Otherwise a default_program change while the form is
+// open pairs the resolved program with an account fetched for a different
+// agent: a refusal, or worse a same-named identity in the new agent's registry.
+func TestImplicitProgramDropsAnUnchosenAccountPreselect(t *testing.T) {
+	h := configFollowingHome(t)
+	defaults := twoAgentsWithAccounts()
+	defaults.Defaults = map[string]string{"claude": "work"}
+	stubAccounts(t, defaults, nil)
+	got := recordStartRequest(t)
+
+	_, cmd := h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.Update(am)
+		}
+	}
+	require.Equal(t, "work", h.pendingAccount, "the preselect landed on the field")
+	require.False(t, h.pendingAccountChosen, "a preselect is not a user choice")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Program, "the untouched program stays implicit")
+	assert.Empty(t, got.Account,
+		"an account preselected FOR the displayed program must not become an explicit account for the resolved one")
+}
+
+// TestChosenAccountPinsTheDisplayedProgram is the other half of the pairing
+// (#4889 review): an account the USER picked is a commitment to the program on
+// screen — an identity in that agent's registry — so the program it was chosen
+// against pins explicit on the wire. Sending "" would let the daemon resolve a
+// different default and pair it with an identity from the wrong registry.
+func TestChosenAccountPinsTheDisplayedProgram(t *testing.T) {
+	h := configFollowingHome(t)
+	got := recordStartRequest(t)
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramClaude, got.Program,
+		"a chosen account pins the displayed program — the pair the user committed")
+	assert.Equal(t, "work", got.Account)
+}
+
+// TestFailedCreateRestoreKeepsAnImplicitProgramImplicit is the draft-restore
+// half (#4889 review): a create whose untouched program went out as "" keeps
+// "" on retry — the failure may BE the old default going away, and marking the
+// draft's display value "chosen" would freeze it into an explicit retry.
+func TestFailedCreateRestoreKeepsAnImplicitProgramImplicit(t *testing.T) {
+	h := configFollowingHome(t)
+	got := recordStartRequest(t)
+
+	inst := newLoadingInstance(t, "demo")
+	inst.Path = h.repoRoot
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+
+	// The default moves after the failure — exactly the case where replaying
+	// the displayed program would retry the dead agent.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramAider)
+	require.NoError(t, err)
+
+	// The failed request's wire program was implicit — "" for the daemon to
+	// resolve — which is the only thing the restore can faithfully re-arm. With
+	// the user still watching, the refusal re-arms the form inline.
+	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: ""}
+	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
+	require.False(t, h.pendingProgramChosen,
+		"a draft that went out implicit must restore implicit")
+	require.Equal(t, tmux.ProgramAider, h.pendingProgram,
+		"the restored field shows the live default the retry resolves")
+	require.NoError(t, h.namingInstance.SetTitle("demo2"))
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Program,
+		"the retry resolves the live default rather than replaying the dead one")
+}
+
+// TestPreflightChecksTheProgramTheDaemonWillResolve is the preflight half
+// (#4889 review): an untouched field sends "", so the daemon resolves the live
+// default_program — preflight must check THAT program. Checking the displayed
+// seed would refuse a create that succeeds (old default uninstalled, new one
+// present) or wave through one that fails.
+func TestPreflightChecksTheProgramTheDaemonWillResolve(t *testing.T) {
+	h := configFollowingHome(t)
+	got := recordStartRequest(t)
+
+	var checked string
+	t.Cleanup(SetLocalSessionPreflightForTest(func(_ *config.Config, program string) error {
+		checked = program
+		return nil
+	}))
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram,
+		"the field opened on the old default")
+
+	// The default moves while the form is open; the daemon will resolve aider.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramAider)
+	require.NoError(t, err)
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramAider, checked,
+		"preflight validates the program the daemon will resolve, not the stale seed")
+	assert.Empty(t, got.Program, "the create itself still goes out implicit")
+}
+
+// TestTaskCreatePreservesAnExplicitLaunchProgram is the task-side contract
+// (#4889 review): launched with an explicit --program, "Use config default"
+// means the launch's choice, so the task stores it — the empty program the
+// runner re-resolves is only for a launch that follows config.
+func TestTaskCreatePreservesAnExplicitLaunchProgram(t *testing.T) {
+	h := activeProjectHome(t)
+	clearDaemonTarget(t)
+	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
+	t.Chdir(h.repoRoot)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	tp := h.automations.TaskPane()
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, tp.IsCreating())
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("launch-pinned")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do a thing")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, disk, 1)
+	assert.Equal(t, tmux.ProgramGemini, disk[0].Program,
+		"an explicit launch --program is the default \"Use config default\" refers to")
+}

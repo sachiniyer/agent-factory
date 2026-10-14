@@ -2,10 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -222,4 +224,40 @@ func TestResolveConfigForRepoContextBoundsFileLoads(t *testing.T) {
 	require.NoError(t, <-writerDone)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, elapsed, 8*time.Second, "a stalled config read must return on the caller's deadline rather than wait for the filesystem")
+}
+
+// TestResolveConfigForRepoContextSharesAWedgedRead is the accumulation half of
+// the bound (#4889 review): a read that never returns cannot be killed
+// mid-syscall, so retries must attach to the one in-flight worker rather than
+// stacking another abandoned goroutine on the same files per call.
+func TestResolveConfigForRepoContextSharesAWedgedRead(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	release := make(chan struct{})
+	prev := resolveRepoForBound
+	resolveRepoForBound = func(*RepoContext) (*ResolvedConfig, error) {
+		calls.Add(1)
+		<-release
+		return nil, errors.New("wedged read")
+	}
+	t.Cleanup(func() {
+		close(release)
+		resolveRepoForBound = prev
+	})
+
+	// Three calls, each bounding only its own wait while the worker stays
+	// wedged. Without dedup each would stack another blocked worker.
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err = ResolveConfigForRepoContext(ctx, repo)
+		cancel()
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	require.Equal(t, int32(1), calls.Load(),
+		"timed-out retries must share the wedged worker, not accumulate one per call")
 }

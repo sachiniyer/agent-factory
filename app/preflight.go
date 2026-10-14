@@ -45,7 +45,17 @@ func (m *home) preflightSessionCreate() error {
 	if err != nil {
 		return err
 	}
-	return localSessionPreflight(cfg, m.pendingProgram)
+	program := m.pendingProgram
+	if !m.pendingProgramChosen && m.programFollowsConfig && !isRemoteTarget() {
+		// An untouched form sends "" and the daemon resolves the LIVE
+		// default_program at create time (#4889). Preflighting the displayed
+		// seed would validate a program the create never asks for — and could
+		// refuse a create that would succeed when the seed is stale. cfg is the
+		// same freshly resolved config the daemon consults, so its
+		// default_program IS the program being checked.
+		program = cfg.DefaultProgram
+	}
+	return localSessionPreflight(cfg, program)
 }
 
 func (m *home) preflightConfig() (*config.Config, error) {
