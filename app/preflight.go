@@ -41,6 +41,16 @@ func (m *home) preflightSessionCreate() error {
 	if !local {
 		return nil
 	}
+	// A remote target hosts the session on the daemon's machine — its tmux,
+	// its PATH, its resolved default_program. Checking THIS host's binaries
+	// would refuse a create the remote could serve (an untouched form sends
+	// "" for the daemon to resolve, so substituting the client's
+	// cfg.DefaultProgram here is actively wrong when the two hosts differ)
+	// and can never approve anything the daemon does not recheck itself —
+	// remote creates skip client-local prereqs (#4889 review).
+	if isRemoteTarget() {
+		return nil
+	}
 	cfg, err := m.preflightConfig()
 	if err != nil {
 		return err

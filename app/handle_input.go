@@ -370,8 +370,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // startNewInstance creates a new instance and enters stateNew for naming.
 func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.backendPickerPending = false
-	if m.restoreFailedCreate() {
-		return m, m.selectionChanged()
+	if restored, restoreCmd := m.restoreFailedCreate(); restored {
+		return m, tea.Batch(m.selectionChanged(), restoreCmd)
 	}
 	// A session lives in a project, and registry mode has none until the user
 	// selects one (#2477) — so refuse here rather than opening a form that cannot

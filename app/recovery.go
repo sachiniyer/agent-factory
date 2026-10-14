@@ -2,6 +2,7 @@ package app
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -15,10 +16,14 @@ func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd
 
 // restoreFailedCreate reopens the captured draft, never a newer form. A user
 // who navigated away can recover it with the next create action in its project.
-func (m *home) restoreFailedCreate() bool {
+// The returned cmd re-fetches the account the daemon would apply to an implicit
+// submit — the draft carries only the WIRE account, which is "" for an unchosen
+// preselect (#4889 review) — so a restored form must not claim "no account" for
+// a retry that will run as the configured default.
+func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	failed := m.failedCreate
 	if failed == nil || failed.draft == nil || failed.draft.RepoPath != m.repoRoot || m.namingInstance != nil {
-		return false
+		return false, nil
 	}
 	req := failed.draft
 	instance := failed.instance
@@ -53,5 +58,12 @@ func (m *home) restoreFailedCreate() bool {
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)
 	m.failedCreate = nil
-	return true
+	if m.pendingAccountChosen {
+		return true, nil
+	}
+	// The draft proves only that no account was SENT — an unchosen preselect
+	// leaves req.Account empty, so the restored field would read "no account"
+	// while the retry applies the configured default. Re-fetch it exactly as a
+	// fresh form does (#4889 review).
+	return true, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
 }
