@@ -60,12 +60,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
-	// Re-read the live default_program synchronously before saving (#4889): the
-	// cache labels the form's "Use config default" choice, and a save is the
-	// moment that label turns into stored intent, so it is where staleness
-	// would silently commit. The read is bounded and local-only — a remote
-	// target keeps the launch-time value, and a read error keeps the cache.
-	m.refreshDefaultProgram()
+
 	// An empty program field is "Use config default". When the launch itself
 	// committed to a program — an explicit --program (programFollowsConfig is
 	// false) — THAT is the default the label refers to, so the task stores it
