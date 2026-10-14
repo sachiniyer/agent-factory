@@ -129,6 +129,22 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	return nil
 }
 
+// RebindProjectGuarded is the guarded-rebind capability made a wire method
+// (#4888 review). The precondition pair is REQUIRED here — a caller that wants
+// last-writer-wins calls RebindProject — and the method's existence is the
+// whole point: a daemon that predates it answers net/rpc's "can't find method"
+// on the socket or the marked catch-all 404 over HTTP, either way a definitive
+// refusal instead of a silently unguarded apply. That makes the capability
+// atomic with the mutation itself: a Ping observed on one daemon can never
+// vouch for the sibling a proxy might route a later request to, so no separate
+// probe can bind capability to the request the way the method name does.
+func (s *controlServer) RebindProjectGuarded(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	if req.ExpectedRoot == "" && req.ExpectedCheckoutID == "" {
+		return fmt.Errorf("RebindProjectGuarded requires expected_root or expected_checkout_id — call RebindProject for an unguarded rebind")
+	}
+	return s.RebindProject(req, resp)
+}
+
 // ListProjects returns every durable project in this daemon's #2355 registry
 // (#2456). It is a pure config read: config.ListProjects walks the registry
 // directory with no lock and no manager, so — like ListBackends — this handler

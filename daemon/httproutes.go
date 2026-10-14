@@ -278,6 +278,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/RebindProjectGuarded",
+		Description: "Guarded twin of RebindProject: requires expected_root or expected_checkout_id and exists only on daemons that enforce the pair — a daemon predating it answers the marked 404, which clients map to an upgrade refusal rather than letting the precondition drop silently.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProjectGuarded) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ListProjects",
 		Description: "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
 		requestType: reflect.TypeOf(ListProjectsRequest{}),

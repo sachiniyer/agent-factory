@@ -307,6 +307,12 @@ type home struct {
 	// af has seen; Enter on the cursor row switches the rail to that project via
 	// the #1547 switchProject path.
 	projects *ui.ProjectsPane
+	// sidebarProjects is the Projects section's last applied row set in the
+	// picker's overlay.Project shape. The section's own SidebarProject rows
+	// drop the registry fields, so a session-snapshot failure could not merge
+	// fresh registry truth into what is on screen without this copy (#4888
+	// review). Set only through setSidebarProjects.
+	sidebarProjects []overlay.Project
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

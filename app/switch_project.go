@@ -355,6 +355,14 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 // launch and on project switch (paths that fetch synchronously).
 func (m *home) refreshSidebarProjects() {
 	projects, registryDegraded := m.buildProjectList()
+	m.setSidebarProjects(projects, registryDegraded)
+}
+
+// setSidebarProjects is the funnel every Projects-section update flows
+// through: it records the applied row set in sidebarProjects (the merge
+// source a session-snapshot failure reads) before rendering it.
+func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool) {
+	m.sidebarProjects = projects
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
@@ -373,14 +381,19 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 // applySidebarProjects pushes an already-built project list into the Projects
 // section, for callers that built the list for another consumer too — the
 // section and that consumer must describe the SAME registry read (#4888
-// review). A fetch error leaves the last-known rows intact (like
-// handleSnapshot/refreshTasks). Returns whether the visible rows changed.
+// review). A fetch error means the SESSION half never answered; the registry
+// half may still have read fine, so the section merges the fresh registry
+// rows into its last-known set rather than discarding them — a rebind that
+// moved a record between polls would otherwise leave the old root on screen
+// indefinitely while the poll stays unhealthy (#4888 review). Returns whether
+// the visible rows changed.
 func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
 	if fetchErr != nil {
 		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
-		return false
+		projects = overlay.MergePreservingSessionRows(m.sidebarProjects, projects, registryDegraded)
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
+	m.sidebarProjects = projects
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
 	}

@@ -235,15 +235,26 @@ func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	displayed.SetWidth(200)
 	assert.Contains(t, displayed.Render(), "Rebound elsewhere")
 
-	// Esc to the list: the session-derived row survived, and the registry row
-	// refreshed to the rebound root with its last-known counts carried over.
+	// Esc to the list: the session-derived row survived, and the rebound
+	// registration landed under the NEW repo — the merge splits on a RepoID
+	// change (#4888 review), so the rebind target carries no borrowed counts
+	// while the old repo keeps a session-only row with its own 4/1 tallies.
 	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEsc})
 	row, ok := displayed.HighlightedProject()
 	require.True(t, ok, "the rebuilt list still highlights a row")
 	assert.Equal(t, id, row.RegistryID, "the cursor lands on the rebound record")
 	assert.Equal(t, moved, row.Root, "the registry row still refreshes to where the project is bound now")
-	assert.Equal(t, 4, row.SessionCount, "the failed snapshot could not recount — the row keeps its last count")
-	assert.Equal(t, 1, row.InPlaceCount)
+	assert.Equal(t, 0, row.SessionCount,
+		"the moved registration must not inherit counts tallied against the old repo")
+	var oldRepoRow *overlay.Project
+	for i, r := range displayed.Projects() {
+		if r.RegistryID == "" && r.Root == root {
+			oldRepoRow = &displayed.Projects()[i]
+		}
+	}
+	require.NotNil(t, oldRepoRow, "the old repo's sessions keep a session-only row")
+	assert.Equal(t, 4, oldRepoRow.SessionCount, "the failed snapshot could not recount — the old repo keeps its last count")
+	assert.Equal(t, 1, oldRepoRow.InPlaceCount)
 	assert.Contains(t, displayed.Render(), "sessonly",
 		"a session-derived row must survive the failed snapshot refresh")
 }

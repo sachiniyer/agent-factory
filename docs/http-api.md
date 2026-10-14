@@ -247,13 +247,15 @@ rebind` does not; it rebinds unconditionally, as before.
 A daemon that predates the fields treats them like any unknown fields (see
 [Unknown fields](#unknown-fields)). It rejects a hand-authored request with
 `400`. For a request with `X-AF-Client-Version`, such as the TUI's, it ignores
-them and applies the rebind without the check — which is why a client sending
-a guarded pair first reads `GET /v1/health`: a daemon that implements the
-precondition advertises `"guarded_rebind": true` in its `PingResponse`. When
-the bit is absent, or the capability answer cannot be obtained at all, the
-client refuses the send before the request goes out — the remedy is to upgrade
-the daemon or rebind from its host — rather than silently downgrade to last
-writer wins.
+them and applies the rebind without the check — which is why a guarded client
+sends the pair to `POST /v1/RebindProjectGuarded` instead: that route exists
+only on daemons that implement the precondition, so a daemon that predates it
+answers its marked 404 and the client surfaces an upgrade refusal rather than
+silently downgrading to last writer wins. The route is the capability check —
+atomic with the mutation, where a `GET /v1/health` probe answered by one
+daemon could never vouch for the sibling a proxy might route the mutation to.
+`RebindProjectGuarded` refuses a request that omits both expected fields;
+last-writer-wins stays on `POST /v1/RebindProject`.
 
 **Not in the catalog.** The generated table is `af api`'s discovery surface — the
 client-facing session and task RPCs — so the daemon serves several routes it does

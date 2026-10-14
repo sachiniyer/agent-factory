@@ -1047,6 +1047,10 @@ test("rebindProject posts id + verbatim path to RebindProject", async () => {
 test("rebindProject sends the observed pair as expected_root + expected_checkout_id", async () => {
   const cap = stubFetch();
   await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old", "chk_observed");
+  assert.ok(
+    cap.url.endsWith("/v1/RebindProjectGuarded"),
+    `a guarded send hits the guarded route — the route is the capability check (#4888 review), posted to ${cap.url}`,
+  );
   assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
   assert.equal(
     cap.body.expected_checkout_id,

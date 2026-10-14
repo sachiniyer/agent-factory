@@ -403,25 +403,33 @@ func TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot(t *testing.T) 
 		{Name: "newbie", Root: "/repos/newbie", RepoID: "repo-nb", RegistryID: "prj_new", RegistryRoot: "/repos/newbie"},
 	}, false)
 
-	if len(p.all) != 3 {
-		t.Fatalf("merged list must keep the session row, refresh the registry row, and add the new record: %+v", p.all)
+	// Four rows, not three: alpha's RepoID changed (repo-old → repo-new), so
+	// the merge splits — repo-old keeps a session-only row for its 4 live
+	// sessions while the registration lands on repo-new with counts it must
+	// NOT inherit (#4888 review). Sessions and the new record land as before.
+	if len(p.all) != 4 {
+		t.Fatalf("the RepoID change splits alpha into the old repo's session row plus the new repo's registry row: %+v", p.all)
 	}
-	if got := p.all[0]; got.RegistryID != "prj_aaa" || got.Root != "/new/alpha" || got.RepoID != "repo-new" || got.MissingPath {
-		t.Fatalf("the conflict row must be the fresh registry record, got %+v", got)
+	rowByRepoID := map[string]Project{}
+	for _, row := range p.all {
+		rowByRepoID[row.RepoID] = row
 	}
-	if p.all[0].SessionCount != 4 || p.all[0].InPlaceCount != 1 {
-		t.Fatalf("the snapshot that failed could not recount sessions — the row keeps its last counts, got %+v", p.all[0])
+	if got, ok := rowByRepoID["repo-old"]; !ok || got.RegistryID != "" || got.Root != "/old/alpha" || got.SessionCount != 4 || got.InPlaceCount != 1 {
+		t.Fatalf("the old repo keeps a session-only row carrying its own counts, got %+v (ok=%v)", got, ok)
 	}
-	if got := p.all[1]; got.Name != "sessions" || got.SessionCount != 3 || got.RegistryID != "" {
-		t.Fatalf("the session-derived row must be kept whole, got %+v", got)
+	if got, ok := rowByRepoID["repo-new"]; !ok || got.RegistryID != "prj_aaa" || got.Root != "/new/alpha" || got.MissingPath || got.SessionCount != 0 {
+		t.Fatalf("the conflict row must be the fresh registry record under the NEW repo, with no borrowed counts, got %+v (ok=%v)", got, ok)
+	}
+	if got, ok := rowByRepoID["repo-sess"]; !ok || got.Name != "sessions" || got.SessionCount != 3 || got.RegistryID != "" {
+		t.Fatalf("the session-derived row must be kept whole, got %+v (ok=%v)", got, ok)
 	}
 	for _, row := range p.all {
 		if row.RegistryID == "prj_gone" {
 			t.Fatalf("a record absent from a healthy registry read must still drop its stale row: %+v", p.all)
 		}
 	}
-	if got := p.all[2]; got.RegistryID != "prj_new" {
-		t.Fatalf("a registration newer than the picker still lands, got %+v", p.all)
+	if got, ok := rowByRepoID["repo-nb"]; !ok || got.RegistryID != "prj_new" {
+		t.Fatalf("a registration newer than the picker still lands, got %+v (ok=%v)", got, ok)
 	}
 
 	// The cursor and rebind target re-seat onto the rebound row as before.
@@ -814,11 +822,15 @@ func TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths(t *testing.T) {
 }
 
 // TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo pins the
-// #4888 round-6 review finding: a registration that rebounds onto a repo the
-// picker already lists from live sessions must not produce a second row for
-// the same RepoID — the registry copy would inherit counts tallied against
-// the OLD root while the session row kept the real ones. The merge grafts the
-// registration fields onto the session row instead.
+// #4888 round-6 + round-7 review findings: a registration that rebounds onto a
+// repo the picker already lists from live sessions must not produce a second
+// row for the same RepoID — the registry copy would inherit counts tallied
+// against the OLD root while the session row kept the real ones. And when the
+// rebind moved the registration to a DIFFERENT RepoID, the merge must SPLIT:
+// the original repository keeps a session-only row with its own counts (the
+// sessions still run there) while the registration grafts onto the new repo's
+// row — never counts copied across repos, never the old repo's sessions
+// silently rowless.
 func TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo(t *testing.T) {
 	// The session row sorts before AND after the registry row across the two
 	// orderings — the graft must land either way.
@@ -840,20 +852,37 @@ func TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo(t *testing
 
 		// The conflict refresh failed on the session side: the fresh rows carry
 		// the registry union only, and the alpha record's rebind landed it on
-		// the repo the "sessions" row already owns.
+		// the repo the "sessions" row already owns — under a DIFFERENT RepoID.
 		p.SetRebindConflictPreserving("Rebound elsewhere, to /repos/shared · Enter retries from there", []Project{
 			{Name: "alpha", Root: "/repos/shared", RepoID: "repo-shared", RegistryID: "prj_aaa", RegistryRoot: "/repos/shared", RegistryCheckoutID: "chk_new"},
 		}, false)
 
-		if len(p.all) != 1 {
-			t.Fatalf("sessionFirst=%v: the rebound record must not produce a second row for the same repo, got %+v", sessionFirst, p.all)
+		// Two rows, not one: repo-old keeps a session-only row for its 4 live
+		// sessions; repo-shared's row holds its own 3 sessions plus the grafted
+		// registration. The old repo's counts never transfer to the new repo.
+		if len(p.all) != 2 {
+			t.Fatalf("sessionFirst=%v: the split must keep the old repo's sessions AND the new repo's row, got %+v", sessionFirst, p.all)
 		}
-		row := p.all[0]
-		if row.Name != "sessions" || row.SessionCount != 3 || row.InPlaceCount != 2 {
-			t.Fatalf("sessionFirst=%v: the session row keeps its own live counts, got %+v", sessionFirst, row)
+		var oldRow, sharedRow *Project
+		for i := range p.all {
+			switch p.all[i].RepoID {
+			case "repo-old":
+				oldRow = &p.all[i]
+			case "repo-shared":
+				sharedRow = &p.all[i]
+			}
 		}
-		if row.RegistryID != "prj_aaa" || row.RegistryRoot != "/repos/shared" || row.RegistryCheckoutID != "chk_new" || row.MissingPath {
-			t.Fatalf("sessionFirst=%v: the session row gains the registration's fresh identity, got %+v", sessionFirst, row)
+		if oldRow == nil || sharedRow == nil {
+			t.Fatalf("sessionFirst=%v: both repos keep a row, got %+v", sessionFirst, p.all)
+		}
+		if oldRow.RegistryID != "" || oldRow.SessionCount != 4 {
+			t.Fatalf("sessionFirst=%v: the old repo keeps a session-only row with its own counts, got %+v", sessionFirst, *oldRow)
+		}
+		if sharedRow.Name != "sessions" || sharedRow.SessionCount != 3 || sharedRow.InPlaceCount != 2 {
+			t.Fatalf("sessionFirst=%v: the session row keeps its own live counts, got %+v", sessionFirst, *sharedRow)
+		}
+		if sharedRow.RegistryID != "prj_aaa" || sharedRow.RegistryRoot != "/repos/shared" || sharedRow.RegistryCheckoutID != "chk_new" || sharedRow.MissingPath {
+			t.Fatalf("sessionFirst=%v: the session row gains the registration's fresh identity, got %+v", sessionFirst, *sharedRow)
 		}
 	}
 

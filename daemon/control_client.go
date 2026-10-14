@@ -730,46 +730,43 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
-// ErrGuardedRebindUnsupported is returned before a guarded rebind is sent when
-// the responding daemon does not affirm the precondition capability: a daemon
-// that omits Ping's GuardedRebind bit predates the expected_checkout_id half
-// of the compare and would apply the rebind unconditionally — exactly the
-// silent last-writer-wins the caller asked a precondition to prevent (#4822
-// spec). Refusing, with a message that names the upgrade path, beats sending
-// the request and believing the precondition was honored.
+// ErrGuardedRebindUnsupported is returned for a guarded rebind sent to a
+// daemon that predates the precondition: that daemon drops expected_root and
+// expected_checkout_id as unknown fields and would apply the rebind
+// unconditionally — exactly the silent last-writer-wins the caller asked a
+// precondition to prevent (#4822 spec). Refusing, with a message that names
+// the upgrade path, beats believing the precondition was honored.
 var ErrGuardedRebindUnsupported = errors.New("this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host")
+
+// callRebindProjectRPC sends a rebind under the method name the caller's guard
+// picked. A var so tests can stand in a pre-guard daemon's "can't find method"
+// answer without a real socket.
+var callRebindProjectRPC = func(method string, req RebindProjectRequest, resp *RebindProjectResponse) error {
+	return callDaemon(method, req, resp)
+}
 
 // RebindProject asks the daemon to move a registered project's stable identity
 // to the checkout at req.Path (`af projects rebind`) — the same single-writer
 // registry path RegisterProject takes, so a running client is told through
 // projects.changed rather than discovering the move on a later read.
 //
-// pingGuardedRebindCapability asks the daemon on the socket whether it
-// implements the guarded-rebind precondition. It is a var so tests can stand
-// a pre-upgrade daemon in for the real Ping — one that answered the call but
-// carried no capability bit.
-var pingGuardedRebindCapability = func() (PingResponse, error) {
-	var ping PingResponse
-	err := callDaemon("Ping", PingRequest{}, &ping)
-	return ping, err
-}
-
-// A request carrying expected_root or expected_checkout_id is guarded (#4822):
-// before it goes out the daemon must affirm the capability on Ping, else this
-// returns ErrGuardedRebindUnsupported without sending. An unguarded request —
+// A request carrying expected_root or expected_checkout_id is guarded (#4822)
+// and goes to RebindProjectGuarded: the METHOD NAME is the capability check,
+// atomic with the mutation. A daemon that lacks the method answers "can't find
+// method" — definitive proof the precondition would be ignored — which this
+// maps to ErrGuardedRebindUnsupported. No Ping probe decides: a probe is never
+// affine with the mutation it predicts (#4888 review). An unguarded request —
 // the explicit CLI form — keeps last-writer-wins on every daemon vintage.
 func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	method := "RebindProject"
 	if req.ExpectedRoot != "" || req.ExpectedCheckoutID != "" {
-		ping, err := pingGuardedRebindCapability()
-		if err != nil {
-			return config.Project{}, fmt.Errorf("%w (capability check failed: %v)", ErrGuardedRebindUnsupported, err)
-		}
-		if !ping.GuardedRebind {
-			return config.Project{}, ErrGuardedRebindUnsupported
-		}
+		method = "RebindProjectGuarded"
 	}
 	var resp RebindProjectResponse
-	if err := callDaemon("RebindProject", req, &resp); err != nil {
+	if err := callRebindProjectRPC(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && isRPCMethodNotFoundErr(err) {
+			return config.Project{}, ErrGuardedRebindUnsupported
+		}
 		return config.Project{}, err
 	}
 	return resp.Project, nil
