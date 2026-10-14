@@ -374,6 +374,9 @@ func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
 		"a degraded registry read cannot prove absence — the picker's registry row survives")
 	assert.Equal(t, root, regRow.RegistryRoot,
 		"the preserved row keeps its last-known pair as the retry's expected value")
+	assert.Equal(t, 0, regRow.SessionCount,
+		"the landed session snapshot is the count authority — the repo's stale tally clears (#4888 review)")
+	assert.Equal(t, 0, regRow.InPlaceCount)
 	require.NotNil(t, liveRow,
 		"the healthy session half still installs its live row")
 	assert.Equal(t, 1, liveRow.SessionCount, "live counts come from the landed snapshot")

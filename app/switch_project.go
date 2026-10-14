@@ -375,6 +375,15 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 	registry := make([]overlay.Project, 0, len(rows))
 	for _, r := range rows {
 		if r.RegistryID != "" {
+			// Both callers run this only when the session snapshot landed and
+			// the REGISTRY read degraded, so the snapshot is the authority on
+			// counts: a repo it does not count has none. A preserved row that
+			// a fresh session row later claims gets the live counts grafted on
+			// (#4888 review); carrying the stale tallies instead would keep
+			// dead sessions on screen for as long as the registry stays
+			// degraded.
+			r.SessionCount = 0
+			r.InPlaceCount = 0
 			registry = append(registry, r)
 		}
 	}
