@@ -1083,6 +1083,45 @@ test("a project_rebound refusal classifies as a definitive rebind conflict", asy
   assert.equal(isMutationOutcomeUncertain(err), false, "a conflict is a refusal, not an unknown outcome");
 });
 
+test("rebindProject translates the guarded route's marked 404 into the upgrade remedy", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({
+      data: null,
+      error: { message: 'unknown route "/v1/RebindProjectGuarded"', daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no guarded handler ran");
+  assert.match(err.message, /predates guarded rebinds/);
+  assert.match(err.message, /upgrade it, or rebind from the daemon host/);
+});
+
+test("rebindProject keeps an unmarked 404 unconfirmed rather than unsupported", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true, "an intermediary's 404 never claims route absence");
+  assert.doesNotMatch(err.message, /predates guarded rebinds/);
+});
+
 test("rebindProject returns the rebound project", async () => {
   stubFetchResponse({
     ok: true,

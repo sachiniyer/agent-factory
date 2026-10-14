@@ -705,6 +705,12 @@ export async function registerProject(path: string, token: string): Promise<Regi
   return resp.project;
 }
 
+/** The documented remedy when a guarded rebind's versioned route proves absent:
+ *  mirrors daemon.ErrGuardedRebindUnsupported's wording so every client names
+ *  the same fix. */
+const GUARDED_REBIND_UNSUPPORTED =
+  "this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host";
+
 /** Moves a registered project's stable identity to the checkout at `path`
  *  (mirrors `af projects rebind`): the repair after the checkout a registration
  *  names was moved or recloned elsewhere — the `id` survives, only where it
@@ -746,7 +752,26 @@ export async function rebindProject(
   }
   // Two literal af() calls: the parity inventory derives web RPCs statically.
   if (request.expected_root !== undefined || request.expected_checkout_id !== undefined) {
-    const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProjectGuarded", request, token);
+    let resp: { ok: boolean; project: RegisteredProject };
+    try {
+      resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProjectGuarded", request, token);
+    } catch (e) {
+      // The route is the capability check, so its proven absence must surface
+      // as the guarded-rebind remedy rather than a bare 404 the modal invites
+      // the user to retry. daemonRejected marks the daemon's own catch-all;
+      // the legacy sentence covers daemons older than that marker — the same
+      // pair routeNotServed404 accepts on the Go side. An unmarked 404 (an
+      // intermediary's answer) stays an ordinary ApiError: the outcome is
+      // unconfirmed, not unsupported.
+      if (
+        e instanceof ApiError &&
+        e.status === 404 &&
+        (e.daemonRejected || (e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"'))
+      ) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
     return resp.project;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
