@@ -205,6 +205,12 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if sendProgram == "" {
 			sendAccount = ""
 		}
+		// The failed-create draft needs the user's CHOICES beside the wire
+		// values the rules above produced: an account-pinned program and a
+		// deliberate ambient pick are indistinguishable from their wire
+		// encodings once the pending flags clear (#4889 review).
+		programChosen := m.pendingProgramChosen
+		accountChosen := m.pendingAccountChosen
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -255,7 +261,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
 				// before this field existed.
-				Account: sendAccount,
+				Account:       sendAccount,
+				ProgramChosen: programChosen,
+				AccountChosen: accountChosen,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
