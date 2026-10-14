@@ -110,9 +110,11 @@ func (i *Instance) SetLostRestoreAttempts(attempts LostRestoreAttempts) bool {
 }
 
 // ClearLostRestoreAttempts retires the durable accounting at an episode-end
-// edge. Deliberately NOT called by noteRuntimeReplaced: a death inside the
-// confirmation window continues the same episode, so the counts must survive
-// the swap to keep charging it correctly.
+// edge. noteRuntimeReplaced calls it only for replacements that do NOT
+// continue the episode — a handoff, limit-resume, or archive restore — while
+// the Lost-restore paths keep the record: a death inside the confirmation
+// window continues the same episode, so the counts must survive that swap to
+// keep charging it correctly.
 func (i *Instance) ClearLostRestoreAttempts() bool {
 	return i.SetLostRestoreAttempts(LostRestoreAttempts{})
 }

@@ -459,7 +459,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// and would now refuse its own operation's fence. ConfirmLive clears the fence
 	// on success; the deferred EndRecoverFence above lowers it on failure.
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+		if perr := m.prepareRuntimeReplacement(repoID, key, instance, true); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
@@ -519,7 +519,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	waitBeforeReap := instance.LostRestoreWaitSnapshot()
 	// The live-boundary retirement above made the fence drop crash safe. This reset is
 	// still required for transport observations accumulated while Recover ran.
-	m.noteRuntimeReplaced(repoID, instance)
+	m.noteRuntimeReplaced(repoID, instance, true)
 	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag
 	// that authorizes deleting it later. No poll rewrites it (the row is already

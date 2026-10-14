@@ -676,7 +676,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
 		beforeLive := func() {
-			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+			if perr := m.prepareRuntimeReplacement(repoID, key, instance, false); perr != nil {
 				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
 		}
@@ -707,7 +707,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
-		m.noteRuntimeReplaced(repoID, instance)
+		m.noteRuntimeReplaced(repoID, instance, false)
 		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
 		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned

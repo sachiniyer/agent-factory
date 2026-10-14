@@ -86,8 +86,8 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // slow remote replacement can accumulate fresh transport observations after
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
-func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
-	m.noteRuntimeReplaced(repoID, instance)
+func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance, keepsLostRestoreEpisode bool) error {
+	m.noteRuntimeReplaced(repoID, instance, keepsLostRestoreEpisode)
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}

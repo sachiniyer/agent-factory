@@ -686,7 +686,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// operations, not the status poll, which skips on the op AXIS — so the fence
 	// has to come from the recovery itself.
 	if err := inst.RecoverFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
+		if perr := m.prepareRuntimeReplacement(repoID, key, inst, true); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
 		}
 	}); err != nil {
@@ -716,7 +716,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// the swap and this reset widens that window for nothing.
 	// The live-boundary retirement above made the fence drop crash safe. This reset is
 	// still required for transport observations accumulated while Recover ran.
-	m.noteRuntimeReplaced(repoID, inst)
+	m.noteRuntimeReplaced(repoID, inst, true)
 	// Then persist, same as the manual restore path (restore.go): Recover mutates
 	// durable worktree state on the way to SUCCESS too, not only before a failure
 	// — a fresh rebuild from the recorded base recreates the branch and flips

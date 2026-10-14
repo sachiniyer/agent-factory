@@ -373,7 +373,11 @@ func TestRestoreLostSessions_DeadlineClassFallsThroughAfterBoundedShare(t *testi
 
 	// The next non-answer charges the structural budget: the environmental
 	// streak ends, the structural one starts, and the session stops claiming
-	// it is waiting on the environment.
+	// it is waiting on the environment. The spent deadline share stays spent
+	// for the rest of the episode — it is not re-armed by the charge, or
+	// every charge would grant the class another six free waits and a wedged
+	// probe would alternate structural/environmental without ever escalating
+	// (#5295 review).
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	st = manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -384,8 +388,8 @@ func TestRestoreLostSessions_DeadlineClassFallsThroughAfterBoundedShare(t *testi
 	if consecutive != 1 {
 		t.Fatalf("consecutiveFailures = %d after the bounded share was spent, want 1 — the non-answer must charge the structural budget", consecutive)
 	}
-	if deadline != 0 {
-		t.Fatalf("environmentalDeadlineFailures = %d after the structural charge, want the bounded streak ended", deadline)
+	if deadline != lostRestoreMaxAttempts {
+		t.Fatalf("environmentalDeadlineFailures = %d after the structural charge, want %d — the share is episode-scoped and stays spent", deadline, lostRestoreMaxAttempts)
 	}
 	if inst.LifecycleView().RestoreWaitingOnEnvironment {
 		t.Fatal("RestoreWaitingOnEnvironment still set after the failure went structural — the wait must clear")
@@ -394,10 +398,11 @@ func TestRestoreLostSessions_DeadlineClassFallsThroughAfterBoundedShare(t *testi
 		t.Fatalf("the deadline-class exhaustion must be visible in the warn log:\n%s", ownLogs.warnings.String())
 	}
 
-	// And the structural budget still terminates: five more non-answers —
-	// each earning one fresh bounded share that also exhausts — reach the
-	// durable give-up instead of waiting forever.
-	for i := 0; i < lostRestoreMaxAttempts*(lostRestoreMaxAttempts+1); i++ {
+	// And the structural budget still terminates: with the deadline share
+	// spent for the episode, each further non-answer charges structural
+	// directly — five more reach the durable give-up instead of waiting
+	// forever.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
 		manager.RestoreLostSessions()
 	}
 	if !inst.LifecycleView().LostRestoreGaveUp {
@@ -541,7 +546,10 @@ func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
 	manager.mu.Unlock()
 
 	// The next non-answer must charge the structural budget immediately:
-	// the restarted daemon owes no fresh share.
+	// the restarted daemon owes no fresh share. The durable attempts record
+	// also restores the structural streak — the pre-restart charge stays
+	// counted, so this is the second structural failure, not a fresh budget
+	// (#5295 review).
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -553,11 +561,11 @@ func TestRestoreLostSessions_DeadlineBudgetSurvivesStateReset(t *testing.T) {
 	if st == nil {
 		t.Fatal("retry state vanished after the simulated restart")
 	}
-	if consecutive != 1 {
-		t.Fatalf("consecutiveFailures = %d after restart with the bounded share spent, want 1 — a restart must not grant a fresh deadline share", consecutive)
+	if consecutive != 2 {
+		t.Fatalf("consecutiveFailures = %d after restart with the bounded share spent, want 2 — the pre-restart structural charge must be restored and this non-answer charges the structural budget", consecutive)
 	}
-	if deadline != 0 {
-		t.Fatalf("environmentalDeadlineFailures = %d after the charge, want the spent share retired", deadline)
+	if deadline != lostRestoreMaxAttempts {
+		t.Fatalf("environmentalDeadlineFailures = %d after the charge, want %d — the spent share stays spent for the episode", deadline, lostRestoreMaxAttempts)
 	}
 	if total != lostRestoreMaxAttempts+2 {
 		t.Fatalf("totalAttempts = %d, want %d — the seeded cumulative count must keep the pre-restart structural failure plus every armed wait", total, lostRestoreMaxAttempts+2)
@@ -655,7 +663,9 @@ func TestRestoreLostSessions_DeadlineSpentMarkerSurvivesWaitClear(t *testing.T) 
 	manager.mu.Unlock()
 
 	// The next non-answer charges structural immediately — the restarted
-	// daemon owes no fresh share.
+	// daemon owes no fresh share — and the durable attempts record restores
+	// the pre-restart structural charge, so this is the second structural
+	// failure of the same episode.
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -664,11 +674,11 @@ func TestRestoreLostSessions_DeadlineSpentMarkerSurvivesWaitClear(t *testing.T) 
 		consecutive, deadline = st.consecutiveFailures, st.environmentalDeadlineFailures
 	}
 	manager.mu.Unlock()
-	if consecutive != 1 {
-		t.Fatalf("consecutiveFailures = %d after a restart on the spent marker, want 1 — the marker must not re-grant a fresh deadline share", consecutive)
+	if consecutive != 2 {
+		t.Fatalf("consecutiveFailures = %d after a restart on the spent marker, want 2 — the marker must not re-grant a fresh deadline share and the structural streak must survive the restart", consecutive)
 	}
-	if deadline != 0 {
-		t.Fatalf("environmentalDeadlineFailures = %d after the charge — the marker must have seeded the share as already spent", deadline)
+	if deadline != lostRestoreMaxAttempts {
+		t.Fatalf("environmentalDeadlineFailures = %d after the charge, want %d — the share stays spent for the episode", deadline, lostRestoreMaxAttempts)
 	}
 }
 
