@@ -375,27 +375,47 @@ func TestPlaceOverlayBlanksTheBackgroundBesideTheModal(t *testing.T) {
 // opened — a pane preview mid-colour-run or a hyperlink still open. Dropping
 // the row drops the reset too, and without one the style bleeds into the
 // blank margins, an unstyled modal, and every row below (Codex review on
-// #5297). The compositor must close backdrop state before the blank margin.
+// #5297). The compositor must close backdrop state before the blank margin,
+// then restore whatever is still open on the first backdrop row below the
+// band — a closer on a dropped row is honoured, an unclosed span is not lost.
 func TestPlaceOverlayClosesBackdropStateOnModalRows(t *testing.T) {
 	tests := []struct {
 		name     string
 		bg       string
 		wantRow1 string
+		wantRow2 string // "{OPEN}" is the (faded) opener from row 0
 	}{
 		{
 			name:     "sgr span closed on the dropped row",
 			bg:       "\x1b[31mAAAA\nBBBB\x1b[0m\nCCCC",
 			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "CCCC",
+		},
+		{
+			// Codex's example: the span's reset sits BELOW the band, so the
+			// row under the modal is still inside it.
+			name:     "sgr span closed below the band",
+			bg:       "\x1b[31mAAAA\nBBBB\nCCCC\x1b[0m",
+			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "{OPEN}CCCC\x1b[0m",
 		},
 		{
 			name:     "sgr span never closed",
 			bg:       "\x1b[31mAAAA\nBBBB\nCCCC",
 			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "{OPEN}CCCC",
 		},
 		{
 			name:     "hyperlink closed on the dropped row",
 			bg:       "\x1b]8;;https://x\x1b\\AAAA\nBBBB\x1b]8;;\x1b\\\nCCCC",
 			wantRow1: "\x1b]8;;\x1b\\MM  ",
+			wantRow2: "CCCC",
+		},
+		{
+			name:     "hyperlink never closed",
+			bg:       "\x1b]8;;https://x\x1b\\AAAA\nBBBB\nCCCC",
+			wantRow1: "\x1b]8;;\x1b\\MM  ",
+			wantRow2: "{OPEN}CCCC",
 		},
 	}
 	for _, tc := range tests {
@@ -407,8 +427,11 @@ func TestPlaceOverlayClosesBackdropStateOnModalRows(t *testing.T) {
 			t.Fatalf("%s: modal row must open with the backdrop closer — got %q, want %q",
 				tc.name, out[1], tc.wantRow1)
 		}
-		if out[2] != "CCCC" {
-			t.Fatalf("%s: the row below the modal must be clean — got %q", tc.name, out[2])
+		// Row 0 is <opener>AAAA: everything before the text is the styling the
+		// backdrop stream left open, already faded to the backdrop colours.
+		opener := out[0][:strings.Index(out[0], "AAAA")]
+		if want := strings.ReplaceAll(tc.wantRow2, "{OPEN}", opener); out[2] != want {
+			t.Fatalf("%s: row below the band — got %q, want %q", tc.name, out[2], want)
 		}
 	}
 }

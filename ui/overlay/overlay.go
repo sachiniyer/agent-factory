@@ -218,23 +218,28 @@ func closeSequences(line string) string {
 	return closers
 }
 
-// openState tracks what the written background stream leaves open, using
-// closeSequences' last-match model carried across rows: a sequence that opens
-// leaves its channel open, a closer shuts it, and a row with no sequences
-// inherits the carry unchanged — exactly how the terminal interprets the
-// stream. The carry matters because the backdrop CAN leave styling open: a
-// pane preview holds whatever its PTY emitted, and a curses app may run one
-// colour across a whole screenful of rows.
-func openState(line string, sgrOpen, osc8Open bool) (bool, bool) {
-	if matches := sgrRegex.FindAllString(line, -1); len(matches) > 0 {
-		if last := matches[len(matches)-1]; last != "\x1b[0m" && last != "\x1b[m" {
-			sgrOpen = true
+// backdropOpen tracks what the backdrop stream leaves open after line: the
+// SGR openers since the last full reset (so the state can be re-emitted, not
+// just detected) and the OSC 8 introducer of the open link, if any. A closer
+// clears its channel; a row with no sequences inherits the carry — exactly
+// how the terminal interprets the stream. The carry matters because the
+// backdrop CAN leave styling open: a pane preview holds whatever its PTY
+// emitted, and a curses app may run one colour across a whole screenful of
+// rows.
+func backdropOpen(line string, sgrOpen []string, osc8Open string) ([]string, string) {
+	for _, m := range sgrRegex.FindAllString(line, -1) {
+		if m == "\x1b[0m" || m == "\x1b[m" {
+			sgrOpen = sgrOpen[:0]
 		} else {
-			sgrOpen = false
+			sgrOpen = append(sgrOpen, m)
 		}
 	}
 	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
-		osc8Open = matches[len(matches)-1][1] != ""
+		if last := matches[len(matches)-1]; last[1] != "" {
+			osc8Open = last[0]
+		} else {
+			osc8Open = ""
+		}
 	}
 	return sgrOpen, osc8Open
 }
@@ -387,14 +392,32 @@ func PlaceOverlay(
 	// each row closes what it opened first. See closeSequences for why this
 	// closes rather than carries.
 	var b strings.Builder
-	bgSgrOpen, bgOsc8Open := false, false
+	var bgSgrOpen []string
+	var bgOsc8Open string
+	reopenPending := false
 	for i, bgLine := range bgLines {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
 		if i < placeY || i >= placeY+fgHeight {
+			if reopenPending {
+				// The band's blank rows emitted closers for whatever the
+				// backdrop had open, but that state was still live in the
+				// original stream — a colour run or hyperlink whose closer
+				// sits below the modal. Re-emit the openers so rows under the
+				// band keep the styling they would have had (Codex review on
+				// #5297). Sequences a dropped row closed are already gone
+				// from the carry, so a closer inside the band is honoured.
+				for _, s := range bgSgrOpen {
+					b.WriteString(s)
+				}
+				if bgOsc8Open != "" {
+					b.WriteString(bgOsc8Open)
+				}
+				reopenPending = false
+			}
 			b.WriteString(bgLine)
-			bgSgrOpen, bgOsc8Open = openState(bgLine, bgSgrOpen, bgOsc8Open)
+			bgSgrOpen, bgOsc8Open = backdropOpen(bgLine, bgSgrOpen, bgOsc8Open)
 			continue
 		}
 
@@ -402,16 +425,18 @@ func PlaceOverlay(
 		// above the modal opened — a pane preview mid-colour-run, a hyperlink
 		// left open. Without it that state bleeds into the blank margins, an
 		// unstyled modal, and every row below (Codex review on #5297). Close
-		// whatever the backdrop stream has left open BEFORE the margin, so the
-		// margins are truly blank and the rows under the modal stay clean.
-		if bgSgrOpen {
+		// whatever the emitted stream has open BEFORE the margin, so the
+		// margins are truly blank. Keep walking the carry over the dropped
+		// row's own sequences afterwards, so the reopen at the band's end
+		// reflects what the ORIGINAL stream would still have open there.
+		if len(bgSgrOpen) > 0 {
 			b.WriteString("\x1b[0m")
-			bgSgrOpen = false
 		}
-		if bgOsc8Open {
+		if bgOsc8Open != "" {
 			b.WriteString("\x1b]8;;\x1b\\")
-			bgOsc8Open = false
 		}
+		reopenPending = true
+		bgSgrOpen, bgOsc8Open = backdropOpen(bgLine, bgSgrOpen, bgOsc8Open)
 
 		pos := placeX
 		if pos > 0 {
