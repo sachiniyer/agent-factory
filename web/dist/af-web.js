@@ -6710,6 +6710,7 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
+var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
 async function rebindProject(id, path, token2, expectedRoot = null, expectedCheckoutID = null) {
   const request = {
     id,
@@ -6722,7 +6723,15 @@ async function rebindProject(id, path, token2, expectedRoot = null, expectedChec
     request.expected_checkout_id = expectedCheckoutID;
   }
   if (request.expected_root !== void 0 || request.expected_checkout_id !== void 0) {
-    const resp2 = await af("RebindProjectGuarded", request, token2);
+    let resp2;
+    try {
+      resp2 = await af("RebindProjectGuarded", request, token2);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404 && (e.daemonRejected || e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"')) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
     return resp2.project;
   }
   const resp = await af("RebindProject", request, token2);

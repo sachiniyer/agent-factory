@@ -910,3 +910,71 @@ func TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo(t *testing
 		t.Fatalf("the retry must expect the pair the merged row carries, got %+v (ok=%v)", req.Project, ok)
 	}
 }
+
+// TestProjectPickerRebindConflictDropsAStaleRowOnAReusedRoot pins the
+// same-path replacement case: the competing rebind repaired /repo onto a
+// DIFFERENT repository's checkout, so the old repo's row would still navigate
+// to /repo — the replacement's live root — while displaying the old repo's
+// name and counts. The split must drop it rather than show two rows at one
+// live path (#4888 review).
+func TestProjectPickerRebindConflictDropsAStaleRowOnAReusedRoot(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}, "/repo")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 1 || p.all[0].RepoID != "repo-new" || p.all[0].RegistryID != "prj_aaa" {
+		t.Fatalf("a reused root must not leave a stale old-repo row beside the fresh one, got %+v", p.all)
+	}
+}
+
+// TestProjectPickerRebindConflictKeepsADistinctSessionWorkspace is the other
+// half: when the old repo's row navigates to a workspace the fresh
+// registration does NOT claim, that workspace still belongs to the old repo's
+// sessions — the row survives as session-only.
+func TestProjectPickerRebindConflictKeepsADistinctSessionWorkspace(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/ws-old", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}, "/ws-old")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 2 {
+		t.Fatalf("a distinct session workspace keeps the old repo's row, got %+v", p.all)
+	}
+	var oldRow, newRow *Project
+	for i := range p.all {
+		switch p.all[i].RepoID {
+		case "repo-old":
+			oldRow = &p.all[i]
+		case "repo-new":
+			newRow = &p.all[i]
+		}
+	}
+	if oldRow == nil || newRow == nil {
+		t.Fatalf("both rows must survive, got %+v", p.all)
+	}
+	if oldRow.Root != "/ws-old" || oldRow.RegistryID != "" || oldRow.SessionCount != 2 {
+		t.Fatalf("the old repo keeps a session-only row at its own workspace, got %+v", *oldRow)
+	}
+	if newRow.RegistryID != "prj_aaa" || newRow.SessionCount != 0 {
+		t.Fatalf("the fresh row lands under the new repo with no borrowed counts, got %+v", *newRow)
+	}
+}

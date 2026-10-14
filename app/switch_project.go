@@ -350,6 +350,24 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	return rows
 }
 
+// sidebarProjectRows is projectRows' inverse for the merge fallback in
+// applySidebarProjects: a pane row has no registry fields, so the converted row
+// is session-derived — the merge preserves it unconditionally, and the coalesce
+// grafts a fresh registration's identity back onto it when the RepoID matches.
+func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
+	projects := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		projects = append(projects, overlay.Project{
+			RepoID:       r.RepoID,
+			Name:         r.Name,
+			Root:         r.Root,
+			SessionCount: r.SessionCount,
+			InPlaceCount: r.InPlaceCount,
+		})
+	}
+	return projects
+}
+
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously).
@@ -390,7 +408,16 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
 	if fetchErr != nil {
 		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
-		projects = overlay.MergePreservingSessionRows(m.sidebarProjects, projects, registryDegraded)
+		old := m.sidebarProjects
+		if len(old) == 0 {
+			// The pane can already hold rows the shadow never recorded —
+			// installed before the field existed, or by a direct SetProjects.
+			// An unseeded shadow would merge from nil and empty the visible
+			// list behind a warning it cannot confirm (#4888 review); the
+			// pane's current rows are the last-known set either way.
+			old = sidebarProjectRows(m.projects.Projects())
+		}
+		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	m.sidebarProjects = projects
