@@ -929,6 +929,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			instance.ClearLostRestoreWaitAtObservation(observationGeneration) {
 			settlementCheckpoint = true
 		}
+		// The spent deadline-share marker is NOT retired here: one accepted
+		// observation is the first of the three answers restore confirmation
+		// requires, and a runtime that dies inside that window continues the
+		// same episode — a restart that found the marker gone would re-grant
+		// the wedged probe a fresh share of free waits. It retires with the
+		// retry state at the full-confirmation edge in RestoreLostSessions
+		// (#5295 review).
 	}
 
 	// The run-marker flip is durable on its own: a held gate releasing on a

@@ -65,7 +65,7 @@ test("idle detail renders only mechanical reason values and observed churn age",
       sess({
         liveness: Liveness.Lost,
         idle_reason: "restore-waiting-on-environment",
-        lost_restore_wait: { attempts: 3, error: "no space left on device" },
+        lost_restore_wait: { attempts: 3, deadline_waits: 0, total_attempts: 3, error: "no space left on device" },
       }),
       now,
     ),

@@ -76,7 +76,7 @@ func TestRuntimeReplacementClearsPriorModelChange(t *testing.T) {
 	_, epoch = inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
 
-	manager.noteRuntimeReplaced(repoID, inst)
+	manager.noteRuntimeReplaced(repoID, inst, false)
 
 	require.Nil(t, inst.AgentModelChange(), "a replacement runtime must not inherit its predecessor's warning")
 	reason, churnAt := inst.IdleReasonSnapshot()
@@ -94,7 +94,7 @@ func TestRefreshStatusDropsModelChangeFromReplacedRuntime(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "model-change-race", backend, true, session.Ready)
 	backend.onRead = func() {
 		require.NoError(t, inst.Transition(session.BeginHandoff()))
-		manager.noteRuntimeReplaced(repoID, inst)
+		manager.noteRuntimeReplaced(repoID, inst, false)
 	}
 
 	manager.refreshInstanceStatus(repoID, inst)

@@ -86,6 +86,12 @@ export interface LostRestoreFailure {
  * — the last failure was a resource limit external to the session (#5295). */
 export interface LostRestoreWait {
   attempts: number;
+  /** The bounded deadline class's share of attempts — durable so the bound
+   * survives a daemon restart (#5295 review). */
+  deadline_waits: number;
+  /** The episode's cumulative attempt count at the last arm — distinct from
+   * attempts, which is only the environmental streak (#5295 review). */
+  total_attempts: number;
   error: string;
 }
 
@@ -179,6 +185,10 @@ export interface SessionData {
   lost_restore_failure?: LostRestoreFailure;
   /** Present while the restore loop defers a retry on the environment (#5295). */
   lost_restore_wait?: LostRestoreWait;
+  /** Set once the bounded deadline class spent its share this episode and the
+   *  wait retired on a structural charge — keeps a restart from re-granting
+   *  the class a fresh share of free waits (#5295). */
+  lost_restore_deadline_spent?: boolean;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
