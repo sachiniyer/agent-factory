@@ -405,23 +405,24 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 // records BOTH, and otherwise answers with a *ProjectReboundError (#4822 spec).
 // Both empty means no precondition.
 //
-// A guarded send first confirms the daemon advertises the capability on Ping:
-// a daemon that omits the bit predates the checkout half and would apply the
-// rebind unconditionally, so this returns daemon.ErrGuardedRebindUnsupported
-// BEFORE the request goes out — never a silent last-writer-wins.
+// A guarded send goes to RebindProjectGuarded: the ROUTE is the capability
+// check, atomic with the mutation (#4888 review). A daemon that predates it
+// answers its marked catch-all 404 — definitive proof the precondition would
+// be ignored — mapped here to daemon.ErrGuardedRebindUnsupported; an
+// intermediary's unmarked 404 stays UnconfirmedHTTPResponseError, since a proxy
+// cannot prove the request did not reach a handler. No Ping probe decides:
+// it is never affine with the mutation it predicts.
 func (c *Client) RebindProject(id, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+	method := "RebindProject"
 	if expectedRoot != "" || expectedCheckoutID != "" {
-		ping, err := c.capabilities()
-		if err != nil {
-			return config.Project{}, fmt.Errorf("%w (capability check failed: %v)", daemon.ErrGuardedRebindUnsupported, err)
-		}
-		if !ping.GuardedRebind {
-			return config.Project{}, daemon.ErrGuardedRebindUnsupported
-		}
+		method = "RebindProjectGuarded"
 	}
 	var resp daemon.RebindProjectResponse
 	req := daemon.RebindProjectRequest{ID: id, Path: path, ExpectedRoot: expectedRoot, ExpectedCheckoutID: expectedCheckoutID}
-	if err := c.call("RebindProject", req, &resp); err != nil {
+	if err := c.call(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && IsRouteNotServed(err) {
+			return config.Project{}, daemon.ErrGuardedRebindUnsupported
+		}
 		return config.Project{}, err
 	}
 	return resp.Project, nil

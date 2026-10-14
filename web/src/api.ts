@@ -723,7 +723,10 @@ export async function registerProject(path: string, token: string): Promise<Regi
  *  a same-path replacement fails on. Each rides verbatim — a value the record
  *  never showed is sent as no field rather than an empty one, because a guarded
  *  precondition the client cannot fully name is a refusal, not a silent
- *  last-writer-wins. */
+ *  last-writer-wins. A guarded send goes to RebindProjectGuarded — the route
+ *  is the capability check (#4888 review): a daemon that predates it answers
+ *  its marked 404 instead of dropping the expected_* fields it does not know
+ *  and applying the move unconditionally. */
 export async function rebindProject(
   id: string,
   path: string,
@@ -740,6 +743,11 @@ export async function rebindProject(
   }
   if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
     request.expected_checkout_id = expectedCheckoutID;
+  }
+  // Two literal af() calls: the parity inventory derives web RPCs statically.
+  if (request.expected_root !== undefined || request.expected_checkout_id !== undefined) {
+    const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProjectGuarded", request, token);
+    return resp.project;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
   return resp.project;

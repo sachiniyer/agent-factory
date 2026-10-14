@@ -6721,6 +6721,10 @@ async function rebindProject(id, path, token2, expectedRoot = null, expectedChec
   if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
     request.expected_checkout_id = expectedCheckoutID;
   }
+  if (request.expected_root !== void 0 || request.expected_checkout_id !== void 0) {
+    const resp2 = await af("RebindProjectGuarded", request, token2);
+    return resp2.project;
+  }
   const resp = await af("RebindProject", request, token2);
   return resp.project;
 }

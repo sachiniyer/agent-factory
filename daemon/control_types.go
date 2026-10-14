@@ -730,15 +730,12 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
-	// GuardedRebind is an affirmative protocol capability, not a version guess
-	// — same rule as AccountHandoff above (#4822 spec). A client about to send
-	// RebindProject's expected_root/expected_checkout_id pair must see true
-	// first: a daemon that omits the bit predates the precondition's checkout
-	// half and would apply the rebind unconditionally — "applied
-	// unconditionally" is the unsafe interpretation of a dropped expected_*,
-	// so the client refuses the rebind before any request goes out rather than
-	// falling back to last-writer-wins.
-	GuardedRebind bool `json:"guarded_rebind,omitempty"`
+	// (The guarded-rebind capability is its wire method instead of a Ping bit —
+	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
+	// the expected_root/expected_checkout_id pair, so a guarded send is refused
+	// by a pre-guard daemon rather than applied unconditionally, and no probe
+	// is consulted since a Ping answered by one daemon can never vouch for
+	// the one a proxy might route the mutation to.)
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's

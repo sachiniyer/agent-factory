@@ -178,6 +178,15 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 	return Project{}, false
 }
 
+// Projects exposes the picker's current row set — for callers verifying what a
+// conflict merge produced, where a single highlighted row cannot describe the
+// split a RepoID-changing rebind leaves behind.
+func (p *ProjectPickerOverlay) Projects() []Project {
+	out := make([]Project, len(p.all))
+	copy(out, p.all)
+	return out
+}
+
 // HighlightedProject names the existing row under the cursor, excluding the
 // add-project and rebind-path fields so typing a path never dispatches a
 // destructive shortcut.
@@ -271,33 +280,41 @@ func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project)
 	p.SetRebindError(msg)
 }
 
-// SetRebindConflictPreserving is SetRebindConflict for a conflict refresh whose
-// session snapshot never answered (#4888 review): projects then carries only
-// the registry-side union, so installing it wholesale would drop every
-// session-derived row and zero the counts on registry rows — the daemon still
-// runs those sessions; this client merely could not recount them. The picker's
-// session-derived rows stay, each surviving registry row keeps the counts it
-// last displayed, and only registry truth replaces registry truth: a record
-// absent from a HEALTHY registry read still drops its stale row — the rebuild
+// MergePreservingSessionRows merges a fresh registry-side project list into
+// rows whose session snapshot never answered (#4888 review): projects then
+// carries only the registry-side union, so installing it wholesale would drop
+// every session-derived row and zero the counts on registry rows — the daemon
+// still runs those sessions; this client merely could not recount them. The
+// old session-derived rows stay, each surviving registry row keeps the counts
+// it last displayed, and only registry truth replaces registry truth: a record
+// absent from a HEALTHY registry read still drops its stale row — the merge
 // exists to remove exactly those — while a failed registry read (degraded)
 // proves nothing about absence and keeps it.
-func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects []Project, registryDegraded bool) {
+//
+// When the competing rebind also moved the registration onto a DIFFERENT
+// repository (its RepoID changed — a repair re-clone can land on another
+// remote), the merge splits rather than grafts: the old repository's row
+// keeps its session counts as a session-only row, and the fresh registry row
+// lands under the new repository with nothing carried over — counts tallied
+// against one repo must never be attributed to another, and the old repo's
+// live sessions must not lose their row (#4888 review).
+func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) []Project {
 	freshByRegistryID := make(map[string]Project, len(projects))
 	for _, row := range projects {
 		if row.RegistryID != "" {
 			freshByRegistryID[row.RegistryID] = row
 		}
 	}
-	merged := make([]Project, 0, len(p.all)+len(projects))
-	seenRepoIDs := make(map[string]bool, len(p.all)+len(projects))
-	seenRoots := make(map[string]bool, len(p.all)+len(projects))
+	merged := make([]Project, 0, len(old)+len(projects))
+	seenRepoIDs := make(map[string]bool, len(old)+len(projects))
+	seenRoots := make(map[string]bool, len(old)+len(projects))
 	// RepoIDs claimed by preserved session rows. A registry row landing on one
 	// of these is the rebound-onto-a-live-repo case: it must NOT emit a second
 	// row for the same repository — the coalesce below grafts its registration
 	// fields onto the session row, which is the one holding the live counts
 	// (#4888 review).
-	sessionRepoIDs := make(map[string]bool, len(p.all))
-	for _, row := range p.all {
+	sessionRepoIDs := make(map[string]bool, len(old))
+	for _, row := range old {
 		if row.RegistryID == "" {
 			// A session-derived row: the snapshot read that produced it never
 			// answered, so nothing fresher exists to replace it with.
@@ -308,6 +325,25 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 			continue
 		}
 		if fresh, ok := freshByRegistryID[row.RegistryID]; ok {
+			if fresh.RepoID != row.RepoID {
+				// RepoID changed: split rather than graft. The old repo keeps
+				// a session-only row — its counts describe live sessions under
+				// the OLD repository — and the registration lands on the new
+				// repository row with those counts left behind.
+				sessionRow := row
+				sessionRow.RegistryID = ""
+				sessionRow.RegistryRoot = ""
+				sessionRow.RegistryCheckoutID = ""
+				sessionRow.MissingPath = false
+				merged = append(merged, sessionRow)
+				seenRepoIDs[sessionRow.RepoID] = true
+				seenRoots[sessionRow.Root] = true
+				sessionRepoIDs[sessionRow.RepoID] = true
+				merged = append(merged, fresh)
+				seenRepoIDs[fresh.RepoID] = true
+				seenRoots[fresh.Root] = true
+				continue
+			}
 			// The fresh registry row carries the record's new root, name and
 			// path state; the counts were last tallied by the snapshot that
 			// failed, so they carry over from the row it replaces.
@@ -346,7 +382,15 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 		seenRepoIDs[row.RepoID] = true
 		seenRoots[row.Root] = true
 	}
-	p.all = coalesceReboundRows(merged)
+	return coalesceReboundRows(merged)
+}
+
+// SetRebindConflictPreserving is SetRebindConflict for a conflict refresh whose
+// session snapshot never answered (#4888 review): the picker's rows merge with
+// the registry-side union rather than being replaced by it — see
+// MergePreservingSessionRows, which the sidebar shares for the same failure.
+func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects []Project, registryDegraded bool) {
+	p.all = MergePreservingSessionRows(p.all, projects, registryDegraded)
 	p.reseatAfterConflictRebuild()
 	p.SetRebindError(msg)
 }
