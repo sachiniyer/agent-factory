@@ -318,6 +318,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
 		instance.ClearLostRestoreWait()
+		instance.ClearLostRestoreDeadlineSpent()
+		instance.ClearLostRestoreAttempts()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
@@ -432,7 +434,11 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				class = lostRestoreEnvDeadline
 			}
 			if class == lostRestoreEnvNone {
-				m.clearLostRestoreWaitDurable(repoID, instance)
+				// nil for the attempts record: it was written at the last arm
+				// and already carries this wait's contribution — the operator's
+				// push failure is not an episode event and must not perturb the
+				// counts (#5295 review).
+				m.clearLostRestoreWaitDurable(repoID, instance, false, nil)
 			}
 			return "", err
 		}
@@ -453,7 +459,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// and would now refuse its own operation's fence. ConfirmLive clears the fence
 	// on success; the deferred EndRecoverFence above lowers it on failure.
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+		if perr := m.prepareRuntimeReplacement(repoID, key, instance, true); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
@@ -505,9 +511,15 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// still writing to disk. A blip in that window would be judged against the
 	// dead sandbox's count. A manual restore is the same lifecycle event as an
 	// automatic one; only the trigger differs (#1794).
+	// Snapshot the durable wait BEFORE the runtime replacement retires it:
+	// noteRuntimeReplaced clears the row as a predecessor fact, but the episode
+	// this restore continues still owns its cumulative count, and the
+	// confirmation arm below would otherwise report a sixth attempt as the
+	// first (#5295 review).
+	waitBeforeReap := instance.LostRestoreWaitSnapshot()
 	// The live-boundary retirement above made the fence drop crash safe. This reset is
 	// still required for transport observations accumulated while Recover ran.
-	m.noteRuntimeReplaced(repoID, instance)
+	m.noteRuntimeReplaced(repoID, instance, true)
 	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag
 	// that authorizes deleting it later. No poll rewrites it (the row is already
@@ -530,7 +542,11 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(repoID, instance)
+	restoredAttempts := 0
+	if waitBeforeReap != nil {
+		restoredAttempts = waitBeforeReap.TotalAttempts
+	}
+	m.armRestoreConfirmation(repoID, instance, restoredAttempts)
 	if settleErr != nil {
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",

@@ -114,7 +114,17 @@ type InstanceData struct {
 	// session — across daemon restarts until a restore attempt succeeds, a
 	// structural failure retires the wait, or a replacement lands (#5295).
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
-
+	// LostRestoreDeadlineSpent persists that the bounded deadline class already
+	// spent its environmental share this episode, so a daemon restart in the
+	// structural-backoff window cannot re-grant the wedged probe a fresh share
+	// of free waits (#5295 review).
+	LostRestoreDeadlineSpent bool `json:"lost_restore_deadline_spent,omitempty"`
+	// LostRestoreAttempts persists the episode's retry accounting — the
+	// structural and preserve streaks plus the cumulative total — so a restart
+	// in a wait-free window (structural backoff, the confirmation window, a
+	// remote preserve between them) cannot reconstruct a zeroed episode for a
+	// session whose budget is in fact nearly spent (#5295 review).
+	LostRestoreAttempts *LostRestoreAttempts `json:"lost_restore_attempts,omitempty"`
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
 	// still known to be later. Persisted across daemon restarts.

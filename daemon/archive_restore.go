@@ -40,7 +40,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// fresh runtime Lost. The instance keeps the same ID across the re-provision
 	// (same session, new runtime), so nothing else can notice the swap; only this
 	// site knows it happened.
-	m.noteRuntimeReplaced(repoID, instance)
+	m.noteRuntimeReplaced(repoID, instance, false)
 	m.persistRuntimeReplacement(repoID, title, instance)
 	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
@@ -340,7 +340,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 		return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err))
 	}
-	m.noteRuntimeReplaced(repoID, instance)
+	m.noteRuntimeReplaced(repoID, instance, false)
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))

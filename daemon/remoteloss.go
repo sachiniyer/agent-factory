@@ -323,7 +323,7 @@ func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProb
 // "post-<trigger> blip does not re-provision again" tests. Known sites:
 // lostrestore.go (automatic Recover), restore.go (manual Recover RPC),
 // limit.go (limit-resume Respawn), archive.go (archive-restore re-provision).
-func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance) {
+func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance, keepsLostRestoreEpisode bool) {
 	// Model diagnostics are observations of one concrete agent process, just like
 	// the remote-loss episode is an observation of one concrete sandbox. Every
 	// recovery/re-provision/handoff already crosses this chokepoint, so retire all
@@ -333,6 +333,26 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	instance.ClearLostRestoreFailure()
 	instance.ClearLostRestoreWait()
 	key := stableSessionKey(repoID, instance)
+	if !keepsLostRestoreEpisode {
+		// An unrelated replacement — a limit-resume respawn, a handoff to a
+		// different agent, an archive restore — ends whatever restore episode
+		// the predecessor's counters describe. Left behind, a stale
+		// LostRestoreAttempts or spent deadline marker seeds the NEXT loss as
+		// if it continued that episode: a restart could then charge a
+		// first-time structural failure against a predecessor's streak and
+		// reach give-up on attempts the session never made. The in-memory
+		// retry state is the predecessor's too — a confirmation window still
+		// open for the dead runtime must not charge this replacement's first
+		// loss (#5295 review).
+		// The Lost-restore callers pass true instead: their confirmation
+		// window deliberately continues the same episode, and a death inside
+		// it keeps charging the carried count.
+		instance.ClearLostRestoreAttempts()
+		instance.ClearLostRestoreDeadlineSpent()
+		m.mu.Lock()
+		delete(m.lostRestoreStates, key)
+		m.mu.Unlock()
+	}
 	m.clearRemoteLoss(key)
 	// A replaced runtime is a fresh pane: the task-run turn watcher's prev
 	// frame belongs to the dead one (#5221 review). The run's own boundary
