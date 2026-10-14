@@ -382,10 +382,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectionChanged())
 			}
 
+			var restoreCmd tea.Cmd
 			if msg.draft != nil {
 				m.failedCreate = &msg
 				if userStillWatching {
-					m.restoreFailedCreate()
+					_, restoreCmd = m.restoreFailedCreate()
 				}
 			}
 			detail := "Your input is retained. " + msg.err.Error()
@@ -394,7 +395,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				detail += " The next create in this project reopens the failed draft."
 				action = "Press any key to continue."
 			}
-			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged())
+			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance

@@ -649,3 +649,75 @@ func TestTaskCreatePreservesAnExplicitLaunchProgram(t *testing.T) {
 	assert.Equal(t, tmux.ProgramGemini, disk[0].Program,
 		"an explicit launch --program is the default \"Use config default\" refers to")
 }
+
+// TestPreflightSkipsClientLocalChecksForRemoteTarget is the remote half of the
+// implicit-program finding (#4889 review): an untouched form sends "" so the
+// REMOTE daemon resolves its own default_program — substituting the client's
+// cfg.DefaultProgram and checking THIS host's binary would refuse a create the
+// remote can serve (or vice versa). Remote creates cannot be validated by
+// client-local prereqs at all: tmux and the agent binary live on the daemon's
+// host, and the daemon rechecks the program itself.
+func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
+	clearDaemonTarget(t)
+	stubRemoteTarget(t)
+
+	h := activeProjectHome(t)
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	h.appConfig = cfg
+	h.programChoice = newProgramChoice("", cfg.DefaultProgram, cfg)
+	got := recordStartRequest(t)
+
+	calls := 0
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
+		calls++
+		return nil
+	}))
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, 0, calls,
+		"a remote target skips client-local prereqs — the daemon's host owns tmux, PATH and default_program")
+	require.Equal(t, "demo", got.Title)
+	assert.Equal(t, "", got.Program,
+		"the remote submit still goes out implicit for the daemon to resolve")
+}
+
+// TestFailedCreateRestoreRefetchesTheDefaultAccount pins the account half of
+// the implicit-draft restore (#4889 review): an implicit submit clears the
+// wire account, so the draft proves nothing about what was DISPLAYED — but a
+// retry re-applies the configured default. The restore must re-fetch that
+// default exactly as a fresh form does, or the reopened form shows "no
+// account" beside a create that will run scoped to one.
+func TestFailedCreateRestoreRefetchesTheDefaultAccount(t *testing.T) {
+	h := configFollowingHome(t)
+	recordStartRequest(t)
+	calls, _ := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
+
+	inst := newLoadingInstance(t, "demo")
+	inst.Path = h.repoRoot
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+
+	// The failed submit went out implicit on BOTH fields: the account the form
+	// displayed was the daemon's preselect, never a user choice.
+	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "", Account: ""}
+	_, cmd := h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
+	require.False(t, h.pendingAccountChosen)
+	require.Empty(t, h.pendingAccount,
+		"the draft only proves nothing was SENT — the field waits on the refetch")
+
+	require.NotNil(t, cmd, "the restore asks the daemon which account the retry would apply")
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if def, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(def)
+		}
+	}
+	assert.Equal(t, 1, *calls, "one ListAccounts for the restored form")
+	assert.Equal(t, "work", h.pendingAccount,
+		"the restored form shows the default the retry will apply")
+}
