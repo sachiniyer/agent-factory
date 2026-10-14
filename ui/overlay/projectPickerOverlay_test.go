@@ -379,8 +379,9 @@ func TestProjectPickerRebindConflictClampsCursor(t *testing.T) {
 // answers, the refreshed list holds only the registry-side union — installing
 // it wholesale would drop every session-derived row and zero the live counts
 // the daemon still runs. The merge must keep session-derived rows, carry each
-// surviving registry row's last-known counts onto its fresh record, and still
-// drop a registry row whose record a healthy read proves is gone.
+// surviving registry row's last-known counts onto its fresh record, and strip
+// a row whose record a healthy read proves deleted to session-only — dropping
+// it only when no session provenance remains.
 func TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot(t *testing.T) {
 	p := NewProjectPickerOverlay([]Project{
 		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", MissingPath: true, SessionCount: 4, InPlaceCount: 1},
@@ -403,11 +404,13 @@ func TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot(t *testing.T) 
 		{Name: "newbie", Root: "/repos/newbie", RepoID: "repo-nb", RegistryID: "prj_new", RegistryRoot: "/repos/newbie"},
 	}, false)
 
-	// Four rows, not three: alpha's RepoID changed (repo-old → repo-new), so
+	// Five rows, not three: alpha's RepoID changed (repo-old → repo-new), so
 	// the merge splits — repo-old keeps a session-only row for its 4 live
 	// sessions while the registration lands on repo-new with counts it must
-	// NOT inherit (#4888 review). Sessions and the new record land as before.
-	if len(p.all) != 4 {
+	// NOT inherit (#4888 review). Sessions and the new record land as before,
+	// and gone's 2 last-known sessions outlive the deleted record as a
+	// session-only row of their own (#4888 review).
+	if len(p.all) != 5 {
 		t.Fatalf("the RepoID change splits alpha into the old repo's session row plus the new repo's registry row: %+v", p.all)
 	}
 	rowByRepoID := map[string]Project{}
@@ -423,10 +426,8 @@ func TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot(t *testing.T) 
 	if got, ok := rowByRepoID["repo-sess"]; !ok || got.Name != "sessions" || got.SessionCount != 3 || got.RegistryID != "" {
 		t.Fatalf("the session-derived row must be kept whole, got %+v (ok=%v)", got, ok)
 	}
-	for _, row := range p.all {
-		if row.RegistryID == "prj_gone" {
-			t.Fatalf("a record absent from a healthy registry read must still drop its stale row: %+v", p.all)
-		}
+	if got, ok := rowByRepoID["repo-gone"]; !ok || got.RegistryID != "" || got.RegistryRoot != "" || got.SessionCount != 2 {
+		t.Fatalf("a deleted record's row survives session-only — live sessions are provenance the deletion cannot erase, got %+v (ok=%v)", got, ok)
 	}
 	if got, ok := rowByRepoID["repo-nb"]; !ok || got.RegistryID != "prj_new" {
 		t.Fatalf("a registration newer than the picker still lands, got %+v (ok=%v)", got, ok)
@@ -1041,15 +1042,59 @@ func TestMergePreservingSessionRowsDegradedRegistryGraftsOntoLiveSession(t *test
 			gamma = &merged[i]
 		}
 	}
-	if gamma == nil || gamma.RegistryID != "prj_ggg" || gamma.SessionCount != 2 {
-		t.Fatalf("the uncovered registry row survives with its last-known counts, got %+v", merged)
+	if gamma == nil || gamma.RegistryID != "prj_ggg" || gamma.SessionCount != 0 || gamma.InPlaceCount != 0 {
+		t.Fatalf("the uncovered registry row survives with its counts cleared — the landed session snapshot is the count authority (#4888 review), got %+v", merged)
 	}
 }
 
+// TestMergePreservingSessionRowsDeletedRegistrationKeepsLiveSessions pins the
+// #4888 review finding on the healthy-read drop: when the session snapshot
+// failed and the healthy registry proves a record was DELETED, a row whose
+// sessions are last-known live still has provenance the deletion does not
+// touch — it degrades to a session-only row rather than vanishing until the
+// next good snapshot. Zero-session rows have nothing left to describe and
+// still drop.
+func TestMergePreservingSessionRowsDeletedRegistrationKeepsLiveSessions(t *testing.T) {
+	old := []Project{
+		{Name: "live", Root: "/repos/live", RepoID: "repo-live", RegistryID: "prj_gone", RegistryRoot: "/repos/live", RegistryCheckoutID: "chk_x", SessionCount: 3, InPlaceCount: 1},
+		{Name: "empty", Root: "/repos/empty", RepoID: "repo-empty", RegistryID: "prj_also_gone", RegistryRoot: "/repos/empty", RegistryCheckoutID: "chk_y", SessionCount: 0},
+	}
+	fresh := []Project{
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_ok", RegistryRoot: "/repos/other", RegistryCheckoutID: "chk_z"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	var live *Project
+	for i := range merged {
+		if merged[i].RepoID == "repo-live" {
+			live = &merged[i]
+		}
+		if merged[i].RepoID == "repo-empty" {
+			t.Fatalf("a deleted zero-session registration has no provenance left — the row must drop, got %+v", merged)
+		}
+	}
+	if live == nil {
+		t.Fatalf("live sessions outlive a deleted registration — the row must survive session-only, got %+v", merged)
+	}
+	if live.RegistryID != "" || live.RegistryRoot != "" || live.RegistryCheckoutID != "" || live.MissingPath {
+		t.Fatalf("the dead registration's identity is stripped, got %+v", *live)
+	}
+	if live.SessionCount != 3 || live.InPlaceCount != 1 {
+		t.Fatalf("last-known session counts carry — the failed snapshot could not recount, got %+v", *live)
+	}
+}
+
+// registryBackedOnly mirrors the caller contract for the snapshot-landed /
+// registry-degraded merge: session rows are already covered by the fresh set,
+// and counts on the registry rows are stale — the landed snapshot proved
+// them, so the caller zeroes them rather than leave dead sessions on screen
+// (#4888 review).
 func registryBackedOnly(rows []Project) []Project {
 	out := make([]Project, 0, len(rows))
 	for _, r := range rows {
 		if r.RegistryID != "" {
+			r.SessionCount = 0
+			r.InPlaceCount = 0
 			out = append(out, r)
 		}
 	}

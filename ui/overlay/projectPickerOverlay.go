@@ -380,8 +380,25 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			merged = append(merged, row)
 			seenRepoIDs[row.RepoID] = true
 			seenRoots[row.Root] = true
+			continue
 		}
-		// Otherwise the healthy read proves the record is gone: drop the row.
+		// The healthy read proves the record is gone — but sessions are
+		// provenance independent of the registration: the snapshot that
+		// produced this row never answered, so its count is the last-known
+		// evidence of live work the deletion does not touch. Strip the dead
+		// registry identity and keep a session-only row; a zero-session row
+		// has nothing left to describe and drops (#4888 review).
+		if row.SessionCount > 0 {
+			sessionRow := row
+			sessionRow.RegistryID = ""
+			sessionRow.RegistryRoot = ""
+			sessionRow.RegistryCheckoutID = ""
+			sessionRow.MissingPath = false
+			merged = append(merged, sessionRow)
+			seenRepoIDs[sessionRow.RepoID] = true
+			seenRoots[sessionRow.Root] = true
+			sessionRepoIDs[sessionRow.RepoID] = true
+		}
 	}
 	// Registry-side rows with no counterpart in the old list — a registration
 	// newer than the picker, or the root_agents/active rows the snapshot used
