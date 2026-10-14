@@ -403,19 +403,20 @@ func TestTaskCreateStoresProgramDefaultUnresolved(t *testing.T) {
 		"\"Use config default\" stores empty so the runner resolves the live default_program per run")
 }
 
-// TestTaskSaveRefreshesTheProgramCache: task save is the second place the
-// default turns into stored intent, so it runs the same synchronous re-read —
-// a `default_program` change after launch must reach the cache that labels the
-// form's "Use config default" choice (#4889 review).
-func TestTaskSaveRefreshesTheProgramCache(t *testing.T) {
+// TestTaskSaveDoesNotReadTheProgramConfig: a task save must NOT synchronously
+// re-read the repo config on the event loop (#4889 review). The read's result
+// cannot affect the stored task — an empty draft program stays empty for
+// run-time resolution, a non-empty draft stores verbatim, and an explicit
+// launch short-circuits the refresh anyway — so the bounded lookup only risked
+// freezing every save for up to its timeout to warm a cache its real consumer
+// (the next session form) re-reads anyway.
+func TestTaskSaveDoesNotReadTheProgramConfig(t *testing.T) {
 	h := configFollowingHome(t)
 	t.Chdir(h.repoRoot)
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
-
-	_, err = config.SetGlobalConfigValue("default_program", tmux.ProgramAider)
-	require.NoError(t, err)
+	calls := trapConfigRead(t)
 
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
@@ -434,8 +435,15 @@ func TestTaskSaveRefreshesTheProgramCache(t *testing.T) {
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
 
-	require.Equal(t, tmux.ProgramAider, h.program,
-		"the save's synchronous re-read refreshed the cache the label reads")
+	require.Zero(t, *calls,
+		"task save performs no program-config read on the event loop")
+	require.Equal(t, tmux.ProgramClaude, h.program,
+		"the display cache keeps the launch seed — the save does not refresh it")
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, disk, 1, "the create should have committed one task")
+	assert.Empty(t, disk[0].Program,
+		"\"Use config default\" still stores empty for run-time resolution")
 }
 
 // TestRefreshKeepsTheCacheOnAReadFailure: a config read that errors — a
