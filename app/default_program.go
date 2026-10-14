@@ -112,3 +112,22 @@ func (m *home) refreshDefaultProgram() {
 		m.program = program
 	}
 }
+
+// sendProgramForCreate is the Program the pending new-session form puts on the
+// wire — the single derivation the submit path and preflight share (#4889
+// review): "" when the form follows config untouched (the daemon resolves the
+// live default_program at create), else the concrete pendingProgram. The
+// concrete cases are an explicit program pick, a launch-fixed --program, a
+// remote target (the client cannot read the remote default synchronously), and
+// a CHOSEN account — an account belongs to one agent's registry, so picking one
+// commits to the displayed program and pins it explicit rather than pairing
+// that account with whatever default the daemon would resolve.
+func (m *home) sendProgramForCreate() string {
+	if m.pendingProgramChosen || !m.programFollowsConfig || isRemoteTarget() {
+		return m.pendingProgram
+	}
+	if m.pendingAccountChosen && m.pendingAccount != "" && m.pendingProgram != "" {
+		return m.pendingProgram
+	}
+	return ""
+}
