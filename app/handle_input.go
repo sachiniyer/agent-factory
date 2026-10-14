@@ -187,9 +187,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		//
 		// Only a choice the user actually made — a picker pick, a launch
 		// --program flag, or a restored failed-create draft — goes out as a
-		// concrete program. A REMOTE target keeps master's behaviour: the
-		// launch-time default is sent explicitly, since the TUI has no
-		// synchronous read of a remote daemon's default_program at all.
+		// concrete program. A remote target stays implicit the same way — ""
+		// asks the remote daemon to resolve ITS default_program, the only
+		// default a remote create can honor (#4889 review).
 		sendProgram := m.sendProgramForCreate()
 		// The account belongs to one agent's registry, so it must travel with
 		// the program it was chosen or preselected for (#4889 review). When the
