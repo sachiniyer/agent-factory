@@ -773,6 +773,12 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 // vouch for the sibling a proxy might route a later request to, so no separate
 // probe can bind capability to the request the way the method name does.
 func (s *controlServer) RebindProjectGuarded(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	// The admission gate runs before the precondition: under upgrade probation
+	// the probation refusal is the answer regardless of request shape, matching
+	// every other mutation (#4888 CI).
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
 	if req.ExpectedRoot == "" && req.ExpectedCheckoutID == "" {
 		return fmt.Errorf("RebindProjectGuarded requires expected_root or expected_checkout_id — call RebindProject for an unguarded rebind")
 	}
