@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -109,14 +110,31 @@ func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
 }
 
+// boundedRepoResolve deduplicates in-flight bounded resolutions per
+// repository. A read wedged on a dead mount cannot be killed mid-syscall, so
+// without dedup every form open after a timeout would stack another abandoned
+// worker on the same files; retries instead share the one in-flight resolve
+// and bound only their own wait (#4889 review). The flight is never forgotten:
+// while a read is wedged the key stays claimed, which is exactly what caps the
+// accumulation at one worker per repository.
+var boundedRepoResolve singleflight.Group
+
+// resolveRepoForBound is the resolve a bounded flight performs, taken out to a
+// var so tests can watch how many workers a wedge accumulates.
+var resolveRepoForBound = func(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
+}
+
 // ResolveConfigForRepoContext is ResolveConfigForRepo bounded by ctx: the git
 // subprocesses inside a RepoContext already carry their own deadlines, but the
 // resolution itself is ordinary file I/O — global/legacy/checked-in/personal
 // TOML — that an unavailable mount can stall indefinitely. A caller that must
-// answer (the TUI's off-loop refresh) bounds the read here rather than leaking
-// a goroutine on every retry (#4889 review). Same pattern as
-// resolveConfigForRepoInspectionWithGlobalAndPersonalContext; the observation
-// record is kept because this is the runtime, not inspection, resolve.
+// answer (the TUI's off-loop refresh) bounds the read here (#4889 review).
+// Same pattern as resolveConfigForRepoInspectionWithGlobalAndPersonalContext,
+// plus singleflight dedup so a wedged read never multiplies workers; the
+// observation record is kept because this is the runtime, not inspection,
+// resolve — a worker that finishes after its callers timed out recorded a
+// load that genuinely happened, and its result still answers the next caller.
 func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required for bounded repo resolution")
@@ -127,24 +145,20 @@ func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*Resol
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("resolve repository config: %w", err)
 	}
-	type result struct {
-		resolved *ResolvedConfig
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		resolved, err := resolveConfigForRepo(repo, recordInRepoLoadObservation)
-		done <- result{resolved: resolved, err: err}
-	}()
+	done := boundedRepoResolve.DoChan(
+		repo.IdentityPath()+"\x00"+repo.WorkspacePath(),
+		func() (any, error) { return resolveRepoForBound(repo) })
 	select {
 	case outcome := <-done:
-		return outcome.resolved, outcome.err
+		resolved, _ := outcome.Val.(*ResolvedConfig)
+		return resolved, outcome.Err
 	case <-ctx.Done():
 		// A completed read is an answer even if its caller's deadline became
 		// ready at the same instant. Prefer it before failing the resolve.
 		select {
 		case outcome := <-done:
-			return outcome.resolved, outcome.err
+			resolved, _ := outcome.Val.(*ResolvedConfig)
+			return resolved, outcome.Err
 		default:
 			return nil, fmt.Errorf("resolve repository config: %w", ctx.Err())
 		}

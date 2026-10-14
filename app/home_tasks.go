@@ -66,12 +66,17 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// would silently commit. The read is bounded and local-only — a remote
 	// target keeps the launch-time value, and a read error keeps the cache.
 	m.refreshDefaultProgram()
-	// An empty program field is "Use config default" and stays empty in the
-	// stored task: task/task.go's runner resolves default_program against the
-	// task's own repo at RUN time. Folding m.defaultProgram() in here would
-	// bake the launch-time cache — possibly a stale agent — into the task
-	// permanently, and it would keep running that program after
-	// default_program moved (#4889 review).
+	// An empty program field is "Use config default". When the launch itself
+	// committed to a program — an explicit --program (programFollowsConfig is
+	// false) — THAT is the default the label refers to, so the task stores it
+	// and later runs keep launching it regardless of config drift (#4889
+	// review). Only a config-following launch leaves the stored program empty,
+	// so task/task.go's runner resolves the live default_program against the
+	// task's own repo at RUN time; folding m.defaultProgram() into that case
+	// would bake a possibly-stale cache in permanently.
+	if program == "" && !m.programFollowsConfig {
+		program = m.program
+	}
 	id, err := task.GenerateID()
 	if err != nil {
 		return m.handleError(fmt.Errorf("failed to generate task id: %v", err))

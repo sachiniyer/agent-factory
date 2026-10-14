@@ -29,16 +29,24 @@ func (m *home) restoreFailedCreate() bool {
 	m.namingInstance = instance
 	// The field re-seeds from the placeholder's Program — the value the user was
 	// shown — not req.Program, which is the WIRE value and is "" for a submit
-	// whose program was implicit (#4889 review). The restored draft is a
-	// confirmed choice either way, so what the resubmit sends is the value the
-	// user is looking at.
+	// whose program was implicit (#4889 review). What a resubmit SENDS depends
+	// on what the original request sent, though: an explicit program stays
+	// explicit (it is a choice the user already committed), while an implicit
+	// one stays implicit so a retry resolves the live default_program again —
+	// the failure that produced this draft may well be the old default going
+	// away, and replaying it as a pick would retry the same dead program.
 	m.pendingProgram, m.pendingPrompt = instance.Program, failed.rawPrompt
 	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
-	m.pendingAccountChosen = true
-	// The restored draft's program is a value the user already submitted once —
-	// a confirmed choice, so the resubmit sends it concretely on the wire rather
-	// than as "" (#4889 review).
-	m.pendingProgramChosen = true
+	m.pendingAccountChosen = req.Account != ""
+	m.pendingProgramChosen = req.Program != ""
+	if !m.pendingProgramChosen {
+		// Re-resolve the live default for the restored field's seed: the
+		// displayed program is what a retry's implicit "" will resolve to, so
+		// it should be the CURRENT default, not the stale one the failed form
+		// happened to show (#4889 review).
+		m.refreshDefaultProgram()
+		m.pendingProgram = m.defaultProgram()
+	}
 	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
 	m.menu.SetNamingAccount(m.pendingAccount != "")
