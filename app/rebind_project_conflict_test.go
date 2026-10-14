@@ -307,3 +307,74 @@ func TestRebindConflictRefreshTimeoutReArmsTheForm(t *testing.T) {
 	assert.Contains(t, displayed.Render(), "Rebound elsewhere",
 		"the re-armed form names the daemon's refusal")
 }
+
+// TestRebindConflictWithADegradedRegistryKeepsRegistryRows pins the #4888
+// review finding on the mirror-image failure: the conflict refresh's session
+// snapshot LANDED but the registry read degraded. The fresh list carries live
+// session rows and no registry records; a wholesale install would drop every
+// registry-backed row behind a read that cannot prove absence — and leave the
+// rebind form's target stale beside it. The merge preserves the picker's
+// registry rows while live session truth replaces the session half.
+func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
+	h, id := activeRebindHome(t)
+	root, ok := registeredProjectRoot(id)
+	require.True(t, ok)
+	var recordedCheckout string
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	for _, p := range projects {
+		if p.ID == id {
+			recordedCheckout = p.CheckoutID
+		}
+	}
+	require.NotEmpty(t, recordedCheckout)
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "active", Root: root, RepoID: h.repoID, RegistryID: id, RegistryRoot: root, RegistryCheckoutID: recordedCheckout, MissingPath: true, SessionCount: 4, InPlaceCount: 1},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+	displayed := h.projectPickerOverlay
+
+	moved := initTestGitRepo(t)
+	_, err = config.RebindProject(id, moved) // another client, meanwhile
+	require.NoError(t, err)
+	stubRebindCAS(t)
+
+	// The session half answers with a live session on an unrelated repo; the
+	// registry read is degraded by a stray file under the test registry —
+	// strict enumeration refuses it (#3297), which is exactly the read the
+	// conflict refresh performs.
+	liveRepo := initTestGitRepo(t)
+	live := session.InstanceData{Title: "live", CreatedAt: time.Now()}
+	live.Path = liveRepo
+	live.Worktree.RepoPath = liveRepo
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return []session.InstanceData{live}, nil
+	}))
+	dir, err := config.ProjectRegistryDir()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stray.txt"), []byte("x"), 0o644))
+
+	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	require.NotNil(t, cmd)
+	h.Update(cmd())
+
+	assert.False(t, displayed.RebindPending(), "the reply still re-arms the form on a degraded registry")
+	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEsc})
+
+	var regRow, liveRow *overlay.Project
+	for i, r := range displayed.Projects() {
+		if r.RegistryID == id {
+			regRow = &displayed.Projects()[i]
+		}
+		if r.RegistryID == "" && r.RepoID == config.RepoIDFromRoot(liveRepo) {
+			liveRow = &displayed.Projects()[i]
+		}
+	}
+	require.NotNil(t, regRow,
+		"a degraded registry read cannot prove absence — the picker's registry row survives")
+	assert.Equal(t, root, regRow.RegistryRoot,
+		"the preserved row keeps its last-known pair as the retry's expected value")
+	require.NotNil(t, liveRow,
+		"the healthy session half still installs its live row")
+	assert.Equal(t, 1, liveRow.SessionCount, "live counts come from the landed snapshot")
+}

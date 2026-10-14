@@ -237,6 +237,19 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
 		return m, nil
 	}
+	if degraded {
+		// The mirror image: the SESSION half landed but the registry read
+		// failed, so fresh carries live session rows and no registry records.
+		// Installing it wholesale would drop every registry-backed row behind
+		// a read that cannot prove absence — and leave rebindTarget's stale
+		// pair as the retry expectation (#4888 review). Merge fresh session
+		// truth against only the picker's registry-backed rows; the degraded
+		// flag preserves each record whose absence was never established, and
+		// the merge grafts a same-repo session row onto the stale identity.
+		m.projectPickerOverlay.SetRebindConflict(text,
+			overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true))
+		return m, nil
+	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)
 	return m, nil
 }

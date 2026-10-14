@@ -254,3 +254,51 @@ func TestProjectsSection_FailedSnapshotMergesFreshRegistryRows(t *testing.T) {
 	assert.Equal(t, 3, rows["repo-sess"].SessionCount,
 		"an unrelated session-derived row survives the failed fetch")
 }
+
+// TestProjectsSection_DegradedRegistryKeepsRegistryRows pins the mirror image
+// of TestProjectsSection_FailedSnapshotMergesFreshRegistryRows (#4888 review):
+// the session snapshot LANDED but the registry read degraded, so the fresh
+// list holds live session rows and no registry records. Installing wholesale
+// would drop every registry-backed row behind a read that cannot prove
+// absence; the merge preserves them and grafts a same-repo session row onto
+// the stale identity so live counts win.
+func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/repos/active"
+	h.setSidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_old", SessionCount: 4},
+		{Name: "gone", Root: "/repos/gone", RepoID: "repo-gone", RegistryID: "prj_ggg", RegistryRoot: "/repos/gone", SessionCount: 2},
+	}, false)
+
+	// The poll's registry half failed; its session half read fine and reports
+	// live counts — alpha's sessions grew, and the repo-gone row has no live
+	// counterpart.
+	changed := h.applySidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5},
+	}, true, nil)
+	require.True(t, changed, "fresh session truth still reaches the section")
+
+	rows := map[string]ui.SidebarProject{}
+	for _, r := range h.projects.Projects() {
+		rows[r.RepoID] = r
+	}
+	require.Contains(t, rows, "repo-alpha")
+	assert.Equal(t, 5, rows["repo-alpha"].SessionCount,
+		"the live session row wins the count — the stale registry row must not shadow it")
+	require.Contains(t, rows, "repo-gone",
+		"absence unproven under a degraded read — the registry row stays")
+	assert.Equal(t, 2, rows["repo-gone"].SessionCount,
+		"an uncovered registry row keeps its last-known tallies")
+
+	// And the graft restored alpha's registration identity: the shadow list
+	// keeps the rebind affordance the pane rows cannot carry.
+	var alpha *overlay.Project
+	for i, r := range h.sidebarProjects {
+		if r.RepoID == "repo-alpha" {
+			alpha = &h.sidebarProjects[i]
+		}
+	}
+	require.NotNil(t, alpha)
+	assert.Equal(t, "prj_aaa", alpha.RegistryID,
+		"the grafted row carries the registration identity, not a stale duplicate")
+}

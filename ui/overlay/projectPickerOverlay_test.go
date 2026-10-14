@@ -1003,3 +1003,55 @@ func TestProjectPickerRebindConflictDropsARegistrationOnlyRowOnRepoChange(t *tes
 		t.Fatalf("a registration-only row with no sessions leaves no phantom behind, got %+v", p.all)
 	}
 }
+
+// TestMergePreservingSessionRowsDegradedRegistryGraftsOntoLiveSession: when the
+// session snapshot is live but the registry read degraded, the caller merges
+// only the old REGISTRY rows against the fresh session list. A fresh session
+// row for the same repo must absorb the stale row's registration identity —
+// live counts win — instead of being deduped behind it (#4888 review).
+func TestMergePreservingSessionRowsDegradedRegistryGraftsOntoLiveSession(t *testing.T) {
+	old := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}
+	fresh := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5, InPlaceCount: 1},
+	}
+	merged := MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+	if len(merged) != 1 {
+		t.Fatalf("one row for the repo — the live session row grafts the registration, got %+v", merged)
+	}
+	row := merged[0]
+	if row.SessionCount != 5 || row.InPlaceCount != 1 {
+		t.Fatalf("the live session row's counts win, got %+v", row)
+	}
+	if row.RegistryID != "prj_aaa" || row.RegistryRoot != "/repos/alpha" || row.RegistryCheckoutID != "chk_old" {
+		t.Fatalf("the grafted row carries the registration identity, got %+v", row)
+	}
+
+	// A registry row with no session counterpart is preserved as-is.
+	fresh = append(fresh, Project{Name: "beta", Root: "/repos/beta", RepoID: "repo-beta", SessionCount: 1})
+	old = append(old, Project{Name: "gamma", Root: "/repos/gamma", RepoID: "repo-gamma", RegistryID: "prj_ggg", RegistryRoot: "/repos/gamma", RegistryCheckoutID: "chk_g", SessionCount: 2})
+	merged = MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+	if len(merged) != 3 {
+		t.Fatalf("alpha grafted, beta fresh, gamma preserved — got %+v", merged)
+	}
+	var gamma *Project
+	for i := range merged {
+		if merged[i].RepoID == "repo-gamma" {
+			gamma = &merged[i]
+		}
+	}
+	if gamma == nil || gamma.RegistryID != "prj_ggg" || gamma.SessionCount != 2 {
+		t.Fatalf("the uncovered registry row survives with its last-known counts, got %+v", merged)
+	}
+}
+
+func registryBackedOnly(rows []Project) []Project {
+	out := make([]Project, 0, len(rows))
+	for _, r := range rows {
+		if r.RegistryID != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}

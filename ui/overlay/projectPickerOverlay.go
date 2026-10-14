@@ -298,6 +298,11 @@ func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project)
 // lands under the new repository with nothing carried over — counts tallied
 // against one repo must never be attributed to another, and the old repo's
 // live sessions must not lose their row (#4888 review).
+//
+// `old` is the half whose freshness failed: the full prior row set when the
+// session snapshot errored, or only the registry-backed rows when the session
+// snapshot landed but the registry read degraded — fresh session rows are
+// live truth then, so old session rows must not shadow them.
 func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) []Project {
 	freshByRegistryID := make(map[string]Project, len(projects))
 	for _, row := range projects {
@@ -314,6 +319,11 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 	// fields onto the session row, which is the one holding the live counts
 	// (#4888 review).
 	sessionRepoIDs := make(map[string]bool, len(old))
+	// RepoIDs of registry rows preserved only because the read was degraded —
+	// mapped to their slot in merged. A fresh session row claiming one of
+	// these repos carries live truth the stale row lacks, so the dedupe below
+	// grafts the identity across rather than hiding the session row.
+	staleRegistryRepoIDs := make(map[string]int, len(old))
 	for _, row := range old {
 		if row.RegistryID == "" {
 			// A session-derived row: the snapshot read that produced it never
@@ -366,6 +376,7 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			// The registry read failed too — an absent record proves nothing
 			// under a read that read nothing. Keep the row rather than empty
 			// the list behind a warning it cannot confirm.
+			staleRegistryRepoIDs[row.RepoID] = len(merged)
 			merged = append(merged, row)
 			seenRepoIDs[row.RepoID] = true
 			seenRoots[row.Root] = true
@@ -384,6 +395,21 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			continue
 		}
 		if seenRepoIDs[row.RepoID] || seenRoots[row.Root] {
+			// A fresh SESSION row can collide with a registry row preserved
+			// only because the registry read degraded (the merge ran on
+			// registry-backed old rows while the snapshot was healthy): the
+			// session row is live truth and the registry row carries the
+			// durable identity — graft rather than drop the live row behind a
+			// stale one (#4888 review).
+			if row.RegistryID == "" && row.RepoID != "" {
+				if at, ok := staleRegistryRepoIDs[row.RepoID]; ok {
+					row.RegistryID = merged[at].RegistryID
+					row.RegistryRoot = merged[at].RegistryRoot
+					row.RegistryCheckoutID = merged[at].RegistryCheckoutID
+					row.MissingPath = merged[at].MissingPath
+					merged[at] = row
+				}
+			}
 			continue
 		}
 		merged = append(merged, row)
