@@ -177,61 +177,6 @@ func attemptNoun(attempts int) string {
 	return "attempts"
 }
 
-// seedLostRestoreStateFromDurables reconstructs the episode's counters from
-// the session's durable records after a daemon restart dropped the in-memory
-// state. The terminal failure seeds first (its count is the cumulative total
-// at give-up), then the live wait's environmental streaks, then the durable
-// attempts record — each later source only raises a counter, never lowers
-// one, so a mixed episode keeps its real shape (#5295 review).
-//
-// The spent marker fills in the bounded deadline share only when no live wait
-// carries it: a wait's own DeadlineWaits is the newer record — a share that
-// was spent, charged, and then re-armed keeps the marker on disk alongside a
-// fresh count, and superseding it would deny a share the in-memory counter
-// legitimately holds (#5295 review).
-func (st *lostRestoreState) seedLostRestoreStateFromDurables(wait *session.LostRestoreWait, failure *session.LostRestoreFailure, attempts *session.LostRestoreAttempts, deadlineSpent bool) {
-	if failure != nil {
-		// A restart drops the retry map but deliberately keeps the terminal
-		// session fact: an explicit retry's failure continues the recorded
-		// count and stays terminal rather than promising an automatic retry
-		// the durable gate refuses (#5295 review).
-		st.consecutiveFailures = failure.Attempts
-		st.totalAttempts = failure.Attempts
-	}
-	if wait != nil {
-		st.environmentalFailures = wait.Attempts
-		st.environmentalDeadlineFailures = wait.DeadlineWaits
-		if wait.TotalAttempts > st.totalAttempts {
-			st.totalAttempts = wait.TotalAttempts
-		}
-	}
-	if attempts != nil {
-		if attempts.Structural > st.consecutiveFailures {
-			st.consecutiveFailures = attempts.Structural
-		}
-		if attempts.Preserve > st.preserveFailureAttempts {
-			st.preserveFailureAttempts = attempts.Preserve
-		}
-		if attempts.Total > st.totalAttempts {
-			st.totalAttempts = attempts.Total
-		}
-	}
-	if deadlineSpent && wait == nil {
-		st.environmentalDeadlineFailures = lostRestoreMaxAttempts
-	}
-}
-
-// durableRestoreAttempts is the durable-record form of the state's current
-// accounting — written beside every arm, charge, and budget reset so the
-// record tracks the episode even when no wait is armed. Caller holds m.mu.
-func (st *lostRestoreState) durableRestoreAttempts() session.LostRestoreAttempts {
-	return session.LostRestoreAttempts{
-		Structural: st.consecutiveFailures,
-		Preserve:   st.preserveFailureAttempts,
-		Total:      st.totalAttempts,
-	}
-}
-
 // clearLostRestoreWaitDurable retires an environmental wait AND makes the
 // retirement durable when the wait was actually armed — a checkpoint write,
 // not a settlement, the same class the arm's own write uses: the clear is
@@ -241,41 +186,8 @@ func (st *lostRestoreState) durableRestoreAttempts() session.LostRestoreAttempts
 // clear is not already swept into a settlement write on the same path — the
 // give-up and heal arms write the row themselves right after clearing. The
 // caller must not hold m.mu (the write takes it through the repo start lock).
-//
-// deadlineShareSpent is the structural charge that follows an exhausted
-// deadline-class share: the spent marker is written alongside the clear so a
-// restart cannot re-grant the class a fresh share of free waits (#5295
-// review). attempts, when non-nil, converges the durable accounting record to
-// the episode's current counters — the wait no longer carries TotalAttempts
-// once cleared, so without it a restart in the structural-backoff window
-// would zero the cumulative count (#5295 review).
-func (m *Manager) clearLostRestoreWaitDurable(repoID string, inst *session.Instance, deadlineShareSpent bool, attempts *session.LostRestoreAttempts) {
-	marked := deadlineShareSpent && inst.MarkLostRestoreDeadlineSpent()
-	cleared := inst.ClearLostRestoreWait()
-	attemptsChanged := false
-	if attempts != nil {
-		attemptsChanged = inst.SetLostRestoreAttempts(*attempts)
-	}
-	if !marked && !cleared && !attemptsChanged {
-		return
-	}
-	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
-		m.warn().Printf("lost session %q: the ended environmental wait is cleared in memory but its stale copy is not yet durable: %v", inst.Title, err)
-	}
-}
-
-// retireLostRestoreEnvironment clears BOTH the armed wait and a spent
-// deadline marker at an episode-end edge — a landed push, a force-replaced
-// sandbox, a confirmed replacement, a fresh budget — persisting when any
-// changed. The same write class as clearLostRestoreWaitDurable, and the same
-// lock contract. attempts converges the durable accounting record: partial
-// resets pass their post-reset counters, full retirements pass the empty
-// tuple.
-func (m *Manager) retireLostRestoreEnvironment(repoID string, inst *session.Instance, attempts session.LostRestoreAttempts) {
-	cleared := inst.ClearLostRestoreWait()
-	unmarked := inst.ClearLostRestoreDeadlineSpent()
-	attemptsChanged := inst.SetLostRestoreAttempts(attempts)
-	if !cleared && !unmarked && !attemptsChanged {
+func (m *Manager) clearLostRestoreWaitDurable(repoID string, inst *session.Instance) {
+	if !inst.ClearLostRestoreWait() {
 		return
 	}
 	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
@@ -288,33 +200,19 @@ func (m *Manager) retireLostRestoreEnvironment(repoID string, inst *session.Inst
 // the automatic probeAnsweredDead path does in-line, so that the manual restore
 // path also resets the budget when its own preserveSandboxBeforeReap lands — a
 // successful push ends the episode regardless of which path ran it.
-//
-// When no in-memory state exists — a daemon restart between the armed wait and
-// this preserve — the state is first SEEDED from the durable records, so the
-// post-reset accounting the durable record then receives still carries the
-// episode's structural streak and cumulative total (#5295 review).
 func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
 	st := m.lostRestoreStates[stateKey]
-	if st == nil {
-		st = &lostRestoreState{}
-		st.seedLostRestoreStateFromDurables(
-			inst.LostRestoreWaitSnapshot(), inst.LostRestoreFailureSnapshot(),
-			inst.LostRestoreAttemptsSnapshot(), inst.LostRestoreDeadlineSpent())
-		m.lostRestoreStates[stateKey] = st
+	if st != nil {
+		st.preserveFailureAttempts = 0
+		st.remoteUnknownAttempts = 0
+		st.environmentalFailures = 0
+		st.environmentalDeadlineFailures = 0
+		st.nextAttempt = time.Time{}
 	}
-	st.preserveFailureAttempts = 0
-	st.remoteUnknownAttempts = 0
-	st.environmentalFailures = 0
-	st.environmentalDeadlineFailures = 0
-	// consecutiveFailures — and therefore the cumulative totalAttempts —
-	// deliberately survives: this is the preserve episode's reset, not
-	// the Recover episode's (#5295 review).
-	st.nextAttempt = time.Time{}
-	settled := st.durableRestoreAttempts()
 	m.mu.Unlock()
-	m.retireLostRestoreEnvironment(repoID, inst, settled)
+	m.clearLostRestoreWaitDurable(repoID, inst)
 }
 
 // resetRecoverBudget clears the Recover-flap episode counter for the session
@@ -359,10 +257,8 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	m.mu.Unlock()
 	// A force-replaced sandbox owns none of the predecessor's wait — the row
 	// must not keep claiming the environment is to blame once the episode is
-	// deliberately reset. The accounting record resets with it: the new
-	// sandbox's episode starts from zero, not from the predecessor's spent
-	// budget.
-	m.retireLostRestoreEnvironment(repoID, inst, session.LostRestoreAttempts{})
+	// deliberately reset.
+	m.clearLostRestoreWaitDurable(repoID, inst)
 }
 
 // observationsSinceSpawnLocked reports how many ANSWERS polls have gotten out of

@@ -56,13 +56,11 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"restore failure snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreFailure(&LostRestoreFailure{Attempts: 3, Error: "gone"})
 		}},
-		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, 0, 2, errors.New("enospc")) }},
+		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, errors.New("enospc")) }},
 		{"clear restore wait", func(t *testing.T, i *Instance) { i.lostRestoreWait = LostRestoreWait{Attempts: 2, Error: "enospc"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreWait() }},
 		{"restore wait snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "enospc"})
 		}},
-		{"deadline spent mark", nil, func(t *testing.T, i *Instance) { i.MarkLostRestoreDeadlineSpent() }},
-		{"deadline spent clear", func(t *testing.T, i *Instance) { i.lostRestoreDeadlineSpent = true }, func(t *testing.T, i *Instance) { i.ClearLostRestoreDeadlineSpent() }},
 		{"root context", nil, func(t *testing.T, i *Instance) { i.ReconcileRootRecreateContext(RootRecreateContextFresh) }},
 		{"root acknowledgement", func(t *testing.T, i *Instance) { i.rootRecreateContext = RootRecreateContextFresh }, func(t *testing.T, i *Instance) { i.AcknowledgeRootRecreateContext() }},
 		{"conversation", nil, func(t *testing.T, i *Instance) {

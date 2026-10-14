@@ -466,7 +466,7 @@ func TestRefreshInstanceStatus_RetiredProbeCannotConfirmReplacement(t *testing.T
 	}
 
 	inst.ClearIdleEvidence()
-	manager.armRestoreConfirmation(repoID, inst, 0)
+	manager.armRestoreConfirmation(repoID, inst)
 	close(backend.releaseAlive)
 	select {
 	case <-pollDone:

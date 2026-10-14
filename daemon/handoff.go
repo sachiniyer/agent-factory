@@ -318,7 +318,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	})
 
 	// The runtime this session's failure history was about is gone (#1794).
-	m.noteRuntimeReplaced(repoID, instance, false)
+	m.noteRuntimeReplaced(repoID, instance)
 	// SwapAgent built the crash checkpoint before the runtime-clear chokepoint.
 	// Retire the same predecessor-owned idle facts in that value; otherwise a
 	// daemon crash during readiness restores them onto the incoming agent.

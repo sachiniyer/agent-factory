@@ -165,7 +165,7 @@ func TestInstanceRendererRestoreWaitDetailLeadsBranch(t *testing.T) {
 	require.NoError(t, err)
 	inst.Branch = "feature"
 	inst.SetStatusForTest(session.Lost)
-	require.True(t, inst.SetLostRestoreWait(3, 0, 3, errors.New("no space left on device")))
+	require.True(t, inst.SetLostRestoreWait(3, errors.New("no space left on device")))
 
 	r := NewInstanceRenderer()
 	r.SetWidth(30)

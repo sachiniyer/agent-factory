@@ -323,7 +323,7 @@ func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProb
 // "post-<trigger> blip does not re-provision again" tests. Known sites:
 // lostrestore.go (automatic Recover), restore.go (manual Recover RPC),
 // limit.go (limit-resume Respawn), archive.go (archive-restore re-provision).
-func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance, keepsLostRestoreEpisode bool) {
+func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance) {
 	// Model diagnostics are observations of one concrete agent process, just like
 	// the remote-loss episode is an observation of one concrete sandbox. Every
 	// recovery/re-provision/handoff already crosses this chokepoint, so retire all
@@ -332,20 +332,6 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance,
 	instance.ClearIdleEvidence()
 	instance.ClearLostRestoreFailure()
 	instance.ClearLostRestoreWait()
-	if !keepsLostRestoreEpisode {
-		// An unrelated replacement — a limit-resume respawn, a handoff to a
-		// different agent, an archive restore — ends whatever restore episode
-		// the predecessor's durable counters describe. Left behind, a stale
-		// LostRestoreAttempts or spent deadline marker seeds the NEXT loss as
-		// if it continued that episode: a restart could then charge a
-		// first-time structural failure against a predecessor's streak and
-		// reach give-up on attempts the session never made (#5295 review).
-		// The Lost-restore callers pass true instead: their confirmation
-		// window deliberately continues the same episode, and a death inside
-		// it keeps charging the carried count.
-		instance.ClearLostRestoreAttempts()
-		instance.ClearLostRestoreDeadlineSpent()
-	}
 	key := stableSessionKey(repoID, instance)
 	m.clearRemoteLoss(key)
 	// A replaced runtime is a fresh pane: the task-run turn watcher's prev
