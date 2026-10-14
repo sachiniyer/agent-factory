@@ -45,14 +45,16 @@ func (m *home) preflightSessionCreate() error {
 	if err != nil {
 		return err
 	}
-	program := m.pendingProgram
-	if !m.pendingProgramChosen && m.programFollowsConfig && !isRemoteTarget() {
-		// An untouched form sends "" and the daemon resolves the LIVE
-		// default_program at create time (#4889). Preflighting the displayed
-		// seed would validate a program the create never asks for — and could
-		// refuse a create that would succeed when the seed is stale. cfg is the
-		// same freshly resolved config the daemon consults, so its
-		// default_program IS the program being checked.
+	// Preflight must check the program the wire carries — the same derivation
+	// the submit path applies (#4889 review). An untouched form sends "" and
+	// the daemon resolves the LIVE default_program at create time, so cfg's
+	// default_program is the program to check; an explicit pick, a launch
+	// --program, a remote target, or a CHOSEN account instead pins the
+	// displayed pendingProgram, and checking the config value then would
+	// refuse a valid request or approve one whose sent program lacks local
+	// prerequisites.
+	program := m.sendProgramForCreate()
+	if program == "" {
 		program = cfg.DefaultProgram
 	}
 	return localSessionPreflight(cfg, program)

@@ -190,26 +190,20 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// concrete program. A REMOTE target keeps master's behaviour: the
 		// launch-time default is sent explicitly, since the TUI has no
 		// synchronous read of a remote daemon's default_program at all.
-		sendProgram := ""
-		if m.pendingProgramChosen || !m.programFollowsConfig || isRemoteTarget() {
-			sendProgram = m.pendingProgram
-		}
+		sendProgram := m.sendProgramForCreate()
 		// The account belongs to one agent's registry, so it must travel with
 		// the program it was chosen or preselected for (#4889 review). When the
 		// program goes out implicitly ("" resolves the live default on the
 		// daemon) a stale pairing is possible: an account the daemon PRESELECTED
 		// for the displayed program would be read as explicit for whatever
 		// program the daemon resolves now — refuse-worthy or silently wrong. A
-		// CHOSEN account is a commitment to the displayed program, so it pins
-		// that program explicit; an unchosen preselect stays implicit alongside
-		// the program and lets the daemon resolve both.
+		// CHOSEN account is a commitment to the displayed program, so
+		// sendProgramForCreate already pins that program explicit; an unchosen
+		// preselect stays implicit alongside the program and lets the daemon
+		// resolve both.
 		sendAccount := m.pendingAccount
-		if sendProgram == "" && sendAccount != "" {
-			if m.pendingAccountChosen && m.pendingProgram != "" {
-				sendProgram = m.pendingProgram
-			} else {
-				sendAccount = ""
-			}
+		if sendProgram == "" {
+			sendAccount = ""
 		}
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading

@@ -566,6 +566,43 @@ func TestPreflightChecksTheProgramTheDaemonWillResolve(t *testing.T) {
 	assert.Empty(t, got.Program, "the create itself still goes out implicit")
 }
 
+// TestPreflightChecksTheProgramAChosenAccountPins is the account-pick half
+// (#4889 review): when the user picks an account, the submit pins the
+// DISPLAYED program to keep the pair — so a default_program that moves while
+// the form is open is NOT what the wire carries. Preflighting the resolved
+// default would check a program the create never sends: refuse a valid
+// request when the pinned one is installed, or approve a missing one.
+func TestPreflightChecksTheProgramAChosenAccountPins(t *testing.T) {
+	h := configFollowingHome(t)
+	got := recordStartRequest(t)
+
+	var checked string
+	t.Cleanup(SetLocalSessionPreflightForTest(func(_ *config.Config, program string) error {
+		checked = program
+		return nil
+	}))
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram,
+		"the field opened on the old default")
+
+	// The default moves while the form is open AND the user picks an account —
+	// the pair on the wire is the pinned display program + the account.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramAider)
+	require.NoError(t, err)
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramClaude, checked,
+		"preflight validates the program the wire pins, not the moved default")
+	assert.Equal(t, tmux.ProgramClaude, got.Program,
+		"the create carries the pinned program the account was chosen against")
+	assert.Equal(t, "work", got.Account)
+}
+
 // TestTaskCreatePreservesAnExplicitLaunchProgram is the task-side contract
 // (#4889 review): launched with an explicit --program, "Use config default"
 // means the launch's choice, so the task stores it — the empty program the
