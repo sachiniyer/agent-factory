@@ -49,10 +49,9 @@ func (m *home) preflightSessionCreate() error {
 	// the submit path applies (#4889 review). An untouched form sends "" and
 	// the daemon resolves the LIVE default_program at create time, so cfg's
 	// default_program is the program to check; an explicit pick, a launch
-	// --program, a remote target, or a CHOSEN account instead pins the
-	// displayed pendingProgram, and checking the config value then would
-	// refuse a valid request or approve one whose sent program lacks local
-	// prerequisites.
+	// --program, or a CHOSEN account instead pins the displayed
+	// pendingProgram, and checking the config value then would refuse a valid
+	// request or approve one whose sent program lacks local prerequisites.
 	program := m.sendProgramForCreate()
 	if program == "" {
 		program = cfg.DefaultProgram

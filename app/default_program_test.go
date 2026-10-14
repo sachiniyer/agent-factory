@@ -232,11 +232,13 @@ func TestRemoteTargetMakesNoLocalRead(t *testing.T) {
 		"opening the form on a remote target must not read the client's local config")
 }
 
-// TestRemoteUntouchedSubmitSendsTheLaunchDefault: for a remote daemon an
-// untouched field still submits the launch-time default explicitly — master's
-// wire behaviour — since the client's "follow config" flag speaks for a
-// resolution only the remote daemon could produce.
-func TestRemoteUntouchedSubmitSendsTheLaunchDefault(t *testing.T) {
+// TestRemoteUntouchedSubmitLeavesTheProgramImplicit: for a remote daemon an
+// untouched field still DISPLAYS the launch-time local default — the remote
+// daemon's default_program is remote state no synchronous read can see — but
+// the wire carries "" so the remote daemon resolves its own live default
+// (#4889 review). Sending the local seed explicitly would override the remote
+// default with a program that may not even exist on that host.
+func TestRemoteUntouchedSubmitLeavesTheProgramImplicit(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
 
@@ -253,8 +255,8 @@ func TestRemoteUntouchedSubmitSendsTheLaunchDefault(t *testing.T) {
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
-	assert.Equal(t, tmux.ProgramClaude, got.Program,
-		"a remote target's untouched submit sends the launch-time default explicitly")
+	assert.Equal(t, "", got.Program,
+		"an untouched remote submit stays implicit — the remote daemon resolves its own default_program")
 }
 
 // TestProgramPickerPickSubmitsTheChosenProgram: a program the user confirmed in

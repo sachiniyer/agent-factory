@@ -117,13 +117,18 @@ func (m *home) refreshDefaultProgram() {
 // wire — the single derivation the submit path and preflight share (#4889
 // review): "" when the form follows config untouched (the daemon resolves the
 // live default_program at create), else the concrete pendingProgram. The
-// concrete cases are an explicit program pick, a launch-fixed --program, a
-// remote target (the client cannot read the remote default synchronously), and
-// a CHOSEN account — an account belongs to one agent's registry, so picking one
+// concrete cases are an explicit program pick, a launch-fixed --program, and a
+// CHOSEN account — an account belongs to one agent's registry, so picking one
 // commits to the displayed program and pins it explicit rather than pairing
 // that account with whatever default the daemon would resolve.
+//
+// A remote target is deliberately NOT a concrete case: "" asks the remote
+// daemon to resolve ITS default_program, which is the only default a remote
+// create can honor — the launch-time local seed displayed in the field is a
+// guess at remote state, and sending it explicitly would override the daemon's
+// live default with a program that may not even exist on that host.
 func (m *home) sendProgramForCreate() string {
-	if m.pendingProgramChosen || !m.programFollowsConfig || isRemoteTarget() {
+	if m.pendingProgramChosen || !m.programFollowsConfig {
 		return m.pendingProgram
 	}
 	if m.pendingAccountChosen && m.pendingAccount != "" && m.pendingProgram != "" {
