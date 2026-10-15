@@ -879,6 +879,11 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	}))
 
 	inst := startNaming(t, h, "demo")
+	// Model the launch-fixed state honestly: the form opens with the pinned
+	// program seeded into the field (startNaming's generic "claude" seed is
+	// the config-following shape, which this case is not).
+	h.pendingProgram = tmux.ProgramGemini
+	inst.Program = tmux.ProgramGemini
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, tmux.ProgramGemini, captured.Program,
 		"the launch-fixed program goes out concretely")
@@ -896,5 +901,4 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	require.True(t, h.pendingProgramChosen,
 		"the launch-fixed draft restores as a choice, not an implicit field")
 	require.Equal(t, tmux.ProgramGemini, h.pendingProgram)
-	_ = inst
 }
