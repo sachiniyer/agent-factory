@@ -638,7 +638,14 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		if hasSession && session == sanitizedName &&
 			(generations == nil || generations.contains(environ) || (hasGeneration && generation == "")) {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
-			markerFound = append(markerFound, process)
+			// Expand only roots that were actually admitted — a tracked
+			// requester skipped by addOrReplaceOrphanCandidate must not pull
+			// its descendants in through the back door (the marker-scrubbed
+			// daemon child of an auto-start client would read as an unmarked
+			// candidate and turn a valid self-teardown into a refusal).
+			if _, admitted := byPID[process.PID]; admitted {
+				markerFound = append(markerFound, process)
+			}
 			continue
 		}
 		// A process carrying a COHORT generation while its session marker is
@@ -651,7 +658,9 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		if hasGeneration && session != sanitizedName &&
 			generations != nil && generations.values[generation] {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
-			markerFound = append(markerFound, process)
+			if _, admitted := byPID[process.PID]; admitted {
+				markerFound = append(markerFound, process)
+			}
 		}
 	}
 	// Candidates discovered by marker alone never went through the ancestry

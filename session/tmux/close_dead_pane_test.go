@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -234,7 +235,7 @@ func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_t
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$1",
 		"#{session_created}", "1726000000",
-		"#{pid}", "4242",
+		"#{pid}", "5000000",
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -261,6 +262,17 @@ func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_t
 // session's own launch markers for show-environment, and `#{pid}` answers the
 // server-identity probe the verified variant makes.
 func deadPaneCohortExec(anchorPID int, env map[string]string, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	// The fake server pid sits above Linux's pid_max, so the direct-child audit
+	// can never collide with a real pid slot on the test host.
+	return deadPaneCohortExecOnServer(anchorPID, 5000000, env, status, signal, deadTime, killed)
+}
+
+// deadPaneCohortExecOnServer serves the dead-pane cohort fixture with #{pid}
+// answering a caller-chosen server pid. Passing os.Getpid() makes the test
+// process itself stand in for the tmux server: its real children then play
+// pane roots the direct-child audit must classify (#5319 review).
+func deadPaneCohortExecOnServer(anchorPID, serverPID int, env map[string]string, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	pidStr := strconv.Itoa(serverPID)
 	rowExpand := strings.NewReplacer(
 		"#{pane_pid}", "",
 		"#{pane_dead}", "1",
@@ -269,7 +281,7 @@ func deadPaneCohortExec(anchorPID int, env map[string]string, status, signal, de
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$0",
 		"#{session_created}", "1726000000",
-		"#{pid}", "4242",
+		"#{pid}", pidStr,
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -283,9 +295,9 @@ func deadPaneCohortExec(anchorPID int, env map[string]string, status, signal, de
 			switch {
 			case strings.Contains(s, "list-panes"):
 				if anchorPID > 0 {
-					return []byte(fmt.Sprintf("%d|0||$0|4242|1726000000\n|1|%s%s%s|$0|4242|1726000000\n", anchorPID, status, signal, deadTime)), nil
+					return []byte(fmt.Sprintf("%d|0||$0|%[2]s|1726000000\n|1|%[3]s%[4]s%[5]s|$0|%[2]s|1726000000\n", anchorPID, pidStr, status, signal, deadTime)), nil
 				}
-				return []byte(fmt.Sprintf("|1|%s%s%s|$0|4242|1726000000\n", status, signal, deadTime)), nil
+				return []byte(fmt.Sprintf("|1|%s%s%s|$0|%s|1726000000\n", status, signal, deadTime, pidStr)), nil
 			case strings.Contains(s, "display-message"):
 				return []byte(rowExpand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			case strings.Contains(s, "show-environment"):
@@ -599,6 +611,91 @@ func TestCloseAndWaitForPaneExit_HeldPaneRefusesUnmarkedChildOfDiscoveredRoot(t 
 		"the positively identified survivor must still be reaped alongside the refusal")
 }
 
+// An `env -u` survivor keeps no marker for the scan to find, but while it is
+// still parented to this session's tmux server its environment IS readable —
+// so "markers did not find it" is not "it is not there". A readable child of
+// the server that proves no other owner must make the capture incomplete
+// rather than letting an empty scan authorize the worktree delete (#5319
+// review). The fixture names the test process as the tmux server so the
+// stranger is a kernel-real server child.
+func TestCloseAndWaitForPaneExit_HeldPaneUnmarkedServerChildRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-unmarked-root", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	unmarked := startStranger(t, nil)
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExecOnServer(anchor.PID, os.Getpid(), sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a readable but unmarked child of the pane's server is unprovable — refuse")
+	require.True(t, proctree.AliveSame(unmarked),
+		"a refused server child must never be signalled")
+}
+
+// The same audit must leave a server child alone when its environment proves
+// another owner — another af session's stamped process on the shared default
+// socket is not this teardown's business (#5319 review).
+func TestCloseAndWaitForPaneExit_HeldPaneForeignServerChildIsLeftAlone(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-foreign-root", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	foreign := startStranger(t, markerEnv(toTmuxName("someone-elses-session", ""), home, "gen9"))
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExecOnServer(anchor.PID, os.Getpid(), sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, proctree.AliveSame(foreign),
+		"the teardown reaped a server child another session's markers own")
+}
+
+// A marker-attributed survivor can keep forking between the capture snapshot
+// and kill-session: a static candidate set reaps the parent and leaks a child
+// born mid-window. Observing the survivors' ancestry through the bounded
+// grace — the same mechanism the vanished sweep uses — lets the post-window
+// refresh surface the late child to validation, where its missing markers
+// refuse the teardown instead of leaking it (#5319 review).
+func TestCloseAndWaitForPaneExit_HeldPaneSurvivorForkingLateChildRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-late-child", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	gate := filepath.Join(t.TempDir(), "fork-now")
+	parent := startMarkedParentWithGatedStrippedChild(t, markerEnv(name, home, "gen1"), gate)
+	// Release the fork only once the capture's grace observation is open, and
+	// hold that pass until the child is provably in the process table — the
+	// pass that follows is guaranteed to see it.
+	var once sync.Once
+	oldBarrier := graceObservationBarrier
+	graceObservationBarrier = func(string) {
+		once.Do(func() {
+			require.NoError(t, os.WriteFile(gate, []byte("1"), 0o600))
+			require.Eventually(t, func() bool {
+				snap, err := proctree.Snapshot()
+				return err == nil && len(proctree.TreeOf(snap, parent.PID)) > 0
+			}, 3*time.Second, 10*time.Millisecond, "the gated parent never spawned its stripped child")
+		})
+	}
+	t.Cleanup(func() { graceObservationBarrier = oldBarrier })
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unmarked child born during the grace window must make the capture incomplete")
+	require.False(t, proctree.AliveSame(parent),
+		"the positively identified survivor must still be reaped alongside the refusal")
+}
+
 // af doctor's escaped-process check hunts exactly the processes the teardown
 // capture ADDS via launch markers: a marked process that escaped its dead
 // pane's tree is the finding, so merging it into the diagnostic result would
@@ -776,6 +873,27 @@ func startMarkedParentWithStrippedChild(t *testing.T, extraEnv []string) proctre
 		return err == nil && len(proctree.TreeOf(snap, parent.PID)) > 0
 	}, 3*time.Second, 20*time.Millisecond, "the marked parent never spawned its stripped child")
 	return parent
+}
+
+// startMarkedParentWithGatedStrippedChild is startMarkedParentWithStrippedChild
+// with the child's fork gated on a trigger file: the parent blocks until the
+// file exists, so a fixture can hold the fork until a capture window has
+// already opened — the "child born mid-grace" shape a static candidate set
+// would miss (#5319 review). It does not wait for the child: landing inside
+// the window is the point.
+func startMarkedParentWithGatedStrippedChild(t *testing.T, extraEnv []string, gate string) proctree.Process {
+	t.Helper()
+	c := exec.Command("sh", "-c",
+		"while [ ! -f "+gate+" ]; do sleep 0.02; done; "+
+			"env -u "+EnvMarkerSession+" -u "+EnvMarkerHome+" -u "+EnvMarkerGeneration+" sleep 300 & wait")
+	c.Env = append(os.Environ(), extraEnv...)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Start())
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+	})
+	return processIdentity(t, c.Process.Pid)
 }
 
 // startEnvlessStranger starts a process with an empty environment — the

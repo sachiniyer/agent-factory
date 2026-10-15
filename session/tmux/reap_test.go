@@ -1188,3 +1188,58 @@ func TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL(t *testing.T) {
 			"is told what to go look at")
 	require.Contains(t, err.Error(), name, "the error must name the session the survivor came from")
 }
+
+// A tracked teardown requester that marker-matches is skipped by
+// addOrReplaceOrphanCandidate; it must not seed marker-driven ancestry
+// expansion either, or its marker-less descendants read as unproven
+// candidates and turn a valid self-teardown into a refusal — the marked
+// daemon child an auto-start client leaves behind is exactly that shape
+// (#5319 review).
+func TestRefreshOrphanCandidatesDoesNotExpandSkippedRequester(t *testing.T) {
+	name := "af_refresh-requester-expansion"
+	parent := startMarkedParentWithStrippedChild(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + t.TempDir(),
+		EnvMarkerGeneration + "=gen1",
+	})
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	children := proctree.TreeOf(snap, parent.PID)
+	// The fixture's stripped `env -u` sleeper is the descendant only the
+	// requester's ancestry could attribute: the intermediate sh subshell
+	// keeps its launch markers, so the table scan names it on its own.
+	var stripped int
+	for _, descendant := range children {
+		if descendant.Comm == "sleep" {
+			stripped = descendant.PID
+		}
+	}
+	require.NotZero(t, stripped, "the fixture must hold a stripped sleep descendant")
+	untrack := TrackTeardownRequester(parent)
+	defer untrack()
+	generations := &orphanGenerationSet{values: map[string]bool{"gen1": true}}
+
+	candidates, err := refreshOrphanCandidates(nil, name, generations, false)
+	require.NoError(t, err)
+	excluded := map[int]bool{}
+	for _, p := range candidates {
+		excluded[p.PID] = true
+	}
+	require.False(t, excluded[parent.PID],
+		"a skipped requester must not enter the candidate set")
+	require.False(t, excluded[stripped],
+		"a skipped requester must not pull its unmarked descendants in either")
+
+	candidates, err = refreshOrphanCandidates(nil, name, generations, true)
+	require.NoError(t, err)
+	seen := map[int]bool{}
+	for _, p := range candidates {
+		seen[p.PID] = true
+	}
+	require.True(t, seen[parent.PID],
+		"the requester is admitted when the capture feeds the reaper directly")
+	for _, descendant := range children {
+		require.True(t, seen[descendant.PID],
+			"an admitted requester's descendant %d still expands as usual", descendant.PID)
+	}
+}

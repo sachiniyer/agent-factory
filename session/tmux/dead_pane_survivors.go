@@ -3,8 +3,11 @@ package tmux
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -118,46 +121,41 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	}
 	candidates := append([]proctree.Process(nil), captured...)
 	refreshed, refreshErr := refreshOrphanCandidates(candidates, markerName, &generations, true)
+	scanErr := refreshErr
+	if !verifiedOnly {
+		// A marker-attributed survivor ignores SIGHUP and keeps running — and
+		// can keep FORKING between this capture and the reap that consumes it,
+		// so the static set is never the whole story. Observe its ancestry
+		// through the bounded grace the vanished sweep uses, then refresh once
+		// more so a child forked mid-window or a marker that appeared late
+		// still reaches validation before the capture is called conclusive
+		// (#5319 review).
+		var observed []proctree.Process
+		var observeErr error
+		observed, observeErr = observeOrphanAncestryObserved(refreshed, sanitizedName, reapGraceWait)
+		refreshed, refreshErr = refreshOrphanCandidates(observed, markerName, &generations, true)
+		scanErr = errors.Join(scanErr, observeErr, refreshErr)
+	}
 	// Members the pane tree captured moments ago are already proven; a marked
-	// one that lands on the teardown's own ancestry (a daemon auto-started by a
-	// client inside the pane) must not fail the scan it was never meant to
+	// one that lands on the teardown's own ancestry (a daemon auto-started by
+	// a client inside the pane) must not fail the scan it was never meant to
 	// need — the self-chain refusal only guards marker-only matches.
 	treeVerified := make(map[int]bool, len(captured))
 	for _, member := range captured {
 		treeVerified[member.PID] = true
 	}
 	marked, inspectErr := markedOrphanProcesses(refreshed, markerName, scanHome, generations, treeVerified, serverPID)
-	scanErr := errors.Join(refreshErr, inspectErr)
+	scanErr = errors.Join(scanErr, inspectErr)
 	// A pane root still parented to this session's server but running under a
 	// different uid is invisible to the marker scan: its environment cannot be
 	// read, so refreshOrphanCandidates skips it and validation never sees it.
 	// With the server pid known, every direct child of that server is
-	// enumerable; one whose environment proves unreadable is unprovable —
-	// incomplete, never absent (#5319 review).
+	// enumerable; one the marker scan cannot explain — unreadable, or readable
+	// but carrying nothing that proves another owner — is unprovable, never
+	// absent (#5319 review).
 	if serverErr == nil && serverPID > 0 {
-		fresh, snapErr := proctree.Snapshot()
-		if snapErr != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf(
-				"cannot enumerate children of tmux server %d for a pid-less dead pane: %w", serverPID, snapErr))
-		} else {
-			inSet := make(map[int]proctree.Process, len(refreshed))
-			for _, candidate := range refreshed {
-				inSet[candidate.PID] = candidate
-			}
-			for _, process := range fresh {
-				if process.PPID != serverPID {
-					continue
-				}
-				if known, exists := inSet[process.PID]; exists && known.StartID == process.StartID {
-					continue
-				}
-				if _, envErr := proctree.Environ(process.PID); envErr != nil {
-					scanErr = errors.Join(scanErr, fmt.Errorf(
-						"direct child pid %d of tmux server %d has an unreadable environment, so a pid-less dead pane's survivors cannot be fully attributed: %w",
-						process.PID, serverPID, envErr))
-				}
-			}
-		}
+		auditErr := auditServerChildren(cmdExec, refreshed, serverPID, markerName, scanHome)
+		scanErr = errors.Join(scanErr, auditErr)
 	}
 	if serverErr != nil {
 		scanErr = errors.Join(scanErr, fmt.Errorf(
@@ -196,6 +194,103 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 		}
 	}
 	return verified, scanErr
+}
+
+// auditServerChildren accounts for every direct child of this session's tmux
+// server that the marker candidate set does not already cover. A child that is
+// a LIVE pane root of some session — this one or another af/plain session on
+// the shared default socket — is explained by list-panes and skipped. The rest
+// are detached processes still parented to the server: if their environment
+// cannot be read, or can be read but carries nothing proving another owner,
+// they are unattributable and the capture is incomplete. A child that
+// definitively exited between the snapshot and the probe is churn, not
+// evidence (#5319 review).
+func auditServerChildren(cmdExec cmd.Executor, refreshed []proctree.Process, serverPID int,
+	markerName, scanHome string) error {
+	fresh, snapErr := proctree.Snapshot()
+	if snapErr != nil {
+		return fmt.Errorf("cannot enumerate children of tmux server %d for a pid-less dead pane: %w",
+			serverPID, snapErr)
+	}
+	var auditErr error
+	liveRoots, rootsErr := serverPaneRoots(cmdExec)
+	if rootsErr != nil {
+		auditErr = errors.Join(auditErr, fmt.Errorf(
+			"cannot list live pane roots on tmux server %d: %w", serverPID, rootsErr))
+	}
+	inSet := make(map[int]proctree.Process, len(refreshed))
+	for _, candidate := range refreshed {
+		inSet[candidate.PID] = candidate
+	}
+	for _, process := range fresh {
+		if process.PPID != serverPID {
+			continue
+		}
+		if liveRoots[process.PID] {
+			continue
+		}
+		if known, exists := inSet[process.PID]; exists && known.StartID == process.StartID {
+			continue
+		}
+		environ, envErr := proctree.Environ(process.PID)
+		if envErr != nil {
+			// Ordinary pane-root churn on a shared server exits between the
+			// snapshot and the read; suppress only a definitive exit (#5319).
+			if _, lookupErr := proctree.Lookup(process.PID); errors.Is(lookupErr, proctree.ErrProcessExited) ||
+				errors.Is(lookupErr, os.ErrNotExist) || errors.Is(lookupErr, syscall.ESRCH) {
+				continue
+			}
+			auditErr = errors.Join(auditErr, fmt.Errorf(
+				"direct child pid %d of tmux server %d has an unreadable environment, so a pid-less dead pane's survivors cannot be fully attributed: %w",
+				process.PID, serverPID, envErr))
+			continue
+		}
+		if serverChildProvenForeign(environ, markerName, scanHome) {
+			continue
+		}
+		auditErr = errors.Join(auditErr, fmt.Errorf(
+			"direct child pid %d of tmux server %d is not a live pane root and its environment proves no other owner, so a pid-less dead pane's survivors cannot be fully attributed",
+			process.PID, serverPID))
+	}
+	return auditErr
+}
+
+// serverPaneRoots lists the live pane roots across every session on the tmux
+// server — pane_pid is the first field of this codebase's row format, so the
+// same read serves a bare -F '#{pane_pid}' answer and a full row alike.
+func serverPaneRoots(cmdExec cmd.Executor) (map[int]bool, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "list-panes", "-a", "-F", "#{pane_pid}")
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: list-panes -a after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		return nil, err
+	}
+	roots := map[int]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		field, _, _ := strings.Cut(line, "|")
+		if pid, err := strconv.Atoi(strings.TrimSpace(field)); err == nil && pid > 0 {
+			roots[pid] = true
+		}
+	}
+	return roots, nil
+}
+
+// serverChildProvenForeign reports whether a server's detached child's
+// environment actively attributes it to someone else: a different session
+// name, or a different nonempty ownership home. Anything weaker — no markers,
+// partial markers, or this session's own name — proves nothing (#5319 review).
+func serverChildProvenForeign(environ []string, markerName, scanHome string) bool {
+	if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session != "" && session != markerName {
+		return true
+	}
+	if home, ok := processEnvValue(environ, EnvMarkerHome); ok && home != "" &&
+		filepath.Clean(home) != filepath.Clean(scanHome) {
+		return true
+	}
+	return false
 }
 
 // paneRowIncarnationMatches re-asks the session id a pane row carried for the
