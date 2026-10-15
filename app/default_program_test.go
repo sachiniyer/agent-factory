@@ -839,17 +839,21 @@ func TestStaleAccountDefaultReplyCannotOverwriteTheRefetch(t *testing.T) {
 	require.NoError(t, naming.SetTitle("demo"))
 
 	// Fetch one is still in flight when the create fails and the restore
-	// launches fetch two — the replies return out of order.
+	// launches fetch two. The seam answers on invocation, so the cmds are
+	// invoked in issuance order — fetch one reads the OLD default, fetch two
+	// the moved one — then their replies are DELIVERED out of order: newer
+	// lands first, stale lands last.
 	first := h.fetchAccountDefault(naming, "claude")
 	second := h.fetchAccountDefault(naming, "claude")
 	require.NotNil(t, first)
 	require.NotNil(t, second)
 
-	newer := second().(accountDefaultMsg) // fetch two answers first...
+	older := first().(accountDefaultMsg)
+	newer := second().(accountDefaultMsg)
+
 	_, _ = h.Update(newer)
 	require.Equal(t, "fresh", h.pendingAccount, "the newer answer applies")
 
-	older := first().(accountDefaultMsg) // ...then the stale one lands last
 	_, _ = h.Update(older)
 	assert.Equal(t, "fresh", h.pendingAccount,
 		"an older in-flight reply must not overwrite the newer preselection")
