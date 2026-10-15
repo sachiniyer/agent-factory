@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -163,7 +164,7 @@ func TestRebindConflictRefreshRunsOffTheEventLoop(t *testing.T) {
 	stubRebindCAS(t)
 
 	fetched := make(chan struct{}, 1)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		fetched <- struct{}{}
 		return nil, errors.New("daemon snapshot unavailable")
 	}))
@@ -223,7 +224,7 @@ func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	require.NoError(t, err)
 	stubRebindCAS(t)
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, errors.New("daemon snapshot unavailable")
 	}))
 
@@ -277,12 +278,10 @@ func TestRebindConflictRefreshTimeoutReArmsTheForm(t *testing.T) {
 	rebindConflictRefreshTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { rebindConflictRefreshTimeout = old })
 
-	release := make(chan struct{})
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
-		<-release // never answered: the fetch hangs for the life of the test
-		return nil, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(ctx context.Context) ([]session.InstanceData, error) {
+		<-ctx.Done() // the daemon accepted and never answers; only the deadline frees the read
+		return nil, ctx.Err()
 	}))
-	t.Cleanup(func() { close(release) })
 
 	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
 	require.NotNil(t, cmd, "the conflict refresh is dispatched off the event loop")
@@ -347,7 +346,7 @@ func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
 	live := session.InstanceData{Title: "live", CreatedAt: time.Now()}
 	live.Path = liveRepo
 	live.Worktree.RepoPath = liveRepo
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{live}, nil
 	}))
 	dir, err := config.ProjectRegistryDir()
