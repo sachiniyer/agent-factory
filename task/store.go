@@ -63,19 +63,38 @@ func LoadTasks() ([]Task, error) {
 	}
 
 	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			// A resolving link's target can be removed between the guard above
-			// and this Stat — the check-then-read window the config
-			// materialization path closes the same way (#3672 review). Re-check
-			// the link before treating the store as ordinarily absent, or a
-			// link that dangled by the time Stat followed it reads as ENOENT
-			// here and silently drops every task this guard was added to keep.
-			if err := config.RefuseDanglingConfigLink(path); err != nil {
-				return nil, err
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read tasks file: %w", err)
+		}
+		// A resolving link's target can be removed between the guard above
+		// and this Stat — the check-then-read window the config
+		// materialization path closes the same way (#3672 review). Re-check
+		// the link before treating the store as ordinarily absent, or a
+		// link that dangled by the time Stat followed it reads as ENOENT
+		// here and silently drops every task this guard was added to keep.
+		if err := config.RefuseDanglingConfigLink(path); err != nil {
+			return nil, err
+		}
+		// A symlink that resolves at the recheck is not "no store yet": its
+		// target may have been restored between the failed Stat and the
+		// recheck (another process replacing it via two renames), so
+		// RefuseDanglingConfigLink passes while the file is once again
+		// readable. Retry the Stat once; if the link resolves now, fall
+		// through to the read. A still-absent target after the retry is a
+		// flapping link, not an empty store. A simply-absent path (no
+		// symlink) stays an ordinary empty store (#3672 review).
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			if _, err := os.Stat(path); err != nil {
+				if os.IsNotExist(err) {
+					if err := config.RefuseDanglingConfigLink(path); err != nil {
+						return nil, err
+					}
+				}
+				return nil, fmt.Errorf("failed to read tasks file: %w", err)
 			}
+		} else {
 			return []Task{}, nil
 		}
-		return nil, fmt.Errorf("failed to read tasks file: %w", err)
 	}
 
 	data, _, err := loadAndMigrateTasksFile(path)
@@ -162,19 +181,37 @@ func loadTasksLocked(path string) ([]Task, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// The same check-then-read race as LoadTasks: a target removed
-			// between the guard and this ReadFile re-creates the empty list
-			// that hides a dangling link. Re-check before returning the
-			// ordinary-empty shape, so a mutation against a now-dangling link
-			// surfaces the broken link instead of a misleading "not found"
-			// (#3672 review).
-			if err := config.RefuseDanglingConfigLink(path); err != nil {
-				return nil, err
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read tasks file: %w", err)
+		}
+		// The same check-then-read race as LoadTasks: a target removed
+		// between the guard and this ReadFile re-creates the empty list
+		// that hides a dangling link. Re-check before returning the
+		// ordinary-empty shape, so a mutation against a now-dangling link
+		// surfaces the broken link instead of a misleading "not found"
+		// (#3672 review).
+		if err := config.RefuseDanglingConfigLink(path); err != nil {
+			return nil, err
+		}
+		// The same recheck-then-retry race as LoadTasks: a resolving link
+		// whose target was restored between the failed ReadFile and the
+		// recheck passes RefuseDanglingConfigLink and would read as an empty
+		// store. Retry the read; a still-absent target after the retry is a
+		// flapping link, not an empty store. A simply-absent path (no
+		// symlink) stays the ordinary empty shape (#3672 review).
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			data, err = os.ReadFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					if err := config.RefuseDanglingConfigLink(path); err != nil {
+						return nil, err
+					}
+				}
+				return nil, fmt.Errorf("failed to read tasks file: %w", err)
 			}
+		} else {
 			return []Task{}, nil
 		}
-		return nil, fmt.Errorf("failed to read tasks file: %w", err)
 	}
 	migrated, _, err := migrateTasksSchemaBytes(data, path)
 	if err != nil {
@@ -217,18 +254,35 @@ func ensureTasksSchemaMigrated(path string) error {
 		return err
 	}
 	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			// The same check-then-read race as LoadTasks: re-check the link
-			// before treating the store as absent, or a target removed between
-			// the guard and this Stat skips migration as if the store were gone
-			// — the silent-empty shape this guard was added to stop (#3672
-			// review).
-			if err := config.RefuseDanglingConfigLink(path); err != nil {
-				return err
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read tasks file: %w", err)
+		}
+		// The same check-then-read race as LoadTasks: re-check the link
+		// before treating the store as absent, or a target removed between
+		// the guard and this Stat skips migration as if the store were gone
+		// — the silent-empty shape this guard was added to stop (#3672
+		// review).
+		if err := config.RefuseDanglingConfigLink(path); err != nil {
+			return err
+		}
+		// The same recheck-then-retry race as LoadTasks: a resolving link
+		// whose target was restored between the failed Stat and the recheck
+		// passes RefuseDanglingConfigLink and would skip migration as if the
+		// store were absent. Retry the Stat; a still-absent target after the
+		// retry is a flapping link, not an absent store. A simply-absent path
+		// (no symlink) stays the ordinary nil (#3672 review).
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			if _, err := os.Stat(path); err != nil {
+				if os.IsNotExist(err) {
+					if err := config.RefuseDanglingConfigLink(path); err != nil {
+						return err
+					}
+				}
+				return fmt.Errorf("failed to read tasks file: %w", err)
 			}
+		} else {
 			return nil
 		}
-		return fmt.Errorf("failed to read tasks file: %w", err)
 	}
 	_, _, err := loadAndMigrateTasksFile(path)
 	if err != nil {
