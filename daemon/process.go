@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Everything that treats the daemon as an EXTERNAL OS process lives here:
@@ -92,6 +93,23 @@ func launchDaemonProcessAt(execPath string) error {
 // spawns pass none.
 func startDaemonChild(execPath string, extraArgs ...string) (int, error) {
 	cmd := exec.Command(execPath, append([]string{"--daemon"}, extraArgs...)...)
+
+	// An af invoked inside a session pane carries that session's launch
+	// markers, and a plain os.Environ inheritance would hand them to the
+	// daemon: a session-wide survivor scan would then match the daemon
+	// itself for whichever session spawned it, and the teardown the scan
+	// feeds would signal the process answering the kill RPC. Scrub them;
+	// the daemon belongs to the home, never to a session.
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case tmux.EnvMarkerSession, tmux.EnvMarkerHome, tmux.EnvMarkerGeneration:
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = env
 
 	// Detach the process from the parent
 	cmd.Stdin = nil

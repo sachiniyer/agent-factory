@@ -31,7 +31,10 @@ import (
 //     server, and the capture set is its ppid-descendants plus processes
 //     sharing its kernel session id (tmux makes each pane root a session
 //     leader, so SID membership proves pane ancestry even for processes
-//     already reparented to init).
+//     already reparented to init). A dead pane tmux reports no pid for
+//     (tmux ≥ 3.8) is captured by its launch markers instead — a process
+//     still carrying this session's AF_SESSION and this home's AF_HOME —
+//     the same provenance bar the vanished-session sweep applies (#5319).
 //   - Every signal re-verifies the (pid, starttime) identity via
 //     proctree.Signal, so a recycled PID is never signalled.
 //   - If kill-session fails and the tmux session survives, nothing is
@@ -93,6 +96,22 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // or a concrete finding, the way the package already treats an unreadable
 // process table or session list.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	return captureSessionProcessTrees(cmdExec, sanitizedName, true)
+}
+
+// CaptureVerifiedSessionProcessTrees is the diagnostic variant of
+// CaptureSessionProcessTrees: it returns only processes the pane-tree/SID
+// evidence verified, never marker-attributed survivors of a dead pane whose
+// pid tmux would not report. A marked process attributed that way IS an
+// escaped process — it escaped its pane's tree, which is why markers are the
+// only evidence it exists — so merging it into the result would make
+// `af doctor`'s escaped-process check read attribution as membership and the
+// finding it exists to report would never fire.
+func CaptureVerifiedSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	return captureSessionProcessTrees(cmdExec, sanitizedName, false)
+}
+
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, mergeMarked bool) ([]proctree.Process, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
@@ -138,23 +157,65 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 			procs = append(procs, p)
 		}
 	}
+	// The no-pid dead pane's survivors are attributed by the same sweep the
+	// vanished-session path stands on: refreshOrphanCandidates discovers
+	// descendants of captured members plus AF_SESSION-marked processes in the
+	// session's generation cohort, and markedOrphanProcesses applies the
+	// hardened ownership rules — AF_HOME, uid, identity revalidation,
+	// self-chain — rather than a second scanner with its own answers. It runs
+	// once per capture, not once per pid-less pane.
+	var markedScan struct {
+		procs []proctree.Process
+		err   error
+		done  bool
+	}
+	scanMarkedSurvivors := func() ([]proctree.Process, error) {
+		if !markedScan.done {
+			ownHome, homeErr := afHomeDir()
+			if homeErr != nil {
+				markedScan.err = fmt.Errorf("cannot resolve this agent-factory home for a dead pane's survivor attribution: %w", homeErr)
+			} else {
+				candidates := append([]proctree.Process(nil), procs...)
+				generations := orphanGenerations(candidates, sanitizedName)
+				refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations)
+				marked, inspectErr := markedOrphanProcesses(refreshed, sanitizedName, ownHome, generations)
+				markedScan.procs = marked
+				markedScan.err = errors.Join(refreshErr, inspectErr)
+			}
+			markedScan.done = true
+		}
+		return markedScan.procs, markedScan.err
+	}
+	var deferred []string
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || panePID <= 1 {
+		if err != nil || (panePID <= 1 && !row.pidAbsent) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		if row.dead && row.pidAbsent {
+			// tmux ≥ 3.8 reports no pid for a held dead pane, so its marker
+			// scan seeds its generation cohort from the session's OTHER,
+			// kernel-attributed members — which means every live pane must be
+			// captured first regardless of list-panes order (#5319).
+			deferred = append(deferred, field)
 			continue
 		}
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
-			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row)
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+			// Positively identified members are added even when the capture
+			// is incomplete: the teardown below reaps partial results so a
+			// proven survivor does not outlive the session merely because
+			// something else could not be ruled out.
+			for _, p := range survivors {
+				add(p)
+			}
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
-			}
-			for _, p := range survivors {
-				add(p)
 			}
 			if !asLive {
 				continue
@@ -182,6 +243,28 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		// already exited and they were reparented to init.
 		for _, p := range proctree.SessionMembers(snap, root.SID) {
 			add(p)
+		}
+	}
+	for _, field := range deferred {
+		if !mergeMarked {
+			// A dead pane has no live root for the verified capture to
+			// include, and the processes its launch markers would name are
+			// precisely the escaped ones this variant exists to report —
+			// so the pid-less dead row contributes nothing here (#5319).
+			continue
+		}
+		row, err := parsePaneRow(field)
+		if err != nil {
+			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		survivors, _, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+		for _, p := range survivors {
+			add(p)
+		}
+		if err != nil {
+			captureErrs = append(captureErrs, err)
+			continue
 		}
 	}
 	return procs, errors.Join(captureErrs...)

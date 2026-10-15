@@ -27,6 +27,12 @@ import (
 // when its terminal closes, and reports a status, a signal or a death time only
 // after it has reaped the root. Every reader below keys on that second fact.
 //
+// tmux ≥ 3.8 changes one column of that table: pane_pid requires the pane's
+// pty, so a pane whose terminal is gone reports NO pane_pid at all and the row
+// arrives as `|1|<status+signal+time>` (upstream commit e03a937c71, #5319).
+// Every reader below must therefore read the dead column before it trusts the
+// pid column.
+//
 // Once tmux has reaped the root, the kernel may hand its pid to an unrelated
 // process. That is why a reaped pane's pid is never waited on or signalled. Its
 // kernel session is still usable, though: a pid stays reserved while any process
@@ -40,13 +46,15 @@ const paneFieldSeparator = "|"
 
 // paneRowFormat is what the teardown asks list-panes and display-message for.
 // The third field concatenates every value tmux reports only after reaping the
-// root, so it is non-empty exactly when the root is known to be gone.
+// root, so it is non-empty exactly when the root is known to be gone. The
+// fourth carries the session's concrete incarnation id, which names the exact
+// session a row belongs to in a way a reused name cannot.
 //
 // A reply without the separator is a bare pane_pid, which is what a tmux that
 // cannot expand the later fields, or a test executor, returns. It reads as a
 // live pane, the behaviour from before #4479.
 const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + paneFieldSeparator +
-	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}"
+	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{session_id}"
 
 // paneRow is one pane of a list-panes or display-message reply.
 type paneRow struct {
@@ -55,20 +63,48 @@ type paneRow struct {
 	dead bool
 	// reaped: tmux collected the root, so the pid no longer names it.
 	reaped bool
+	// pidAbsent: tmux reported the pid FIELD EMPTY — the tmux ≥ 3.8 shape for
+	// a pane whose terminal is gone — not merely a pid that parses oddly. Only
+	// this flag exempts a row from the pid <= 1 rejection: a dead row carrying
+	// a numeric sentinel like `0|1|7` or `1|1|7` is malformed output, not the
+	// shape being accommodated.
+	pidAbsent bool
+	// sessionID: the $id of the session incarnation list-panes observed —
+	// stable across a same-named replacement in a way the name is not.
+	sessionID string
 }
 
 func parsePaneRow(field string) (paneRow, error) {
 	parts := strings.Split(strings.TrimSpace(field), paneFieldSeparator)
-	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return paneRow{}, fmt.Errorf("invalid pane pid %q", field)
-	}
-	row := paneRow{pid: pid}
+	row := paneRow{}
 	if len(parts) > 1 {
 		row.dead = strings.TrimSpace(parts[1]) == "1"
 	}
 	if len(parts) > 2 {
 		row.reaped = row.dead && strings.TrimSpace(parts[2]) != ""
+	}
+	if len(parts) > 3 {
+		row.sessionID = strings.TrimSpace(parts[3])
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	switch {
+	case err == nil:
+		row.pid = pid
+	case row.dead && strings.TrimSpace(parts[0]) == "":
+		// A held dead pane has no live root for a pid to name — the pid tmux
+		// used to report already belonged to a dead process — so a pid tmux
+		// does not report is absence, not an unreadable answer (#5319). The
+		// pane's detached survivors, if any, are attributed by their launch
+		// markers instead: see deadPaneProcesses. Only the EMPTY field is
+		// exempt: a non-empty pid that cannot be read is malformed output,
+		// not a shape tmux reports, and stays an error.
+		row.pidAbsent = true
+	default:
+		// A pane tmux does NOT report dead may have a live root, and a pid it
+		// cannot read leaves that root unverifiable. That stays a parse error:
+		// an unverifiable root is exactly what the #2962 guard refuses
+		// worktree cleanup on.
+		return paneRow{}, fmt.Errorf("invalid pane pid %q", field)
 	}
 	return row, nil
 }
@@ -80,7 +116,18 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow) (procs []proctree.Process, asLive bool, err error) {
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func() ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
+	if row.pidAbsent {
+		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
+		// (#5319), and without the pid there is no kernel session key to look
+		// survivors up by. What remains is the launch provenance af stamps
+		// into every pane it spawns: the AF_SESSION/AF_HOME markers a process
+		// still carries are proof it came from this session — the same
+		// evidence the vanished-session sweep stands on, and the same
+		// bounded-candidate machinery the caller's scan shares with it.
+		procs, err := markedSurvivors()
+		return procs, false, err
+	}
 	_, present := snap[row.pid]
 	switch {
 	case present && row.reaped:
@@ -171,7 +218,7 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		return paneRow{}, errPaneQueryFoundNoPane
 	}
 	row, err := parsePaneRow(trimmed)
-	if err != nil || row.pid <= 0 {
+	if err != nil || (row.pid <= 0 && !row.pidAbsent) {
 		return paneRow{}, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}
 	return row, nil

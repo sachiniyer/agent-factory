@@ -39,6 +39,7 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 		"#{pane_dead_status}", p.status,
 		"#{pane_dead_signal}", p.signal,
 		"#{pane_dead_time}", p.at,
+		"#{session_id}", "$0",
 	).Replace(c.Args[len(c.Args)-1]) + "\n", true
 }
 

@@ -594,7 +594,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// the read that would prove membership never returned. A read that
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
-			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+			tree, paneErr := tmux.CaptureVerifiedSessionProcessTrees(ctx.opts.Exec, name)
 			// Build the captured-PID set from whatever the partial tree
 			// returned (may be non-empty even when paneErr != nil, e.g. one
 			// pane vanished between list-panes and the process snapshot while
