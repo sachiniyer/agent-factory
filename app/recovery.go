@@ -47,9 +47,16 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// deliberate "Ambient identity" is indistinguishable from an untouched
 	// field. The draft carries the original chosen flags for exactly this
 	// (#4889 review): restore the flags so an account-pinned program goes back
-	// to config-following and a chosen ambient account is not overwritten by
-	// the refetched default.
-	m.pendingAccountChosen = req.AccountChosen
+	// to config-following.
+	//
+	// Only a NAMED account survives as chosen: a chosen-ambient draft has
+	// AccountChosen but Account "", which sendProgramForCreate does not pin
+	// and the retry sends as ""+"" — daemon-side resolution. Keeping the flag
+	// would skip the refreshes below and leave the display describing defaults
+	// that may already have moved, so the flag records the pinning decision —
+	// "a named account was chosen" — which is the only decision the wire can
+	// still see (#4889 review).
+	m.pendingAccountChosen = req.AccountChosen && req.Account != ""
 	m.pendingProgramChosen = req.ProgramChosen
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		// Re-resolve the live default for the restored field's seed: the
@@ -57,9 +64,9 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 		// it should be the CURRENT default, not the stale one the failed form
 		// happened to show (#4889 review).
 		//
-		// A CHOSEN account forbids the re-resolve: the wire program was the
-		// displayed one pinned to keep the pair, so instance.Program is the
-		// agent that account's registry belongs to. Refreshing it onto a
+		// A CHOSEN named account forbids the re-resolve: the wire program was
+		// the displayed one pinned to keep the pair, so instance.Program is
+		// the agent that account's registry belongs to. Refreshing it onto a
 		// moved default would re-pair (for example) claude's "work" account
 		// with codex on the retry — silently wrong or a registry mismatch
 		// (#4889 review).
@@ -76,8 +83,9 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 		return true, nil
 	}
 	// The draft proves only that no account was SENT — an unchosen preselect
-	// leaves req.Account empty, so the restored field would read "no account"
-	// while the retry applies the configured default. Re-fetch it exactly as a
-	// fresh form does (#4889 review).
+	// and a chosen ambient identity both leave req.Account empty, so the
+	// restored field would read "no account" while the retry applies the
+	// configured default. Re-fetch it exactly as a fresh form does (#4889
+	// review).
 	return true, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
 }

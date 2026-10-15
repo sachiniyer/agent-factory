@@ -302,6 +302,16 @@ func TestResolveConfigForRepoContextReReadsAfterAJoinedFlight(t *testing.T) {
 		bDone <- bErr
 	}()
 
+	// Releasing before B is provably parked on flight one would let B open
+	// the fresh flight itself and never exercise the join path.
+	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
+	require.Eventually(t, func() bool {
+		repoResolveFlightsMu.Lock()
+		f, ok := repoResolveFlights[key]
+		repoResolveFlightsMu.Unlock()
+		return ok && f.waiters.Load() == 2
+	}, 5*time.Second, time.Millisecond, "the joiner must attach to the in-flight flight")
+
 	// Flight one completes; the pileup stays at one worker while B re-reads.
 	close(releaseFirst)
 	require.EqualError(t, <-bDone, "fresh flight result",
