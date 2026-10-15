@@ -36,16 +36,15 @@ import (
 // tmux reports the pane dead. The pane carries the launch markers a real af
 // pane gets (#1104): they are the only provenance left for a pane whose pid
 // tmux ≥ 3.8 no longer reports, and the detached-survivor test below relies on
-// them exactly the way production relies on them.
+// them exactly the way production relies on them. They go through the same
+// capability gate production uses — new-session -e needs tmux ≥ 3.2, which
+// this fixture still has to run on.
 func startHeldPane(t *testing.T, name, command string) {
 	t.Helper()
-	home, err := afHomeDir()
-	require.NoError(t, err)
-	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name,
-		"-e", EnvMarkerSession+"="+name,
-		"-e", EnvMarkerGeneration+"="+t.Name(),
-		"-e", EnvMarkerHome+"="+home,
-		command, ";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
+	args := []string{"new-session", "-d", "-s", name}
+	args = append(args, sessionEnvFlags(name, t.Name())...)
+	args = append(args, command, ";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on")
+	require.NoError(t, exec.Command("tmux", args...).Run())
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
 	require.Eventually(t, func() bool {
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead}").Output()
@@ -347,6 +346,7 @@ func TestParsePaneRow_LivePaneWithNoReportedPidErrors(t *testing.T) {
 // The teardown must still be conclusive — the pane is dead, so there is no
 // live root whose identity could not be established.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidIsConclusive(t *testing.T) {
+	requireInspectableProcessTable(t)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	name := toTmuxName("dead-pane-no-pid", "")
@@ -366,6 +366,7 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidIsConclusive(t *testin
 // af pane passes to everything it spawns (#5319, #1104): the session's own
 // AF_SESSION name, AF_HOME and AF_SESSION_GEN.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor(t *testing.T) {
+	requireInspectableProcessTable(t)
 	shrinkReapWaits(t)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -390,6 +391,7 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor
 // unmarked one, one from another home, and one from another generation of the
 // same name are all left alone.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnattributableProcesses(t *testing.T) {
+	requireInspectableProcessTable(t)
 	shrinkReapWaits(t)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -421,6 +423,7 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnattributablePr
 // different agent-factory home owns: the fallback matches the SESSION's
 // stamped AF_HOME, never the invoker's own.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidScopesMarkersToSessionHome(t *testing.T) {
+	requireInspectableProcessTable(t)
 	shrinkReapWaits(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	foreignHome := t.TempDir()
@@ -439,6 +442,40 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidScopesMarkersToSession
 	require.Equal(t, PaneStateKnown, state)
 	require.False(t, proctree.AliveSame(survivor),
 		"a survivor marked with the session's own home escaped attribution")
+}
+
+// A numeric sentinel in the pid field is malformed output, not the empty
+// field tmux ≥ 3.8 reports: a dead row reading `0|1|7` or `1|1|7` must still
+// fail the capture rather than laundering corruption into a clean scan.
+func TestCloseAndWaitForPaneExit_DeadPaneWithSentinelPidRefuses(t *testing.T) {
+	for _, pid := range []string{"0", "1", "-1"} {
+		s := newTmuxSession(toTmuxName("dead-pane-sentinel-pid", ""), "sh", NewMockPtyFactory(t),
+			paneRowExec(pid, "1", "7", "", "1726000000", nil))
+		state, err := s.CloseAndWaitForPaneExit()
+		require.Error(t, err, "a dead row carrying pid %s must stay a capture error", pid)
+		require.Equal(t, PaneStateUnknown, state)
+	}
+}
+
+// A live same-uid process whose environment cannot be inspected AND that
+// still looks like a pane survivor — a member of a kernel session whose
+// leader is gone — could be an `env -i`-launched detached child, so the
+// capture is incomplete and the teardown refuses.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidRefusesOnUninspectableSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-envless", "")
+	stranger := startEnvlessOrphanedMember(t)
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}, nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a live same-uid process the scan cannot inspect must make the capture incomplete")
+	require.True(t, proctree.AliveSame(stranger), "the teardown signalled a process it could not inspect")
 }
 
 // A session launched before the marker contract exists carries no launch
@@ -485,6 +522,50 @@ func startStranger(t *testing.T, extraEnv []string) proctree.Process {
 		_, _ = c.Process.Wait()
 	})
 	return processIdentity(t, c.Process.Pid)
+}
+
+// startEnvlessOrphanedMember starts a process with an empty environment — the
+// `env -i` shape the marker scan cannot inspect — that remains a member of a
+// kernel session whose leader is already gone: the exact process-table shape
+// of a detached pane survivor.
+func startEnvlessOrphanedMember(t *testing.T) proctree.Process {
+	t.Helper()
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	c := exec.Command("sh", "-c", "env -i sleep 300 & echo $! > \"$1\"; exit 0", "sh", pidfile)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Run())
+	pid := readPIDFile(t, pidfile)
+	p := processIdentity(t, pid)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	return p
+}
+
+// requireInspectableProcessTable skips the test on a host that already holds a
+// live same-uid process the marker scan would flag — an uninspectable member
+// of a dead kernel session — because the scan correctly reports that capture
+// as incomplete, so a teardown-proceeds expectation cannot be met there.
+// Daemons like ssh-agent or (sd-pam), unreadable on every desktop host, are
+// their own session leaders and do not match.
+func requireInspectableProcessTable(t *testing.T) {
+	t.Helper()
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	selfUID, known := proctree.UID(os.Getpid())
+	if !known {
+		return
+	}
+	for _, p := range snap {
+		if uid, ok := proctree.UID(p.PID); !ok || uid != selfUID {
+			continue
+		}
+		if _, envErr := proctree.Environ(p.PID); envErr != nil &&
+			p.SID > 1 && p.SID != p.PID && proctree.AliveSame(p) {
+			if _, leaderAlive := snap[p.SID]; !leaderAlive {
+				t.Skipf("host holds an uninspectable same-uid member of a dead session (pid %d); "+
+					"the marker scan correctly reports an incomplete capture", p.PID)
+			}
+		}
+	}
 }
 
 func readPIDFile(t *testing.T, path string) int {

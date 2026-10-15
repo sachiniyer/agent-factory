@@ -141,17 +141,32 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 			procs = append(procs, p)
 		}
 	}
+	// The no-pid dead pane's marker scan reads the session's environment and
+	// walks the snapshot once per capture, not once per pane: a session of
+	// held panes would otherwise pay three bounded tmux queries per row.
+	var markedScan struct {
+		procs []proctree.Process
+		err   error
+		done  bool
+	}
+	scanMarkedSurvivors := func() ([]proctree.Process, error) {
+		if !markedScan.done {
+			markedScan.procs, markedScan.err = markedSessionSurvivors(cmdExec, snap, sanitizedName)
+			markedScan.done = true
+		}
+		return markedScan.procs, markedScan.err
+	}
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || (!row.dead && panePID <= 1) {
+		if err != nil || (panePID <= 1 && !row.pidAbsent) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
-			survivors, asLive, err := deadPaneProcesses(cmdExec, snap, sanitizedName, row)
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
@@ -443,9 +458,15 @@ func (g orphanGenerationSet) empty() bool {
 // reports a generation — this session's AF_SESSION_GEN. A process carrying
 // all three provably came from this session: the same bar the vanished-session
 // sweep stands on. A same-named process of a different generation is a
-// leftover of an earlier incarnation, never this session's to claim. A process
-// whose environment cannot be read is not evidence of membership and is
-// skipped.
+// leftover of an earlier incarnation, never this session's to claim.
+//
+// A process that has since exited leaves the scan. A LIVE same-uid process
+// whose environment cannot be read is not absence of markers — an `env -i`
+// launch looks exactly like a withheld one — but it cannot fail the capture on
+// its own: daemons such as ssh-agent or (sd-pam) are unreadable on every
+// desktop host, and refusing on them would wedge every teardown. Only one that
+// still looks like a pane survivor — a member of a kernel session whose leader
+// is already gone — makes the capture incomplete.
 //
 // A session that carries no launch markers at all predates the contract, so a
 // scan that finds nothing there proves nothing about its survivors: that is an
@@ -478,6 +499,23 @@ func markedSessionSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process,
 		}
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
+			// Revalidate identity first: a snapshot entry that has since
+			// exited is no survivor at all. A live entry we cannot inspect
+			// makes the capture incomplete only when it still looks like a
+			// pane survivor — a member of a kernel session whose leader is
+			// gone — because ssh-agent and (sd-pam) answer this same shape
+			// with unreadable environments on every desktop host.
+			same, identityErr := proctree.SameIdentity(process)
+			switch {
+			case identityErr != nil:
+				return nil, fmt.Errorf("tmux session %s: cannot revalidate pid %d while attributing a dead pane's survivors: %w",
+					sanitizedName, process.PID, identityErr)
+			case same && process.SID > 1 && process.SID != process.PID:
+				if _, leaderAlive := snap[process.SID]; !leaderAlive {
+					return nil, fmt.Errorf("tmux session %s: live pid %d's environment cannot be read and its session leader is gone, so a dead pane's survivors cannot be attributed",
+						sanitizedName, process.PID)
+				}
+			}
 			continue
 		}
 		session, ok := processEnvValue(environ, EnvMarkerSession)

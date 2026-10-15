@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -62,6 +61,12 @@ type paneRow struct {
 	dead bool
 	// reaped: tmux collected the root, so the pid no longer names it.
 	reaped bool
+	// pidAbsent: tmux reported the pid FIELD EMPTY — the tmux ≥ 3.8 shape for
+	// a pane whose terminal is gone — not merely a pid that parses oddly. Only
+	// this flag exempts a row from the pid <= 1 rejection: a dead row carrying
+	// a numeric sentinel like `0|1|7` or `1|1|7` is malformed output, not the
+	// shape being accommodated.
+	pidAbsent bool
 }
 
 func parsePaneRow(field string) (paneRow, error) {
@@ -85,6 +90,7 @@ func parsePaneRow(field string) (paneRow, error) {
 		// markers instead: see deadPaneProcesses. Only the EMPTY field is
 		// exempt: a non-empty pid that cannot be read is malformed output,
 		// not a shape tmux reports, and stays an error.
+		row.pidAbsent = true
 	default:
 		// A pane tmux does NOT report dead may have a live root, and a pid it
 		// cannot read leaves that root unverifiable. That stays a parse error:
@@ -102,8 +108,8 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(cmdExec cmd.Executor, snap map[int]proctree.Process, sanitizedName string, row paneRow) (procs []proctree.Process, asLive bool, err error) {
-	if row.pid <= 0 {
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func() ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
+	if row.pidAbsent {
 		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
 		// (#5319), and without the pid there is no kernel session key to look
 		// survivors up by. What remains is the launch provenance af stamps
@@ -112,7 +118,7 @@ func deadPaneProcesses(cmdExec cmd.Executor, snap map[int]proctree.Process, sani
 		// evidence the vanished-session sweep stands on. When the session
 		// itself carries no markers, a scan that finds nothing proves nothing
 		// about survivors: that is an incomplete capture, not an empty one.
-		procs, err := markedSessionSurvivors(cmdExec, snap, sanitizedName)
+		procs, err := markedSurvivors()
 		return procs, false, err
 	}
 	_, present := snap[row.pid]
@@ -205,7 +211,7 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		return paneRow{}, errPaneQueryFoundNoPane
 	}
 	row, err := parsePaneRow(trimmed)
-	if err != nil || (row.pid <= 0 && !row.dead) {
+	if err != nil || (row.pid <= 0 && !row.pidAbsent) {
 		return paneRow{}, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}
 	return row, nil
