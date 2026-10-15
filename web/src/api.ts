@@ -244,7 +244,7 @@ export function isMutationOutcomeUncertain(e: unknown): boolean {
  * a non-null error, or on a transport failure — mirroring apiclient.call so the
  * whole client shares one error path.
  */
-export async function af<T>(method: string, body: unknown, token: string): Promise<T> {
+export async function af<T>(method: string, body: unknown, token: string, signal?: AbortSignal): Promise<T> {
   // An empty token is the "this client needs none" sentinel (loopback, or
   // require_token=false, #1696): send no Authorization header at all rather than a
   // bogus "Bearer " — the daemon exempts the peer, so the header is simply absent.
@@ -258,6 +258,7 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
       method: "POST",
       headers,
       body: JSON.stringify(body ?? {}),
+      signal: signal ?? null,
     });
   } catch (e) {
     // A TypeError from fetch is a transport failure (daemon down, wrong host).
@@ -784,8 +785,8 @@ export async function rebindProject(
  *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
  *  only client that reads the registry over HTTP; the TUI and CLI read
  *  config.ListProjects() in-process, so this has no Go apiclient twin. */
-export async function listProjects(token: string): Promise<RegisteredProject[]> {
-  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+export async function listProjects(token: string, signal?: AbortSignal): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token, signal);
   return resp.projects ?? [];
 }
 

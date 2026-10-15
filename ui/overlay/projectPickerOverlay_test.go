@@ -1197,3 +1197,59 @@ func TestMergePreservingSessionRowsFreshRegistryRowSurvivesASessionClaimedRoot(t
 		t.Fatalf("the session-only row keeps its last-known counts and no registry identity, got %+v", merged)
 	}
 }
+
+// TestMergePreservingSessionRowsRestoresDocumentedOrder pins the #4888 review
+// finding on ordering: the merge substitutes preserved rows at their old
+// positions and appends new ones, so a rebind that moved a project's display
+// name or root would leave the list mis-sorted for the life of the degraded
+// read. The result must come back under the documented Name/Root ordering the
+// normal project-list build produces.
+func TestMergePreservingSessionRowsRestoresDocumentedOrder(t *testing.T) {
+	old := []Project{
+		{Name: "zeta", Root: "/repos/zeta", RepoID: "repo-zeta", RegistryID: "prj_z", RegistryRoot: "/repos/zeta", SessionCount: 1},
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_a", RegistryRoot: "/repos/alpha"},
+	}
+	// alpha's registration moved it to /repos/mmm — the preserved row lands
+	// where alpha sat, but must sort under its NEW name.
+	fresh := []Project{
+		{Name: "mmm", Root: "/repos/mmm", RepoID: "repo-alpha", RegistryID: "prj_a", RegistryRoot: "/repos/mmm"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+	if len(merged) != 2 {
+		t.Fatalf("expected two rows, got %+v", merged)
+	}
+	if merged[0].Name != "mmm" || merged[1].Name != "zeta" {
+		t.Fatalf("the merged list must restore name order (mmm before zeta), got %+v", merged)
+	}
+}
+
+// TestRebindConflictReseatParksCursorWhenTheRecordVanishes pins the #4888
+// review finding on the no-match path: when the target registration is
+// deleted before the conflict refresh, nothing in the rebuilt list carries
+// its RegistryID. The in-range clamp alone leaves the cursor on whatever row
+// inherited the index — Esc returning to the list would highlight an
+// unrelated project, and Enter/`b` would act on it. The cursor must park on
+// the neutral trailing add-project row instead.
+func TestRebindConflictReseatParksCursorWhenTheRecordVanishes(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "a", Root: "/repos/a", RepoID: "repo-a", RegistryID: "prj_a", RegistryRoot: "/repos/a"},
+		{Name: "gone", Root: "/old/gone", RepoID: "repo-old", RegistryID: "prj_gone", RegistryRoot: "/old/gone", SessionCount: 2},
+	}, "")
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	// The registry read proves the record deleted; the failed session
+	// snapshot keeps its row only as session-only provenance — nothing in the
+	// rebuild still carries prj_gone's registration identity.
+	p.SetRebindConflictPreserving("Rebound elsewhere — its record is gone", []Project{
+		{Name: "a", Root: "/repos/a", RepoID: "repo-a", RegistryID: "prj_a", RegistryRoot: "/repos/a"},
+	}, false)
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.selectedIdx != len(p.all) || !p.addRowSelected() {
+		t.Fatalf("no matching registration — the cursor must park on the add-project row, got idx %d over %d rows", p.selectedIdx, len(p.all))
+	}
+}
