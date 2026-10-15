@@ -38,12 +38,14 @@ import (
 // forks a marked helper during the reads is still seen. A process that has
 // since exited leaves the scan; a LIVE same-uid process whose environment
 // cannot be read is not absence of markers — an `env -i` launch looks exactly
-// like a withheld one. It is cleared only by a positive reason it cannot be
-// the pane's — a start time older than the session itself — because daemons
-// like ssh-agent or (sd-pam) answer the uninspectable shape on every desktop
-// host and refusing on them would wedge every teardown. One started inside
-// the session's lifetime could be a detached env-less survivor, leading its
-// own session or not, so that one makes the capture incomplete.
+// like a withheld one. But unreadable alone cannot refuse either: daemons
+// like ssh-agent or (sd-pam) answer that shape on every Linux host, and on
+// macOS every SIP/code-signing-restricted same-uid process does. What makes
+// one suspicious is positive evidence of possible pane membership: it still
+// wears a kernel session whose leader is gone, inside the session's own
+// lifetime. Everything else unreadable is cleared — a survivor that setsids
+// itself out of any observable membership escapes both this scan and the
+// pre-3.8 SID path alike.
 //
 // A session that carries no launch markers at all predates the contract, so a
 // scan that finds nothing there proves nothing about its survivors: that is an
@@ -79,12 +81,18 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		return nil, fmt.Errorf("cannot bind tmux session %s (id %s) for survivor attribution: %w",
 			sanitizedName, row.sessionID, err)
 	}
-	if _, sessionMarked, err := sessionEnvMarkerAt(cmdExec, row.sessionID, EnvMarkerSession); err != nil {
+	sessionMarker, sessionMarked, err := sessionEnvMarkerAt(cmdExec, row.sessionID, EnvMarkerSession)
+	if err != nil {
 		return nil, err
 	} else if !sessionMarked {
 		return nil, fmt.Errorf("tmux session %s carries no %s launch marker, so a dead pane's survivors cannot be attributed",
 			sanitizedName, EnvMarkerSession)
 	}
+	// The recorded marker — not the listed name — is what descendants carry:
+	// a session renamed since launch still stamps its original AF_SESSION on
+	// everything it spawned, so matching the current name would read those
+	// survivors as foreign and call the capture empty while they still live.
+	markerName := sessionMarker
 	sessionHome, homePresent, err := sessionEnvMarkerAt(cmdExec, row.sessionID, EnvMarkerHome)
 	if err != nil {
 		return nil, err
@@ -134,6 +142,55 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 			procs = append(procs, p)
 		}
 	}
+	// fullMatch reports whether an environment carries the complete launch
+	// provenance of THIS session: the recorded AF_SESSION name, the session's
+	// own AF_HOME, and — when the session reports one — its AF_SESSION_GEN.
+	fullMatch := func(environ []string) bool {
+		session, hasSession := processEnvValue(environ, EnvMarkerSession)
+		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
+		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		return hasSession && session == markerName && hasHome &&
+			filepath.Clean(processHome) == cleanHome &&
+			(sessionGeneration == "" || (hasGeneration && generation == sessionGeneration))
+	}
+	// attribute returns the process record a full marker match actually
+	// describes. The snapshot predates the environment read, so the pid may
+	// have been recycled in between: the markers then belong to the pid's
+	// CURRENT occupant, and appending the stale record would fail the reap's
+	// AliveSame check — reading as "nothing left" while a live marked process
+	// stands. The current occupant must re-prove the full match itself; a
+	// failure anywhere is an incomplete capture, not a silent drop.
+	attribute := func(p proctree.Process, environ []string) (proctree.Process, error) {
+		same, err := proctree.SameIdentity(p)
+		if err != nil {
+			return proctree.Process{}, fmt.Errorf("tmux session %s: cannot revalidate marked pid %d after its environment read: %w",
+				sanitizedName, p.PID, err)
+		}
+		if same {
+			return p, nil
+		}
+		cur, err := proctree.Lookup(p.PID)
+		if err != nil {
+			return proctree.Process{}, fmt.Errorf("tmux session %s: marked pid %d changed identity during capture and its current occupant cannot be read: %w",
+				sanitizedName, p.PID, err)
+		}
+		if uid, known := proctree.UID(cur.PID); !known {
+			return proctree.Process{}, fmt.Errorf("tmux session %s: marked pid %d changed identity during capture and its occupant's ownership cannot be determined",
+				sanitizedName, p.PID)
+		} else if uid != selfUID {
+			return proctree.Process{}, nil
+		}
+		curEnv, err := proctree.Environ(cur.PID)
+		if err != nil {
+			return proctree.Process{}, fmt.Errorf("tmux session %s: marked pid %d changed identity during capture and its occupant's environment cannot be read: %w",
+				sanitizedName, p.PID, err)
+		}
+		if !fullMatch(curEnv) {
+			return proctree.Process{}, fmt.Errorf("tmux session %s: marked pid %d changed identity during capture and its occupant no longer proves membership",
+				sanitizedName, p.PID)
+		}
+		return cur, nil
+	}
 	for _, process := range fresh {
 		if selfChain[process.PID] {
 			continue
@@ -141,19 +198,28 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
 			// Revalidate identity first: a snapshot entry that has since
-			// exited is no survivor at all. A live entry we cannot inspect
-			// and cannot clear by age — it started inside the session's
-			// lifetime — could be a detached `env -i` survivor, so the
-			// capture is incomplete rather than clean. A foreign uid's
-			// unreadable environment cannot be this session's either.
+			// exited is no survivor at all. What remains needs POSITIVE
+			// evidence of possible pane membership before it can make the
+			// capture incomplete — on macOS, SIP/code-signing-restricted
+			// processes answer unreadable for the same uid, so "unreadable
+			// and young" would wedge every teardown on a busy host. The
+			// evidence that survives is kernel-session orphanage: a process
+			// still wearing a session id whose leader is gone (or whose
+			// leader pid has plainly been recycled — a leader cannot start
+			// after its member) could be a detached `env -i` survivor. One
+			// started before the session existed provably cannot be, and a
+			// foreign uid's unreadable environment cannot be either.
 			same, identityErr := proctree.SameIdentity(process)
 			switch {
 			case identityErr != nil:
 				return nil, fmt.Errorf("tmux session %s: cannot revalidate pid %d while attributing a dead pane's survivors: %w",
 					sanitizedName, process.PID, identityErr)
 			case same && !process.StartedAt.Before(sessionCreated):
-				if uid, known := proctree.UID(process.PID); !known || uid == selfUID {
-					return nil, fmt.Errorf("tmux session %s: live pid %d's environment cannot be read and it started inside the session's lifetime, so a dead pane's survivors cannot be attributed",
+				leader, leaderListed := fresh[process.SID]
+				orphanMember := process.SID != process.PID &&
+					(!leaderListed || leader.StartedAt.After(process.StartedAt))
+				if uid, known := proctree.UID(process.PID); orphanMember && (!known || uid == selfUID) {
+					return nil, fmt.Errorf("tmux session %s: live pid %d's environment cannot be read and it wears an orphaned kernel session, so a dead pane's survivors cannot be attributed",
 						sanitizedName, process.PID)
 				}
 			}
@@ -175,7 +241,7 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		// evidence: a different session name, a different home, or — when
 		// the session reports a generation — a different or unexpected
 		// generation all prove the process is not this session's.
-		contradicts := (hasSession && session != sanitizedName) ||
+		contradicts := (hasSession && session != markerName) ||
 			(hasHome && filepath.Clean(processHome) != cleanHome) ||
 			(sessionGeneration != "" && hasGeneration && generation != sessionGeneration) ||
 			(sessionGeneration == "" && hasGeneration)
@@ -189,7 +255,7 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		// Consistent-but-incomplete cannot prove absence — like the sweep's
 		// "has no AF_SESSION marker" refusal, this is an incomplete capture,
 		// not an empty one.
-		full := hasSession && hasHome && (sessionGeneration == "" || hasGeneration)
+		full := fullMatch(environ)
 		uid, uidKnown := proctree.UID(process.PID)
 		switch {
 		case full:
@@ -198,7 +264,13 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 					sanitizedName, process.PID)
 			}
 			if uid == selfUID {
-				addSurvivor(process)
+				member, attrErr := attribute(process, environ)
+				if attrErr != nil {
+					return nil, attrErr
+				}
+				if member.PID != 0 {
+					addSurvivor(member)
+				}
 			}
 		case !uidKnown || uid == selfUID:
 			return nil, fmt.Errorf("tmux session %s: live pid %d carries only a partial set of launch markers, so it cannot be ruled out as a dead pane's survivor",
@@ -222,21 +294,21 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 				return nil, fmt.Errorf("tmux session %s: live pid %d descends from an attributed survivor but its environment cannot be read, so a dead pane's survivors cannot be attributed",
 					sanitizedName, descendant.PID)
 			}
-			session, hasSession := processEnvValue(environ, EnvMarkerSession)
-			processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
-			generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
-			full := hasSession && session == sanitizedName && hasHome &&
-				filepath.Clean(processHome) == cleanHome &&
-				(sessionGeneration == "" || (hasGeneration && generation == sessionGeneration))
-			if full {
+			if fullMatch(environ) {
 				uid, uidKnown := proctree.UID(descendant.PID)
 				if !uidKnown {
 					return nil, fmt.Errorf("tmux session %s: live pid %d carries this session's launch markers but its ownership cannot be determined, so a dead pane's survivors cannot be attributed",
 						sanitizedName, descendant.PID)
 				}
 				if uid == selfUID {
-					addSurvivor(descendant)
-					queue = append(queue, descendant)
+					member, attrErr := attribute(descendant, environ)
+					if attrErr != nil {
+						return nil, attrErr
+					}
+					if member.PID != 0 {
+						addSurvivor(member)
+						queue = append(queue, member)
+					}
 				}
 				continue
 			}

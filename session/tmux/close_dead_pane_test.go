@@ -646,18 +646,25 @@ func startMarkedParentWithStrippedChild(t *testing.T, extraEnv []string) proctre
 }
 
 // startEnvlessStranger starts a process with an empty environment — the
-// `env -i` shape the marker scan cannot inspect.
+// `env -i` shape the marker scan cannot inspect — that still wears the kernel
+// session of a leader that has already exited: the detached-survivor shape.
+// A process that merely leads its own session is cleared by the scan;
+// orphanage inside the session's lifetime is what makes it unprovable.
 func startEnvlessStranger(t *testing.T) proctree.Process {
 	t.Helper()
-	c := exec.Command("sleep", "300")
-	c.Env = []string{}
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	// sh leads a fresh kernel session, spawns the env-less child wearing
+	// that session, then exits — leaving the child an orphaned member.
+	c := exec.Command("sh", "-c", "env -i sleep 300 & echo $! > "+pidFile)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, c.Start())
+	require.NoError(t, c.Wait())
+	pid := readPIDFile(t, pidFile)
+	proc := processIdentity(t, pid)
 	t.Cleanup(func() {
-		_ = c.Process.Kill()
-		_, _ = c.Process.Wait()
+		_ = proctree.Signal(proc, syscall.SIGKILL)
 	})
-	return processIdentity(t, c.Process.Pid)
+	return proc
 }
 
 func readPIDFile(t *testing.T, path string) int {
