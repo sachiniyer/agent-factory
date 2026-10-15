@@ -171,10 +171,10 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 
 			cmd, returnEarly := h.handleMenuHighlighting(tc.key)
 
-			// The keypress is intercepted so the highlight + re-emit fire.
-			assert.True(t, returnEarly, "naming action keys should be intercepted during stateNew")
-			assert.NotNil(t, cmd)
-			assert.True(t, h.keySent, "keySent guards the re-emitted key from re-highlighting")
+			// The highlight fires and the key goes on to its action in the same
+			// Update: nothing is consumed or replayed.
+			assert.False(t, returnEarly, "naming action keys must reach their action")
+			assert.NotNil(t, cmd, "the highlight schedules its clearing tick")
 
 			// keydownCallback runs synchronously when the batch is built, so the
 			// menu now renders the matching option underlined.

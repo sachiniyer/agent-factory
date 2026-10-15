@@ -533,7 +533,7 @@ func TestAccountSwapOpportunity_UsesObservationFromUnloadablePersistedSession(t 
 	// durable observation must still exclude the exhausted identity even though
 	// the row contributes nothing to the manager's in-memory instance map.
 	failLoadFor(t, observer.Title)
-	loaded, _, err := refreshDaemonInstances(nil)
+	loaded, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1251,7 +1251,8 @@ func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testin
 		vscode:    newVSCodeSupervisor(),
 	}
 	registerVSCodeMarker(manager, "key")
-	if err := manager.prepareRuntimeForAccountSwap("key", inst); err != nil {
+	probe := probeLivenessForOperator(inst, inst.AgentServer())
+	if err := manager.prepareRuntimeForAccountSwap("key", inst, probe); err != nil {
 		t.Fatal(err)
 	}
 	if inst.TabAlive(1) {

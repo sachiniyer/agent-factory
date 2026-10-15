@@ -107,7 +107,7 @@ func TestPreview_TabIDSurvivesConcurrentOrdinalShift(t *testing.T) {
 			require.Equal(t, 2, resolved)
 
 			closed := make(chan error, 1)
-			go func() { closed <- inst.CloseTab(1) }()
+			go func() { closed <- inst.CloseTabByID(snapshot[1].ID) }()
 			require.NoError(t, <-closed)
 			requireIndex(t, inst, b.ID, 1)
 			requireIndex(t, inst, c.ID, 2)
@@ -150,7 +150,7 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	defer log.Close()
 
 	inst := previewIdentityInstance(t, "af_preview_remote_bridge")
-	_, err := inst.AddProcessTab("a", "a")
+	a, err := inst.AddProcessTab("a", "a")
 	require.NoError(t, err)
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	closeDone := make(chan error, 1)
 	content, err := inst.previewByIDAsOrdinal(b.ID, func(idx int) (string, error) {
 		require.Equal(t, 2, idx)
-		go func() { closeDone <- inst.CloseTab(1) }()
+		go func() { closeDone <- inst.CloseTabByID(a.ID) }()
 		select {
 		case err := <-closeDone:
 			t.Fatalf("tab close completed during the capture critical section: %v", err)

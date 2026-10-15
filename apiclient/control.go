@@ -95,6 +95,27 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 	return nil
 }
 
+// ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
+// on the operator's attestation that it already landed (#4429) — the "mark
+// delivered" exit for a sent-unverified or could-not-confirm verdict, and the
+// supported way out of a startup-unknown wedge. It never resends: a daemon
+// predating the verb refuses loudly (route not served) rather than run a retry
+// against a mission that may already be executing.
+func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) error {
+	var resp daemon.ConfirmHandoffDeliveryResponse
+	err := c.call("ConfirmHandoffDelivery", req, &resp)
+	if IsRouteNotServed(err) {
+		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013) — the TUI's handoff action. Returns the swap the daemon
 // actually performed (outgoing agent, incoming agent, attribution boundary).
@@ -140,15 +161,31 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
-// There is deliberately no RenameTab/ReorderTab here (#1813). This is the Go
-// HTTP client, and its only consumer is the TUI; the tab rename/reorder verbs
-// are driven by the web client, which is TypeScript and calls the daemon's
-// /v1/RenameTab and /v1/ReorderTab routes directly (web/src/api.ts), and by the
-// CLI, which goes over the gob control socket (daemon.RenameTab). Adding
-// wrappers here purely for symmetry with CreateTab/CloseTab — which exist
-// because the TUI genuinely calls them (app/session_control.go) — would be dead
-// code whose only caller was its own test. Add them the day the TUI grows a
-// rename/reorder surface.
+// RenameTab asks the daemon to relabel one tab of an existing session and
+// persist the roster (daemon.Manager.RenameTab over /v1/RenameTab). It returns
+// the RESOLVED name — sanitized and collision-suffixed — which is what the
+// caller must render and what the other tab verbs now address the tab by.
+func (c *Client) RenameTab(req daemon.RenameTabRequest) (string, error) {
+	var resp daemon.RenameTabResponse
+	if err := c.call("RenameTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
+
+// ReorderTab asks the daemon to move one tab within a session's roster and
+// returns the moved tab's name and resolved final index (#1813). It is the
+// TUI's </> tab-move path — the same /v1/ReorderTab route the web's drag
+// reorder calls (web/src/api.ts) and `af sessions tab-reorder` reaches over the
+// gob control socket (daemon.ReorderTab), so all three surfaces permute one
+// roster through one method.
+func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var resp daemon.ReorderTabResponse
+	if err := c.call("ReorderTab", req, &resp); err != nil {
+		return daemon.ReorderTabResponse{}, err
+	}
+	return resp, nil
+}
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an
@@ -353,6 +390,18 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 func (c *Client) RegisterProject(path string) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
 	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// RebindProject moves a registered project's stable identity to the checkout at
+// path through the daemon — the single writer (#960) — which resolves the path
+// on its own filesystem, refuses a root another project owns, and publishes
+// projects.changed. HTTP twin of RebindProject.
+func (c *Client) RebindProject(id, path string) (config.Project, error) {
+	var resp daemon.RebindProjectResponse
+	if err := c.call("RebindProject", daemon.RebindProjectRequest{ID: id, Path: path}, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil

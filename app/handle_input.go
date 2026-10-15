@@ -57,6 +57,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleNotice(errors.New("Loading backends…"))
 		}
 	}
+	// The line-clear key empties the title, as it does in every other TUI text
+	// field (#4846).
+	if ui.IsClearLineKey(msg) {
+		if err := instance.SetTitle(""); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		// Resolve the effective title into a LOCAL and run every naming gate against

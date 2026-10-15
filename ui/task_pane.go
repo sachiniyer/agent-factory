@@ -128,8 +128,21 @@ type TaskPane struct {
 	// the whole task — means a save of one field can never clobber a field
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
-	deleted   []task.Task
-	hasFocus  bool
+	// discardedDrafts names the drafts DiscardDeletedDraft dropped because a
+	// save proved their task deleted (#4798), until the app takes them as one
+	// notice with TakeDiscardedDraftNotice.
+	discardedDrafts []string
+	// unconfirmedIDs marks held edits whose save may have landed with only its
+	// reply lost (#4824). They stay in dirtyIDs, so the draft is kept and shown,
+	// but ConsumeDirty skips them: an automatic save must not re-send a patch
+	// the daemon may already hold. A new edit to the task clears the mark.
+	// settledDrafts and unconfirmedQuitWarned carry their notices; see
+	// task_pane_unconfirmed.go.
+	unconfirmedIDs        map[string]bool
+	settledDrafts         []string
+	unconfirmedQuitWarned bool
+	deleted               []task.Task
+	hasFocus              bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -469,7 +482,13 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		s.showActions = !s.showActions
 		return true
 	case "esc":
-		s.hasFocus = false
+		// Route the close through SetFocus(false) so the pendingCreate /
+		// pendingTrigger / pendingTriggerID clears the #1531 contract relies on
+		// actually run. Writing hasFocus directly bypasses them, so a pending
+		// run-now whose pre-trigger flush failed survives the close and fires on
+		// the first keypress after reopen (SetTasks preserves it deliberately for
+		// the mid-flush reload, #1474, so the close is the only drop).
+		s.SetFocus(false)
 		return true
 	case "up", "k":
 		if s.selectedIdx > 0 {
@@ -715,7 +734,7 @@ func (s *TaskPane) renderListMode() string {
 			parts = append(parts, tsk.Name)
 		}
 		if tsk.Enabled && tsk.NextRunAt != nil {
-			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+			parts = append(parts, "next "+nextRunLabel(tsk, s.now()))
 		}
 		header := strings.Join(parts, "  ")
 

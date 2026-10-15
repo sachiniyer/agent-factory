@@ -348,11 +348,15 @@ button:disabled,
   gap: var(--af-space-2);
 }
 .af-project-add,
+.af-project-rebind,
 .af-project-delete {
   flex: 1 1 0;
   justify-content: center;
   font-size: var(--af-type-body);
   white-space: nowrap;
+}
+.af-project-missing {
+  color: var(--af-dead);
 }
 .af-appbar-tools-wrap,
 .af-appbar-tools {

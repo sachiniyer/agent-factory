@@ -156,11 +156,13 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	if restoreResult == tmux.RestoreRespawned {
-		i.setRuntimeProgram(declarationBase)
+		i.setRuntimeLaunch(declarationBase, ts)
 	} else {
-		// Restore established only that the persisted tmux name exists. A session
-		// recreated under that name is not proof of the command AF last launched.
-		i.clearRuntimeProgramForUnverifiedReattach()
+		// Restore established only that the persisted tmux name exists. The pane
+		// root's recorded (pid, start-time) identity decides whether it still
+		// names the launch AF recorded — a match keeps the claim, anything else
+		// retires it.
+		i.clearRuntimeProgramForUnverifiedReattach(ts)
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

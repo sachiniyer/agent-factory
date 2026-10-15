@@ -368,7 +368,7 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		t.Fatalf("unmarshal tombstone: %v", err)
 	}
-	stored = stored.ForStorage() // Storage.LoadInstances normalizes here before FromInstanceData.
+	stored = stored.ForStorage() // the daemon normalizes through ForStorage before FromInstanceData.
 	if stored.RuntimeCleanup == nil {
 		t.Fatal("storage normalization dropped the loaded cleanup handle")
 	}

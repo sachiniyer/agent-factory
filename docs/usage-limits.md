@@ -246,9 +246,8 @@ A scope drop is one-way: the session records the dropped name on the handoff's
 account-capable agent does not restore it — name the account again with
 `--account`.
 
-The session keeps its worktree and branch, and the new conversation receives the
-handoff brief. See [Hand off to another account](#hand-off-to-another-account)
-for examples, admission checks, and the TUI and web pickers.
+The session keeps its worktree and branch. See [Hand off to another account](#hand-off-to-another-account)
+for the conversation outcome, examples, admission checks, and the TUI and web pickers.
 
 ### Bug report redaction
 
@@ -461,8 +460,11 @@ outgoing and incoming accounts and branch tip.
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
 submission may already have landed. Inspect the replacement pane, then choose
-the explicit override when it is needed: press **`c`** in the TUI (shown as
-**Retry**), click **Retry handoff** in the web pane header, or run
+the explicit override when it is needed: if the agent is already acting on the
+mission, mark it delivered (no resend) — **Mark delivered** in the TUI's
+**`c`** picker, **Mark delivered** in the web pane header, or
+`af sessions retry-limit <title> --delivered`; otherwise resend it — **Try
+send** in the **`c`** picker, **Retry handoff** in the web pane header, or run
 `af sessions retry-limit <title>`. The retry verdict is attached to that pending
 handoff mission; sending another prompt does not make the daemon resend it.
 If that explicit retry delivers the mission but cannot persist its final
@@ -536,7 +538,12 @@ blocked on:
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back
-to it once its limit resets and it picks up its own conversation.
+to it once its limit resets and it picks up its own conversation. A scope drop
+is one-way, so name the dropped account again with `--account` on the way back —
+without it the returned agent runs ambient. Returning to the account re-pins
+its credentials, but the return is still a cross-agent handoff, so the
+incoming agent starts a fresh conversation rather than resuming the dropped
+thread (see [Account-scoped handoff](#account-scoped-handoff)).
 
 There is no automatic handoff. A swap changes which agent is editing your
 branch, so it is always something you ask for.

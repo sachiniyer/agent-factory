@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -55,6 +56,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			cmd.Root().SilenceUsage = true
+			if configWarningsToStderr(cmd) {
+				config.SetInteractiveWarningWriter(os.Stderr)
+			}
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -153,6 +157,10 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
 			go launchEnsureDaemonForTasks()
+
+			// From here bubbletea owns the terminal; a stderr write would
+			// tear the screen, so later config warnings are log-only.
+			config.SetInteractiveWarningWriter(nil)
 
 			app.Version = version
 			return runLaunchApp(ctx, program, repo)
@@ -412,4 +420,20 @@ func removedAutoYesFlagError(_ *cobra.Command, err error) error {
 		return config.RemovedAutoYesError()
 	}
 	return err
+}
+
+// configWarningsToStderr reports whether config warnings a person must act on
+// (an unknown in-repo [docker]/[ssh] key, #4599) should reach stderr as well as
+// the log for this invocation. Not for the daemon — its stderr is not a person —
+// and not under --json, whose contract is that stderr carries only the
+// {data,error} envelope (#3169). The TUI turns the writer off again before it
+// takes the terminal (see rootCmd's RunE).
+func configWarningsToStderr(cmd *cobra.Command) bool {
+	if daemonFlag {
+		return false
+	}
+	if f := cmd.Flags().Lookup("json"); f != nil && f.Value.String() == "true" {
+		return false
+	}
+	return true
 }

@@ -451,3 +451,35 @@ func TestClosedConclusivelyLiveAgainClearsTeardownMark(t *testing.T) {
 	require.False(t, session.ClosedConclusively())
 	require.False(t, session.teardownInitiated(), "the name is live again and af has not asked for it")
 }
+
+// TestExpectingTeardownPredicateDemotesVanishToInfo pins the #5138 predicate
+// contract: an UNMARKED monitor's gone-classification consults the caller's
+// af-initiated-teardown predicate — the instance's own state, evaluated at
+// the moment the disappearance is classified — so the whole window between
+// af recording a teardown and close() landing the mark still reads as
+// expected. A false predicate is the property's other half: nothing in af's
+// state explains the vanish, so it stays ERROR.
+func TestExpectingTeardownPredicateDemotesVanishToInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		expect    func() bool
+		wantInfo  bool
+		wantError bool
+	}{
+		{name: "instance state records a teardown", expect: func() bool { return true }, wantInfo: true},
+		{name: "no teardown recorded", expect: func() bool { return false }, wantError: true},
+		{name: "nil predicate keeps the mark-only contract", expect: nil, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			m.alive.Store(false)
+			m.captureOK.Store(false)
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, tc.wantInfo, strings.Contains(infos.String(), "going silent"))
+			require.Equal(t, tc.wantError, strings.Contains(errs.String(), "going silent"))
+		})
+	}
+}

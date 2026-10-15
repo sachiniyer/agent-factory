@@ -434,16 +434,20 @@ async function assertPhoneHeader(page: Page): Promise<void> {
     role: element.getAttribute("role") ?? (element.matches("a[href]") ? "link" : "button"),
     name: element.getAttribute("aria-label")?.trim() ||
       (element as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
-  })))) as Array<{ role: ControlRole; name: string }>;
+    projectFocus: (element as HTMLElement).dataset.projectFocus ?? null,
+  })))) as Array<{ role: ControlRole; name: string; projectFocus: string | null }>;
   expect(controlOrder.every(({ name }) => name !== ""), "every phone control has an accessible name").toBe(true);
 
   let injectedRebuild = false;
   for (const [position, control] of controlOrder.entries()) {
     await page.keyboard.press("Tab");
-    await expect(
-      menu.getByRole(control.role, { name: control.name, exact: true }),
-      `Tab ${position + 1} focuses ${control.role} “${control.name}”`,
-    ).toBeFocused();
+    // A project row's name carries live counts ("4 sessions · 1 working"), so a
+    // Working flicker mid-walk renames it. Resolve rows by the identity the menu
+    // restores focus with (#4817); the name was already checked non-empty above.
+    const target = control.projectFocus === null
+      ? menu.getByRole(control.role, { name: control.name, exact: true })
+      : menu.getByRole(control.role).and(menu.locator(`[data-project-focus=${JSON.stringify(control.projectFocus)}]`));
+    await expect(target, `Tab ${position + 1} focuses ${control.role} “${control.name}”`).toBeFocused();
     if (control.role === "button" && control.name === "+ Add project") {
       // Force #4007 instead of waiting for daemon timing. Match the production
       // renderer by replacing every project-menu child with a fresh node, and

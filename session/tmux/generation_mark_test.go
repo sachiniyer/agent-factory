@@ -291,7 +291,9 @@ func TestStartClearsBoundMarkWhenGenerationSurvives(t *testing.T) {
 // bound session exited on its own and a replacement already owns the name, so
 // close()'s name-targeted kill-session will hit the replacement. Marking the
 // bound generation anyway would read its unrequested death as the teardown af
-// just asked for.
+// just asked for. The af-teardown window an op-scoped close produces is
+// covered by the poll's expectation predicate instead, so losing the mark
+// here does not cost #5138's silence.
 func TestCloseDoesNotMarkAGenerationThatLostTheName(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
@@ -312,10 +314,9 @@ func TestCloseDoesNotMarkAGenerationThatLostTheName(t *testing.T) {
 	require.NotContains(t, infos.String(), "going silent")
 }
 
-// TestCloseMarksTheGenerationTheNameStillResolvesTo is the counterpart: while
-// the name answers for the polled generation, close() marks it exactly as
-// before — the resolution only vetoes a mark that could not describe the
-// session kill-session will reach.
+// TestCloseMarksTheGenerationTheNameStillResolvesTo is the ordinary case:
+// the name answers for the polled generation and close() marks it — the
+// resolution only ever vetoed the mark on a non-answer.
 func TestCloseMarksTheGenerationTheNameStillResolvesTo(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
@@ -571,7 +572,9 @@ func TestCloseWedgedIdentityProbeSpendsNoFurtherBudget(t *testing.T) {
 // name probe answers an empty session context — an ANSWERED nothing, not a
 // wedge. kill-session cannot retire a generation already gone, so marking it
 // would launder the unrequested crash into af's request and quiet the next
-// poll to INFO (Codex on #4473).
+// poll to INFO (Codex on #4473). The af-initiated-teardown window around an
+// op-scoped close on an already-dead session is covered by the expectation
+// predicate instead (#5138).
 func TestCloseDoesNotMarkAbsentGeneration(t *testing.T) {
 	shortTmuxTimeout(t, markTestTimeout)
 	gen := &tmuxGeneration{sessionID: "$6", serverPID: "111", created: "222"}

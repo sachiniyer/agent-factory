@@ -322,8 +322,17 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 		return changed
 	}
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
+		countChanged := m.store.NumTasks() != len(tasks)
 		m.store.SetTasks(tasks)
 		changed = true
+		if countChanged {
+			// The task count feeds the rail's automations-section height
+			// (#1126), read only in relayout — reflow on this poll, as the
+			// TUI's own write paths do, so a CLI-added first task appears and
+			// a removed last one goes (#4965). A same-count edit leaves every
+			// grid input alone, so the 750ms poll doesn't churn the layout.
+			m.relayout()
+		}
 	}
 	// A held draft keeps the pane's list different from disk, so the pane, not
 	// this comparison, says whether the reconcile changed anything visible.
@@ -583,13 +592,17 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
+	// The tree selection is another binding into the same replaced-session
+	// roster. Carry it through the same name domain as panes: every ID is freshly
+	// minted, while the equivalent replacement tab keeps its name (#1991). Bound
+	// before the pane reconcile for the same #5298 reason as the in-place path —
+	// a sidebar-reading relayout must not run while the selection binding is
+	// unresolved — but the CURSOR re-pin still belongs to the reconcile's final
+	// SelectInstance: the re-sort leaves the flattened indices stale until then.
+	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
 	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
 		m.relayout()
 	}
-	// The tree selection is another binding into the same replaced-session
-	// roster. Carry it through the same name domain as panes: every ID is freshly
-	// minted, while the equivalent replacement tab keeps its name (#1991).
-	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
 	return true
 }
 
@@ -618,6 +631,20 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// materialization of the same snapshot.
 	if d.StartupStateUnknown && !inst.StartupStateUnknown() {
 		inst.MarkStartupStateUnknown()
+		changed = true
+	}
+	// Mirror the daemon's durable mechanical evidence BEFORE the liveness
+	// transition below (#5221 review): the task-run completion gate consults it
+	// inside the transition, and a Ready snapshot can carry a turn observation
+	// the edge needs to see. The run marker itself is mirrored outright — a
+	// client that missed the snapshot carrying the evidence (always possible:
+	// the final Ready snapshot scrubs the window fields with the run) cannot
+	// re-derive the end locally, so the daemon's decision is authoritative.
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt,
+		d.TaskRunPromptAttemptAt, d.TaskRunTurnObservedAt) {
+		changed = true
+	}
+	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
 		changed = true
 	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
@@ -687,12 +714,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
 		changed = true
 	}
-	// Mirror the daemon's durable mechanical evidence independently of liveness.
-	// An interactive send can change delivery status while the row remains Ready,
-	// and pane churn can race the next Running transition (#3168).
-	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
-		changed = true
-	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
 	// daemon heals a root and clears when any client opens that session's pane,
 	// both while the liveness sits at Ready. Reconciling it here is what makes an
@@ -724,25 +745,34 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		if tabsChanged {
 			changed = true
 		}
-		// Re-bind the panes whenever the tab IDENTITY list moved — NOT merely when
-		// the reconcile reported a visible change. The two are not the same: an id
-		// adoption is deliberately silent, and a pane bound to an id that just left
-		// the roster must still close. Gating this on tabsChanged left panes on dead
-		// ids whenever the roster change didn't register as "visible" (#1886).
+		// Re-bind the roster's bindings whenever the tab IDENTITY list moved —
+		// NOT merely when the reconcile reported a visible change. The two are
+		// not the same: an id adoption is deliberately silent, and a binding
+		// holding an id that just left the roster must still be repaired.
+		// Gating this on tabsChanged left panes on dead ids whenever the roster
+		// change didn't register as "visible" (#1886).
 		if !sameTabSlotKeys(oldKeys, paneTabKeys(inst)) {
-			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
-				m.relayout()
-			}
 			// The tree's selection is the OTHER binding into that roster, and it
-			// needs the SAME identity remap for the same reason: a reorder lands
-			// entirely here (no local action, #1813), and the clamps only keep the
-			// index in range — which a permutation never violates — so an
-			// index-keyed selection silently becomes a different tab.
+			// needs the SAME identity remap — a reorder lands entirely here (no
+			// local action, #1813), and the clamps only keep the index in range,
+			// which a permutation never violates, so an index-keyed selection
+			// silently becomes a different tab.
+			//
+			// Resolve it BEFORE the pane reconcile's relayout: relayout re-reads
+			// the sidebar (the footer's row-verb target), and a rebuild while
+			// the cursor still holds its pre-shrink flat index drifts it onto the
+			// NEXT row — the following session's instance row when the dropped
+			// tab was the last child — which pushSelection commits as the new
+			// display selection, leaving the remap below no session to repair
+			// (#5298).
 			if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
 				// An in-place roster update never re-sorts the projection, so the
 				// sidebar indices are current and can follow the remapped tab now.
 				m.sidebar.SyncCursorToActiveTab()
 				changed = true
+			}
+			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
+				m.relayout()
 			}
 		}
 	}

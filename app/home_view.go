@@ -97,9 +97,10 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 // confirmActionWithDetail is confirmAction for a dialog whose copy splits into
-// consequences (message) and elaboration (detail). The overlay then guarantees
-// the consequences render or refuses the confirm outright, rather than clipping
-// the tail and collecting a 'y' for something it never showed (#1973).
+// consequences (message) and elaboration (detail). The overlay then keeps every
+// line reachable by scrolling — and refuses the confirm only when the window
+// cannot show even one body row — rather than clipping the tail and collecting
+// a 'y' for something it never showed (#1973, #5171).
 // The callback may return a follow-up tea.Cmd as its result; handleStateConfirm
 // schedules that command on the event loop instead of executing it inline.
 func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {
@@ -238,6 +239,9 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	hint, hideHint := m.noticeDetailsHint()
+	m.errBox.SetDetailsHint(hint)
+	m.errBox.HideDetailsHint(hideHint)
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 
@@ -266,7 +270,8 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
-		m.state == stateSelectBackend || m.state == stateSelectAccount {
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
@@ -281,10 +286,10 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return placeOverlay(fg, mainView)
-	} else if m.state == statePromptInput || m.state == stateJumpTab {
-		// Both states drive the same promptOverlay — the naming form's initial-prompt
-		// field and the jump-to-tab prompt (#3021). They differ in who owns the answer,
-		// not in how a single line of text is drawn.
+	} else if m.state == statePromptInput || m.state == stateJumpTab || m.state == stateRenameTab {
+		// These states drive the same promptOverlay — the naming form's initial-prompt
+		// field, the jump-to-tab prompt (#3021), and the rename-tab prompt. They differ
+		// in who owns the answer, not in how a single line of text is drawn.
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView

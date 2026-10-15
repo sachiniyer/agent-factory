@@ -86,6 +86,10 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 	agentSpawn := spawns[0]
 	assert.Equal(t, 1, strings.Count(agentSpawn, "--plugin-dir"),
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
+	require.NotEmpty(t, restored.RuntimeProgram(),
+		"Recover respawns a real process, so it must record the command it launched (#5066)")
+	assert.Equal(t, resolveLaunchProgramForInstance(restored).command, restored.RuntimeProgram(),
+		"the recorded command must be the respawn's resolved base, not the bare persisted Program")
 }
 
 func TestRecover_UnverifiedReattachClearsRuntimeProgram(t *testing.T) {
@@ -145,6 +149,8 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 		"the replacement claude identity must receive an explicit fresh conversation")
 	require.Contains(t, strings.Join(spawns, "\n"), "__af-session-env-exec-account-environment",
 		"restored process panes must launch inside the replacement account environment")
+	assert.Equal(t, "claude", restored.RuntimeProgram(),
+		"an account-swap respawn launches a replacement process and must record its resolved command (#5066)")
 }
 
 // A relocation probe that reaches its deadline latches the worktree as stalled

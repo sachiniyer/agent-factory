@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 
@@ -281,17 +282,50 @@ func (m *home) handleAccountLoginDone(msg accountLoginDoneMsg) (tea.Model, tea.C
 // A failure to reopen is surfaced rather than swallowed — the same rule
 // showConfigEditor keeps — but it leaves the user at the default view rather
 // than in a half-opened overlay.
+//
+// The spawn these statuses report is an async daemon round trip. The login
+// keypress left the user in stateDefault (handle_overlay.go: the overlay closes
+// so the takeover has a clean terminal), and the wider the round trip — longer
+// for a remote daemon — the more reachable navigation becomes. By the time the
+// result lands the user may have navigated into an unrelated overlay: started a
+// new session (stateNew, orphaning namingInstance and pendingPrompt), renamed a
+// tab (stateRenameTab), opened the prompt field (statePromptInput), the
+// tasks/hooks editors, … Reopening unconditionally would set m.state =
+// stateConfigEditor (showConfigEditor) and yank them out of that in-progress
+// work.
+//
+// So reopen ONLY when the user is still positioned to receive the result —
+// stateDefault (where the login keypress left them) or stateConfigEditor (they
+// reopened the editor while waiting) — which is the designed behavior
+// TestAccountLoginDoneReportsWithoutReapingThePane pins. From any other state
+// surface the outcome as a transient notice and leave m.state alone, the same
+// pattern handleConfigAgentDone keeps for an async result that lands after the
+// user moved on.
 func (m *home) reopenConfigWithAccountStatus(status string, isError bool) (tea.Model, tea.Cmd) {
-	model, cmd := m.showConfigEditor()
-	if !m.configPane.HasFocus() {
-		// showConfigEditor refused (a config that will not load, a remote daemon
-		// that will not answer) and has already raised its own error. Do not
-		// overwrite that with an account status the user cannot see anyway.
+	switch m.state {
+	case stateDefault, stateConfigEditor:
+		model, cmd := m.showConfigEditor()
+		if !m.configPane.HasFocus() {
+			// showConfigEditor refused (a config that will not load, a remote
+			// daemon that will not answer) and has already raised its own error.
+			// Do not overwrite that with an account status the user cannot see
+			// anyway.
+			return model, cmd
+		}
+		m.configPane.SetAccountStatus(status, isError)
+		if isError {
+			log.WarningLog.Printf("accounts: %s", status)
+		}
 		return model, cmd
+	default:
+		// The user moved on. Tell them the login ended without stealing their
+		// screen: surface the outcome as a transient notice and leave their
+		// state untouched. A failure is raised as an error notice so it stands
+		// out; a success is informational, the same distinction the bar draws
+		// between SetError and SetNotice.
+		if isError {
+			return m, m.handleError(errors.New(status))
+		}
+		return m, m.handleNotice(errors.New(status))
 	}
-	m.configPane.SetAccountStatus(status, isError)
-	if isError {
-		log.WarningLog.Printf("accounts: %s", status)
-	}
-	return model, cmd
 }

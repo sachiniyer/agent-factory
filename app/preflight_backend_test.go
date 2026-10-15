@@ -62,8 +62,7 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			startNaming(t, h, "repo-declared-backend")
 
 			// A refusal ends in a transient notice whose cmd is a timer, so the
-			// refused leg drains one hop (pressExpectingNotice) rather than
-			// following the re-emitted key's cmd to completion.
+			// refused leg does not wait on the press's cmd (pressExpectingNotice).
 			if tc.wantRefused {
 				pressExpectingNotice(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			} else {

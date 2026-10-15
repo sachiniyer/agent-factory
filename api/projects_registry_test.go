@@ -139,6 +139,75 @@ func TestProjectsAddSurfacesDaemonError(t *testing.T) {
 		"a daemon rejection must surface as a CLI error")
 }
 
+// TestProjectsRebindRoutesThroughDaemon proves `af projects rebind` performs the
+// rebind through the daemon RebindProject RPC — the single-writer path the TUI
+// and web share — not an in-process config write, and PRINTS the returned
+// project.
+func TestProjectsRebindRoutesThroughDaemon(t *testing.T) {
+	var gotReq daemon.RebindProjectRequest
+	restore := rebindProjectViaDaemon
+	rebindProjectViaDaemon = func(req daemon.RebindProjectRequest) (config.Project, error) {
+		gotReq = req
+		return config.Project{ID: req.ID, Root: req.Path}, nil
+	}
+	t.Cleanup(func() { rebindProjectViaDaemon = restore })
+
+	rebind := findSubcommand(t, "rebind")
+	out := captureJSON(t, func() error {
+		return rebind.RunE(rebind, []string{"prj_0123456789abcdef0123456789abcdef", "/some/abs/repo"})
+	})
+
+	require.Equal(t, "prj_0123456789abcdef0123456789abcdef", gotReq.ID,
+		"the stable project id goes to the daemon verbatim")
+	require.Equal(t, "/some/abs/repo", gotReq.Path)
+	var project config.Project
+	require.NoError(t, json.Unmarshal(out, &project))
+	require.Equal(t, "/some/abs/repo", project.Root, "the rebound project is printed back")
+}
+
+// TestProjectsRebindResolvesPathAgainstClientCwd mirrors the add verb's
+// contract: a relative path or '~' resolves against the USER's shell cwd before
+// the request is sent — the daemon resolves what it receives against ITS own
+// filesystem, so forwarding '.' raw would rebind to the daemon's cwd.
+func TestProjectsRebindResolvesPathAgainstClientCwd(t *testing.T) {
+	var gotPath string
+	restore := rebindProjectViaDaemon
+	rebindProjectViaDaemon = func(req daemon.RebindProjectRequest) (config.Project, error) {
+		gotPath = req.Path
+		return config.Project{ID: req.ID, Root: gotPath}, nil
+	}
+	t.Cleanup(func() { rebindProjectViaDaemon = restore })
+
+	rebind := findSubcommand(t, "rebind")
+	for _, input := range []string{".", "nested/sub", "~/somewhere"} {
+		gotPath = ""
+		_ = captureJSON(t, func() error {
+			return rebind.RunE(rebind, []string{"prj_0123456789abcdef0123456789abcdef", input})
+		})
+		require.True(t, filepath.IsAbs(gotPath),
+			"input %q must be forwarded as an absolute path, got %q", input, gotPath)
+		require.NotContains(t, gotPath, "~", "a leading ~ must be expanded before sending, got %q", gotPath)
+		want, err := config.ResolveUserPath(input)
+		require.NoError(t, err)
+		require.Equal(t, want, gotPath,
+			"input %q must resolve against the client's cwd (or home), not be forwarded raw", input)
+	}
+}
+
+// TestProjectsRebindSurfacesDaemonError: a daemon-side rejection (unknown id,
+// path owned by another project) surfaces as a CLI error.
+func TestProjectsRebindSurfacesDaemonError(t *testing.T) {
+	restore := rebindProjectViaDaemon
+	rebindProjectViaDaemon = func(daemon.RebindProjectRequest) (config.Project, error) {
+		return config.Project{}, errors.New("path is already bound to another project")
+	}
+	t.Cleanup(func() { rebindProjectViaDaemon = restore })
+
+	rebind := findSubcommand(t, "rebind")
+	require.Error(t, rebind.RunE(rebind, []string{"prj_0123456789abcdef0123456789abcdef", "/tmp/other"}),
+		"a daemon rejection must surface as a CLI error")
+}
+
 func findSubcommand(t *testing.T, name string) *cobra.Command {
 	t.Helper()
 	for _, cmd := range ProjectsCmd.Commands() {

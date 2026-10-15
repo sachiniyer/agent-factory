@@ -138,9 +138,9 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 // full manager lives in the tasks overlay. Cursor keys move the section's
 // selection, Enter opens the manager overlay on it, Esc returns focus to the
 // tree. Advertised global bindings (Tab/Shift-Tab focus ring, task manager,
-// hooks, ? help, q quit) keep working, while pane-management verbs are
-// consumed here so hidden `s`/`S`/`x`/pane-switch keys cannot mutate workspace
-// panes from Automations focus (#1417).
+// hooks, ? help, q quit) keep working, while pane-management and tab-mutation
+// verbs are consumed here so hidden `s`/`S`/`x`/pane-switch/`</>` keys cannot
+// mutate workspace panes or the roster from Automations focus (#1417).
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
@@ -156,7 +156,7 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
-	if automationsConsumesPaneVerb(msg) {
+	if automationsConsumesMutationVerb(msg) {
 		return m, nil, true
 	}
 	return m, nil, false
@@ -258,13 +258,21 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	return false
 }
 
-func automationsConsumesPaneVerb(msg tea.KeyMsg) bool {
+// automationsConsumesMutationVerb reports whether msg is a binding that must
+// stay inert while the Automations rail owns focus: pane management AND the
+// </> tab move. The rail's footer does not advertise these verbs, and a key
+// that fell through to the global dispatcher would mutate a session or pane
+// the user is not looking at (#1417). Named for what it protects, not the key
+// list it started with.
+func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyOpenPane,
 		keys.KeySplitPane,
 		keys.KeyHidePane,
 		keys.KeyPanePrev,
 		keys.KeyPaneNext,
+		keys.KeyMoveTabLeft,
+		keys.KeyMoveTabRight,
 	} {
 		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
 			return true

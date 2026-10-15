@@ -520,6 +520,15 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		m.warn().Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
 	}
 	if err != nil {
+		// The adoption-discharge refusal is the ONE send-path error that is not
+		// ambiguous: NoteAdoptionDelivery returns it only after refusing the
+		// write, so this attempt provably delivered nothing and stays refundable
+		// (#4984). notAttempted() supplies the wire marker that carries the
+		// classification across the control socket to the watch path — a
+		// sentinel alone would be flattened to text by net/rpc.
+		if errors.Is(err, session.ErrDischargeRefusedDelivery) {
+			return status, notAttempted(err)
+		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return status, nil

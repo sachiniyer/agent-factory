@@ -509,23 +509,37 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// clamp enforces, so the over-estimate costs a shorter title and the ● stays.
 	title := titleS.Render(layout.RowWithRightAffix(titleContent, " "+join, r.width))
 
-	remainingWidth := r.width
-	remainingWidth -= prefixWidth
-	remainingWidth -= runewidth.StringWidth(branchIcon)
-	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
-
 	// Use the mutex-guarded accessor so this read (on the renderer
 	// goroutine) doesn't race with LocalBackend.Start's write on the
 	// instance-creation tea.Cmd goroutine.
 	branch := i.GetBranch()
+	hasBranch := branch != ""
 	if i.Started() && hasMultipleRepos {
 		repoName, err := i.RepoName()
 		if err != nil {
 			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else {
+		} else if hasBranch {
 			branch += fmt.Sprintf(" (%s)", repoName)
+		} else {
+			// No branch to attach the context to; the repo name still
+			// disambiguates, but the row must not pick up the branch glyph.
+			branch = fmt.Sprintf("(%s)", repoName)
 		}
 	}
+
+	// The ⎇ labels the row's branch, so it only leads a row that names one:
+	// in front of a bare idle detail or a repo name it would mark a phrase
+	// that is not a branch (#4174).
+	branchMarker := ""
+	if hasBranch {
+		branchMarker = branchIcon + "-"
+	}
+
+	remainingWidth := r.width
+	remainingWidth -= prefixWidth
+	remainingWidth -= runewidth.StringWidth(branchMarker)
+	remainingWidth-- // for the literal " " in the branchLine format string
+
 	description := branch
 	restoreFailed := false
 	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
@@ -537,8 +551,17 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 		if branch == "" {
 			description = detail
-		} else {
+		} else if restoreFailed {
+			// A restore-gave-up row exists to report the failure — it renders
+			// warning-colored and stays visible even unselected — so the
+			// actionable detail leads and the branch trails it, the one
+			// exception to the branch-first order.
 			description = detail + " · " + branch
+		} else {
+			// The branch leads so right-truncation eats the idle detail
+			// first: this row exists to name the branch, and a leading
+			// detail truncated the branch away entirely (#4174).
+			description = fitIdleDetail(branch, detail, remainingWidth)
 		}
 	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
@@ -564,7 +587,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		spaces = strings.Repeat(" ", remainingWidth)
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
+	branchLine := fmt.Sprintf("%s %s%s%s", strings.Repeat(" ", prefixWidth), branchMarker, description, spaces)
 
 	lines := []string{title}
 	if archiveWarning == "" {
@@ -617,6 +640,32 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 // idleReasonDetail renders only the mechanically established vocabulary from
 // session.IdleReason. The elapsed suffix is explicitly since the last OBSERVED
 // pane churn; it does not claim the agent answered, finished, or became wedged.
+// idleDetailSeparator joins the branch to its idle detail, and the idle
+// detail's own segments to each other (see idleReasonDetail).
+const idleDetailSeparator = " · "
+
+// fitIdleDetail composes the branch-led row "branch · detail" within width
+// cells, but trims the idle detail by whole " · "-separated segments rather
+// than by rune: the reason label ("pane changed") is the smallest unit that
+// still says something, and cutting inside one produced a bare "· …" or a
+// one-word "pane …" that reads as a rendering glitch (#4956). The longest run
+// of leading segments that fits is kept; when not even the label fits, the
+// detail is dropped and the branch renders alone, left to the caller's
+// ordinary truncation.
+func fitIdleDetail(branch, detail string, width int) string {
+	if detail == "" {
+		return branch
+	}
+	segments := strings.Split(detail, idleDetailSeparator)
+	for keep := len(segments); keep > 0; keep-- {
+		candidate := branch + idleDetailSeparator + strings.Join(segments[:keep], idleDetailSeparator)
+		if runewidth.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return branch
+}
+
 func idleReasonDetail(reason session.IdleReason, churnAt, now time.Time) string {
 	label := reason.Label()
 	if label == "" {

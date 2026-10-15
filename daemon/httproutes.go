@@ -187,14 +187,17 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ArchiveSession",
 		Description: "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
 		requestType: reflect.TypeOf(ArchiveSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ArchiveSession) },
+		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
+		// the teardown-requester registry — the `archive --self` caller blocked
+		// on this response is exempted from its own pane reap (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -230,6 +233,18 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},
+	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
+	// operator inspected the pane and attests the mission arrived, so the
+	// daemon retires the obligation WITHOUT resending. A separate verb rather
+	// than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead
+	// of silently resending.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ConfirmHandoffDelivery",
+		Description: "Retire a pending handoff mission on the operator's attestation that it already landed — settles the replacement fence and startup-unknown flag without resending.",
+		requestType: reflect.TypeOf(ConfirmHandoffDeliveryRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ConfirmHandoffDelivery) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",
@@ -250,6 +265,16 @@ var httpRoutes = []HTTPRoute{
 		Description: "Register a git checkout as a durable, sessionless project by path (expand ~, resolve the git root, validate, persist to the registry) — resolved on the daemon's filesystem, idempotent for a known checkout.",
 		requestType: reflect.TypeOf(RegisterProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
+	},
+	// Not sandboxAllowed, like RegisterProject: it rewrites the daemon host's
+	// registry and resolves a caller-supplied path against the host's
+	// filesystem — both operator-authority operations, not capability discovery.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RebindProject",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -376,7 +401,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
-		Description: "Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically).",
+		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
 	},

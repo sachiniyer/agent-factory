@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/doctor"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/spf13/cobra"
@@ -103,6 +104,12 @@ that the run is unhealthy. A CI step or health probe should fail on the command
 exit code: 1 means unresolved actionable issues remain or a check did not finish
 looking. Advisory warnings alone do not fail the run.
 
+Rows can also carry INFO: a deliberate unknown — something visible but not
+comparable, like a root session the daemon adopted rather than launched, whose
+resolved runtime command therefore was never recorded. An INFO row is neither a
+problem nor an unfinished check; it appears in the report and in summary.info
+in --json output, and never contributes to the exit code.
+
 A check that stops early — for example, the temp-home sweep hits a candidate
 budget on a machine with a very large temp dir — now exits 1 even if it found
 no unhealthy condition. The summary line ends with "INCOMPLETE" naming the
@@ -133,6 +140,9 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		// Doctor reports config warnings as findings; echoing them on stderr
+		// too would say everything twice (#4599).
+		config.SetInteractiveWarningWriter(nil)
 
 		report, err := doctorRun(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
 		if err != nil {

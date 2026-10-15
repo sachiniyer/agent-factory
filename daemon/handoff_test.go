@@ -75,13 +75,18 @@ func (b *handoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPl
 	return nil
 }
 
-func (b *handoffBackend) Preview(*session.Instance) (string, error) {
+func (b *handoffBackend) Preview(i *session.Instance) (string, error) {
 	// One fixture containing each simple agent's ready glyph keeps these daemon
 	// orchestration tests independent of which supported target they choose.
 	b.mu.Lock()
 	b.previewCalls++
 	b.events = append(b.events, "ready")
 	b.mu.Unlock()
+	// Mirror LocalBackend.Preview: a row whose `started` bit is down captures
+	// nothing, so readiness can never pass on it (#4429).
+	if !i.Started() {
+		return "", nil
+	}
 	return "ready\n❯\n›\n> \n╰", nil
 }
 
@@ -92,7 +97,14 @@ func (b *handoffBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return false, false, ""
 }
 
-func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+func (b *handoffBackend) SendPromptCommand(i *session.Instance, prompt string) error {
+	// Mirror LocalBackend.SendPromptCommandWithStatus: it refuses a row whose
+	// `started` bit is down before touching the pane. A fixture that ignored the
+	// bit let a startup-unknown retry pass here and fail on every real session
+	// (#4429).
+	if !i.Started() {
+		return errors.New("instance not started")
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.events = append(b.events, "send")

@@ -29,41 +29,6 @@ func TabKindRenameable(kind TabKind) bool {
 	return kind == TabKindWeb || kind == TabKindProcess || kind == TabKindVSCode
 }
 
-// RenameTab sets a new name on the tab at idx and returns the RESOLVED
-// name — sanitized, and suffixed ("dup" -> "dup-2") when the sanitized name is
-// already taken — so callers can render what actually happened rather than what
-// was asked for.
-//
-// The requested name is sanitized to the tmux-safe token set exactly as tab
-// creation sanitizes it (sanitizeTabName). A name that sanitizes to nothing is an
-// error rather than a silent fall back to a default: at creation "web" is a
-// sensible default for an unnamed tab, but a user explicitly renaming a tab to
-// "...." asked for something specific, and quietly naming it "web" instead is the
-// silent mangling #1813 calls out.
-//
-// Only kinds that display their name can be renamed (TabKindRenameable); the
-// agent tab is additionally pinned at index 0. Resolution and mutation are atomic
-// under the write lock so two concurrent renames cannot both resolve to the same
-// free name.
-//
-// Renaming does NOT touch the tab's live tmux session — restore rebinds by the
-// persisted TmuxName, not by re-deriving from the name, so the tab survives a
-// restart. The name it renames AWAY from is therefore free immediately: names
-// are unique among the roster's current names and nothing else (#1957), and the
-// still-live tmux session it leaves behind is dodged at SPAWN by
-// uniqueTabTmuxName rather than by holding the user's old name hostage. See the
-// two-namespace note at the top of tab_names.go.
-func (i *Instance) RenameTab(idx int, requestedName string) (string, error) {
-	base := sanitizeTabName(requestedName)
-	if base == "" {
-		return "", fmt.Errorf("tab name %q has no usable characters: a name may contain only letters, digits, '_' and '-'", requestedName)
-	}
-
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.renameTabLocked(idx, base)
-}
-
 // RenameTabByID selects and renames the stable target under one write lock, so
 // a caller never applies an ordinal from an older roster to a different tab.
 func (i *Instance) RenameTabByID(tabID, requestedName string) (string, error) {

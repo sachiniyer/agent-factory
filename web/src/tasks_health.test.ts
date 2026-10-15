@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { taskArmingSummary, taskHealthMark, taskHealthSummary, taskNeedsAttention } from "./tasks.js";
+import { farOutNote, taskArmingSummary, taskHealthMark, taskHealthSummary, taskNeedsAttention } from "./tasks.js";
 import type { TaskData } from "./types.js";
 
 function task(over: Partial<TaskData> = {}): TaskData {
@@ -190,4 +190,21 @@ test("a mark always has words, on every state that can carry one", () => {
   const healthy = task();
   assert.equal(taskHealthMark(healthy), null);
   assert.equal(taskHealthSummary(healthy), "");
+});
+
+// #4843: a dated cron re-armed for next year. Whether it is far out is the
+// daemon's next_run_far; the list only words it, in the TUI's words.
+test("a far-out next run carries its date and distance", () => {
+  const now = new Date(2026, 8, 24, 12, 0);
+  const next = new Date(2027, 8, 21, 7, 0).toISOString();
+  const far = task({ cron_expr: "0 7 21 9 *", next_run_at: next, next_run_far: true, arming: "armed" });
+  assert.equal(taskArmingSummary(far, now), "Next run 2027-09-21 (in 11 months)");
+  assert.equal(farOutNote(next, now), "2027-09-21 (in 11 months)");
+});
+
+test("without the daemon's flag the list never re-derives far-out", () => {
+  const now = new Date(2026, 8, 24, 12, 0);
+  const next = new Date(2027, 8, 21, 7, 0).toISOString();
+  const unflagged = task({ cron_expr: "0 7 21 9 *", next_run_at: next, arming: "armed" });
+  assert.doesNotMatch(taskArmingSummary(unflagged, now), /months/);
 });

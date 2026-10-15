@@ -314,14 +314,17 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart is true for every ordinary write: config.toml is read at
+	// startup, so a change applies to af and the daemon on their next start,
+	// exactly like a hand-edit. The exception is a project-scoped branch_prefix
+	// (#4539): stored but never applied, so no restart can apply it and the
+	// field reports false rather than promising one.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -563,7 +566,8 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 	prettyPath := prettyHomePath(path)
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
+		rawStructured: rawValue}
 
 	var result *SetResult
 	writeErr := WithFileLock(path, func() error {
@@ -579,6 +583,16 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	// to say "that account is not registered yet" at the moment it is typed.
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
+	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself. And
+	// because no restart can ever apply it (the daemon names branches from its
+	// frozen global prefix), the write bypasses the generic restart
+	// result/notice: printing "restart them to apply" for a value that can
+	// never take effect would contradict the warning.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+		result.RequiresRestart = false
 	}
 	return result, nil
 }
@@ -726,8 +740,12 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 			return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
-		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, true)
 		if err != nil {
 			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
@@ -788,6 +806,23 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	if err != nil {
 		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
 	}
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
+	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's
 	// multiline value produces valid TOML that MEANS something else (#3662), so
@@ -837,7 +872,15 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("refusing to write: the current personal project config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, false)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
 			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)

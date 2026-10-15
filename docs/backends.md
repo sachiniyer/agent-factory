@@ -45,8 +45,9 @@ surface — each overrides the repo config for that one session:
     The non-local backends work by running an **`af agent-server`** in the remote
     workspace — a headless, single-workspace process that a daemon dials and
     drives. It serves **no frontend**: opening its port in a browser gets you a
-    404 telling you so. The **web UI is served by the daemon** — run `af daemon`
-    and open <http://localhost:8443>. See [The web client](web.md).
+    404 telling you so. The **web UI is served by the daemon** — running `af`
+    starts one on demand, then open <http://localhost:8443>. See
+    [The web client](web.md).
 
 ---
 

@@ -152,9 +152,6 @@ func briefingSetHint(e ManifestEntry) string {
 	spec, ok := settableKeySpecs[e.Key]
 	if !ok || !e.Settable {
 		hint := "edit `" + e.Key + "` in `config.toml` by hand"
-		if len(e.AcceptedTypes) > 1 {
-			return hint + " · accepts a " + e.typeLabel()
-		}
 		// Name the actual shape — calling the cors_allowed_origins list a
 		// "table" would be a small lie in the one sentence telling a reader
 		// what to go and do.

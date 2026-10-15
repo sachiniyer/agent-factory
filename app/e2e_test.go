@@ -305,17 +305,15 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 	// Settle initial Init ticks.
 	time.Sleep(100 * time.Millisecond)
 
-	// Press 'n' to begin creating a new instance. The key flows through
-	// handleMenuHighlighting (which re-emits it once for highlighting
-	// bookkeeping), so this lands in stateNew after the second Update cycle.
+	// Press 'n' to begin creating a new instance.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	eh.waitUntil(e2eAsyncTimeout, "state transitions to stateNew", func() bool {
 		return eh.homeState() == stateNew
 	})
 
 	// Type the name. Characters chosen to avoid GlobalKeyStringsMap
-	// entries ({k,j,o,n,q,s,a,r,p,h,l}) — handleMenuHighlighting re-emits
-	// any mapped key, which reorders typing in subtle ways.
+	// entries ({k,j,o,n,q,s,a,r,p,h,l}), which read as actions outside
+	// the naming form.
 	eh.tm.Type("fig")
 	eh.waitUntil(e2eAsyncTimeout, "title 'fig' fully typed", func() bool {
 		return eh.namingTitle() == "fig"

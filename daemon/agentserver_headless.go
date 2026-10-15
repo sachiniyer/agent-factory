@@ -392,6 +392,12 @@ type agentSnapshotResponse struct {
 	HasPrompt   bool                      `json:"has_prompt"`
 	Content     string                    `json:"content"`
 	ModelChange *session.AgentModelChange `json:"model_change,omitempty"`
+	// Captured reports whether this server's own pane probe actually
+	// captured (#5221 review): the daemon's observation streak must not count
+	// a snapshot whose in-sandbox capture-pane failed. Always sent so the
+	// client can distinguish a reported miss from a server that predates the
+	// field.
+	Captured bool `json:"captured"`
 }
 
 func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) error {
@@ -404,6 +410,7 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.HasPrompt = obs.HasPrompt
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange
+	resp.Captured = obs.Captured
 	return nil
 }
 

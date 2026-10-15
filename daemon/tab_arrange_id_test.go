@@ -215,7 +215,7 @@ func TestRenameTab_RefusesUnresolvableTabID(t *testing.T) {
 	resolved := arrangeTabIDByName(t, manager, repo.ID, title, "preview")
 
 	// Close the tab and let a NEW tab take the freed name.
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	arrangeWebTabs(t, manager, repo.ID, title, "preview")
@@ -247,7 +247,7 @@ func TestReorderTab_RefusesUnresolvableTabID(t *testing.T) {
 	arrangeWebTabs(t, manager, repo.ID, title, "preview", "build")
 	resolved := arrangeTabIDByName(t, manager, repo.ID, title, "preview")
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	arrangeWebTabs(t, manager, repo.ID, title, "preview")

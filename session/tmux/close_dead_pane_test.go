@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,6 +45,37 @@ func startHeldPane(t *testing.T, name, command string) {
 	}, 5*time.Second, 20*time.Millisecond, "the pane never died")
 }
 
+// probeHeldExit probes a held dead pane once and requires its exit status. One
+// probe is the contract: ProbePaneExit waits for tmux to collect the root and
+// nudges a tmux that lost the root's SIGCHLD (#4682), so a status missing here
+// is a product failure, not a slow runner. The failure says which of the two
+// states tmux was left in.
+func probeHeldExit(t *testing.T, s *TmuxSession, name string) (status int, at time.Time) {
+	t.Helper()
+	dead, status, statusKnown, at, known := s.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	if !statusKnown {
+		out, _ := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+			"#{pane_dead_status}|#{pane_pid}").Output()
+		fields := strings.Split(strings.TrimSpace(string(out)), "|")
+		state := "unreadable"
+		if pid, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+			_, lookupErr := proctree.Lookup(pid)
+			switch {
+			case errors.Is(lookupErr, proctree.ErrProcessExited):
+				state = "still a zombie: tmux never collected it"
+			case pidGone(pid):
+				state = "gone"
+			default:
+				state = "running"
+			}
+		}
+		t.Fatalf("no exit status after one probe (tmux now reports %q; root %s)", out, state)
+	}
+	return status, at
+}
+
 func requireSessionGone(t *testing.T, name string) {
 	t.Helper()
 	require.Error(t, exec.Command("tmux", "has-session", "-t", exactTarget(name)).Run(),
@@ -58,10 +90,7 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
 
 	s := NewTmuxSessionFromSanitizedName(name, "sh")
-	dead, status, statusKnown, at, known := s.ProbePaneExit()
-	require.True(t, known)
-	require.True(t, dead)
-	require.True(t, statusKnown)
+	status, at := probeHeldExit(t, s, name)
 	require.Equal(t, 7, status)
 	require.False(t, at.Before(before), "death time %v predates the pane", at)
 
@@ -71,6 +100,37 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 		"a pane whose command already exited has nothing left to wait for")
 	requireSessionGone(t, name)
 	require.True(t, s.ClosedConclusively(), "the observed close must latch its proof")
+}
+
+// #4682, on real tmux: Ubuntu's tmux 3.4 leaves about one in sixteen of these
+// roots uncollected (25 of 400 measured), so a single pane passes by luck. Many
+// panes on one server make the lost SIGCHLD all but certain to occur, and every
+// probe must still recover its status. On a tmux that loses nothing (3.6+, or a
+// build without utempter) this passes trivially.
+//
+// An anchor session holds the server for the whole loop. Without it, killing
+// each pane's session left the server with none, so it exited (exit-empty) and
+// every pane got a fresh server; the next new-session could also reach a server
+// already on its way out and fail with "server exited unexpectedly" (#4217).
+func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
+	testguard.IsolateTmux(t)
+	const anchor = "af_test_held_exit_anchor"
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", anchor, "sleep 3600").Run())
+	serverPID := func() string {
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(anchor), "#{pid}").Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	server := serverPID()
+	const panes = 60
+	for i := range panes {
+		name := fmt.Sprintf("af_test_held_exit_%d_%d", time.Now().UnixNano(), i)
+		startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
+		status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, "sh"), name)
+		require.Equal(t, 7, status, "pane %d", i)
+		require.NoError(t, exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run())
+	}
+	require.Equal(t, server, serverPID(), "every pane must be probed on the same tmux server")
 }
 
 // The root exited, but a child it backgrounded is still running: it left the
