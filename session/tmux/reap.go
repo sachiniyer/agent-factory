@@ -190,12 +190,16 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
 			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+			// Positively identified members are added even when the capture
+			// is incomplete: the teardown below reaps partial results so a
+			// proven survivor does not outlive the session merely because
+			// something else could not be ruled out.
+			for _, p := range survivors {
+				add(p)
+			}
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
-			}
-			for _, p := range survivors {
-				add(p)
 			}
 			if !asLive {
 				continue

@@ -535,7 +535,8 @@ func TestCloseAndWaitForPaneExit_HeldPaneRefusesUnmarkedChildOfMarkedSurvivor(t 
 	require.Error(t, err)
 	require.Equal(t, PaneStateUnknown, state,
 		"an unmarked descendant of an attributed survivor must make the capture incomplete")
-	require.True(t, proctree.AliveSame(parent), "the teardown signalled the marked parent it refused over")
+	require.False(t, proctree.AliveSame(parent),
+		"the positively identified survivor must still be reaped alongside the refusal")
 }
 
 // af doctor's escaped-process check hunts exactly the processes the teardown
