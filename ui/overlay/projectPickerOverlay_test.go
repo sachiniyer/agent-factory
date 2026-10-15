@@ -1163,3 +1163,37 @@ func TestMergePreservingSessionRowsBothFailedKeepsLastKnownCounts(t *testing.T) 
 		t.Fatalf("zero-count fallback must not erase last-known counts, got %+v", row)
 	}
 }
+
+// TestMergePreservingSessionRowsFreshRegistryRowSurvivesASessionClaimedRoot
+// pins the mirror of the root-only collision finding (#4888 review): an OLD
+// session-only row (the snapshot that produced it never answered) names a
+// repo at a root a FRESH registry row claims for a different repository — the
+// registration moved, or the path was re-bound. The registry row is the read
+// that DID answer; dedupe on Root alone would hide authoritative truth behind
+// a stale session claim. Both rows survive — the session row as last-known
+// provenance, the registration as the path's real record.
+func TestMergePreservingSessionRowsFreshRegistryRowSurvivesASessionClaimedRoot(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 3},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, true)
+
+	var oldRow, newRow *Project
+	for i := range merged {
+		switch merged[i].RepoID {
+		case "repo-old":
+			oldRow = &merged[i]
+		case "repo-new":
+			newRow = &merged[i]
+		}
+	}
+	if newRow == nil || newRow.RegistryID != "prj_new" {
+		t.Fatalf("the fresh registration must land beside the stale session claim, got %+v", merged)
+	}
+	if oldRow == nil || oldRow.SessionCount != 3 || oldRow.RegistryID != "" {
+		t.Fatalf("the session-only row keeps its last-known counts and no registry identity, got %+v", merged)
+	}
+}

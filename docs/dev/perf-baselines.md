@@ -95,8 +95,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1022915.000 | 1022915.000–1022915.000 | 0.000 | 1074060.750 |
-| gzip_bytes | 228734.000 | 228734.000–228734.000 | 0.000 | 240170.700 |
+| raw_bytes | 1019619.000 | 1019619.000–1019619.000 | 0.000 | 1070599.950 |
+| gzip_bytes | 227265.000 | 227265.000–227265.000 | 0.000 | 238628.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -125,9 +125,11 @@ reason to move a budget.
 ### Guarded-rebind bundle refresh (#4888)
 
 Bundle bytes are deterministic — the metric is the per-file gzip-9 sum of the
-committed `web/dist`, computed by `scripts/perf/report.mjs`. The two rows above
-were measured with that identical algorithm on the PR head (`1ce0e5c5d6` for
-the current rows) rather than a container recording: a container cannot change
+`.js`/`.css` files in the committed `web/dist`, computed by
+`scripts/perf/report.mjs`'s `\.(js|css)$` filter (non-script assets such as
+`index.html` and the webmanifest are outside it). The two rows above were
+measured with that identical algorithm on the PR head (`4aa567d05f` for the
+current rows) rather than a container recording: a container cannot change
 committed bytes, so the three samples are the same measured value. All timing
 and layout-shift entries pass their existing budgets and remain unchanged.
 
