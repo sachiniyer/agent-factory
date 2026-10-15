@@ -96,7 +96,7 @@ under the `perf-baselines` artifact.
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1019773.000 | 1019773.000–1019773.000 | 0.000 | 1070761.650 |
-| gzip_bytes | 226913.000 | 226913.000–226913.000 | 0.000 | 238258.650 |
+| gzip_bytes | 227321.000 | 227321.000–227321.000 | 0.000 | 238687.050 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -127,11 +127,14 @@ reason to move a budget.
 Bundle bytes are deterministic — the metric is the per-file gzip-9 sum of the
 `.js`/`.css` files in the committed `web/dist`, computed by
 `scripts/perf/report.mjs`'s `\.(js|css)$` filter (non-script assets such as
-`index.html` and the webmanifest are outside it). The two rows above were
-measured with that identical algorithm on the PR head (remeasured after the
-ctx-bound snapshot fetch and abortable conflict refresh added their few bytes)
-rather than a container recording: a container cannot change committed bytes,
-so the three samples are the same measured value. All timing and layout-shift
+`index.html` and the webmanifest are outside it). The gzip leg uses Node's
+`gzipSync(..., { level: 9 })` per file — the `gzip -9` CLI emits 408 fewer
+bytes for the same input, so the entry was recomputed with the reporter's own
+compressor. The two rows above were measured with that identical algorithm on
+the PR head (remeasured after the ctx-bound snapshot fetch and abortable
+conflict refresh added their few bytes) rather than a container recording: a
+container cannot change committed bytes, so the three samples are the same
+measured value. All timing and layout-shift
 entries pass their existing budgets and remain unchanged.
 
 The refresh was required on two counts. The reviewed PR adds the
