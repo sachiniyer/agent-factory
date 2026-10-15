@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // programChoice is the program new sessions and tasks default to, and where
@@ -143,13 +144,15 @@ func (m *home) sendProgramForCreate() string {
 }
 
 // remoteDefaultMsg carries the REMOTE daemon's resolved default_program back
-// to an open naming form. The local seed the form opened with is only a guess
-// at remote state; this reply is the authoritative project-scoped answer the
-// create's implicit "" will actually resolve to (#4889 review).
+// to an open naming form, plus the program catalog it reported. The local seed
+// the form opened with is only a guess at remote state; this reply is the
+// authoritative project-scoped answer the create's implicit "" will actually
+// resolve to (#4889 review).
 type remoteDefaultMsg struct {
-	naming  *session.Instance
-	program string
-	err     error
+	naming   *session.Instance
+	program  string
+	programs []string
+	err      error
 }
 
 // listProgramsThroughDaemon is the fetch seam, mirroring
@@ -192,7 +195,11 @@ func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
 	fetch := listProgramsThroughDaemon
 	return func() tea.Msg {
 		resp, err := fetch(repoPath)
-		return remoteDefaultMsg{naming: naming, program: resp.Default, err: err}
+		programs := make([]string, 0, len(resp.Programs))
+		for _, p := range resp.Programs {
+			programs = append(programs, p.Name)
+		}
+		return remoteDefaultMsg{naming: naming, program: resp.Default, programs: programs, err: err}
 	}
 }
 
@@ -215,13 +222,41 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 	if m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
-	if msg.err != nil || msg.program == "" || m.pendingProgramChosen {
+	// The answer — success or failure — lifts the submit gate the fetch armed.
+	m.remoteDefaultPending = false
+	if len(msg.programs) > 0 {
+		// The remote catalog is what the program picker must offer: a newer
+		// daemon can support agents this client's tmux.SupportedPrograms lacks
+		// (#4889 review).
+		m.remoteProgramCatalog = msg.programs
+	}
+	if msg.err != nil {
 		return m, nil
 	}
-	if m.pendingProgram == msg.program {
+	// A committed program is not the guess this reply may correct: an explicit
+	// picker choice sets pendingProgramChosen, and a launch --program pins via
+	// programFollowsConfig — overwriting either would send a program the user
+	// never asked for CONCRETELY (#4889 review).
+	if m.pendingProgramChosen || !m.programFollowsConfig {
+		return m, nil
+	}
+	if msg.program == "" || m.pendingProgram == msg.program {
 		return m, nil
 	}
 	m.pendingProgram = msg.program
 	m.namingInstance.Program = msg.program
+	// Every account state the OLD agent produced must go: a preselect or a
+	// deliberate pick belongs to that agent's registry, and keeping it would
+	// submit a name the resolved agent does not have — or pin a cross-agent
+	// pair the user never chose (#4889 review).
+	m.clearPendingAccount()
+	if m.state == stateSelectAccount && m.selectionOverlay != nil {
+		// The open picker's rows were built from the old agent's registry;
+		// leaving it up would let a stale row mark an account as chosen.
+		m.selectionOverlay = nil
+		m.accountPickerChoices = nil
+		m.state = stateNew
+		m.menu.SetState(ui.StateNewInstance)
+	}
 	return m, m.fetchAccountDefault(msg.naming, sessionenv.AgentForCommand(msg.program))
 }

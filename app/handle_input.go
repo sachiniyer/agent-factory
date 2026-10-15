@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -39,6 +40,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.backendPickerPending = false
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -190,6 +193,12 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// concrete program. A remote target stays implicit the same way — ""
 		// asks the remote daemon to resolve ITS default_program, the only
 		// default a remote create can honor (#4889 review).
+		// A remote form cannot submit "" while its ListPrograms answer is still
+		// in flight: the daemon would resolve a default the field has not yet
+		// shown (#4889 review).
+		if m.remoteDefaultPending {
+			return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
+		}
 		sendProgram := m.sendProgramForCreate()
 		// The account belongs to one agent's registry, so it must travel with
 		// the program it was chosen or preselected for (#4889 review). When the
@@ -235,6 +244,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingAccount = ""
 		m.pendingAccountChosen = false
 		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -287,11 +298,23 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 	case tea.KeyTab:
-		// Open program selection overlay
-		items := make([]string, len(tmux.SupportedPrograms))
+		// Open program selection overlay. A remote target's catalog is the
+		// DAEMON's — it can list agents this client's tmux.SupportedPrograms
+		// lacks, and a resolved default absent from it must still render as the
+		// selected row rather than collapsing the pick onto index 0 (#4889
+		// review).
+		catalog := tmux.SupportedPrograms
+		if isRemoteTarget() && len(m.remoteProgramCatalog) > 0 {
+			catalog = m.remoteProgramCatalog
+		}
+		items := make([]string, 0, len(catalog)+1)
+		items = append(items, catalog...)
+		if m.pendingProgram != "" && !slices.Contains(items, m.pendingProgram) {
+			items = append(items, m.pendingProgram)
+		}
+		m.programPickerChoices = items
 		selectedIdx := 0
-		for i, p := range tmux.SupportedPrograms {
-			items[i] = p
+		for i, p := range items {
 			if m.pendingProgram == p {
 				selectedIdx = i
 			}
@@ -368,6 +391,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.backendPickerPending = false
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -415,6 +440,8 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
 	m.pendingProgramChosen = false
+	m.remoteDefaultPending = false
+	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
@@ -479,7 +506,9 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// launch-time local seed displayed above is only a guess at remote state,
 	// and the account preselect just fired against that guess's agent. Asking
 	// ListPrograms corrects the field — and re-fires the account fetch for the
-	// resolved agent — when the daemon's default differs.
+	// resolved agent — when the daemon's default differs. Submit waits on the
+	// answer so "" cannot resolve a program the user never saw.
+	m.remoteDefaultPending = true
 	return m, tea.Batch(accountFetch, m.fetchRemoteDefaultProgram(instance))
 }
 

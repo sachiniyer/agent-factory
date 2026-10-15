@@ -457,6 +457,21 @@ type home struct {
 	// still pends — and the older reply landing last must not overwrite the
 	// newer answer (#4889 review).
 	accountDefaultSeq int64
+	// remoteDefaultPending marks the window between a remote-target form open
+	// (or implicit restore) and the ListPrograms reply: submitting "" before the
+	// daemon's resolved default corrects the field would create a program the
+	// user never saw (#4889 review).
+	remoteDefaultPending bool
+	// remoteProgramCatalog is the program list the remote daemon reported,
+	// which the program picker offers instead of the local
+	// tmux.SupportedPrograms — a newer daemon can support agents this client
+	// lacks (#4889 review).
+	remoteProgramCatalog []string
+	// programPickerChoices is the option list the open program picker is
+	// showing, held alongside the overlay for the same reason
+	// accountPickerChoices is: a remote catalog cannot be mapped back through
+	// the local enum.
+	programPickerChoices []string
 
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
