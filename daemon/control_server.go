@@ -664,8 +664,6 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
-
- (fix(projects): compare-and-set the guarded rebind on the observed (root, checkout) pair (#4888 review))
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through

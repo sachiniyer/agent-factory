@@ -250,8 +250,6 @@ type RestoreSessionResponse struct {
 	MutationOutcome
 }
 
-
- (fix(projects): compare-and-set the guarded rebind on the observed (root, checkout) pair (#4888 review))
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
