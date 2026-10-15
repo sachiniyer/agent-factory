@@ -282,7 +282,7 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 // than a line per pid: there the pid/generation pairing is the operator's whole
 // decision procedure, and blindGenerationRefusal is what carries it (#3706).
 func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string,
-	generations orphanGenerationSet, treeVerified map[int]bool,
+	generations orphanGenerationSet, treeVerified map[int]bool, serverPID int,
 ) ([]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -382,6 +382,37 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				}
 				continue
 			}
+			// The adopted identity arrived AFTER the UID gate above, so it
+			// must pass ownership itself before any marker read can attribute
+			// it — otherwise a readable foreign-UID survivor could ride the
+			// old pid's pass into the signal set (a privilege-dropping pane
+			// child is exactly that shape). A final identity check bounds the
+			// adoption to the process Lookup just returned.
+			uid, uidKnown = proctree.UID(process.PID)
+			switch {
+			case !uidKnown:
+				sameAgain, againErr := proctree.SameIdentity(process)
+				switch {
+				case againErr != nil:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot recheck adopted pid %d after owner lookup failed: %w",
+						process.PID, againErr))
+				case sameAgain:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of adopted live pid %d", process.PID))
+				}
+				continue
+			case uid != selfUID:
+				inspectErrs = append(inspectErrs, fmt.Errorf("adopted live pid %d belongs to uid %d, not reset uid %d",
+					process.PID, uid, selfUID))
+				continue
+			}
+			stable, stableErr := proctree.SameIdentity(process)
+			switch {
+			case stableErr != nil:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot revalidate adopted pid %d: %w", process.PID, stableErr))
+				continue
+			case !stable:
+				continue // churned again inside one pass — the single-adoption bound stands
+			}
 		}
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
 		if !hasSession {
@@ -441,11 +472,21 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			continue
 		}
 		if selfChain[process.PID] && !isTeardownRequester(process) {
-			if treeVerified[process.PID] {
+			switch {
+			case treeVerified[process.PID]:
 				// The pane tree already proved this member — an af client run
 				// inside the session legitimately places marked pane processes
 				// on the teardown's own ancestry. They are already in the
 				// capture, so the scan neither adds nor faults them.
+				continue
+			case serverPID > 0 && process.PPID == serverPID:
+				// A marker-matched process directly parented to THIS session's
+				// server is its pane root — kernel-verifiable membership the
+				// marker scan needed no pane pid for. A held dead pane's
+				// still-running root lands here on self-teardown (root →
+				// client → daemon), and refusing it would refuse the teardown
+				// it belongs to. Reaping it is the teardown's purpose.
+				owned = append(owned, process)
 				continue
 			}
 			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",

@@ -58,9 +58,13 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	case nameErr != nil:
 		return nil, fmt.Errorf("cannot read the %s marker of the session owning a pid-less dead pane: %w",
 			EnvMarkerSession, nameErr)
-	case !nameFound:
-		return nil, fmt.Errorf("session %s carries no %s marker, so a pid-less dead pane's survivors cannot be attributed",
-			sanitizedName, EnvMarkerSession)
+	case !nameFound || markerName == "":
+		// A PRESENT-but-empty value (`AF_SESSION=` after set-environment
+		// clears it) is worse than absent: it is a key that matches nothing
+		// while every survivor still carries its nonempty launch stamp — an
+		// empty successful scan hiding live processes (#5319 review).
+		return nil, fmt.Errorf("session %s carries no usable %s marker (present=%t value=%q), so a pid-less dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerSession, nameFound, markerName)
 	}
 	generations := orphanGenerations(captured, markerName)
 	generation, genFound, genErr := sessionEnvMarkerAt(cmdExec, target, EnvMarkerGeneration)
@@ -87,6 +91,16 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 		return nil, fmt.Errorf("the session incarnation changed while its markers were read: same=%t err=%v",
 			same, err)
 	}
+	// The server pid serves both the self-chain check inside the scan — a
+	// marked process directly parented to it is a kernel-verifiable pane root
+	// even when it sits on the teardown's own ancestry — and the verified-mode
+	// root filter below. A probe failure cannot be read as "no server": it
+	// leaves the scan conservative (0 → no self-chain exemptions) but must be
+	// reported, so it joins the scan errors.
+	serverPID, serverErr := sessionServerPID(cmdExec, target)
+	if serverErr != nil {
+		serverPID = 0
+	}
 	candidates := append([]proctree.Process(nil), captured...)
 	refreshed, refreshErr := refreshOrphanCandidates(candidates, markerName, &generations, true)
 	// Members the pane tree captured moments ago are already proven; a marked
@@ -97,15 +111,17 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	for _, member := range captured {
 		treeVerified[member.PID] = true
 	}
-	marked, inspectErr := markedOrphanProcesses(refreshed, markerName, scanHome, generations, treeVerified)
+	marked, inspectErr := markedOrphanProcesses(refreshed, markerName, scanHome, generations, treeVerified, serverPID)
 	scanErr := errors.Join(refreshErr, inspectErr)
+	if serverErr != nil {
+		scanErr = errors.Join(scanErr, fmt.Errorf(
+			"cannot name the server owning a dead pane for self-chain verification: %w", serverErr))
+	}
 	if !verifiedOnly {
 		return marked, scanErr
 	}
-	serverPID, serverErr := sessionServerPID(cmdExec, target)
 	if serverErr != nil {
-		return nil, errors.Join(scanErr, fmt.Errorf(
-			"cannot name the server owning a dead pane for verified membership: %w", serverErr))
+		return nil, scanErr
 	}
 	seen := map[int]bool{}
 	var verified []proctree.Process
