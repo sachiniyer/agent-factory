@@ -75,15 +75,15 @@ func LoadTasks() ([]Task, error) {
 		if err := config.RefuseDanglingConfigLink(path); err != nil {
 			return nil, err
 		}
-		// A symlink that resolves at the recheck is not "no store yet": its
-		// target may have been restored between the failed Stat and the
-		// recheck (another process replacing it via two renames), so
-		// RefuseDanglingConfigLink passes while the file is once again
-		// readable. Retry the Stat once; if the link resolves now, fall
-		// through to the read. A still-absent target after the retry is a
-		// flapping link, not an empty store. A simply-absent path (no
-		// symlink) stays an ordinary empty store (#3672 review).
-		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		// Lstat found an entry. A symlink whose target was restored between
+		// the failed Stat and the recheck (another process replacing it via
+		// two renames), or a regular file that replaced the link itself while
+		// we weren't looking — either way the store may now be readable, so
+		// retry the Stat before treating it as absent. A still-absent target
+		// after the retry is a flapping link, not an empty store. Only a
+		// path Lstat itself reports not-exist is an ordinary empty store
+		// (#3672 review).
+		if _, lerr := os.Lstat(path); lerr == nil {
 			if _, err := os.Stat(path); err != nil {
 				if os.IsNotExist(err) {
 					if err := config.RefuseDanglingConfigLink(path); err != nil {
@@ -92,8 +92,10 @@ func LoadTasks() ([]Task, error) {
 				}
 				return nil, fmt.Errorf("failed to read tasks file: %w", err)
 			}
-		} else {
+		} else if os.IsNotExist(lerr) {
 			return []Task{}, nil
+		} else {
+			return nil, fmt.Errorf("failed to read tasks file: %w", lerr)
 		}
 	}
 
@@ -196,10 +198,12 @@ func loadTasksLocked(path string) ([]Task, error) {
 		// The same recheck-then-retry race as LoadTasks: a resolving link
 		// whose target was restored between the failed ReadFile and the
 		// recheck passes RefuseDanglingConfigLink and would read as an empty
-		// store. Retry the read; a still-absent target after the retry is a
-		// flapping link, not an empty store. A simply-absent path (no
-		// symlink) stays the ordinary empty shape (#3672 review).
-		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		// store, and a regular file that replaced the link while we weren't
+		// looking is just as readable. Retry the read whenever Lstat finds
+		// any entry; a still-absent target after the retry is a flapping
+		// link, not an empty store. Only a path Lstat itself reports
+		// not-exist is the ordinary empty shape (#3672 review).
+		if _, lerr := os.Lstat(path); lerr == nil {
 			data, err = os.ReadFile(path)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -209,8 +213,10 @@ func loadTasksLocked(path string) ([]Task, error) {
 				}
 				return nil, fmt.Errorf("failed to read tasks file: %w", err)
 			}
-		} else {
+		} else if os.IsNotExist(lerr) {
 			return []Task{}, nil
+		} else {
+			return nil, fmt.Errorf("failed to read tasks file: %w", lerr)
 		}
 	}
 	migrated, _, err := migrateTasksSchemaBytes(data, path)
@@ -268,10 +274,12 @@ func ensureTasksSchemaMigrated(path string) error {
 		// The same recheck-then-retry race as LoadTasks: a resolving link
 		// whose target was restored between the failed Stat and the recheck
 		// passes RefuseDanglingConfigLink and would skip migration as if the
-		// store were absent. Retry the Stat; a still-absent target after the
-		// retry is a flapping link, not an absent store. A simply-absent path
-		// (no symlink) stays the ordinary nil (#3672 review).
-		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		// store were absent, and a regular file that replaced the link while
+		// we weren't looking is just as readable. Retry the Stat whenever
+		// Lstat finds any entry; a still-absent target after the retry is a
+		// flapping link, not an absent store. Only a path Lstat itself
+		// reports not-exist stays the ordinary nil (#3672 review).
+		if _, lerr := os.Lstat(path); lerr == nil {
 			if _, err := os.Stat(path); err != nil {
 				if os.IsNotExist(err) {
 					if err := config.RefuseDanglingConfigLink(path); err != nil {
@@ -280,8 +288,10 @@ func ensureTasksSchemaMigrated(path string) error {
 				}
 				return fmt.Errorf("failed to read tasks file: %w", err)
 			}
-		} else {
+		} else if os.IsNotExist(lerr) {
 			return nil
+		} else {
+			return fmt.Errorf("failed to read tasks file: %w", lerr)
 		}
 	}
 	_, _, err := loadAndMigrateTasksFile(path)
