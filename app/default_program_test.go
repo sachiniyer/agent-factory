@@ -752,10 +752,11 @@ func TestFailedCreateRestoreKeepsAChosenAmbientAccount(t *testing.T) {
 
 // TestFailedCreateRestoreUnpinsAnAccountPinnedProgram is the program half of
 // the draft-flags finding (#4889 review): a program that reached the wire only
-// because a chosen account pinned it is NOT a program choice — restoring it
-// as chosen would freeze the retry onto the program the account happened to
-// display. With the flag restored false, flipping the account back to ambient
-// returns the retry to config-following: Program "" on the wire.
+// because a chosen account pinned it is NOT a program choice — but it IS the
+// pair the account belongs to, so the restore must keep the displayed program
+// rather than re-resolve a moved default beneath a live pin. Flipping the
+// account back to ambient dissolves the pair and returns the retry to
+// config-following: Program "" on the wire.
 func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	h := configFollowingHome(t)
 	got := recordStartRequest(t)
@@ -763,8 +764,14 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 
 	inst := newLoadingInstance(t, "demo")
 	inst.Path = h.repoRoot
+	inst.Program = tmux.ProgramClaude // the field displayed claude; the account pinned it
 	h.store.AddInstance(inst)
 	h.sidebar.SelectInstance(inst)
+
+	// The default moves after the failure — a re-resolve would silently
+	// re-pair the chosen claude account "work" with a different agent.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramCodex)
+	require.NoError(t, err)
 
 	// The failed submit: account "work" chosen, the program on the wire only
 	// because the pairing pinned it — ProgramChosen stays false.
@@ -775,6 +782,8 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	require.False(t, h.pendingProgramChosen,
 		"an account-pinned program restores config-following, not chosen")
 	require.Equal(t, "work", h.pendingAccount)
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram,
+		"the displayed program stays — the chosen account keeps its agent pair")
 
 	// The user reconsiders: ambient identity. The program pairing dissolves
 	// and the retry resolves the live default_program instead of replaying

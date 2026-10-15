@@ -8,9 +8,24 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-var localSessionPreflight = preflight.LocalSessionPrereqs
+var (
+	localSessionPreflight = preflight.LocalSessionPrereqs
+	localPrereqsRequired  = session.LocalPrereqsRequired
+)
 
 func (m *home) preflightSessionCreate() error {
+	// A remote target hosts the session on the daemon's machine — its tmux,
+	// its PATH, its backend resolution, its default_program. Checked FIRST,
+	// before LocalPrereqsRequired resolves the client's repo config: every
+	// client-local question can both block the event loop on this host's
+	// filesystem and refuse a create the remote could serve (an untouched
+	// form sends "" for the daemon to resolve, so substituting the client's
+	// cfg.DefaultProgram below is actively wrong when the hosts differ). The
+	// daemon rechecks the program itself at create time — remote creates
+	// skip client-local prereqs (#4889 review).
+	if isRemoteTarget() {
+		return nil
+	}
 	// A backend picked in the naming form's field (#1933) decides this, and the
 	// placeholder instance cannot: it is constructed when the form OPENS, before the
 	// user has chosen anything, so its capabilities describe the repo default rather
@@ -35,20 +50,10 @@ func (m *home) preflightSessionCreate() error {
 	// `claude` is not what is wrong with it. The daemon owns the verdict on a
 	// backend it could not resolve, and states it when the create is submitted.
 	//
-	local, _ := session.LocalPrereqsRequired(session.InstanceOptions{
+	local, _ := localPrereqsRequired(session.InstanceOptions{
 		Backend: session.BackendKind(m.pendingBackend),
 	}, m.repoRoot)
 	if !local {
-		return nil
-	}
-	// A remote target hosts the session on the daemon's machine — its tmux,
-	// its PATH, its resolved default_program. Checking THIS host's binaries
-	// would refuse a create the remote could serve (an untouched form sends
-	// "" for the daemon to resolve, so substituting the client's
-	// cfg.DefaultProgram here is actively wrong when the two hosts differ)
-	// and can never approve anything the daemon does not recheck itself —
-	// remote creates skip client-local prereqs (#4889 review).
-	if isRemoteTarget() {
 		return nil
 	}
 	cfg, err := m.preflightConfig()
