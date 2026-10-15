@@ -157,33 +157,49 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 			procs = append(procs, p)
 		}
 	}
-	// The no-pid dead pane's marker scan reads the session's environment and
-	// walks the process table once per capture, not once per pane: a session
-	// of held panes would otherwise pay the bounded tmux queries per row.
+	// The no-pid dead pane's survivors are attributed by the same sweep the
+	// vanished-session path stands on: refreshOrphanCandidates discovers
+	// descendants of captured members plus AF_SESSION-marked processes in the
+	// session's generation cohort, and markedOrphanProcesses applies the
+	// hardened ownership rules — AF_HOME, uid, identity revalidation,
+	// self-chain — rather than a second scanner with its own answers. It runs
+	// once per capture, not once per pid-less pane.
 	var markedScan struct {
 		procs []proctree.Process
 		err   error
 		done  bool
 	}
-	scanMarkedSurvivors := func(row paneRow) ([]proctree.Process, error) {
+	scanMarkedSurvivors := func() ([]proctree.Process, error) {
 		if !markedScan.done {
-			// Diagnostic callers (CaptureVerifiedSessionProcessTrees) run
-			// the same scan with verifiedOnly: marker-attributed DETACHED
-			// survivors are exactly the escaped processes that caller is
-			// hunting, but a marker-matched process still parented by the
-			// server is the pane's live root — positively verifiable, so it
-			// counts as a member rather than an escapee. Failures here are
-			// blindness for that caller, not a clean empty.
-			markedScan.procs, markedScan.err = markedSessionSurvivors(cmdExec, sanitizedName, row, !mergeMarked)
+			ownHome, homeErr := afHomeDir()
+			if homeErr != nil {
+				markedScan.err = fmt.Errorf("cannot resolve this agent-factory home for a dead pane's survivor attribution: %w", homeErr)
+			} else {
+				candidates := append([]proctree.Process(nil), procs...)
+				generations := orphanGenerations(candidates, sanitizedName)
+				refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations)
+				marked, inspectErr := markedOrphanProcesses(refreshed, sanitizedName, ownHome, generations)
+				markedScan.procs = marked
+				markedScan.err = errors.Join(refreshErr, inspectErr)
+			}
 			markedScan.done = true
 		}
 		return markedScan.procs, markedScan.err
 	}
+	var deferred []string
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
 		if err != nil || (panePID <= 1 && !row.pidAbsent) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		if row.dead && row.pidAbsent {
+			// tmux ≥ 3.8 reports no pid for a held dead pane, so its marker
+			// scan seeds its generation cohort from the session's OTHER,
+			// kernel-attributed members — which means every live pane must be
+			// captured first regardless of list-panes order (#5319).
+			deferred = append(deferred, field)
 			continue
 		}
 		if row.dead {
@@ -227,6 +243,28 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		// already exited and they were reparented to init.
 		for _, p := range proctree.SessionMembers(snap, root.SID) {
 			add(p)
+		}
+	}
+	for _, field := range deferred {
+		if !mergeMarked {
+			// A dead pane has no live root for the verified capture to
+			// include, and the processes its launch markers would name are
+			// precisely the escaped ones this variant exists to report —
+			// so the pid-less dead row contributes nothing here (#5319).
+			continue
+		}
+		row, err := parsePaneRow(field)
+		if err != nil {
+			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		survivors, _, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+		for _, p := range survivors {
+			add(p)
+		}
+		if err != nil {
+			captureErrs = append(captureErrs, err)
+			continue
 		}
 	}
 	return procs, errors.Join(captureErrs...)

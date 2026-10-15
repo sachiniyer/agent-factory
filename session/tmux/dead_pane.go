@@ -47,9 +47,8 @@ const paneFieldSeparator = "|"
 // paneRowFormat is what the teardown asks list-panes and display-message for.
 // The third field concatenates every value tmux reports only after reaping the
 // root, so it is non-empty exactly when the root is known to be gone. The
-// fourth carries the session's concrete incarnation id, so the no-pid dead
-// pane's marker reads can be bound to the session list-panes observed rather
-// than whatever a reused name resolves to afterwards.
+// fourth carries the session's concrete incarnation id, which names the exact
+// session a row belongs to in a way a reused name cannot.
 //
 // A reply without the separator is a bare pane_pid, which is what a tmux that
 // cannot expand the later fields, or a test executor, returns. It reads as a
@@ -117,17 +116,16 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func(paneRow) ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func() ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
 	if row.pidAbsent {
 		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
 		// (#5319), and without the pid there is no kernel session key to look
 		// survivors up by. What remains is the launch provenance af stamps
 		// into every pane it spawns: the AF_SESSION/AF_HOME markers a process
 		// still carries are proof it came from this session — the same
-		// evidence the vanished-session sweep stands on. When the session
-		// itself carries no markers, a scan that finds nothing proves nothing
-		// about survivors: that is an incomplete capture, not an empty one.
-		procs, err := markedSurvivors(row)
+		// evidence the vanished-session sweep stands on, and the same
+		// bounded-candidate machinery the caller's scan shares with it.
+		procs, err := markedSurvivors()
 		return procs, false, err
 	}
 	_, present := snap[row.pid]
