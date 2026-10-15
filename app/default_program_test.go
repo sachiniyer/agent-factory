@@ -906,3 +906,42 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 		"the launch-fixed draft restores as a choice, not an implicit field")
 	require.Equal(t, tmux.ProgramGemini, h.pendingProgram)
 }
+
+// TestRemoteTargetSeedsTheDaemonsDefault is the remote half of #4889 review:
+// a remote daemon resolves its OWN default_program, so the form must not keep
+// displaying the client's launch-time local seed — the account preselect that
+// fired for the local agent is fetched again for the resolved one.
+func TestRemoteTargetSeedsTheDaemonsDefault(t *testing.T) {
+	clearDaemonTarget(t)
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+
+	h := configFollowingHome(t)
+
+	t.Cleanup(SetProgramListerForTest(func(repoPath string) (daemon.ListProgramsResponse, error) {
+		return daemon.ListProgramsResponse{Default: tmux.ProgramCodex}, nil
+	}))
+	var agents []string
+	t.Cleanup(SetAccountListerForTest(func(agent, repoPath string) (daemon.ListAccountsResponse, error) {
+		agents = append(agents, agent)
+		return daemon.ListAccountsResponse{}, nil
+	}))
+
+	_, cmd := h.startNewInstance()
+	msgs := drainCmd(t, cmd, time.Second)
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram,
+		"the local seed renders provisionally until the daemon answers")
+	require.True(t, len(msgs) >= 2,
+		"a remote target fires the remote-default fetch beside the account fetch")
+
+	for _, msg := range msgs {
+		_, next := h.Update(msg)
+		for _, m2 := range drainCmd(t, next, time.Second) {
+			_, _ = h.Update(m2)
+		}
+	}
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
+		"the displayed program follows the daemon's resolved default")
+	// The provisional fetch ran for claude; the correction re-fires for codex.
+	require.Equal(t, []string{"claude", "codex"}, agents,
+		"the account preselect re-asks under the resolved agent")
+}

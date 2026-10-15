@@ -4,8 +4,13 @@ import (
 	"context"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // programChoice is the program new sessions and tasks default to, and where
@@ -135,4 +140,88 @@ func (m *home) sendProgramForCreate() string {
 		return m.pendingProgram
 	}
 	return ""
+}
+
+// remoteDefaultMsg carries the REMOTE daemon's resolved default_program back
+// to an open naming form. The local seed the form opened with is only a guess
+// at remote state; this reply is the authoritative project-scoped answer the
+// create's implicit "" will actually resolve to (#4889 review).
+type remoteDefaultMsg struct {
+	naming  *session.Instance
+	program string
+	err     error
+}
+
+// listProgramsThroughDaemon is the fetch seam, mirroring
+// listAccountsThroughDaemon: a package var so the unit suite can answer with a
+// fixture instead of a daemon. It goes through the HTTP client because the
+// answer must come from the daemon the create goes to — which for a remote
+// target is another machine, whose default_program this host cannot read.
+var listProgramsThroughDaemon = func(repoPath string) (daemon.ListProgramsResponse, error) {
+	var resp daemon.ListProgramsResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resp, e = c.ListPrograms(repoPath)
+		return e
+	})
+	if err != nil {
+		return daemon.ListProgramsResponse{}, err
+	}
+	return resp, nil
+}
+
+// SetProgramListerForTest swaps the program-catalog seam so a test can answer
+// with a fixture remote default.
+func SetProgramListerForTest(f func(repoPath string) (daemon.ListProgramsResponse, error)) func() {
+	prev := listProgramsThroughDaemon
+	listProgramsThroughDaemon = f
+	return func() { listProgramsThroughDaemon = prev }
+}
+
+// fetchRemoteDefaultProgram asks the target daemon which program an implicit
+// create resolves to for the active project. Fired when the target is remote:
+// refreshDefaultProgram deliberately skips remote targets (the local config
+// read can't see the daemon host's config), so the displayed seed needs this
+// correction. Asynchronous, like the account preselect — the form is usable
+// before it lands, and a failed fetch is silent.
+func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
+	if naming == nil {
+		return nil
+	}
+	repoPath := m.repoRoot
+	fetch := listProgramsThroughDaemon
+	return func() tea.Msg {
+		resp, err := fetch(repoPath)
+		return remoteDefaultMsg{naming: naming, program: resp.Default, err: err}
+	}
+}
+
+// handleRemoteDefault applies the daemon's resolved default to the open form.
+//
+// The guards mirror handleAccountDefault's: the reply must belong to the form
+// still open (a submit, cancel, or new naming instance retires it), and it
+// must not overwrite a program the user already picked. When it lands on a
+// different program than the local guess, the account preselect fetched for
+// the OLD agent no longer describes the pair the submit will form, so the
+// account field re-asks for the resolved one.
+func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
+	switch m.state {
+	case stateNew, stateSelectBackend, stateSelectProgram, stateSelectAccount, statePromptInput:
+		// These fields edit the same naming flow; a picker open over it must
+		// not discard the correction.
+	default:
+		return m, nil
+	}
+	if m.namingInstance == nil || m.namingInstance != msg.naming {
+		return m, nil
+	}
+	if msg.err != nil || msg.program == "" || m.pendingProgramChosen {
+		return m, nil
+	}
+	if m.pendingProgram == msg.program {
+		return m, nil
+	}
+	m.pendingProgram = msg.program
+	m.namingInstance.Program = msg.program
+	return m, m.fetchAccountDefault(msg.naming, sessionenv.AgentForCommand(msg.program))
 }
