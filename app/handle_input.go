@@ -471,7 +471,16 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// create behaves exactly as it did before this key existed — the daemon applies
 	// the same default either way. What the preselection buys is that the user SEES
 	// it and can change it.
-	return m, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
+	accountFetch := m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
+	if !isRemoteTarget() {
+		return m, accountFetch
+	}
+	// The remote daemon resolves its OWN default_program (#4889 review): the
+	// launch-time local seed displayed above is only a guess at remote state,
+	// and the account preselect just fired against that guess's agent. Asking
+	// ListPrograms corrects the field — and re-fires the account fetch for the
+	// resolved agent — when the daemon's default differs.
+	return m, tea.Batch(accountFetch, m.fetchRemoteDefaultProgram(instance))
 }
 
 // noActiveProjectNotice is the refusal a create gets with no active project.
