@@ -488,6 +488,91 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidRefusesOnUninspectable
 	require.True(t, proctree.AliveSame(stranger), "the teardown signalled a process it could not inspect")
 }
 
+// The `env -u AF_SESSION -u AF_HOME` survivor: its environment is still
+// readable, so it reaches the marker comparison rather than the unreadable
+// branch — but only the generation stamp survives the strip, and a
+// consistent-but-partial marker set neither proves membership nor proves
+// absence. The capture is incomplete, and the teardown must refuse.
+func TestCloseAndWaitForPaneExit_HeldPaneRefusesPartiallyMarkedStranger(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-partial", "")
+	stripped := startStranger(t, []string{EnvMarkerGeneration + "=gen1"})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"},
+			time.Now().Add(24*time.Hour).Unix(), nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a process carrying a consistent but incomplete marker set must make the capture incomplete")
+	require.True(t, proctree.AliveSame(stripped), "the teardown signalled a process it could not rule out")
+}
+
+// The other half of the missing-marker case: a detached child that stripped
+// ALL of its markers is invisible to the marker scan, but while its marked
+// parent still lives, parentage supplies the attribution env cannot — the
+// same evidence the sweep's partial-capture rule stands on. Such a child
+// cannot be ruled out, so the teardown refuses.
+func TestCloseAndWaitForPaneExit_HeldPaneRefusesUnmarkedChildOfMarkedSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-stripped-child", "")
+	parent := startMarkedParentWithStrippedChild(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=gen1",
+	})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"},
+			time.Now().Add(24*time.Hour).Unix(), nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unmarked descendant of an attributed survivor must make the capture incomplete")
+	require.True(t, proctree.AliveSame(parent), "the teardown signalled the marked parent it refused over")
+}
+
+// af doctor's escaped-process check hunts exactly the processes the teardown
+// capture ADDS via launch markers: a marked process that escaped its dead
+// pane's tree is the finding, so merging it into the diagnostic result would
+// hide it. The verified variant returns tree/SID-verified members only — the
+// pid-less dead pane contributes nothing, and errors nothing.
+func TestCaptureVerifiedSessionProcessTrees_LeavesMarkerSurvivorUnclaimed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-verified", "")
+	env := map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}
+	survivor := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=gen1",
+	})
+	exec := paneEnvExec("", "1", "3", "", "1726000000", env, time.Now().Add(24*time.Hour).Unix(), nil)
+
+	verified, err := CaptureVerifiedSessionProcessTrees(exec, name)
+	require.NoError(t, err)
+	for _, p := range verified {
+		require.NotEqual(t, survivor.PID, p.PID,
+			"the verified capture must not claim a marker-attributed survivor as tree-verified")
+	}
+
+	merged, err := CaptureSessionProcessTrees(exec, name)
+	require.NoError(t, err)
+	found := false
+	for _, p := range merged {
+		if p.PID == survivor.PID {
+			found = true
+		}
+	}
+	require.True(t, found, "the teardown capture must still attribute the marked survivor")
+}
+
 // A session launched before the marker contract exists carries no launch
 // markers at all, so a scan that finds nothing proves nothing about its
 // survivors: the capture is incomplete, and the teardown must refuse.
@@ -532,6 +617,32 @@ func startStranger(t *testing.T, extraEnv []string) proctree.Process {
 		_, _ = c.Process.Wait()
 	})
 	return processIdentity(t, c.Process.Pid)
+}
+
+// startMarkedParentWithStrippedChild starts a marker-carrying process that
+// keeps a live child whose environment has every af launch marker stripped —
+// the `env -u` survivor shape, except the marked parent stays alive so
+// parentage still links the child to the session.
+func startMarkedParentWithStrippedChild(t *testing.T, extraEnv []string) proctree.Process {
+	t.Helper()
+	c := exec.Command("sh", "-c",
+		"env -u "+EnvMarkerSession+" -u "+EnvMarkerHome+" -u "+EnvMarkerGeneration+" sleep 300 & wait")
+	c.Env = append(os.Environ(), extraEnv...)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Start())
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+	})
+	parent := processIdentity(t, c.Process.Pid)
+	// The scan's descendant check needs the stripped child to exist before
+	// the process snapshot: `& wait` forks it near-instantly, but assert
+	// rather than race it.
+	require.Eventually(t, func() bool {
+		snap, err := proctree.Snapshot()
+		return err == nil && len(proctree.TreeOf(snap, parent.PID)) > 0
+	}, 3*time.Second, 20*time.Millisecond, "the marked parent never spawned its stripped child")
+	return parent
 }
 
 // startEnvlessStranger starts a process with an empty environment — the
