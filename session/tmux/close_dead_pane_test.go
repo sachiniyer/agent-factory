@@ -405,6 +405,68 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor
 		"a marked survivor of a pane tmux reports no pid for survived the teardown")
 }
 
+// The lone-pane case: a session holding ONLY the pid-less dead pane captures
+// no kernel-attributed members, so nothing seeds the generation cohort. The
+// same situation the vanished sweep's lifecycle-locked callers seed from the
+// live marker scan for (#3413) applies here — a marked survivor must still be
+// attributed and reaped rather than filtered out by a cohort nobody seeded
+// (#5319 review).
+func TestCloseAndWaitForPaneExit_LoneHeldPaneWithNoReportedPidReapsItsMarkedSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-lone-survivor", "")
+	survivor := startStranger(t, markerEnv(name, home, "gen1"))
+	killed := false
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed, "the lone dead pane's session must still be killed")
+	require.False(t, proctree.AliveSame(survivor),
+		"a marked survivor of a session with no live pane must not survive its teardown")
+}
+
+// pane_dead without status, signal or death time means tmux has not collected
+// the root — a root that closed its pty can still be running, and a
+// pre-marker or marker-stripped root is invisible to the launch-marker scan.
+// An empty scan is then not proof the pane is gone, and the capture must stay
+// incomplete (#5319 review).
+func TestCloseAndWaitForPaneExit_UnreapedHeldPaneWithNoReportedPidRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-unreaped", "")
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "", "", "", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unreaped pid-less pane with no attributed process must not authorize worktree cleanup")
+}
+
+// The same unreaped row stops refusing once the scan positively attributes a
+// live process: positive membership is the only conclusive evidence a
+// pid-less row can give when tmux has not reaped the root (#5319 review).
+func TestCloseAndWaitForPaneExit_UnreapedHeldPaneWithNoReportedPidReapsMarkedProcess(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-unreaped-marked", "")
+	survivor := startStranger(t, markerEnv(name, home, "gen1"))
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "", "", "", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.False(t, proctree.AliveSame(survivor),
+		"a positively attributed process must be reaped even when the row carries no reap evidence")
+}
+
 // Processes the sweep cannot attribute are not evidence of membership: an
 // unmarked one, one from another home, and one from another generation of the
 // same name are all left alone.

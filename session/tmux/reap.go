@@ -177,10 +177,27 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 			} else {
 				candidates := append([]proctree.Process(nil), procs...)
 				generations := orphanGenerations(candidates, sanitizedName)
+				if generations.empty() {
+					// A session holding ONLY pid-less dead panes — the
+					// single-pane process-tab case — captured no members, so
+					// no live pane seeded the cohort and the generation
+					// filter would reject every marked survivor. This is the
+					// same situation reapVanishedSessionProcessCohort solves
+					// for its lifecycle-locked callers by seeding the cohort
+					// from the live marker scan (#3413): this teardown holds
+					// the session's lifecycle, so no same-named replacement
+					// can mint mid-sweep. A cohort still empty afterwards
+					// means nothing marked exists — a true empty rather than
+					// a filtered one.
+					seeded, seedErr := refreshOrphanCandidates(candidates, sanitizedName, nil)
+					candidates = seeded
+					generations = orphanGenerations(candidates, sanitizedName)
+					markedScan.err = errors.Join(markedScan.err, seedErr)
+				}
 				refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations)
 				marked, inspectErr := markedOrphanProcesses(refreshed, sanitizedName, ownHome, generations)
 				markedScan.procs = marked
-				markedScan.err = errors.Join(refreshErr, inspectErr)
+				markedScan.err = errors.Join(markedScan.err, refreshErr, inspectErr)
 			}
 			markedScan.done = true
 		}

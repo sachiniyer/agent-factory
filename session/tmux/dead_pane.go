@@ -126,6 +126,17 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 		// evidence the vanished-session sweep stands on, and the same
 		// bounded-candidate machinery the caller's scan shares with it.
 		procs, err := markedSurvivors()
+		if err == nil && !row.reaped && len(procs) == 0 {
+			// pane_dead without status, signal or death time means tmux has
+			// NOT collected the root: a root that closed its pty can still be
+			// running, and a pre-marker or marker-stripped root is invisible
+			// to the launch-marker scan — an empty scan is not proof the pane
+			// is gone. Positive attribution, or the death fields tmux fills
+			// at reap time, is the only conclusive-empty evidence a pid-less
+			// row can give (#5319 review).
+			err = fmt.Errorf("session %s dead pane reports no pid and no reap evidence, and no live process carried its launch markers",
+				sanitizedName)
+		}
 		return procs, false, err
 	}
 	_, present := snap[row.pid]
