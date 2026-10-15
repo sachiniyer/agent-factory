@@ -587,7 +587,7 @@ func TestCleanupSessionsFailsClosedOnUnownedProcessForVanishedSession(t *testing
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	err := CleanupSessions(vanishOnMarkerExecutor(t, name))
-	require.ErrorContains(t, err, "has no AF_HOME ownership marker")
+	require.ErrorContains(t, err, "has no usable AF_HOME ownership marker")
 	require.True(t, proctree.AliveSame(marked),
 		"a process with unknown home ownership must be left alone")
 }

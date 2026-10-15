@@ -448,7 +448,7 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnattributablePr
 	})
 	wrongGeneration := startStranger(t, []string{
 		EnvMarkerSession + "=" + name,
-		EnvMarkerHome + "=" + home,
+		EnvMarkerHome + "=" + t.TempDir(),
 		EnvMarkerGeneration + "=gen0",
 	})
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
@@ -518,6 +518,41 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidRefusesStrangerWithout
 		"a refused process must never be signalled")
 }
 
+// A detached survivor claiming this session's name with a present-but-empty
+// marker is malformed, not foreign: `AF_SESSION_GEN=` or `AF_HOME=` can never
+// be a launch value, so discovery admits the process and validation refuses
+// it rather than letting the scan complete empty (#5319 review). A nonempty
+// foreign generation remains the replacement shape the sweep leaves alone.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidRefusesMalformedMarkedSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	for _, tc := range []struct {
+		label string
+		env   func(name, home string) []string
+	}{
+		{"empty generation", func(n, h string) []string {
+			return []string{EnvMarkerSession + "=" + n, EnvMarkerHome + "=" + h, EnvMarkerGeneration + "="}
+		}},
+		{"empty home", func(n, h string) []string {
+			return []string{EnvMarkerSession + "=" + n, EnvMarkerHome + "=", EnvMarkerGeneration + "=gen1"}
+		}},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			name := toTmuxName("dead-pane-no-pid-malformed", "")
+			anchor := startStranger(t, markerEnv(name, home, "gen1"))
+			survivor := startStranger(t, tc.env(name, home))
+			s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+				deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
+
+			state, err := s.CloseAndWaitForPaneExit()
+			require.Error(t, err, "a %s marker on a same-name same-home process is unprovable — refuse", tc.label)
+			require.Equal(t, PaneStateUnknown, state)
+			require.True(t, proctree.AliveSame(survivor), "a refused process must never be signalled")
+		})
+	}
+}
+
 // A detached child that stripped ALL of its markers is invisible to the
 // marker scan, but while its marked parent is a kernel-attributed member the
 // ancestry refresh still reaches it — and inside the bounded candidate set an
@@ -539,6 +574,29 @@ func TestCloseAndWaitForPaneExit_HeldPaneRefusesUnmarkedChildOfMarkedMember(t *t
 		"an unmarked descendant of an attributed member must make the capture incomplete")
 	require.False(t, proctree.AliveSame(parent),
 		"the positively identified member must still be reaped alongside the refusal")
+}
+
+// The same unmarked child when its marked parent is NOT a kernel-attributed
+// member but only discovered by markers: the ancestry expansion already ran
+// on the captured set before discovery saw the parent, so without a second
+// pass the child would stay invisible while the parent is reaped (#5319
+// review).
+func TestCloseAndWaitForPaneExit_HeldPaneRefusesUnmarkedChildOfDiscoveredRoot(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-discovered-child", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	parent := startMarkedParentWithStrippedChild(t, markerEnv(name, home, "gen1"))
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unmarked descendant of a marker-discovered process must make the capture incomplete")
+	require.False(t, proctree.AliveSame(parent),
+		"the positively identified survivor must still be reaped alongside the refusal")
 }
 
 // af doctor's escaped-process check hunts exactly the processes the teardown

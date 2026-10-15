@@ -128,6 +128,37 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	}
 	marked, inspectErr := markedOrphanProcesses(refreshed, markerName, scanHome, generations, treeVerified, serverPID)
 	scanErr := errors.Join(refreshErr, inspectErr)
+	// A pane root still parented to this session's server but running under a
+	// different uid is invisible to the marker scan: its environment cannot be
+	// read, so refreshOrphanCandidates skips it and validation never sees it.
+	// With the server pid known, every direct child of that server is
+	// enumerable; one whose environment proves unreadable is unprovable —
+	// incomplete, never absent (#5319 review).
+	if serverErr == nil && serverPID > 0 {
+		fresh, snapErr := proctree.Snapshot()
+		if snapErr != nil {
+			scanErr = errors.Join(scanErr, fmt.Errorf(
+				"cannot enumerate children of tmux server %d for a pid-less dead pane: %w", serverPID, snapErr))
+		} else {
+			inSet := make(map[int]proctree.Process, len(refreshed))
+			for _, candidate := range refreshed {
+				inSet[candidate.PID] = candidate
+			}
+			for _, process := range fresh {
+				if process.PPID != serverPID {
+					continue
+				}
+				if known, exists := inSet[process.PID]; exists && known.StartID == process.StartID {
+					continue
+				}
+				if _, envErr := proctree.Environ(process.PID); envErr != nil {
+					scanErr = errors.Join(scanErr, fmt.Errorf(
+						"direct child pid %d of tmux server %d has an unreadable environment, so a pid-less dead pane's survivors cannot be fully attributed: %w",
+						process.PID, serverPID, envErr))
+				}
+			}
+		}
+	}
 	if serverErr != nil {
 		scanErr = errors.Join(scanErr, fmt.Errorf(
 			"cannot name the server owning a dead pane for self-chain verification: %w", serverErr))

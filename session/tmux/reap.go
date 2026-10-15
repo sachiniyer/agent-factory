@@ -426,8 +426,12 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			continue
 		}
 		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
-		if !hasHome {
-			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s ownership marker",
+		if !hasHome || processHome == "" {
+			// A present-but-empty home normalizes to "." — treating it as a
+			// real comparison value would classify a proven-cohort survivor as
+			// foreign and drop it silently. It is malformed like a missing
+			// marker: refuse, never skip (#5319 review).
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no usable %s ownership marker",
 				process.PID, sanitizedName, EnvMarkerHome))
 			continue
 		}
@@ -617,15 +621,24 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 	for index, process := range refreshed {
 		byPID[process.PID] = index
 	}
+	var markerFound []proctree.Process
 	for _, process := range snap {
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
 			continue
 		}
 		session, hasSession := processEnvValue(environ, EnvMarkerSession)
+		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		// A session-name match stays a candidate when its generation could
+		// belong to the cohort — or when the marker is present-but-empty. The
+		// first is the normal cohort gate; the second is a malformed stamp
+		// only validation may refuse — discovery must not launder it into
+		// invisibility. A NONEMPTY foreign generation is the replacement
+		// shape the vanished sweep deliberately leaves alone (#3309).
 		if hasSession && session == sanitizedName &&
-			(generations == nil || generations.contains(environ)) {
+			(generations == nil || generations.contains(environ) || (hasGeneration && generation == "")) {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
+			markerFound = append(markerFound, process)
 			continue
 		}
 		// A process carrying a COHORT generation while its session marker is
@@ -635,10 +648,26 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		// it. Discovery must surface it so validation can refuse it; skipping
 		// it would turn a live unproven process into an empty successful scan
 		// (#5319 review).
-		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		if hasGeneration && session != sanitizedName &&
 			generations != nil && generations.values[generation] {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
+			markerFound = append(markerFound, process)
+		}
+	}
+	// Candidates discovered by marker alone never went through the ancestry
+	// expansion refreshCapturedAncestry gives the captured set, so a detached
+	// child that stripped every marker would stay invisible while its marked
+	// parent is reaped. Expand each discovery's tree and kernel session the
+	// same way, before validation, so those members surface and refuse rather
+	// than surviving an "empty" scan (#5319 review).
+	for _, root := range markerFound {
+		if current, alive := snap[root.PID]; alive && current.StartID == root.StartID {
+			for _, descendant := range proctree.TreeOf(snap, root.PID) {
+				refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, descendant, admitRequesters)
+			}
+		}
+		for _, member := range proctree.SessionMembers(snap, root.SID) {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, member, admitRequesters)
 		}
 	}
 	return refreshed, nil
