@@ -656,6 +656,79 @@ func TestCloseAndWaitForPaneExit_HeldPaneForeignServerChildIsLeftAlone(t *testin
 		"the teardown reaped a server child another session's markers own")
 }
 
+// A session launched before AF_SESSION_GEN existed has no second attribution
+// key: a detached child that execs with AF_SESSION stripped is unselectable
+// by name AND by cohort, and once reparented away from the pane root nothing
+// can surface it — the scan must stay incomplete rather than returning a
+// successfully-empty scan that authorizes the delete (#5319 review).
+func TestCloseAndWaitForPaneExit_HeldPaneSessionWithoutGenerationRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-no-gen", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	env := map[string]string{EnvMarkerSession: name, EnvMarkerHome: home}
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExec(anchor.PID, env, "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a session with no generation marker cannot attribute pid-less survivors — refuse")
+}
+
+// The post-kill pass: a marker-attributed survivor that forks its stripped
+// child between the capture's last refresh and kill-session itself must not
+// turn into a leak reported as PaneStateKnown. The second discovery runs
+// after the session is gone, while the marked parent still lives — the
+// fork lands inside that observation window and validation refuses (#5319
+// review). The gate file is written by the mock's kill-session answer, so
+// the child provably arrives after the first pass already closed.
+func TestCloseAndWaitForPaneExit_HeldPaneChildForkedDuringKillRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-kill-fork", "")
+	anchor := startStranger(t, markerEnv(name, home, "gen1"))
+	gate := filepath.Join(t.TempDir(), "fork-on-kill")
+	parent := startMarkedParentWithGatedStrippedChild(t, markerEnv(name, home, "gen1"), gate)
+	base := deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil)
+	killed := false
+	oldRun := base.RunFunc
+	base.RunFunc = func(c *exec.Cmd) error {
+		if err := oldRun(c); err != nil {
+			return err
+		}
+		if strings.Contains(c.String(), "kill-session") {
+			killed = true
+			require.NoError(t, os.WriteFile(gate, []byte("1"), 0o600))
+		}
+		return nil
+	}
+	// A child forked after kill-session lands inside the post-kill
+	// observation window; hold one pass until it is provably in the table.
+	var once sync.Once
+	oldBarrier := graceObservationBarrier
+	graceObservationBarrier = func(string) {
+		if !killed {
+			return
+		}
+		once.Do(func() {
+			require.Eventually(t, func() bool {
+				snap, err := proctree.Snapshot()
+				return err == nil && len(proctree.TreeOf(snap, parent.PID)) > 0
+			}, 3*time.Second, 10*time.Millisecond, "the gated parent never spawned its stripped child")
+		})
+	}
+	t.Cleanup(func() { graceObservationBarrier = oldBarrier })
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t), base)
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unmarked child born after the capture's observation closed must still refuse")
+}
+
 // A marker-attributed survivor can keep forking between the capture snapshot
 // and kill-session: a static candidate set reaps the parent and leaks a child
 // born mid-window. Observing the survivors' ancestry through the bounded
@@ -894,6 +967,43 @@ func startMarkedParentWithGatedStrippedChild(t *testing.T, extraEnv []string, ga
 		_, _ = c.Process.Wait()
 	})
 	return processIdentity(t, c.Process.Pid)
+}
+
+// startMarkedParentWithDirectStrippedChild starts a marker-carrying process
+// whose ONLY child is the stripped sleeper — `& exec` leaves no marked
+// intermediate subshell, so the child is attributable solely through the
+// parent's ancestry. That is the shape a tracked teardown requester takes
+// when its auto-started daemon scrubbed every marker (#5319 review).
+func startMarkedParentWithDirectStrippedChild(t *testing.T, extraEnv []string) (parent, child proctree.Process) {
+	t.Helper()
+	c := exec.Command("sh", "-c",
+		"env -u "+EnvMarkerSession+" -u "+EnvMarkerHome+" -u "+EnvMarkerGeneration+" sleep 300 & exec sleep 300")
+	c.Env = append(os.Environ(), extraEnv...)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Start())
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+	})
+	parent = processIdentity(t, c.Process.Pid)
+	require.Eventually(t, func() bool {
+		snap, err := proctree.Snapshot()
+		if err != nil {
+			return false
+		}
+		for _, descendant := range proctree.TreeOf(snap, parent.PID) {
+			environ, envErr := proctree.Environ(descendant.PID)
+			if envErr != nil {
+				continue
+			}
+			if _, marked := processEnvValue(environ, EnvMarkerSession); !marked {
+				child = descendant
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 20*time.Millisecond, "the marked parent never spawned its stripped descendant")
+	return parent, child
 }
 
 // startEnvlessStranger starts a process with an empty environment — the

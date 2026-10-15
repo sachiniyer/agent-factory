@@ -97,7 +97,8 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // or a concrete finding, the way the package already treats an unreadable
 // process table or session list.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
-	return captureSessionProcessTrees(cmdExec, sanitizedName, true)
+	procs, _, err := captureSessionProcessTrees(cmdExec, sanitizedName, true)
+	return procs, err
 }
 
 // CaptureVerifiedSessionProcessTrees is the diagnostic variant of
@@ -109,17 +110,18 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 // `af doctor`'s escaped-process check read attribution as membership and the
 // finding it exists to report would never fire.
 func CaptureVerifiedSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
-	return captureSessionProcessTrees(cmdExec, sanitizedName, false)
+	procs, _, err := captureSessionProcessTrees(cmdExec, sanitizedName, false)
+	return procs, err
 }
 
-func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, mergeMarked bool) ([]proctree.Process, error) {
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, mergeMarked bool) ([]proctree.Process, *deadPaneSurvivorScan, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
 		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+			return nil, nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 		}
 		// tmux ANSWERED that the session is not there. Marked with a sentinel
 		// rather than returned as a plain failure, because whether it is a
@@ -141,13 +143,13 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		// the session listing, because that answer names nothing to match on
 		// (#3469).
 		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName) {
-			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
+			return nil, nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
-		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
+		return nil, nil, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
+		return nil, nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
 	}
 	byPID := make(map[int]int)
 	var procs []proctree.Process
@@ -175,17 +177,17 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 	// self-chain — rather than a second scanner with its own answers. It runs
 	// once per capture, not once per pid-less pane.
 	var markedScan struct {
-		procs []proctree.Process
-		err   error
-		done  bool
+		scan *deadPaneSurvivorScan
+		err  error
+		done bool
 	}
-	scanMarkedSurvivors := func(row paneRow) ([]proctree.Process, error) {
+	scanMarkedSurvivors := func(row paneRow) (*deadPaneSurvivorScan, error) {
 		if !markedScan.done {
-			markedScan.procs, markedScan.err =
+			markedScan.scan, markedScan.err =
 				markedDeadPaneSurvivors(cmdExec, snap, sanitizedName, row, procs, !mergeMarked)
 			markedScan.done = true
 		}
-		return markedScan.procs, markedScan.err
+		return markedScan.scan, markedScan.err
 	}
 	var deferred []string
 	for _, field := range strings.Fields(string(out)) {
@@ -261,7 +263,7 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 			continue
 		}
 	}
-	return procs, errors.Join(captureErrs...)
+	return procs, markedScan.scan, errors.Join(captureErrs...)
 }
 
 // markedOrphanProcesses filters a previously captured pane process tree down to
@@ -638,12 +640,13 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		if hasSession && session == sanitizedName &&
 			(generations == nil || generations.contains(environ) || (hasGeneration && generation == "")) {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
-			// Expand only roots that were actually admitted — a tracked
-			// requester skipped by addOrReplaceOrphanCandidate must not pull
-			// its descendants in through the back door (the marker-scrubbed
-			// daemon child of an auto-start client would read as an unmarked
-			// candidate and turn a valid self-teardown into a refusal).
-			if _, admitted := byPID[process.PID]; admitted {
+			// Expand only roots that were actually admitted — and never a
+			// tracked requester, admitted or not. Its descendants are
+			// client-side processes (the marker-scrubbed daemon an auto-start
+			// client leaves behind), not teardown survivors; pulling them in
+			// turns a valid self-teardown into an incomplete-capture refusal
+			// (#5319 review).
+			if _, admitted := byPID[process.PID]; admitted && !isTeardownRequester(process) {
 				markerFound = append(markerFound, process)
 			}
 			continue
@@ -658,7 +661,7 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		if hasGeneration && session != sanitizedName &&
 			generations != nil && generations.values[generation] {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
-			if _, admitted := byPID[process.PID]; admitted {
+			if _, admitted := byPID[process.PID]; admitted && !isTeardownRequester(process) {
 				markerFound = append(markerFound, process)
 			}
 		}
@@ -799,6 +802,30 @@ func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]in
 	}
 	byPID[process.PID] = len(candidates)
 	return append(candidates, process)
+}
+
+// mergeProcessIdentities unions two process sets by PID, replacing an entry
+// when the newer set carries a different StartID — the same identity-not-slot
+// rule addOrReplaceOrphanCandidate applies (#5319).
+func mergeProcessIdentities(base, extra []proctree.Process) []proctree.Process {
+	if len(extra) == 0 {
+		return base
+	}
+	byPID := make(map[int]int, len(base))
+	for index, process := range base {
+		byPID[process.PID] = index
+	}
+	for _, process := range extra {
+		if index, exists := byPID[process.PID]; exists {
+			if base[index].StartID != process.StartID {
+				base[index] = process
+			}
+			continue
+		}
+		byPID[process.PID] = len(base)
+		base = append(base, process)
+	}
+	return base
 }
 
 func processEnvValue(environ []string, name string) (string, bool) {

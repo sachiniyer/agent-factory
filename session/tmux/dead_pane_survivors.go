@@ -22,8 +22,7 @@ import (
 // incarnation id the row carries so a same-named replacement can never lend
 // its stamp (#5319). The second read is what lets a session holding ONLY dead
 // panes — no members left to seed the cohort — still attribute its detached
-// survivors. A session with no generation marker falls back to the sweep's
-// legacy cohort, matching only marker-less-generation candidates.
+// survivors.
 //
 // The ownership home is likewise the SESSION's stamped AF_HOME when it
 // carries one — af doctor runs this capture against sessions another home
@@ -31,13 +30,48 @@ import (
 // exactly the processes the check exists to measure. Only an unmarked
 // session falls back to the invoking home.
 //
+// A session with NO generation marker gets no legacy fallback here: unlike
+// the sweep — which still holds the vanished session's captured members to
+// compare against — this path may attribute a whole cohort to nothing. A
+// detached child that stripped AF_SESSION is then unselectable by name and
+// by cohort, so an empty successful scan would still authorize the delete
+// (#5319 review).
+//
+// deadPaneSurvivorScan is the residue one marker attribution leaves behind:
+// the validated survivors plus every input the post-kill pass needs to repeat
+// the discovery without asking tmux — the session's own markers are gone by
+// then, so the cohort, name, home and server pid ride along (#5319 review).
+type deadPaneSurvivorScan struct {
+	procs        []proctree.Process
+	candidates   []proctree.Process
+	markerName   string
+	generations  orphanGenerationSet
+	scanHome     string
+	serverPID    int
+	treeVerified map[int]bool
+}
+
+// secondPass repeats discovery after kill-session, while the marked parents
+// are still alive to be expanded from: a child a marker-attributed survivor
+// forked between the last capture refresh and the kill — during validation,
+// the server-child audit, or the kill itself — lands here while its PPID link
+// still exists. It mirrors the vanished sweep's second refresh/validate pass;
+// the caller merges the additions into the reap set and joins any refusal
+// into the capture error (#5319 review).
+func (s *deadPaneSurvivorScan) secondPass(name string) ([]proctree.Process, error) {
+	observed, observeErr := observeOrphanAncestryObserved(s.candidates, name, reapGraceWait)
+	refreshed, refreshErr := refreshOrphanCandidates(observed, s.markerName, &s.generations, true)
+	marked, inspectErr := markedOrphanProcesses(refreshed, s.markerName, s.scanHome, s.generations, s.treeVerified, s.serverPID)
+	return marked, errors.Join(observeErr, refreshErr, inspectErr)
+}
+
 // admitRequesters is true because this capture feeds reapSessionProcesses
 // directly: a marked survivor that is itself the teardown requester must stay
 // in the set so SignalUnlessTracked can exempt it per signal tier and reap it
 // once the exemption lapses — dropping it at discovery would leak it forever.
 func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process,
 	sanitizedName string, row paneRow, captured []proctree.Process, verifiedOnly bool,
-) ([]proctree.Process, error) {
+) (*deadPaneSurvivorScan, error) {
 	target := row.sessionID
 	if target == "" {
 		target = exactTarget(sanitizedName)
@@ -84,7 +118,14 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	case genFound:
 		generations.values[generation] = true
 	default:
-		generations.legacy = true
+		// A session launched before AF_SESSION_GEN existed has no second
+		// attribution key: a detached child that execs with AF_SESSION
+		// stripped is then unselectable by name AND by cohort — reparented
+		// away from the pane root it is invisible to every check here, so an
+		// empty successful scan would still authorize the delete (#5319
+		// review).
+		return nil, fmt.Errorf("session %s carries no %s marker, so a pid-less dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerGeneration)
 	}
 	scanHome, homeFound, homeErr := sessionEnvMarkerAt(cmdExec, target, EnvMarkerHome)
 	switch {
@@ -161,8 +202,13 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 		scanErr = errors.Join(scanErr, fmt.Errorf(
 			"cannot name the server owning a dead pane for self-chain verification: %w", serverErr))
 	}
+	scan := &deadPaneSurvivorScan{
+		candidates: refreshed, markerName: markerName, generations: generations,
+		scanHome: scanHome, serverPID: serverPID, treeVerified: treeVerified,
+	}
 	if !verifiedOnly {
-		return marked, scanErr
+		scan.procs = marked
+		return scan, scanErr
 	}
 	if serverErr != nil {
 		return nil, scanErr
@@ -193,7 +239,8 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 			add(member)
 		}
 	}
-	return verified, scanErr
+	scan.procs = verified
+	return scan, scanErr
 }
 
 // auditServerChildren accounts for every direct child of this session's tmux

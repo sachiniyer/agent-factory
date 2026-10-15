@@ -162,17 +162,18 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	leaked, deadScan, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, true)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
 	// daemon.KillSession forever behind its kills-in-flight guard, leaving the
 	// session undeletable until the daemon restarts.
-	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
+	killErr := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName))
+	if killErr != nil {
 		switch {
 		case r.unknown:
 			// r.tmux already wrapped this as ErrTmuxTimeout.
-			errs = append(errs, err)
+			errs = append(errs, killErr)
 			// The deadline tripped, so the session's real state is UNKNOWN. Do NOT
 			// probe has-session: it would spawn another tmux command against the same
 			// wedged server and hang identically, defeating the bound we just came
@@ -188,10 +189,10 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 			exists, ok := r.probe()
 			switch {
 			case !ok:
-				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
+				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, killErr))
 				leaked = nil
 			case exists:
-				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
+				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", killErr), ErrSessionStillAlive))
 				// tmux refused the teardown and answered that the session is live, so
 				// no af request describes it any more — provided the live session is
 				// the generation the monitor polls; a replacement behind the name
@@ -215,6 +216,21 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				leaked = nil
 			}
 		}
+	}
+
+	// A marker-attributed survivor of a pid-less dead pane can keep forking
+	// until it is signalled: a child born between the capture's last refresh
+	// and the kill — during validation, the server-child audit, or the kill
+	// itself — is not in the static set. With the session now gone, repeat
+	// the discovery while those parents still live so the addition either
+	// reaps with the rest or refuses the capture rather than leaking into a
+	// PaneStateKnown verdict (#5319 review).
+	if killErr == nil && deadScan != nil {
+		var sweepErr error
+		var extra []proctree.Process
+		extra, sweepErr = deadScan.secondPass(t.sanitizedName)
+		leaked = mergeProcessIdentities(leaked, extra)
+		captureErr = errors.Join(captureErr, sweepErr)
 	}
 
 	// The process that asked for this teardown is still blocked on its reply
