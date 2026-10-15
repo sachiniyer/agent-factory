@@ -608,6 +608,31 @@ func TestCloseAndWaitForPaneExit_DeadPaneNoPidWithoutSessionMarkerRefuses(t *tes
 		"a session carrying no AF_SESSION marker cannot prove a pid-less dead pane has no survivors")
 }
 
+// A marker present-but-empty (`AF_SESSION=` after set-environment clears it)
+// is worse than absent: it is a key that matches nothing while every survivor
+// still carries its nonempty launch stamp — an empty successful scan hiding
+// live processes. The session, generation, and home stamps each refuse it
+// (#5319 review).
+func TestCloseAndWaitForPaneExit_DeadPaneNoPidWithAnEmptyMarkerRefuses(t *testing.T) {
+	for _, emptied := range []string{EnvMarkerSession, EnvMarkerGeneration, EnvMarkerHome} {
+		t.Run(emptied, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			name := toTmuxName("dead-pane-no-pid-empty-marker", "")
+			anchor := startStranger(t, nil)
+			env := sessionMarkerMap(name, home, "gen1")
+			env[emptied] = ""
+			s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+				deadPaneCohortExec(anchor.PID, env, "3", "", "1726000000", nil))
+
+			state, err := s.CloseAndWaitForPaneExit()
+			require.Error(t, err)
+			require.Equal(t, PaneStateUnknown, state,
+				"a session carrying an empty %s marker cannot prove a pid-less dead pane has no survivors", emptied)
+		})
+	}
+}
+
 // The session id is a per-server counter: a server restart can reissue it to a
 // different session. If the incarnation the row observed is gone, the markers
 // a scan would read belong to a stranger and teardown must refuse (#5319).

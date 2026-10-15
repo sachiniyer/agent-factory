@@ -84,10 +84,18 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 		generations.legacy = true
 	}
 	scanHome, homeFound, homeErr := sessionEnvMarkerAt(cmdExec, target, EnvMarkerHome)
-	if homeErr != nil {
+	switch {
+	case homeErr != nil:
 		return nil, fmt.Errorf("cannot read the home of the session owning a pid-less dead pane: %w", homeErr)
-	}
-	if !homeFound {
+	case homeFound && scanHome == "":
+		// A present-but-empty home (`AF_HOME=` after set-environment clears
+		// it) normalizes to "." and marks every survivor carrying the
+		// session's absolute launch home as foreign — the third
+		// empty-successful-scan shape, malformed rather than empty (#5319
+		// review).
+		return nil, fmt.Errorf("session %s carries an empty %s marker, so a pid-less dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerHome)
+	case !homeFound:
 		var ownErr error
 		scanHome, ownErr = afHomeDir()
 		if ownErr != nil {
