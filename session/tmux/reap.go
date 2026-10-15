@@ -151,7 +151,7 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
-			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row)
+			survivors, asLive, err := deadPaneProcesses(cmdExec, snap, sanitizedName, row)
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
@@ -434,26 +434,45 @@ func (g orphanGenerationSet) empty() bool {
 // kernel-side keys are gone — a dead pane tmux reports no pid for (tmux ≥ 3.8,
 // #5319). With the pid goes the pane's kernel session id, which is what the
 // detached-survivor lookup above is keyed on, so what remains is the launch
-// provenance af stamps into every pane it spawns (#1104): a process still
-// carrying this session's AF_SESSION marker AND this home's AF_HOME marker
-// provably came from it — the same evidence the vanished-session sweep stands
-// on, used here while the session still exists. A process whose environment
-// cannot be read is not evidence of membership, so it is skipped rather than
-// blocking the capture.
-func markedSessionSurvivors(snap map[int]proctree.Process, sanitizedName string) []proctree.Process {
-	home, err := afHomeDir()
-	if err != nil {
-		log.InfoLog.Printf("tmux session %s: cannot attribute a dead pane's survivors without resolving this home: %v",
-			sanitizedName, err)
-		return nil
+// provenance af stamps into every pane it spawns (#1104).
+//
+// The provenance bar is read from the SESSION's own environment, not the
+// invoker's: af doctor maps every visible session on the server, including
+// ones another agent-factory home owns, so a candidate must carry this
+// session's AF_SESSION name, this session's AF_HOME, and — when the session
+// reports a generation — this session's AF_SESSION_GEN. A process carrying
+// all three provably came from this session: the same bar the vanished-session
+// sweep stands on. A same-named process of a different generation is a
+// leftover of an earlier incarnation, never this session's to claim. A process
+// whose environment cannot be read is not evidence of membership and is
+// skipped.
+//
+// A session that carries no launch markers at all predates the contract, so a
+// scan that finds nothing there proves nothing about its survivors: that is an
+// incomplete capture — reported as an error — not an empty one.
+func markedSessionSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process, sanitizedName string) ([]proctree.Process, error) {
+	if _, sessionMarked, err := sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerSession); err != nil {
+		return nil, err
+	} else if !sessionMarked {
+		return nil, fmt.Errorf("tmux session %s carries no %s launch marker, so a dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerSession)
 	}
-	cleanHome := filepath.Clean(home)
+	sessionHome, homePresent, err := sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome)
+	if err != nil {
+		return nil, err
+	}
+	if !homePresent {
+		return nil, fmt.Errorf("tmux session %s carries no %s launch marker, so a dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerHome)
+	}
+	sessionGeneration, _, err := sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
+	if err != nil {
+		return nil, err
+	}
+	cleanHome := filepath.Clean(sessionHome)
 	selfUID, selfUIDKnown := proctree.UID(os.Getpid())
 	var procs []proctree.Process
 	for _, process := range snap {
-		if isTeardownRequester(process) {
-			continue
-		}
 		if uid, known := proctree.UID(process.PID); !known || !selfUIDKnown || uid != selfUID {
 			continue
 		}
@@ -469,9 +488,16 @@ func markedSessionSurvivors(snap map[int]proctree.Process, sanitizedName string)
 		if !ok || filepath.Clean(processHome) != cleanHome {
 			continue
 		}
+		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		switch {
+		case sessionGeneration != "" && generation != sessionGeneration:
+			continue
+		case sessionGeneration == "" && hasGeneration:
+			continue
+		}
 		procs = append(procs, process)
 	}
-	return procs
+	return procs, nil
 }
 
 // refreshOrphanCandidates closes the capture-to-marker TOCTOU window. A pane

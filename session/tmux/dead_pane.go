@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -76,12 +77,14 @@ func parsePaneRow(field string) (paneRow, error) {
 	switch {
 	case err == nil:
 		row.pid = pid
-	case row.dead:
+	case row.dead && strings.TrimSpace(parts[0]) == "":
 		// A held dead pane has no live root for a pid to name — the pid tmux
 		// used to report already belonged to a dead process — so a pid tmux
 		// does not report is absence, not an unreadable answer (#5319). The
 		// pane's detached survivors, if any, are attributed by their launch
-		// markers instead: see deadPaneProcesses.
+		// markers instead: see deadPaneProcesses. Only the EMPTY field is
+		// exempt: a non-empty pid that cannot be read is malformed output,
+		// not a shape tmux reports, and stays an error.
 	default:
 		// A pane tmux does NOT report dead may have a live root, and a pid it
 		// cannot read leaves that root unverifiable. That stays a parse error:
@@ -99,15 +102,18 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow) (procs []proctree.Process, asLive bool, err error) {
+func deadPaneProcesses(cmdExec cmd.Executor, snap map[int]proctree.Process, sanitizedName string, row paneRow) (procs []proctree.Process, asLive bool, err error) {
 	if row.pid <= 0 {
 		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
 		// (#5319), and without the pid there is no kernel session key to look
 		// survivors up by. What remains is the launch provenance af stamps
 		// into every pane it spawns: the AF_SESSION/AF_HOME markers a process
 		// still carries are proof it came from this session — the same
-		// evidence the vanished-session sweep stands on.
-		return markedSessionSurvivors(snap, sanitizedName), false, nil
+		// evidence the vanished-session sweep stands on. When the session
+		// itself carries no markers, a scan that finds nothing proves nothing
+		// about survivors: that is an incomplete capture, not an empty one.
+		procs, err := markedSessionSurvivors(cmdExec, snap, sanitizedName)
+		return procs, false, err
 	}
 	_, present := snap[row.pid]
 	switch {

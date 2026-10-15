@@ -251,6 +251,26 @@ func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_t
 	}
 }
 
+// paneEnvExec extends paneRowExec with a session-environment answer for the
+// no-pid dead pane's marker attribution: show-environment reports the markers
+// a marker-launched session carries, and tmux's `-VAR` absent form for any
+// marker the session lacks.
+func paneEnvExec(pid, dead, status, signal, deadTime string, env map[string]string, killed *bool) cmd_test.MockCmdExec {
+	base := paneRowExec(pid, dead, status, signal, deadTime, killed)
+	inner := base.OutputFunc
+	base.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
+		if strings.Contains(c.String(), "show-environment") {
+			marker := c.Args[len(c.Args)-1]
+			if v, ok := env[marker]; ok {
+				return []byte(marker + "=" + v + "\n"), nil
+			}
+			return []byte("-" + marker + "\n"), nil
+		}
+		return inner(c)
+	}
+	return base
+}
+
 // The mock form of the defect: a held dead pane reports a pid that is absent
 // from the process table. Refusing it made a finished process tab impossible to
 // archive or kill.
@@ -313,9 +333,11 @@ func TestParsePaneRow_DeadPaneWithNoReportedPid(t *testing.T) {
 
 // The #2962 guard's other half: a pane tmux does NOT report dead may have a
 // live root, and a pid it cannot read leaves that root unverifiable — so the
-// row must still be a parse error, empty pid or garbage alike.
+// row must still be a parse error, empty pid or garbage alike. The same holds
+// for a dead row carrying a corrupt pid: only the truly empty field is
+// absence.
 func TestParsePaneRow_LivePaneWithNoReportedPidErrors(t *testing.T) {
-	for _, field := range []string{"|0|", "|0|3", "garbage|0|", "content"} {
+	for _, field := range []string{"|0|", "|0|3", "garbage|0|", "garbage|1|7", "content"} {
 		_, err := parsePaneRow(field)
 		require.Error(t, err, "a non-dead pane row with an unreadable pid must stay an error: %q", field)
 	}
@@ -325,9 +347,13 @@ func TestParsePaneRow_LivePaneWithNoReportedPidErrors(t *testing.T) {
 // The teardown must still be conclusive — the pane is dead, so there is no
 // live root whose identity could not be established.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidIsConclusive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid", "")
 	killed := false
-	s := newTmuxSession(toTmuxName("dead-pane-no-pid", ""), "sh", NewMockPtyFactory(t),
-		paneRowExec("", "1", "7", "", "1726000000", &killed))
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "7", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}, &killed))
 
 	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
@@ -337,7 +363,8 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidIsConclusive(t *testin
 
 // With no pid there is no kernel session key to look the pane's detached
 // survivors up by, so the capture attributes them by the launch markers every
-// af pane passes to everything it spawns (#5319, #1104).
+// af pane passes to everything it spawns (#5319, #1104): the session's own
+// AF_SESSION name, AF_HOME and AF_SESSION_GEN.
 func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor(t *testing.T) {
 	shrinkReapWaits(t)
 	home := t.TempDir()
@@ -346,9 +373,11 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor
 	survivor := startStranger(t, []string{
 		EnvMarkerSession + "=" + name,
 		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=gen1",
 	})
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
-		paneRowExec("", "1", "3", "", "1726000000", nil))
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}, nil))
 
 	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
@@ -357,18 +386,72 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor
 		"a marked survivor of a pane tmux reports no pid for survived the teardown")
 }
 
-// An unmarked process is not evidence of membership: the no-pid dead pane's
-// marker scan must leave every process it cannot attribute alone.
-func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnmarkedProcesses(t *testing.T) {
+// Processes the scan cannot attribute are not evidence of membership: an
+// unmarked one, one from another home, and one from another generation of the
+// same name are all left alone.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnattributableProcesses(t *testing.T) {
 	shrinkReapWaits(t)
-	stranger := startStranger(t, nil)
-	s := newTmuxSession(toTmuxName("dead-pane-no-pid-unmarked", ""), "sh", NewMockPtyFactory(t),
-		paneRowExec("", "1", "3", "", "1726000000", nil))
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-unmarked", "")
+	unmarked := startStranger(t, nil)
+	wrongHome := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + t.TempDir(),
+		EnvMarkerGeneration + "=gen1",
+	})
+	wrongGeneration := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=gen0",
+	})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}, nil))
 
 	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
-	require.True(t, proctree.AliveSame(stranger), "the teardown reaped a process it could not attribute")
+	require.True(t, proctree.AliveSame(unmarked), "the teardown reaped an unmarked process")
+	require.True(t, proctree.AliveSame(wrongHome), "the teardown reaped another home's process")
+	require.True(t, proctree.AliveSame(wrongGeneration), "the teardown reaped another generation's process")
+}
+
+// af doctor maps every visible session on the server, including sessions a
+// different agent-factory home owns: the fallback matches the SESSION's
+// stamped AF_HOME, never the invoker's own.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidScopesMarkersToSessionHome(t *testing.T) {
+	shrinkReapWaits(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	foreignHome := t.TempDir()
+	name := toTmuxName("dead-pane-no-pid-foreign", "")
+	survivor := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + foreignHome,
+		EnvMarkerGeneration + "=gen1",
+	})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000",
+			map[string]string{EnvMarkerSession: name, EnvMarkerHome: foreignHome, EnvMarkerGeneration: "gen1"}, nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.False(t, proctree.AliveSame(survivor),
+		"a survivor marked with the session's own home escaped attribution")
+}
+
+// A session launched before the marker contract exists carries no launch
+// markers at all, so a scan that finds nothing proves nothing about its
+// survivors: the capture is incomplete, and the teardown must refuse.
+func TestCloseAndWaitForPaneExit_UnmarkedDeadPaneWithNoReportedPidRefuses(t *testing.T) {
+	s := newTmuxSession(toTmuxName("dead-pane-no-pid-unmarked-session", ""), "sh", NewMockPtyFactory(t),
+		paneEnvExec("", "1", "3", "", "1726000000", nil, nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unmarked session's survivors cannot be attributed, so the capture is incomplete")
 }
 
 // A pane tmux does NOT report dead whose pid cannot be read is the opposite
