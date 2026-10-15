@@ -881,9 +881,11 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	inst := startNaming(t, h, "demo")
 	// Model the launch-fixed state honestly: the form opens with the pinned
 	// program seeded into the field (startNaming's generic "claude" seed is
-	// the config-following shape, which this case is not).
+	// the config-following shape, which this case is not). The user stays on
+	// the failed instance so the refusal re-arms the form inline.
 	h.pendingProgram = tmux.ProgramGemini
 	inst.Program = tmux.ProgramGemini
+	h.sidebar.SelectInstance(inst)
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, tmux.ProgramGemini, captured.Program,
 		"the launch-fixed program goes out concretely")
