@@ -622,8 +622,22 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		if envErr != nil {
 			continue
 		}
-		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName &&
+		session, hasSession := processEnvValue(environ, EnvMarkerSession)
+		if hasSession && session == sanitizedName &&
 			(generations == nil || generations.contains(environ)) {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
+			continue
+		}
+		// A process carrying a COHORT generation while its session marker is
+		// absent or names another session is a partially-marked possible
+		// survivor — the shape a child takes when it strips AF_SESSION (the
+		// spawnSessionWaitingToStartUnmarkedHelper fixture) or never received
+		// it. Discovery must surface it so validation can refuse it; skipping
+		// it would turn a live unproven process into an empty successful scan
+		// (#5319 review).
+		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		if hasGeneration && session != sanitizedName &&
+			generations != nil && generations.values[generation] {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
 		}
 	}

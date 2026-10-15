@@ -497,10 +497,10 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUninspectableOrp
 }
 
 // The `env -u AF_SESSION` survivor: its environment is readable and it still
-// carries the generation stamp, but the discovery scan keys on AF_SESSION —
-// without it the process is never a candidate, and no kernel-attributed link
-// exists to find it through. It is left alone (#5319).
-func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesStrangerWithoutSessionMarker(t *testing.T) {
+// carries the cohort's generation stamp, so discovery admits it and validation
+// refuses on the missing name marker — a live process the capture cannot
+// prove is a stranger, not a gap the teardown may step over (#5319 review).
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidRefusesStrangerWithoutSessionMarker(t *testing.T) {
 	shrinkReapWaits(t)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -511,10 +511,11 @@ func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesStrangerWithoutS
 		deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil))
 
 	state, err := s.CloseAndWaitForPaneExit()
-	require.NoError(t, err)
-	require.Equal(t, PaneStateKnown, state)
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a readable survivor holding the cohort generation but no session marker is unprovable — refuse")
 	require.True(t, proctree.AliveSame(stripped),
-		"a process the marker scan cannot key on must be left alone")
+		"a refused process must never be signalled")
 }
 
 // A detached child that stripped ALL of its markers is invisible to the

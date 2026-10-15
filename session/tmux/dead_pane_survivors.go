@@ -71,6 +71,13 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	switch {
 	case genErr != nil:
 		return nil, fmt.Errorf("cannot read the generation of the session owning a pid-less dead pane: %w", genErr)
+	case genFound && generation == "":
+		// A present-but-empty generation seeds a cohort that matches no
+		// launch stamp: survivors keep their nonempty generation and the
+		// discovery rejects every one of them — another empty-successful-scan
+		// shape, malformed rather than empty (#5319 review).
+		return nil, fmt.Errorf("session %s carries an empty %s marker, so a pid-less dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerGeneration)
 	case genFound:
 		generations.values[generation] = true
 	default:
