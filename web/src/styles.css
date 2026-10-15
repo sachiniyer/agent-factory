@@ -3210,16 +3210,25 @@ button:disabled,
 /* The Explain affordance (#4803): the key itself is the disclosure trigger, so
  * a closed row carries no trace chrome at all — the most repeated control on
  * the page stays the quietest. The trigger is a button reset to the key's own
- * monospace text; only the muted caret marks it as expandable. It keeps the
+ * box metrics; only the muted caret marks it as expandable. It keeps the
  * label column narrow (align-self) rather than spanning it, so a click in the
  * dead space right of the name cannot surprise-toggle the trace. The open
  * trace panel spans both columns like the write echo — a candidate list is
- * prose, not a control. */
-.af-config-explain-trigger {
+ * prose, not a control.
+ *
+ * The .af-config scope outranks the shared button recipes
+ * (:is(.af-appbar, .af-rail, .af-main-term) button and the global control
+ * floor): without it the trigger inherits the touch-target min-height and a
+ * closed row grows ~22px. */
+.af-config .af-config-explain-trigger {
   align-self: flex-start;
+  appearance: none;
+  min-height: 0;
+  margin: 0;
   padding: 0;
   background: none;
   border: none;
+  line-height: inherit;
   cursor: pointer;
   text-align: left;
 }

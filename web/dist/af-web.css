@@ -2481,11 +2481,15 @@ button:disabled,
   border-radius: var(--af-radius-control);
   padding: var(--af-space-1) var(--af-space-2);
 }
-.af-config-explain-trigger {
+.af-config .af-config-explain-trigger {
   align-self: flex-start;
+  appearance: none;
+  min-height: 0;
+  margin: 0;
   padding: 0;
   background: none;
   border: none;
+  line-height: inherit;
   cursor: pointer;
   text-align: left;
 }
