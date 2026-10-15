@@ -324,6 +324,12 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 	// these repos carries live truth the stale row lacks, so the dedupe below
 	// grafts the identity across rather than hiding the session row.
 	staleRegistryRepoIDs := make(map[string]int, len(old))
+	// Roots claimed by rows that carry only session provenance. A fresh
+	// REGISTRY row colliding on one of these is a different repo's
+	// registration at a path the old session list still describes — registry
+	// truth must land beside the last-known session row rather than be
+	// dropped behind it (#4888 review).
+	sessionRoots := make(map[string]bool, len(old))
 	for _, row := range old {
 		if row.RegistryID == "" {
 			// A session-derived row: the snapshot read that produced it never
@@ -332,6 +338,7 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			seenRepoIDs[row.RepoID] = true
 			seenRoots[row.Root] = true
 			sessionRepoIDs[row.RepoID] = true
+			sessionRoots[row.Root] = true
 			continue
 		}
 		if fresh, ok := freshByRegistryID[row.RegistryID]; ok {
@@ -356,6 +363,7 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 					seenRepoIDs[sessionRow.RepoID] = true
 					seenRoots[sessionRow.Root] = true
 					sessionRepoIDs[sessionRow.RepoID] = true
+					sessionRoots[sessionRow.Root] = true
 				}
 				merged = append(merged, fresh)
 				seenRepoIDs[fresh.RepoID] = true
@@ -398,6 +406,7 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			seenRepoIDs[sessionRow.RepoID] = true
 			seenRoots[sessionRow.Root] = true
 			sessionRepoIDs[sessionRow.RepoID] = true
+			sessionRoots[sessionRow.Root] = true
 		}
 	}
 	// Registry-side rows with no counterpart in the old list — a registration
@@ -445,14 +454,27 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 					// (#4888 review).
 					merged = append(merged, row)
 					seenRepoIDs[row.RepoID] = true
+					sessionRoots[row.Root] = true
 					continue
 				}
+			}
+			// The mirror image: a fresh REGISTRY row — authoritative even in
+			// a degraded merge, since it came from the read that DID answer —
+			// colliding on root alone with session-derived rows must still
+			// land. Dropping it would leave the stale session row naming a
+			// repo the path no longer hosts (#4888 review).
+			if row.RegistryID != "" && !seenRepoIDs[row.RepoID] && sessionRoots[row.Root] {
+				merged = append(merged, row)
+				seenRepoIDs[row.RepoID] = true
 			}
 			continue
 		}
 		merged = append(merged, row)
 		seenRepoIDs[row.RepoID] = true
 		seenRoots[row.Root] = true
+		if row.RegistryID == "" {
+			sessionRoots[row.Root] = true
+		}
 	}
 	return coalesceReboundRows(merged)
 }
