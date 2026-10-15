@@ -46,13 +46,16 @@ const paneFieldSeparator = "|"
 
 // paneRowFormat is what the teardown asks list-panes and display-message for.
 // The third field concatenates every value tmux reports only after reaping the
-// root, so it is non-empty exactly when the root is known to be gone.
+// root, so it is non-empty exactly when the root is known to be gone. The
+// fourth carries the session's concrete incarnation id, so the no-pid dead
+// pane's marker reads can be bound to the session list-panes observed rather
+// than whatever a reused name resolves to afterwards.
 //
 // A reply without the separator is a bare pane_pid, which is what a tmux that
 // cannot expand the later fields, or a test executor, returns. It reads as a
 // live pane, the behaviour from before #4479.
 const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + paneFieldSeparator +
-	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}"
+	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{session_id}"
 
 // paneRow is one pane of a list-panes or display-message reply.
 type paneRow struct {
@@ -67,6 +70,9 @@ type paneRow struct {
 	// a numeric sentinel like `0|1|7` or `1|1|7` is malformed output, not the
 	// shape being accommodated.
 	pidAbsent bool
+	// sessionID: the $id of the session incarnation list-panes observed —
+	// stable across a same-named replacement in a way the name is not.
+	sessionID string
 }
 
 func parsePaneRow(field string) (paneRow, error) {
@@ -77,6 +83,9 @@ func parsePaneRow(field string) (paneRow, error) {
 	}
 	if len(parts) > 2 {
 		row.reaped = row.dead && strings.TrimSpace(parts[2]) != ""
+	}
+	if len(parts) > 3 {
+		row.sessionID = strings.TrimSpace(parts[3])
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 	switch {
@@ -108,7 +117,7 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func() ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func(paneRow) ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
 	if row.pidAbsent {
 		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
 		// (#5319), and without the pid there is no kernel session key to look
@@ -118,7 +127,7 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 		// evidence the vanished-session sweep stands on. When the session
 		// itself carries no markers, a scan that finds nothing proves nothing
 		// about survivors: that is an incomplete capture, not an empty one.
-		procs, err := markedSurvivors()
+		procs, err := markedSurvivors(row)
 		return procs, false, err
 	}
 	_, present := snap[row.pid]
