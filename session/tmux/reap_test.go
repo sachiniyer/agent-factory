@@ -598,7 +598,7 @@ func TestAddOrReplaceOrphanCandidateReplacesRecycledPID(t *testing.T) {
 	candidates := []proctree.Process{stale}
 	byPID := map[int]int{stale.PID: 0}
 
-	candidates = addOrReplaceOrphanCandidate(candidates, byPID, current)
+	candidates = addOrReplaceOrphanCandidate(candidates, byPID, current, false)
 
 	require.Equal(t, []proctree.Process{current}, candidates,
 		"a current marked process must replace a stale identity that reused its PID")

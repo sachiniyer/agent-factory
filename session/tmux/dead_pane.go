@@ -116,7 +116,7 @@ func parsePaneRow(field string) (paneRow, error) {
 // processes that outlived a root that is gone. A nil procs with asLive false
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func() ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markedSurvivors func(paneRow) ([]proctree.Process, error)) (procs []proctree.Process, asLive bool, err error) {
 	if row.pidAbsent {
 		// tmux ≥ 3.8 reports no pane_pid once a pane's terminal is gone
 		// (#5319), and without the pid there is no kernel session key to look
@@ -125,7 +125,7 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 		// still carries are proof it came from this session — the same
 		// evidence the vanished-session sweep stands on, and the same
 		// bounded-candidate machinery the caller's scan shares with it.
-		procs, err := markedSurvivors()
+		procs, err := markedSurvivors(row)
 		return procs, false, err
 	}
 	_, present := snap[row.pid]
