@@ -216,6 +216,9 @@ func TestNewSessionFormKeepsTheLaunchResolvedDefaultWhenReReadFails(t *testing.T
 func TestRemoteTargetMakesNoLocalRead(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
+	// The remote open still asks the DAEMON (ListPrograms) — the no-read claim
+	// is about the client's local config files, so stub the dial away.
+	stubRemoteProgramFeed(t, tmux.ProgramClaude)
 
 	h := activeProjectHome(t)
 	cfg, err := config.LoadConfig()
@@ -232,6 +235,29 @@ func TestRemoteTargetMakesNoLocalRead(t *testing.T) {
 		"opening the form on a remote target must not read the client's local config")
 }
 
+// settleRemoteForm drains a form-opening cmd's async replies (the account
+// preselect and the remote ListPrograms answer) back through Update, the way
+// the real event loop delivers them — the remote submit gate lifts only when
+// that answer arrives (#4889 review).
+func settleRemoteForm(t *testing.T, h *home, cmd tea.Cmd) {
+	t.Helper()
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		_, _ = h.Update(msg)
+	}
+}
+
+// stubRemoteProgramFeed answers the remote ListPrograms fetch and the account
+// preselect without a dial, so a remote-target test can deliver the replies.
+func stubRemoteProgramFeed(t *testing.T, program string) {
+	t.Helper()
+	t.Cleanup(SetProgramListerForTest(func(string) (daemon.ListProgramsResponse, error) {
+		return daemon.ListProgramsResponse{Default: program}, nil
+	}))
+	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{}, nil
+	}))
+}
+
 // TestRemoteUntouchedSubmitLeavesTheProgramImplicit: for a remote daemon an
 // untouched field still DISPLAYS the launch-time local default — the remote
 // daemon's default_program is remote state no synchronous read can see — but
@@ -241,6 +267,7 @@ func TestRemoteTargetMakesNoLocalRead(t *testing.T) {
 func TestRemoteUntouchedSubmitLeavesTheProgramImplicit(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
+	stubRemoteProgramFeed(t, tmux.ProgramClaude)
 
 	h := activeProjectHome(t)
 	cfg, err := config.LoadConfig()
@@ -249,7 +276,8 @@ func TestRemoteUntouchedSubmitLeavesTheProgramImplicit(t *testing.T) {
 	h.programChoice = newProgramChoice("", cfg.DefaultProgram, cfg)
 	got := recordStartRequest(t)
 
-	_, _ = h.startNewInstance()
+	_, cmd := h.startNewInstance()
+	settleRemoteForm(t, h, cmd)
 	naming := h.namingInstance
 	require.NoError(t, naming.SetTitle("demo"))
 
@@ -660,6 +688,7 @@ func TestTaskCreatePreservesAnExplicitLaunchProgram(t *testing.T) {
 func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
+	stubRemoteProgramFeed(t, tmux.ProgramClaude)
 
 	h := activeProjectHome(t)
 	cfg, err := config.LoadConfig()
@@ -674,7 +703,8 @@ func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
 		return nil
 	}))
 
-	_, _ = h.startNewInstance()
+	_, cmd := h.startNewInstance()
+	settleRemoteForm(t, h, cmd)
 	naming := h.namingInstance
 	require.NoError(t, naming.SetTitle("demo"))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
