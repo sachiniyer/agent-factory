@@ -920,10 +920,13 @@ func TestRemoteTargetSeedsTheDaemonsDefault(t *testing.T) {
 	t.Cleanup(SetProgramListerForTest(func(repoPath string) (daemon.ListProgramsResponse, error) {
 		return daemon.ListProgramsResponse{Default: tmux.ProgramCodex}, nil
 	}))
-	var agents []string
+	// The fetch is agent-agnostic — the daemon returns a Defaults map for the
+	// whole roster and msg.agent selects the entry — so the refetch is visible
+	// only in the RESULT: codex's default lands once the program moves.
+	var fetches int
 	t.Cleanup(SetAccountListerForTest(func(agent, repoPath string) (daemon.ListAccountsResponse, error) {
-		agents = append(agents, agent)
-		return daemon.ListAccountsResponse{}, nil
+		fetches++
+		return daemon.ListAccountsResponse{Defaults: map[string]string{"codex": "work"}}, nil
 	}))
 
 	_, cmd := h.startNewInstance()
@@ -941,7 +944,8 @@ func TestRemoteTargetSeedsTheDaemonsDefault(t *testing.T) {
 	}
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
 		"the displayed program follows the daemon's resolved default")
-	// The provisional fetch ran for claude; the correction re-fires for codex.
-	require.Equal(t, []string{"claude", "codex"}, agents,
-		"the account preselect re-asks under the resolved agent")
+	require.Equal(t, "work", h.pendingAccount,
+		"the account preselect lands for the resolved agent, not the local guess")
+	require.Equal(t, 2, fetches,
+		"the correction re-fetches the preselect under the resolved agent")
 }
