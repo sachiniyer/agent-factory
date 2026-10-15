@@ -195,12 +195,12 @@ func TestOrphanCandidatesNeverAdmitRequester(t *testing.T) {
 	defer untrack()
 
 	byPID := map[int]int{}
-	got := addOrReplaceOrphanCandidate(nil, byPID, requester)
+	got := addOrReplaceOrphanCandidate(nil, byPID, requester, false)
 	require.Empty(t, got, "a tracked requester is never an orphan candidate")
 	require.NotContains(t, byPID, requester.PID,
 		"the requester's pid slot must stay free — a later real process with it would otherwise be skipped")
 
-	got = addOrReplaceOrphanCandidate(got, byPID, other)
+	got = addOrReplaceOrphanCandidate(got, byPID, other, false)
 	require.Equal(t, []proctree.Process{other}, got, "non-requesters are admitted unchanged")
 }
 

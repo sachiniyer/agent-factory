@@ -151,8 +151,16 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // sessionEnvMarker binds the query, response parser, and absence classifier to
 // one marker name so readers cannot accidentally classify a different variable.
 func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
+	return sessionEnvMarkerAt(cmdExec, exactTarget(sanitizedName), marker)
+}
+
+// sessionEnvMarkerAt is sessionEnvMarker against an already-resolved tmux
+// target — a session $id rather than a name, when the caller must read the
+// exact incarnation an earlier answer observed rather than whatever a reused
+// name resolves to now.
+func sessionEnvMarkerAt(cmdExec cmd.Executor, target, marker string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), marker)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", target, marker)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
@@ -161,19 +169,19 @@ func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (strin
 			return "", false, nil
 		}
 		if strings.ContainsAny(line, "\r\n") {
-			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed multiline response", marker, sanitizedName)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed multiline response", marker, target)
 		}
 		value, ok := strings.CutPrefix(line, marker+"=")
 		if !ok {
-			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed response %q", marker, sanitizedName, line)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed response %q", marker, target, line)
 		}
 		return value, true, nil
 	}
 	if markerTimedOut {
-		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, target, tmuxCommandTimeout)
 	}
 	if !missingSessionEnvMarker(markerErr, marker) {
-		return "", false, fmt.Errorf("read %s marker for tmux session %s: %w", marker, sanitizedName, markerErr)
+		return "", false, fmt.Errorf("read %s marker for tmux session %s: %w", marker, target, markerErr)
 	}
 
 	// The targeted result itself identified an absent variable. Ask for the
@@ -181,18 +189,18 @@ func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (strin
 	// session answered and the marker alone was absent. A generic targeted error
 	// never reaches this fallback, even if this second command would succeed.
 	allCtx, allCancel := tmuxTimeoutContext()
-	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
+	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", target)
 	allTimedOut := allCtx.Err() != nil
 	allCancel()
 	if allErr == nil {
 		return "", false, nil
 	}
 	if allTimedOut {
-		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, target, tmuxCommandTimeout)
 	}
 
 	return "", false, fmt.Errorf("read %s marker for tmux session %s: targeted query: %v; environment query: %w",
-		marker, sanitizedName, markerErr, allErr)
+		marker, target, markerErr, allErr)
 }
 
 // missingSessionEnvMarker recognizes tmux's explicit absent-variable answer

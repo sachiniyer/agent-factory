@@ -587,7 +587,7 @@ func TestCleanupSessionsFailsClosedOnUnownedProcessForVanishedSession(t *testing
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	err := CleanupSessions(vanishOnMarkerExecutor(t, name))
-	require.ErrorContains(t, err, "has no AF_HOME ownership marker")
+	require.ErrorContains(t, err, "has no usable AF_HOME ownership marker")
 	require.True(t, proctree.AliveSame(marked),
 		"a process with unknown home ownership must be left alone")
 }
@@ -598,7 +598,7 @@ func TestAddOrReplaceOrphanCandidateReplacesRecycledPID(t *testing.T) {
 	candidates := []proctree.Process{stale}
 	byPID := map[int]int{stale.PID: 0}
 
-	candidates = addOrReplaceOrphanCandidate(candidates, byPID, current)
+	candidates = addOrReplaceOrphanCandidate(candidates, byPID, current, false)
 
 	require.Equal(t, []proctree.Process{current}, candidates,
 		"a current marked process must replace a stale identity that reused its PID")
@@ -1187,4 +1187,43 @@ func TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL(t *testing.T) {
 		"the error must name the surviving PID: aborting the reset is only actionable if the user "+
 			"is told what to go look at")
 	require.Contains(t, err.Error(), name, "the error must name the session the survivor came from")
+}
+
+// A tracked teardown requester that marker-matches must not seed
+// marker-driven ancestry expansion — admitted or not. Its descendants are
+// client-side processes (the marker-scrubbed daemon an auto-start client
+// leaves behind), not teardown survivors; pulling them in reads a valid
+// self-teardown as an incomplete capture (#5319 review).
+func TestRefreshOrphanCandidatesDoesNotExpandSkippedRequester(t *testing.T) {
+	name := "af_refresh-requester-expansion"
+	parent, child := startMarkedParentWithDirectStrippedChild(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + t.TempDir(),
+		EnvMarkerGeneration + "=gen1",
+	})
+	untrack := TrackTeardownRequester(parent)
+	defer untrack()
+	generations := &orphanGenerationSet{values: map[string]bool{"gen1": true}}
+
+	candidates, err := refreshOrphanCandidates(nil, name, generations, false)
+	require.NoError(t, err)
+	excluded := map[int]bool{}
+	for _, p := range candidates {
+		excluded[p.PID] = true
+	}
+	require.False(t, excluded[parent.PID],
+		"a skipped requester must not enter the candidate set")
+	require.False(t, excluded[child.PID],
+		"a skipped requester must not pull its unmarked descendants in either")
+
+	candidates, err = refreshOrphanCandidates(nil, name, generations, true)
+	require.NoError(t, err)
+	seen := map[int]bool{}
+	for _, p := range candidates {
+		seen[p.PID] = true
+	}
+	require.True(t, seen[parent.PID],
+		"the requester is admitted when the capture feeds the reaper directly")
+	require.False(t, seen[child.PID],
+		"an admitted requester's marker-less descendants are still client-side, not candidates")
 }

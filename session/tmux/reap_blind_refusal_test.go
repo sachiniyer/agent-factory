@@ -128,7 +128,7 @@ func TestBlindRefusalDoesNotOfferTheSweepsOwnProcessAsSafeToKill(t *testing.T) {
 		require.NoError(t, err)
 
 		_, inspectErr := markedOrphanProcesses([]proctree.Process{self}, name, home,
-			orphanGenerationSet{values: map[string]bool{}})
+			orphanGenerationSet{values: map[string]bool{}}, nil, 0)
 
 		require.Error(t, inspectErr, "an unplaceable marked process must still refuse")
 		require.Contains(t, inspectErr.Error(), strconv.Itoa(os.Getpid()),

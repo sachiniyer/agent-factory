@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -31,7 +32,10 @@ import (
 //     server, and the capture set is its ppid-descendants plus processes
 //     sharing its kernel session id (tmux makes each pane root a session
 //     leader, so SID membership proves pane ancestry even for processes
-//     already reparented to init).
+//     already reparented to init). A dead pane tmux reports no pid for
+//     (tmux ≥ 3.8) is captured by its launch markers instead — a process
+//     still carrying this session's AF_SESSION and this home's AF_HOME —
+//     the same provenance bar the vanished-session sweep applies (#5319).
 //   - Every signal re-verifies the (pid, starttime) identity via
 //     proctree.Signal, so a recycled PID is never signalled.
 //   - If kill-session fails and the tmux session survives, nothing is
@@ -93,13 +97,31 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // or a concrete finding, the way the package already treats an unreadable
 // process table or session list.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	procs, _, err := captureSessionProcessTrees(cmdExec, sanitizedName, true)
+	return procs, err
+}
+
+// CaptureVerifiedSessionProcessTrees is the diagnostic variant of
+// CaptureSessionProcessTrees: it returns only processes the pane-tree/SID
+// evidence verified, never marker-attributed survivors of a dead pane whose
+// pid tmux would not report. A marked process attributed that way IS an
+// escaped process — it escaped its pane's tree, which is why markers are the
+// only evidence it exists — so merging it into the result would make
+// `af doctor`'s escaped-process check read attribution as membership and the
+// finding it exists to report would never fire.
+func CaptureVerifiedSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	procs, _, err := captureSessionProcessTrees(cmdExec, sanitizedName, false)
+	return procs, err
+}
+
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, mergeMarked bool) ([]proctree.Process, *deadPaneSurvivorScan, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
 		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+			return nil, nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 		}
 		// tmux ANSWERED that the session is not there. Marked with a sentinel
 		// rather than returned as a plain failure, because whether it is a
@@ -121,40 +143,82 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		// the session listing, because that answer names nothing to match on
 		// (#3469).
 		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName) {
-			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
+			return nil, nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
-		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
+		return nil, nil, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
+		return nil, nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
 	}
-	seen := make(map[int]bool)
+	byPID := make(map[int]int)
 	var procs []proctree.Process
 	var captureErrs []error
+	// The deferred marker scan refreshes identities: a process that exits and
+	// hands its pid to a marked stranger between the snapshot and the marker
+	// queries must REPLACE the stale (pid, startID) entry, not be skipped by
+	// it — a stale record reads as dead at reap time while the marked
+	// replacement stays live and unaccounted for.
 	add := func(p proctree.Process) {
-		if !seen[p.PID] {
-			seen[p.PID] = true
-			procs = append(procs, p)
+		if idx, ok := byPID[p.PID]; ok {
+			if procs[idx].StartID != p.StartID {
+				procs[idx] = p
+			}
+			return
 		}
+		byPID[p.PID] = len(procs)
+		procs = append(procs, p)
 	}
+	// The no-pid dead pane's survivors are attributed by the same sweep the
+	// vanished-session path stands on: refreshOrphanCandidates discovers
+	// descendants of captured members plus AF_SESSION-marked processes in the
+	// session's generation cohort, and markedOrphanProcesses applies the
+	// hardened ownership rules — AF_HOME, uid, identity revalidation,
+	// self-chain — rather than a second scanner with its own answers. It runs
+	// once per capture, not once per pid-less pane.
+	var markedScan struct {
+		scan *deadPaneSurvivorScan
+		err  error
+		done bool
+	}
+	scanMarkedSurvivors := func(row paneRow) (*deadPaneSurvivorScan, error) {
+		if !markedScan.done {
+			markedScan.scan, markedScan.err =
+				markedDeadPaneSurvivors(cmdExec, snap, sanitizedName, row, procs, !mergeMarked)
+			markedScan.done = true
+		}
+		return markedScan.scan, markedScan.err
+	}
+	var deferred []string
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || panePID <= 1 {
+		if err != nil || (panePID <= 1 && !row.pidAbsent) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		if row.dead && row.pidAbsent {
+			// tmux ≥ 3.8 reports no pid for a held dead pane, so its marker
+			// scan seeds its generation cohort from the session's OTHER,
+			// kernel-attributed members — which means every live pane must be
+			// captured first regardless of list-panes order (#5319).
+			deferred = append(deferred, field)
 			continue
 		}
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
-			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row)
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+			// Positively identified members are added even when the capture
+			// is incomplete: the teardown below reaps partial results so a
+			// proven survivor does not outlive the session merely because
+			// something else could not be ruled out.
+			for _, p := range survivors {
+				add(p)
+			}
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
-			}
-			for _, p := range survivors {
-				add(p)
 			}
 			if !asLive {
 				continue
@@ -184,7 +248,22 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 			add(p)
 		}
 	}
-	return procs, errors.Join(captureErrs...)
+	for _, field := range deferred {
+		row, err := parsePaneRow(field)
+		if err != nil {
+			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
+		survivors, _, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
+		for _, p := range survivors {
+			add(p)
+		}
+		if err != nil {
+			captureErrs = append(captureErrs, err)
+			continue
+		}
+	}
+	return procs, markedScan.scan, errors.Join(captureErrs...)
 }
 
 // markedOrphanProcesses filters a previously captured pane process tree down to
@@ -204,7 +283,9 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 // predecessor to place anyone against — still refuses, but as ONE message rather
 // than a line per pid: there the pid/generation pairing is the operator's whole
 // decision procedure, and blindGenerationRefusal is what carries it (#3706).
-func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet) ([]proctree.Process, error) {
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string,
+	generations orphanGenerationSet, treeVerified map[int]bool, serverPID int,
+) ([]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -262,6 +343,79 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			}
 			continue
 		}
+		// The pid may have been recycled between the SameIdentity check and a
+		// successful read, leaving environ describing the NEW holder while
+		// process carries the old StartID — which the merge and the reaper
+		// would each read differently. Adopt the live identity and re-read it,
+		// once, so `owned` never retains a stale record (#5319 review).
+		sameAfter, recheckErr := proctree.SameIdentity(process)
+		switch {
+		case recheckErr != nil:
+			inspectErrs = append(inspectErrs, fmt.Errorf("cannot revalidate captured pid %d after environment read: %w",
+				process.PID, recheckErr))
+			continue
+		case !sameAfter:
+			current, lookupErr := proctree.Lookup(process.PID)
+			switch {
+			case lookupErr == nil:
+			case errors.Is(lookupErr, proctree.ErrProcessExited) ||
+				errors.Is(lookupErr, os.ErrNotExist) ||
+				errors.Is(lookupErr, syscall.ESRCH):
+				continue // the pid holder exited entirely — nothing left to attribute
+			default:
+				// A lookup that cannot say the process is gone cannot be read
+				// as "gone": a transient sysctl or malformed-stat read must
+				// leave this candidate unproven, not cleared (sameIdentity's
+				// own error contract).
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot re-resolve recycled pid %d for session %s: %w",
+					process.PID, sanitizedName, lookupErr))
+				continue
+			}
+			process = current
+			if environ, envErr = proctree.Environ(process.PID); envErr != nil {
+				sameAgain, againErr := proctree.SameIdentity(process)
+				switch {
+				case againErr != nil:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot recheck reused pid %d after environment lookup failed: %w",
+						process.PID, errors.Join(envErr, againErr)))
+				case sameAgain:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether captured live pid %d belongs to session %s: %w",
+						process.PID, sanitizedName, envErr))
+				}
+				continue
+			}
+			// The adopted identity arrived AFTER the UID gate above, so it
+			// must pass ownership itself before any marker read can attribute
+			// it — otherwise a readable foreign-UID survivor could ride the
+			// old pid's pass into the signal set (a privilege-dropping pane
+			// child is exactly that shape). A final identity check bounds the
+			// adoption to the process Lookup just returned.
+			uid, uidKnown = proctree.UID(process.PID)
+			switch {
+			case !uidKnown:
+				sameAgain, againErr := proctree.SameIdentity(process)
+				switch {
+				case againErr != nil:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot recheck adopted pid %d after owner lookup failed: %w",
+						process.PID, againErr))
+				case sameAgain:
+					inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of adopted live pid %d", process.PID))
+				}
+				continue
+			case uid != selfUID:
+				inspectErrs = append(inspectErrs, fmt.Errorf("adopted live pid %d belongs to uid %d, not reset uid %d",
+					process.PID, uid, selfUID))
+				continue
+			}
+			stable, stableErr := proctree.SameIdentity(process)
+			switch {
+			case stableErr != nil:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot revalidate adopted pid %d: %w", process.PID, stableErr))
+				continue
+			case !stable:
+				continue // churned again inside one pass — the single-adoption bound stands
+			}
+		}
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
 		if !hasSession {
 			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d has no %s marker for vanished session %s",
@@ -274,8 +428,12 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			continue
 		}
 		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
-		if !hasHome {
-			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s ownership marker",
+		if !hasHome || processHome == "" {
+			// A present-but-empty home normalizes to "." — treating it as a
+			// real comparison value would classify a proven-cohort survivor as
+			// foreign and drop it silently. It is malformed like a missing
+			// marker: refuse, never skip (#5319 review).
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no usable %s ownership marker",
 				process.PID, sanitizedName, EnvMarkerHome))
 			continue
 		}
@@ -319,7 +477,24 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerGeneration))
 			continue
 		}
-		if selfChain[process.PID] {
+		if selfChain[process.PID] && !isTeardownRequester(process) {
+			switch {
+			case treeVerified[process.PID]:
+				// The pane tree already proved this member — an af client run
+				// inside the session legitimately places marked pane processes
+				// on the teardown's own ancestry. They are already in the
+				// capture, so the scan neither adds nor faults them.
+				continue
+			case serverPID > 0 && process.PPID == serverPID:
+				// A marker-matched process directly parented to THIS session's
+				// server is its pane root — kernel-verifiable membership the
+				// marker scan needed no pane pid for. A held dead pane's
+				// still-running root lands here on self-teardown (root →
+				// client → daemon), and refusing it would refuse the teardown
+				// it belongs to. Reaping it is the teardown's purpose.
+				owned = append(owned, process)
+				continue
+			}
 			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
 				process.PID, sanitizedName))
 			continue
@@ -439,7 +614,7 @@ func (g orphanGenerationSet) empty() bool {
 // are not evidence of membership. Failures on captured/SID/descendant
 // candidates remain visible when markedOrphanProcesses validates the bounded
 // set, preserving unknown without making hardened hosts globally unreadable.
-func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, generations *orphanGenerationSet) ([]proctree.Process, error) {
+func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, generations *orphanGenerationSet, admitRequesters bool) ([]proctree.Process, error) {
 	refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
 	if err != nil {
 		return captured, err
@@ -448,14 +623,63 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 	for index, process := range refreshed {
 		byPID[process.PID] = index
 	}
+	var markerFound []proctree.Process
 	for _, process := range snap {
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
 			continue
 		}
-		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName &&
-			(generations == nil || generations.contains(environ)) {
-			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
+		session, hasSession := processEnvValue(environ, EnvMarkerSession)
+		generation, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		// A session-name match stays a candidate when its generation could
+		// belong to the cohort — or when the marker is present-but-empty. The
+		// first is the normal cohort gate; the second is a malformed stamp
+		// only validation may refuse — discovery must not launder it into
+		// invisibility. A NONEMPTY foreign generation is the replacement
+		// shape the vanished sweep deliberately leaves alone (#3309).
+		if hasSession && session == sanitizedName &&
+			(generations == nil || generations.contains(environ) || (hasGeneration && generation == "")) {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
+			// Expand only roots that were actually admitted — and never a
+			// tracked requester, admitted or not. Its descendants are
+			// client-side processes (the marker-scrubbed daemon an auto-start
+			// client leaves behind), not teardown survivors; pulling them in
+			// turns a valid self-teardown into an incomplete-capture refusal
+			// (#5319 review).
+			if _, admitted := byPID[process.PID]; admitted && !isTeardownRequester(process) {
+				markerFound = append(markerFound, process)
+			}
+			continue
+		}
+		// A process carrying a COHORT generation while its session marker is
+		// absent or names another session is a partially-marked possible
+		// survivor — the shape a child takes when it strips AF_SESSION (the
+		// spawnSessionWaitingToStartUnmarkedHelper fixture) or never received
+		// it. Discovery must surface it so validation can refuse it; skipping
+		// it would turn a live unproven process into an empty successful scan
+		// (#5319 review).
+		if hasGeneration && session != sanitizedName &&
+			generations != nil && generations.values[generation] {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, admitRequesters)
+			if _, admitted := byPID[process.PID]; admitted && !isTeardownRequester(process) {
+				markerFound = append(markerFound, process)
+			}
+		}
+	}
+	// Candidates discovered by marker alone never went through the ancestry
+	// expansion refreshCapturedAncestry gives the captured set, so a detached
+	// child that stripped every marker would stay invisible while its marked
+	// parent is reaped. Expand each discovery's tree and kernel session the
+	// same way, before validation, so those members surface and refuse rather
+	// than surviving an "empty" scan (#5319 review).
+	for _, root := range markerFound {
+		if current, alive := snap[root.PID]; alive && current.StartID == root.StartID {
+			for _, descendant := range proctree.TreeOf(snap, root.PID) {
+				refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, descendant, admitRequesters)
+			}
+		}
+		for _, member := range proctree.SessionMembers(snap, root.SID) {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, member, admitRequesters)
 		}
 	}
 	return refreshed, nil
@@ -539,7 +763,7 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 	byPID := make(map[int]int, len(captured))
 	refreshed := make([]proctree.Process, 0, len(captured))
 	add := func(process proctree.Process) {
-		refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
+		refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, false)
 	}
 	for _, process := range captured {
 		add(process)
@@ -560,13 +784,14 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 // slot with a process identity. A current snapshot or marker scan must replace
 // an older entry when the same PID now carries another StartID; otherwise the
 // stale identity would be rejected later while the replacement escaped review.
-//
-// A tracked teardown requester (#5182) is never admitted to the orphan cohort:
-// it is blocked on this teardown's reply, not a leak, and it cannot exit until
-// the reply is sent — admitting it would only stall every grace pass and then
-// report the caller it was built to spare.
-func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process) []proctree.Process {
-	if isTeardownRequester(process) {
+func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process, admitRequesters bool) []proctree.Process {
+	// A tracked teardown requester (#5182) is skipped when the candidate set
+	// feeds a grace loop: it is blocked on this teardown's reply, so admitting
+	// it would stall every pass and then report the caller it was built to
+	// spare. The dead-pane capture instead ADMITS it — its result feeds
+	// reapSessionProcesses, where SignalUnlessTracked re-checks the registry
+	// per signal tier and the requester is reaped once its exemption lapses.
+	if !admitRequesters && isTeardownRequester(process) {
 		return candidates
 	}
 	if index, exists := byPID[process.PID]; exists {
@@ -577,6 +802,30 @@ func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]in
 	}
 	byPID[process.PID] = len(candidates)
 	return append(candidates, process)
+}
+
+// mergeProcessIdentities unions two process sets by PID, replacing an entry
+// when the newer set carries a different StartID — the same identity-not-slot
+// rule addOrReplaceOrphanCandidate applies (#5319).
+func mergeProcessIdentities(base, extra []proctree.Process) []proctree.Process {
+	if len(extra) == 0 {
+		return base
+	}
+	byPID := make(map[int]int, len(base))
+	for index, process := range base {
+		byPID[process.PID] = index
+	}
+	for _, process := range extra {
+		if index, exists := byPID[process.PID]; exists {
+			if base[index].StartID != process.StartID {
+				base[index] = process
+			}
+			continue
+		}
+		byPID[process.PID] = len(base)
+		base = append(base, process)
+	}
+	return base
 }
 
 func processEnvValue(environ []string, name string) (string, bool) {
