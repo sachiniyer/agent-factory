@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -353,8 +354,20 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			continue
 		case !sameAfter:
 			current, lookupErr := proctree.Lookup(process.PID)
-			if lookupErr != nil {
+			switch {
+			case lookupErr == nil:
+			case errors.Is(lookupErr, proctree.ErrProcessExited) ||
+				errors.Is(lookupErr, os.ErrNotExist) ||
+				errors.Is(lookupErr, syscall.ESRCH):
 				continue // the pid holder exited entirely — nothing left to attribute
+			default:
+				// A lookup that cannot say the process is gone cannot be read
+				// as "gone": a transient sysctl or malformed-stat read must
+				// leave this candidate unproven, not cleared (sameIdentity's
+				// own error contract).
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot re-resolve recycled pid %d for session %s: %w",
+					process.PID, sanitizedName, lookupErr))
+				continue
 			}
 			process = current
 			if environ, envErr = proctree.Environ(process.PID); envErr != nil {
