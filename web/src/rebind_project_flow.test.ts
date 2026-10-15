@@ -53,6 +53,9 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   let nextTimer = 1;
   const fire = () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } };
   const context = {
+    // AbortController backs the conflict-refresh bound's cancel — the stubbed
+    // listProjects ignores the signal, but the class must exist.
+    AbortController,
     window: {
       setTimeout: (fn: () => void) => { const id = nextTimer++; timers.set(id, fn); return id; },
       clearTimeout: (id: number) => { timers.delete(id); },

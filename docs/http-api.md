@@ -124,7 +124,7 @@ committed-outcome envelopes. CLI `--json` ordinary errors retain their existing
 shape without the HTTP provenance marker.
 
 `error.code: "project_rebound"` (status `409`, with `daemon_rejected: true`) is
-`POST /v1/RebindProject`'s refusal of a compare-and-set rebind — see
+the refusal both rebind routes give a compare-and-set rebind — see
 [Rebinding a project](#rebinding-a-project). Nothing was written, so it is a
 definitive refusal, not an uncertain outcome.
 
@@ -136,7 +136,7 @@ definitive refusal, not an uncertain outcome.
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
-| `409 Conflict` | `POST /v1/RebindProject` only: the request's `expected_root` no longer matches the project's recorded root, because another rebind landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
+| `409 Conflict` | `POST /v1/RebindProject` and `POST /v1/RebindProjectGuarded`: part of the request's expected pair no longer matches the project's record — `expected_root` against the recorded root, `expected_checkout_id` against the recorded checkout marker (which a same-path reclone or repair rotates) — because another rebind or re-clone landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 

@@ -1388,14 +1388,20 @@ function openRebindProject(projectId: string, label: string): void {
           };
           // fetch carries no timeout, so the read is bounded: after
           // REBIND_REFRESH_MS its late answer is dropped and missed() runs
-          // instead of leaving the modal busy forever (#4888 review).
+          // instead of leaving the modal busy forever (#4888 review). The
+          // bound also aborts the request itself — a daemon that accepts and
+          // never answers would otherwise keep the connection pending while
+          // missed() refetches, and repeated conflicts would pile those reads
+          // up against the per-origin connection pool (#4888 review).
+          const readAbort = new AbortController();
           let readSettled = false;
           const bound = window.setTimeout(() => {
             if (readSettled) return;
             readSettled = true;
+            readAbort.abort();
             missed();
           }, REBIND_REFRESH_MS);
-          void listProjects(tok)
+          void listProjects(tok, readAbort.signal)
             .then((projects) => {
               if (readSettled) return;
               readSettled = true;

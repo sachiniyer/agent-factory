@@ -6536,7 +6536,7 @@ function isProjectReboundError(e) {
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
-async function af(method, body, token2) {
+async function af(method, body, token2, signal) {
   const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
@@ -6546,7 +6546,8 @@ async function af(method, body, token2) {
     resp = await fetch(`/v1/${method}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(body ?? {})
+      body: JSON.stringify(body ?? {}),
+      signal: signal ?? null
     });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
@@ -6737,8 +6738,8 @@ async function rebindProject(id, path, token2, expectedRoot = null, expectedChec
   const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
-async function listProjects(token2) {
-  const resp = await af("ListProjects", {}, token2);
+async function listProjects(token2, signal) {
+  const resp = await af("ListProjects", {}, token2, signal);
   return resp.projects ?? [];
 }
 async function listDirectory(path, token2) {
@@ -18634,13 +18635,15 @@ function openRebindProject(projectId, label) {
             m.setBusy(false);
             m.setError(errorText(e));
           };
+          const readAbort = new AbortController();
           let readSettled = false;
           const bound = window.setTimeout(() => {
             if (readSettled) return;
             readSettled = true;
+            readAbort.abort();
             missed();
           }, REBIND_REFRESH_MS);
-          void listProjects(tok).then((projects) => {
+          void listProjects(tok, readAbort.signal).then((projects) => {
             if (readSettled) return;
             readSettled = true;
             window.clearTimeout(bound);

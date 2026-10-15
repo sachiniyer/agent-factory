@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -476,7 +477,18 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			sessionRoots[row.Root] = true
 		}
 	}
-	return coalesceReboundRows(merged)
+	out := coalesceReboundRows(merged)
+	// The preservation path substitutes and appends where the degraded reads
+	// landed, so restore the ordering buildProjectListFrom documents — a
+	// rebind that moved a name/root must not leave the list mis-sorted for
+	// the life of the degraded refresh (#4888 review).
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Root < out[j].Root
+	})
+	return out
 }
 
 // SetRebindConflictPreserving is SetRebindConflict for a conflict refresh whose
@@ -546,9 +558,15 @@ func (p *ProjectPickerOverlay) reseatAfterConflictRebuild() {
 			// old numeric position: an Esc returning to the list must
 			// highlight THIS registration (#4888 review).
 			p.selectedIdx = i
-			break
+			return
 		}
 	}
+	// No matching registration survived the rebuild — the record was deleted
+	// between the refusal and the refresh. The clamp above only keeps the
+	// index in range; leaving it lands Esc on whatever unrelated row occupies
+	// the old position, and Enter/`b` would then act on THAT project. Park the
+	// cursor on the trailing add-project row instead (#4888 review).
+	p.selectedIdx = len(p.all)
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal
