@@ -321,7 +321,6 @@ export class ConfigPane {
   private explainError = "";
   private explainBusy = false;
   private explainGeneration = 0;
-  private explainButton: HTMLElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
@@ -413,7 +412,13 @@ export class ConfigPane {
     const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
     const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const wasExplain = this.explainButton !== null && active === this.explainButton;
+    // The explain trigger is rendered on every row, so the one that held focus
+    // is named by its data-key — restored below whether the disclosure it drove
+    // ended the rebuild open or closed.
+    const explainFocusedKey =
+      active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger")
+        ? active.getAttribute("data-key")
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -442,8 +447,10 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
-    } else if (wasExplain && this.explainButton) {
-      this.explainButton.focus({ preventScroll: true });
+    } else if (explainFocusedKey !== null) {
+      this.el
+        .querySelector<HTMLElement>(`.af-config-explain-trigger[data-key="${CSS.escape(explainFocusedKey)}"]`)
+        ?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -494,7 +501,6 @@ export class ConfigPane {
     // one would name a detached node for the rest of this render.
     this.editingInput = null;
     this.advancedToggle = null;
-    this.explainButton = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -573,10 +579,32 @@ export class ConfigPane {
     const row = h("div", { class: "af-config-row" });
     row.setAttribute("data-key", e.key);
 
+    const open = this.explainKey === e.key;
+    // The key itself is the explain trigger (#4803): the caret marks it as a
+    // disclosure, and the trace it opens is about exactly this name. Keeping the
+    // affordance on the key's own line means a closed trace adds no row height —
+    // the most repeated control on the page stays the quietest.
+    const caret = h("span", { class: "af-config-explain-caret" }, open ? "▾" : "▸");
+    caret.setAttribute("aria-hidden", "true");
+    const trigger = h(
+      "button",
+      {
+        type: "button",
+        class: "af-config-key af-config-explain-trigger",
+        title: "Which config layer supplied this value",
+      },
+      caret,
+      e.key,
+    );
+    trigger.setAttribute("aria-expanded", String(open));
+    trigger.setAttribute("aria-controls", `af-config-explain-${e.key}`);
+    trigger.setAttribute("data-key", e.key);
+    trigger.addEventListener("click", () => this.toggleExplain(e.key));
+
     const label = h(
       "div",
       { class: "af-config-label" },
-      h("span", { class: "af-config-key" }, e.key),
+      trigger,
       h("span", { class: "af-config-purpose" }, e.purpose),
     );
     row.append(label);
@@ -595,32 +623,21 @@ export class ConfigPane {
         }
       }
     }
-    row.append(this.renderExplainSection(e));
+    if (open) {
+      row.append(this.renderExplainSection(e));
+    }
     return row;
   }
 
-  /** The provenance affordance (#4803): an "Explain" button per row that opens
-   *  the SAME candidate trace `af config get --explain` prints — which on-disk
-   *  layer won, and which were shadowed, absent, or disallowed. The daemon
-   *  computes the ResolvedValue; this view only formats it, so the two surfaces
-   *  cannot disagree about what a layer did. */
+  /** The open provenance panel (#4803): the SAME candidate trace
+   *  `af config get --explain` prints — which on-disk layer won, and which were
+   *  shadowed, absent, or disallowed. The daemon computes the ResolvedValue;
+   *  this view only formats it, so the two surfaces cannot disagree about what
+   *  a layer did. Rendered only while the row's key trigger is open, so a closed
+   *  row carries no trace chrome. */
   private renderExplainSection(e: ConfigEntry): HTMLElement {
-    const section = h("div", { class: "af-config-explain" });
-    const open = this.explainKey === e.key;
-    const btn = h(
-      "button",
-      { type: "button", class: "af-ghost af-config-explain-btn" },
-      open ? "Hide provenance" : "Explain",
-    );
-    btn.setAttribute("aria-expanded", String(open));
-    btn.addEventListener("click", () => this.toggleExplain(e.key));
-    if (open) {
-      this.explainButton = btn;
-    }
-    section.append(btn);
-    if (open) {
-      section.append(this.renderExplainBody());
-    }
+    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section.append(this.renderExplainBody());
     return section;
   }
 

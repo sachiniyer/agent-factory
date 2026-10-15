@@ -7737,7 +7737,6 @@ var ConfigPane = class {
   explainError = "";
   explainBusy = false;
   explainGeneration = 0;
-  explainButton = null;
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
@@ -7797,7 +7796,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const wasExplain = this.explainButton !== null && active === this.explainButton;
+    const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7809,8 +7808,8 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
-    } else if (wasExplain && this.explainButton) {
-      this.explainButton.focus({ preventScroll: true });
+    } else if (explainFocusedKey !== null) {
+      this.el.querySelector(`.af-config-explain-trigger[data-key="${CSS.escape(explainFocusedKey)}"]`)?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7853,7 +7852,6 @@ var ConfigPane = class {
   render() {
     this.editingInput = null;
     this.advancedToggle = null;
-    this.explainButton = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -7917,10 +7915,27 @@ var ConfigPane = class {
   renderRow(e) {
     const row = h("div", { class: "af-config-row" });
     row.setAttribute("data-key", e.key);
+    const open = this.explainKey === e.key;
+    const caret = h("span", { class: "af-config-explain-caret" }, open ? "\u25BE" : "\u25B8");
+    caret.setAttribute("aria-hidden", "true");
+    const trigger = h(
+      "button",
+      {
+        type: "button",
+        class: "af-config-key af-config-explain-trigger",
+        title: "Which config layer supplied this value"
+      },
+      caret,
+      e.key
+    );
+    trigger.setAttribute("aria-expanded", String(open));
+    trigger.setAttribute("aria-controls", `af-config-explain-${e.key}`);
+    trigger.setAttribute("data-key", e.key);
+    trigger.addEventListener("click", () => this.toggleExplain(e.key));
     const label = h(
       "div",
       { class: "af-config-label" },
-      h("span", { class: "af-config-key" }, e.key),
+      trigger,
       h("span", { class: "af-config-purpose" }, e.purpose)
     );
     row.append(label);
@@ -7936,31 +7951,20 @@ var ConfigPane = class {
         }
       }
     }
-    row.append(this.renderExplainSection(e));
+    if (open) {
+      row.append(this.renderExplainSection(e));
+    }
     return row;
   }
-  /** The provenance affordance (#4803): an "Explain" button per row that opens
-   *  the SAME candidate trace `af config get --explain` prints — which on-disk
-   *  layer won, and which were shadowed, absent, or disallowed. The daemon
-   *  computes the ResolvedValue; this view only formats it, so the two surfaces
-   *  cannot disagree about what a layer did. */
+  /** The open provenance panel (#4803): the SAME candidate trace
+   *  `af config get --explain` prints — which on-disk layer won, and which were
+   *  shadowed, absent, or disallowed. The daemon computes the ResolvedValue;
+   *  this view only formats it, so the two surfaces cannot disagree about what
+   *  a layer did. Rendered only while the row's key trigger is open, so a closed
+   *  row carries no trace chrome. */
   renderExplainSection(e) {
-    const section = h("div", { class: "af-config-explain" });
-    const open = this.explainKey === e.key;
-    const btn = h(
-      "button",
-      { type: "button", class: "af-ghost af-config-explain-btn" },
-      open ? "Hide provenance" : "Explain"
-    );
-    btn.setAttribute("aria-expanded", String(open));
-    btn.addEventListener("click", () => this.toggleExplain(e.key));
-    if (open) {
-      this.explainButton = btn;
-    }
-    section.append(btn);
-    if (open) {
-      section.append(this.renderExplainBody());
-    }
+    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section.append(this.renderExplainBody());
     return section;
   }
   toggleExplain(key) {

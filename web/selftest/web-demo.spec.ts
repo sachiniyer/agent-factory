@@ -738,6 +738,15 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await configInput.fill(savedValue);
   await expect(save).toBeDisabled();
   await expect(save).toHaveCSS("border-width", "1px");
+  // One row's provenance trace open (#4803): the same key the dirty beat just
+  // edited, expanded through its key-name trigger — the closed affordance adds
+  // no row height, so only the open trace takes space in the frame.
+  const explainTrigger = page.locator('.af-config-row[data-key="vscode_server_binary"] .af-config-explain-trigger');
+  await explainTrigger.click();
+  await expect(page.locator(".af-config-explain .af-config-explain-cand").first()).toBeVisible();
+  await shot("config-explain");
+  await explainTrigger.click();
+  await expect(page.locator(".af-config-explain")).toHaveCount(0);
   await page.locator(".af-account-disclosure summary").click();
   await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
   await page.getByLabel("New claude account name", { exact: true }).fill("team");
