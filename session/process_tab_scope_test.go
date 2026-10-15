@@ -226,10 +226,10 @@ func (p *launchingPane) refuses(now time.Time) bool {
 var (
 	paneFieldsBlank = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
-		"#{session_id}", "")
+		"#{session_id}", "", "#{pid}", "", "#{session_created}", "")
 	paneFieldsRunning = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "0",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
-		"#{session_id}", "$0")
+		"#{session_id}", "$0", "#{pid}", "4242", "#{session_created}", "1726000000")
 )
 
 func (m *tmuxModel) session(name, program string) *tmux.TmuxSession {

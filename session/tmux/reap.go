@@ -148,14 +148,23 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 	if err != nil {
 		return nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
 	}
-	seen := make(map[int]bool)
+	byPID := make(map[int]int)
 	var procs []proctree.Process
 	var captureErrs []error
+	// The deferred marker scan refreshes identities: a process that exits and
+	// hands its pid to a marked stranger between the snapshot and the marker
+	// queries must REPLACE the stale (pid, startID) entry, not be skipped by
+	// it — a stale record reads as dead at reap time while the marked
+	// replacement stays live and unaccounted for.
 	add := func(p proctree.Process) {
-		if !seen[p.PID] {
-			seen[p.PID] = true
-			procs = append(procs, p)
+		if idx, ok := byPID[p.PID]; ok {
+			if procs[idx].StartID != p.StartID {
+				procs[idx] = p
+			}
+			return
 		}
+		byPID[p.PID] = len(procs)
+		procs = append(procs, p)
 	}
 	// The no-pid dead pane's survivors are attributed by the same sweep the
 	// vanished-session path stands on: refreshOrphanCandidates discovers
@@ -283,7 +292,30 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 	if target == "" {
 		target = exactTarget(sanitizedName)
 	}
-	generations := orphanGenerations(captured, sanitizedName)
+	// The env reads below must answer for the incarnation list-panes observed,
+	// not whatever the id — a per-server counter — resolves to after a server
+	// restart. The row carries the full (session_id, server pid, created)
+	// tuple; check it before AND after so a replacement can never lend its
+	// markers to this scan.
+	if same, err := paneRowIncarnationMatches(cmdExec, row); err != nil || !same {
+		return nil, fmt.Errorf("cannot confirm the session incarnation owning a pid-less dead pane: same=%t err=%v",
+			same, err)
+	}
+	// AF_SESSION is required, not optional: a session that does not carry its
+	// own name marker predates the marker contract, so a scan finding nothing
+	// proves nothing about survivors — that is an incomplete capture, not an
+	// empty one. The stamped value is also the match key, so a session whose
+	// tmux name drifted from its launch name still attributes its own.
+	markerName, nameFound, nameErr := sessionEnvMarkerAt(cmdExec, target, EnvMarkerSession)
+	switch {
+	case nameErr != nil:
+		return nil, fmt.Errorf("cannot read the %s marker of the session owning a pid-less dead pane: %w",
+			EnvMarkerSession, nameErr)
+	case !nameFound:
+		return nil, fmt.Errorf("session %s carries no %s marker, so a pid-less dead pane's survivors cannot be attributed",
+			sanitizedName, EnvMarkerSession)
+	}
+	generations := orphanGenerations(captured, markerName)
 	generation, genFound, genErr := sessionEnvMarkerAt(cmdExec, target, EnvMarkerGeneration)
 	switch {
 	case genErr != nil:
@@ -304,9 +336,13 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 			return nil, fmt.Errorf("cannot resolve this agent-factory home for a dead pane's survivor attribution: %w", ownErr)
 		}
 	}
+	if same, err := paneRowIncarnationMatches(cmdExec, row); err != nil || !same {
+		return nil, fmt.Errorf("the session incarnation changed while its markers were read: same=%t err=%v",
+			same, err)
+	}
 	candidates := append([]proctree.Process(nil), captured...)
-	refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations, true)
-	marked, inspectErr := markedOrphanProcesses(refreshed, sanitizedName, scanHome, generations)
+	refreshed, refreshErr := refreshOrphanCandidates(candidates, markerName, &generations, true)
+	marked, inspectErr := markedOrphanProcesses(refreshed, markerName, scanHome, generations)
 	scanErr := errors.Join(refreshErr, inspectErr)
 	if !verifiedOnly {
 		return marked, scanErr
@@ -343,6 +379,30 @@ func markedDeadPaneSurvivors(cmdExec cmd.Executor, snap map[int]proctree.Process
 		}
 	}
 	return verified, scanErr
+}
+
+// paneRowIncarnationMatches re-asks the session id a pane row carried for the
+// server-pid/creation tuple list-panes observed alongside it — the
+// (session_id, pid, session_created) triple io.go's confirmedGeneration uses,
+// because the id alone is a per-server counter a replacement server reissues.
+// A missing target, a blank answer, or a changed tuple means the session the
+// row described is gone.
+func paneRowIncarnationMatches(cmdExec cmd.Executor, row paneRow) (bool, error) {
+	if row.sessionID == "" || row.serverPID == "" || row.sessionCreated == "" {
+		return false, fmt.Errorf("pane row carries no session incarnation to revalidate")
+	}
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-p",
+		"-t", row.sessionID, "#{session_id} #{pid} #{session_created}")
+	if err != nil {
+		return false, err
+	}
+	f := strings.Fields(strings.TrimSpace(string(out)))
+	if len(f) < 3 {
+		return false, fmt.Errorf("session id %s no longer resolves to a session", row.sessionID)
+	}
+	return f[0] == row.sessionID && f[1] == row.serverPID && f[2] == row.sessionCreated, nil
 }
 
 // sessionServerPID names the tmux server process that owns the session a pane
@@ -494,7 +554,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerGeneration))
 			continue
 		}
-		if selfChain[process.PID] {
+		if selfChain[process.PID] && !isTeardownRequester(process) {
 			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
 				process.PID, sanitizedName))
 			continue

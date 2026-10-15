@@ -233,6 +233,8 @@ func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_t
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$1",
+		"#{session_created}", "1726000000",
+		"#{pid}", "4242",
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -266,6 +268,8 @@ func deadPaneCohortExec(anchorPID int, env map[string]string, status, signal, de
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$0",
+		"#{session_created}", "1726000000",
+		"#{pid}", "4242",
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -279,15 +283,11 @@ func deadPaneCohortExec(anchorPID int, env map[string]string, status, signal, de
 			switch {
 			case strings.Contains(s, "list-panes"):
 				if anchorPID > 0 {
-					return []byte(fmt.Sprintf("%d|0||$0\n|1|%s%s%s|$0\n", anchorPID, status, signal, deadTime)), nil
+					return []byte(fmt.Sprintf("%d|0||$0|4242|1726000000\n|1|%s%s%s|$0|4242|1726000000\n", anchorPID, status, signal, deadTime)), nil
 				}
-				return []byte(fmt.Sprintf("|1|%s%s%s|$0\n", status, signal, deadTime)), nil
+				return []byte(fmt.Sprintf("|1|%s%s%s|$0|4242|1726000000\n", status, signal, deadTime)), nil
 			case strings.Contains(s, "display-message"):
-				format := c.Args[len(c.Args)-1]
-				if format == "#{pid}" {
-					return []byte("4242\n"), nil
-				}
-				return []byte(rowExpand.Replace(format) + "\n"), nil
+				return []byte(rowExpand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			case strings.Contains(s, "show-environment"):
 				marker := c.Args[len(c.Args)-1]
 				if v, ok := env[marker]; ok {
@@ -587,6 +587,52 @@ func TestCloseAndWaitForPaneExit_UnmarkedDeadPaneWithNoReportedPidRefuses(t *tes
 	require.Error(t, err)
 	require.Equal(t, PaneStateUnknown, state,
 		"a member carrying no session marker makes the capture incomplete")
+}
+
+// A session that does not carry its own AF_SESSION marker predates the marker
+// contract: a scan that finds nothing has proven nothing, so the capture is
+// incomplete rather than empty and teardown must refuse (#5319).
+func TestCloseAndWaitForPaneExit_DeadPaneNoPidWithoutSessionMarkerRefuses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-no-session-marker", "")
+	anchor := startStranger(t, nil)
+	env := map[string]string{EnvMarkerHome: home, EnvMarkerGeneration: "gen1"}
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneCohortExec(anchor.PID, env, "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a session carrying no AF_SESSION marker cannot prove a pid-less dead pane has no survivors")
+}
+
+// The session id is a per-server counter: a server restart can reissue it to a
+// different session. If the incarnation the row observed is gone, the markers
+// a scan would read belong to a stranger and teardown must refuse (#5319).
+func TestCloseAndWaitForPaneExit_DeadPaneNoPidWithReplacedIncarnationRefuses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-replaced-incarnation", "")
+	anchor := startStranger(t, nil)
+	base := deadPaneCohortExec(anchor.PID, sessionMarkerMap(name, home, "gen1"), "3", "", "1726000000", nil)
+	baseOutput := base.OutputFunc
+	base.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
+		// The incarnation probe is the only display-message asking for the
+		// tuple; answer it with a DIFFERENT server pid — the $0 that pane row
+		// carried now belongs to a replacement server.
+		if strings.Contains(c.String(), "display-message") &&
+			c.Args[len(c.Args)-1] == "#{session_id} #{pid} #{session_created}" {
+			return []byte("$0 9999 1726000000\n"), nil
+		}
+		return baseOutput(c)
+	}
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t), base)
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a session id that resolves to a different incarnation cannot lend its markers to the scan")
 }
 
 // A pane tmux does NOT report dead whose pid cannot be read is the opposite
