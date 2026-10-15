@@ -176,6 +176,12 @@ func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*Resol
 	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
 	firstJoin := true
 	for {
+		// A joiner that wakes to a dead ctx must not spawn a fresh worker for
+		// the required re-read — the worker ignores ctx and would run for a
+		// result nobody waits on (#4889 review).
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("resolve repository config: %w", err)
+		}
 		repoResolveFlightsMu.Lock()
 		flight, joined := repoResolveFlights[key]
 		if !joined {

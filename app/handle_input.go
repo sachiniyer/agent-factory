@@ -209,7 +209,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// values the rules above produced: an account-pinned program and a
 		// deliberate ambient pick are indistinguishable from their wire
 		// encodings once the pending flags clear (#4889 review).
-		programChosen := m.pendingProgramChosen
+		//
+		// A launch --program counts as chosen too: programFollowsConfig=false
+		// sends it concretely even though only the picker sets the pending
+		// flag, and a later project switch resets the config-following bit —
+		// restoring such a draft as implicit would swap the launch program
+		// for whatever the moved default is (#4889 review).
+		programChosen := m.pendingProgramChosen || !m.programFollowsConfig
 		accountChosen := m.pendingAccountChosen
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
