@@ -398,31 +398,42 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 		// session is still alive are rare and still surface every tick.
 		// CapturePaneContent has already probed ExistsOrUnknown on the
 		// error path, so use the wrapped sentinel rather than re-probing.
-		if errors.Is(err, ErrSessionGone) {
-			// Expectedness is decided from af's own state, never from timing
-			// or the error text (#5138). Two records count. The generation's
-			// teardown mark — this object's close() ran — which the
-			// snapshotted monitor reads so a poll in flight across a
-			// same-object restart still attributes the OLD session's death to
-			// the teardown af asked for (Codex on #4473). And the caller's
-			// predicate — the instance's own lifecycle state (kill tombstone,
-			// archiving/killing op, cleared started, an owed on_complete) —
-			// covering the whole window between af recording the teardown and
-			// close() landing the mark. Neither present means the session
-			// vanished unexpectedly — the ERROR is what the level exists for.
-			expected := expectGone != nil && expectGone()
-			t.monitorMu.Lock()
-			initiated := expected || (mon.generation != nil && mon.generation.teardownInitiated)
+		//
+		// Expectedness is decided from af's own state, never from timing
+		// or the error text (#5138). Two records count. The generation's
+		// teardown mark — this object's close() ran — which the
+		// snapshotted monitor reads so a poll in flight across a
+		// same-object restart still attributes the OLD session's death to
+		// the teardown af asked for (Codex on #4473). And the caller's
+		// predicate — the instance's own lifecycle state (kill tombstone,
+		// archiving/killing op, cleared started, an owed on_complete) —
+		// covering the whole window between af recording the teardown and
+		// close() landing the mark. Neither present means the session
+		// vanished unexpectedly — the ERROR is what the level exists for.
+		expected := expectGone != nil && expectGone()
+		gone := errors.Is(err, ErrSessionGone)
+		t.monitorMu.Lock()
+		initiated := expected || (mon.generation != nil && mon.generation.teardownInitiated)
+		if gone {
 			mon.dead = true
-			t.monitorMu.Unlock()
-			if initiated {
-				log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
-			} else {
-				log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
-			}
-			return false, false, "", false, false
 		}
-		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
+		t.monitorMu.Unlock()
+		switch {
+		case gone && initiated:
+			log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+		case gone:
+			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+		case initiated && !errors.Is(err, ErrTmuxTimeout):
+			// The same attribution covers the failure a step earlier in
+			// the teardown: a pane can die under a session object tmux
+			// has not finished removing, so capture-pane fails while the
+			// gone-probe still answers alive-or-unknown (#5317). A tripped
+			// deadline is different evidence — af asking for the teardown
+			// does not explain a wedged server — and keeps ERROR.
+			log.InfoLog.Printf("tmux session %s: error capturing pane content in status monitor during af-initiated teardown: %v", t.sanitizedName, err)
+		default:
+			log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
+		}
 		return false, false, "", false, false
 	}
 

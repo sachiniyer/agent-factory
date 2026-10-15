@@ -36,6 +36,9 @@ type teardownMarkTmux struct {
 	killFails   atomic.Bool // kill-session answers a failure instead of removing the session
 	captureOK   atomic.Bool // capture-pane succeeds
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
+	// captureWedged stalls capture-pane past the shortened deadline — the
+	// monitor's error path sees ErrTmuxTimeout, not a pane answer.
+	captureWedged atomic.Bool
 	// nameGen, when set, is what display-message answers for the NAME target:
 	// "$id pid created" — the session generation currently behind the name.
 	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
@@ -107,6 +110,10 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "capture-pane"):
 		m.captureCalls.Add(1)
+		if m.captureWedged.Load() {
+			time.Sleep(markTestWedge)
+			return nil, errors.New("wedged tmux server never answered capture-pane")
+		}
 		if m.captureOK.Load() {
 			return []byte("pane content"), nil
 		}
@@ -482,4 +489,68 @@ func TestExpectingTeardownPredicateDemotesVanishToInfo(t *testing.T) {
 			require.Equal(t, tc.wantError, strings.Contains(errs.String(), "going silent"))
 		})
 	}
+}
+
+// TestTeardownWindowCaptureFailureFollowsAttribution covers the issue's second
+// line (#5317): a step earlier in the same teardown, the pane is already dead
+// while the session object is still listed, so capture-pane answers a failure
+// the gone-probe cannot confirm. Inside an af-requested teardown that failure
+// is the same expected noise as the gone-observation and logs at INFO from the
+// same two attribution sources — the generation's teardown mark and the
+// caller's predicate. The last two rows are the control: with nothing af-side
+// describing a teardown, the identical failure stays at ERROR.
+func TestTeardownWindowCaptureFailureFollowsAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mark      bool
+		expect    func() bool
+		wantInfo  bool
+		wantError bool
+	}{
+		{name: "this object's close() marked the generation", mark: true, wantInfo: true},
+		{name: "instance state records a teardown", expect: func() bool { return true }, wantInfo: true},
+		{name: "no teardown recorded", expect: func() bool { return false }, wantError: true},
+		{name: "nil predicate keeps the mark-only contract", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+			// The session still answers has-session but the pane is gone —
+			// capturePaneContentTarget's gone-probe reports
+			// alive-or-unknown, so the poll lands on the generic branch.
+			m.alive.Store(true)
+			m.captureOK.Store(false)
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, tc.wantInfo, strings.Contains(infos.String(), "during af-initiated teardown"),
+				"a capture failure inside an af-requested teardown is expected noise")
+			require.Equal(t, tc.wantError, strings.Contains(errs.String(), "error capturing pane content in status monitor"),
+				"nothing af-side describes a teardown, so the failure stays at ERROR")
+		})
+	}
+}
+
+// TestWedgedCaptureDuringTeardownStaysError pins the boundary of the demotion:
+// a tripped capture deadline is a wedged server, which af's teardown request
+// does not explain, so it keeps ERROR even with the mark set (#5317).
+func TestWedgedCaptureDuringTeardownStaysError(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	session, m := newMarkedTeardownSession(t)
+	marked, answered := session.markTeardownInitiated()
+	require.True(t, answered)
+	require.NotNil(t, marked)
+	m.captureWedged.Store(true)
+
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.True(t, strings.Contains(errs.String(), "error capturing pane content in status monitor"),
+		"a wedged server is a fault the teardown request cannot explain")
+	require.False(t, strings.Contains(infos.String(), "during af-initiated teardown"))
 }
