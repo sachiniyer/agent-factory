@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -118,14 +117,33 @@ func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
 }
 
-// boundedRepoResolve deduplicates in-flight bounded resolutions per
-// repository. A read wedged on a dead mount cannot be killed mid-syscall, so
-// without dedup every form open after a timeout would stack another abandoned
-// worker on the same files; retries instead share the one in-flight resolve
-// and bound only their own wait (#4889 review). The flight is never forgotten:
-// while a read is wedged the key stays claimed, which is exactly what caps the
-// accumulation at one worker per repository.
-var boundedRepoResolve singleflight.Group
+// boundedRepoResolve serializes in-flight bounded resolutions per repository.
+// A read wedged on a dead mount cannot be killed mid-syscall, so without
+// serialization every form open after a timeout would stack another abandoned
+// worker on the same files; retries instead wait on the one in-flight resolve
+// and bound only their own wait (#4889 review).
+//
+// It is deliberately NOT singleflight's result sharing: a caller that joins an
+// in-flight flight predating its own call would accept a snapshot that can
+// precede the config change this read exists to observe (#4889 review). A
+// joiner waits for the flight to FINISH — the pileup cap is the point — then
+// loops: every flight it can join on a later pass began after the call, so the
+// result is as live as its own read would have been. A completed flight is
+// removed before its result is published, so a caller can never attach to a
+// resolved flight's stale channel.
+type repoResolveFlight struct {
+	done chan repoResolveOutcome
+}
+
+type repoResolveOutcome struct {
+	val *ResolvedConfig
+	err error
+}
+
+var (
+	repoResolveFlightsMu sync.Mutex
+	repoResolveFlights   = map[string]*repoResolveFlight{}
+)
 
 // resolveRepoForBound is the resolve a bounded flight performs, taken out to a
 // var so tests can watch how many workers a wedge accumulates.
@@ -139,10 +157,10 @@ var resolveRepoForBound = func(repo *RepoContext) (*ResolvedConfig, error) {
 // TOML — that an unavailable mount can stall indefinitely. A caller that must
 // answer (the TUI's off-loop refresh) bounds the read here (#4889 review).
 // Same pattern as resolveConfigForRepoInspectionWithGlobalAndPersonalContext,
-// plus singleflight dedup so a wedged read never multiplies workers; the
+// plus the per-repo flight above so a wedged read never multiplies workers; the
 // observation record is kept because this is the runtime, not inspection,
 // resolve — a worker that finishes after its callers timed out recorded a
-// load that genuinely happened, and its result still answers the next caller.
+// load that genuinely happened.
 func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required for bounded repo resolution")
@@ -153,21 +171,45 @@ func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*Resol
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("resolve repository config: %w", err)
 	}
-	done := boundedRepoResolve.DoChan(
-		repo.IdentityPath()+"\x00"+repo.WorkspacePath(),
-		func() (any, error) { return resolveRepoForBound(repo) })
-	select {
-	case outcome := <-done:
-		resolved, _ := outcome.Val.(*ResolvedConfig)
-		return resolved, outcome.Err
-	case <-ctx.Done():
-		// A completed read is an answer even if its caller's deadline became
-		// ready at the same instant. Prefer it before failing the resolve.
+	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
+	firstJoin := true
+	for {
+		repoResolveFlightsMu.Lock()
+		flight, joined := repoResolveFlights[key]
+		if !joined {
+			flight = &repoResolveFlight{done: make(chan repoResolveOutcome, 1)}
+			repoResolveFlights[key] = flight
+			go func() {
+				val, err := resolveRepoForBound(repo)
+				repoResolveFlightsMu.Lock()
+				delete(repoResolveFlights, key)
+				repoResolveFlightsMu.Unlock()
+				flight.done <- repoResolveOutcome{val, err}
+			}()
+		}
+		repoResolveFlightsMu.Unlock()
+
 		select {
-		case outcome := <-done:
-			resolved, _ := outcome.Val.(*ResolvedConfig)
-			return resolved, outcome.Err
-		default:
+		case outcome := <-flight.done:
+			if joined && firstJoin {
+				// The flight predates this call — its snapshot can precede a
+				// change this read exists to observe. Wait done; read again.
+				firstJoin = false
+				continue
+			}
+			return outcome.val, outcome.err
+		case <-ctx.Done():
+			// A completed read is an answer even if its caller's deadline
+			// became ready at the same instant — unless the flight predates
+			// this call, whose stale snapshot the loop still owes a
+			// replacement for and the expired ctx will not wait through.
+			select {
+			case outcome := <-flight.done:
+				if !(joined && firstJoin) {
+					return outcome.val, outcome.err
+				}
+			default:
+			}
 			return nil, fmt.Errorf("resolve repository config: %w", ctx.Err())
 		}
 	}

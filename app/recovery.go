@@ -51,11 +51,18 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// the refetched default.
 	m.pendingAccountChosen = req.AccountChosen
 	m.pendingProgramChosen = req.ProgramChosen
-	if !m.pendingProgramChosen {
+	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		// Re-resolve the live default for the restored field's seed: the
 		// displayed program is what a retry's implicit "" will resolve to, so
 		// it should be the CURRENT default, not the stale one the failed form
 		// happened to show (#4889 review).
+		//
+		// A CHOSEN account forbids the re-resolve: the wire program was the
+		// displayed one pinned to keep the pair, so instance.Program is the
+		// agent that account's registry belongs to. Refreshing it onto a
+		// moved default would re-pair (for example) claude's "work" account
+		// with codex on the retry — silently wrong or a registry mismatch
+		// (#4889 review).
 		m.refreshDefaultProgram()
 		m.pendingProgram = m.defaultProgram()
 	}

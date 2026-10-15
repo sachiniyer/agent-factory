@@ -261,3 +261,56 @@ func TestResolveConfigForRepoContextSharesAWedgedRead(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load(),
 		"timed-out retries must share the wedged worker, not accumulate one per call")
 }
+
+// TestResolveConfigForRepoContextReReadsAfterAJoinedFlight is the freshness
+// half of the bound (#4889 review): a caller that attaches to a flight
+// in-flight when it arrived must not accept that snapshot — the read can
+// precede the config change this call exists to observe. The joiner waits for
+// the older worker to finish, then issues a read that provably starts after
+// its own call.
+func TestResolveConfigForRepoContextReReadsAfterAJoinedFlight(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	firstRunning := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	prev := resolveRepoForBound
+	resolveRepoForBound = func(*RepoContext) (*ResolvedConfig, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			close(firstRunning)
+			<-releaseFirst
+			return nil, errors.New("stale flight result")
+		}
+		return nil, errors.New("fresh flight result")
+	}
+	t.Cleanup(func() { resolveRepoForBound = prev })
+
+	// Caller A opens flight one and stays in it.
+	aDone := make(chan error, 1)
+	go func() {
+		_, aErr := ResolveConfigForRepoContext(context.Background(), repo)
+		aDone <- aErr
+	}()
+	<-firstRunning
+
+	// Caller B joins flight one — it started before B's call.
+	bDone := make(chan error, 1)
+	go func() {
+		_, bErr := ResolveConfigForRepoContext(context.Background(), repo)
+		bDone <- bErr
+	}()
+
+	// Flight one completes; the pileup stays at one worker while B re-reads.
+	close(releaseFirst)
+	require.EqualError(t, <-bDone, "fresh flight result",
+		"a joined flight's snapshot must not satisfy a later caller")
+	require.EqualError(t, <-aDone, "stale flight result",
+		"the flight's own caller takes its result — it is the live read")
+	require.Equal(t, int32(2), calls.Load(),
+		"B's re-read is one new worker after the joined flight finished")
+}
