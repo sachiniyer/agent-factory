@@ -658,7 +658,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// pids and the read that tells a leftover from a replacement (#3706).
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil, false)
-		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations)
+		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, nil)
 		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
 	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations, false)
@@ -676,7 +676,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations, false)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations)
+		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, nil)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -689,7 +689,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		candidates = refreshed
 	}
 	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations, false)
-	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations)
+	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, nil)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	if len(left) > 0 {
 		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",

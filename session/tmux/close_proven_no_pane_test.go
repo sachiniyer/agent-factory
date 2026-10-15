@@ -77,9 +77,12 @@ func TestCloseAndWaitForPaneExit_BlindConclusiveDoesNotLatchClosedConclusively(t
 				// ErrSessionVanishedBeforeCapture.
 				return nil, tmuxCantFindSessionError(t, name)
 			}
-			// display-message answers exit 0 with empty output for a session that
-			// does not exist, so panePID yields errPaneQueryFoundNoPane.
-			return nil, nil
+			// display-message answers exit 0 for a session that does not
+			// exist — and with the identity-bearing row format its answer is
+			// not empty: #{pid} is server-scoped, so it still expands while
+			// every pane/session field stays blank. panePID must read THAT
+			// shape as no-pane too (#5321).
+			return []byte("||||4242|\n"), nil
 		},
 	}
 	s := newTmuxSession(name, "claude", NewMockPtyFactory(t), cmdExec)

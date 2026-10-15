@@ -224,7 +224,7 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		return paneRow{}, fmt.Errorf("failed to query pane pid: %w", err)
 	}
 	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" || strings.Trim(trimmed, paneFieldSeparator) == "" {
+	if !paneRowAnswered(trimmed) {
 		// tmux answered and named no pane. Measured: this is what a missing
 		// session produces — exit 0, empty output — so it is the one pane-query
 		// failure that is evidence of ABSENCE rather than of an unreadable answer.
@@ -237,6 +237,24 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		return paneRow{}, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}
 	return row, nil
+}
+
+// paneRowAnswered reports whether a display-message answer in paneRowFormat
+// named a pane at all. `#{pid}` is SERVER-scoped — it expands even when the
+// target session does not exist — so a missing session answers `||||<pid>|`,
+// not the all-separators `|||` the pre-identity format produced. Every other
+// field is pane- or session-scoped and stays empty for a target that is not
+// there; "nothing but the server pid answered" is the same absence (#5321 CI).
+func paneRowAnswered(trimmed string) bool {
+	for i, part := range strings.Split(trimmed, paneFieldSeparator) {
+		if i == 4 {
+			continue
+		}
+		if strings.TrimSpace(part) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // PaneRootProcess resolves the pane root's process identity — the (PID,

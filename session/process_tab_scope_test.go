@@ -221,12 +221,13 @@ func (p *launchingPane) refuses(now time.Time) bool {
 	return false
 }
 
-// paneFieldsBlank expands every pane field to nothing, as tmux does for a
-// missing target; paneFieldsRunning is a running pane with no pid to hand out.
+// paneFieldsBlank answers as tmux does for a missing target: every pane- and
+// session-scoped field empty, while server-scoped #{pid} still expands;
+// paneFieldsRunning is a running pane with no pid to hand out.
 var (
 	paneFieldsBlank = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
-		"#{session_id}", "", "#{pid}", "", "#{session_created}", "")
+		"#{session_id}", "", "#{pid}", "4242", "#{session_created}", "")
 	paneFieldsRunning = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "0",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
 		"#{session_id}", "$0", "#{pid}", "4242", "#{session_created}", "1726000000")
