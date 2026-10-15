@@ -64,6 +64,15 @@ func LoadTasks() ([]Task, error) {
 
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
+			// A resolving link's target can be removed between the guard above
+			// and this Stat — the check-then-read window the config
+			// materialization path closes the same way (#3672 review). Re-check
+			// the link before treating the store as ordinarily absent, or a
+			// link that dangled by the time Stat followed it reads as ENOENT
+			// here and silently drops every task this guard was added to keep.
+			if err := config.RefuseDanglingConfigLink(path); err != nil {
+				return nil, err
+			}
 			return []Task{}, nil
 		}
 		return nil, fmt.Errorf("failed to read tasks file: %w", err)
@@ -154,6 +163,15 @@ func loadTasksLocked(path string) ([]Task, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// The same check-then-read race as LoadTasks: a target removed
+			// between the guard and this ReadFile re-creates the empty list
+			// that hides a dangling link. Re-check before returning the
+			// ordinary-empty shape, so a mutation against a now-dangling link
+			// surfaces the broken link instead of a misleading "not found"
+			// (#3672 review).
+			if err := config.RefuseDanglingConfigLink(path); err != nil {
+				return nil, err
+			}
 			return []Task{}, nil
 		}
 		return nil, fmt.Errorf("failed to read tasks file: %w", err)
@@ -200,6 +218,14 @@ func ensureTasksSchemaMigrated(path string) error {
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
+			// The same check-then-read race as LoadTasks: re-check the link
+			// before treating the store as absent, or a target removed between
+			// the guard and this Stat skips migration as if the store were gone
+			// — the silent-empty shape this guard was added to stop (#3672
+			// review).
+			if err := config.RefuseDanglingConfigLink(path); err != nil {
+				return err
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to read tasks file: %w", err)
