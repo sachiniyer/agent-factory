@@ -912,10 +912,10 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 // displaying the client's launch-time local seed — the account preselect that
 // fired for the local agent is fetched again for the resolved one.
 func TestRemoteTargetSeedsTheDaemonsDefault(t *testing.T) {
-	clearDaemonTarget(t)
-	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
-
 	h := configFollowingHome(t)
+	// Set the remote target AFTER configFollowingHome — its clearDaemonTarget
+	// resets AF_DAEMON_URL, so the env must be written after the home exists.
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
 
 	t.Cleanup(SetProgramListerForTest(func(repoPath string) (daemon.ListProgramsResponse, error) {
 		return daemon.ListProgramsResponse{Default: tmux.ProgramCodex}, nil
