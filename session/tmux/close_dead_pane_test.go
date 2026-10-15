@@ -33,11 +33,19 @@ import (
 
 // startHeldPane starts a real session on the test's private server with
 // remain-on-exit set in the same invocation (as Start does), and waits until
-// tmux reports the pane dead.
+// tmux reports the pane dead. The pane carries the launch markers a real af
+// pane gets (#1104): they are the only provenance left for a pane whose pid
+// tmux ≥ 3.8 no longer reports, and the detached-survivor test below relies on
+// them exactly the way production relies on them.
 func startHeldPane(t *testing.T, name, command string) {
 	t.Helper()
-	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, command,
-		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name,
+		"-e", EnvMarkerSession+"="+name,
+		"-e", EnvMarkerGeneration+"="+t.Name(),
+		"-e", EnvMarkerHome+"="+home,
+		command, ";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
 	require.Eventually(t, func() bool {
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead}").Output()
@@ -211,9 +219,17 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 // it expands whatever format was asked for, so the fixture tracks the query
 // instead of a canned shape. Every command is accepted, including kill-session.
 func heldPaneExec(pid int, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	return paneRowExec(strconv.Itoa(pid), "1", status, signal, deadTime, killed)
+}
+
+// paneRowExec answers every pane query by expanding the asked-for format with
+// the given row fields: an empty pid is tmux ≥ 3.8's answer for a pane whose
+// terminal is gone (#5319), an empty dead flag is tmux's answer for a target
+// that names no pane at all. Every command is accepted, including kill-session.
+func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
 	expand := strings.NewReplacer(
-		"#{pane_pid}", strconv.Itoa(pid),
-		"#{pane_dead}", "1",
+		"#{pane_pid}", pid,
+		"#{pane_dead}", dead,
 		"#{pane_dead_status}", status,
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
@@ -281,6 +297,90 @@ func TestCloseAndWaitForPaneExit_UnreapedDeadPaneSkipsAPidMarkedForAnotherSessio
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
 	require.True(t, proctree.AliveSame(stranger), "the teardown signalled another session's process")
+}
+
+// #5319: tmux ≥ 3.8 reports no pane_pid for a held dead pane — the pane's pty
+// is gone — so list-panes returns `|1|<status+signal+time>`. This exact record
+// shape is what the macOS CI failure parsed as a pid and refused on. A dead
+// pane has no live root to trace, so an empty pid parses instead of erroring.
+func TestParsePaneRow_DeadPaneWithNoReportedPid(t *testing.T) {
+	row, err := parsePaneRow("|1|71792068687")
+	require.NoError(t, err)
+	require.Equal(t, 0, row.pid)
+	require.True(t, row.dead)
+	require.True(t, row.reaped)
+}
+
+// The #2962 guard's other half: a pane tmux does NOT report dead may have a
+// live root, and a pid it cannot read leaves that root unverifiable — so the
+// row must still be a parse error, empty pid or garbage alike.
+func TestParsePaneRow_LivePaneWithNoReportedPidErrors(t *testing.T) {
+	for _, field := range []string{"|0|", "|0|3", "garbage|0|", "content"} {
+		_, err := parsePaneRow(field)
+		require.Error(t, err, "a non-dead pane row with an unreadable pid must stay an error: %q", field)
+	}
+}
+
+// The mock form of #5319: tmux ≥ 3.8's held dead pane reports no pid at all.
+// The teardown must still be conclusive — the pane is dead, so there is no
+// live root whose identity could not be established.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidIsConclusive(t *testing.T) {
+	killed := false
+	s := newTmuxSession(toTmuxName("dead-pane-no-pid", ""), "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed, "the dead pane's session must still be killed")
+}
+
+// With no pid there is no kernel session key to look the pane's detached
+// survivors up by, so the capture attributes them by the launch markers every
+// af pane passes to everything it spawns (#5319, #1104).
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidReapsItsMarkedSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-survivor", "")
+	survivor := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+	})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.False(t, proctree.AliveSame(survivor),
+		"a marked survivor of a pane tmux reports no pid for survived the teardown")
+}
+
+// An unmarked process is not evidence of membership: the no-pid dead pane's
+// marker scan must leave every process it cannot attribute alone.
+func TestCloseAndWaitForPaneExit_HeldPaneWithNoReportedPidLeavesUnmarkedProcesses(t *testing.T) {
+	shrinkReapWaits(t)
+	stranger := startStranger(t, nil)
+	s := newTmuxSession(toTmuxName("dead-pane-no-pid-unmarked", ""), "sh", NewMockPtyFactory(t),
+		paneRowExec("", "1", "3", "", "1726000000", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, proctree.AliveSame(stranger), "the teardown reaped a process it could not attribute")
+}
+
+// A pane tmux does NOT report dead whose pid cannot be read is the opposite
+// case: its root may be live and unverifiable, so the #2962 refusal stands.
+func TestCloseAndWaitForPaneExit_LivePaneWithNoReportedPidRefuses(t *testing.T) {
+	s := newTmuxSession(toTmuxName("live-pane-no-pid", ""), "sh", NewMockPtyFactory(t),
+		paneRowExec("", "0", "", "", "", nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a live pane whose pid cannot be read must not authorize worktree cleanup")
 }
 
 // startStranger starts a process the teardown under test must leave alone.

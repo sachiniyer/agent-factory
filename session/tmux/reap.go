@@ -31,7 +31,10 @@ import (
 //     server, and the capture set is its ppid-descendants plus processes
 //     sharing its kernel session id (tmux makes each pane root a session
 //     leader, so SID membership proves pane ancestry even for processes
-//     already reparented to init).
+//     already reparented to init). A dead pane tmux reports no pid for
+//     (tmux ≥ 3.8) is captured by its launch markers instead — a process
+//     still carrying this session's AF_SESSION and this home's AF_HOME —
+//     the same provenance bar the vanished-session sweep applies (#5319).
 //   - Every signal re-verifies the (pid, starttime) identity via
 //     proctree.Signal, so a recycled PID is never signalled.
 //   - If kill-session fails and the tmux session survives, nothing is
@@ -141,7 +144,7 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || panePID <= 1 {
+		if err != nil || (!row.dead && panePID <= 1) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
@@ -425,6 +428,50 @@ func (g orphanGenerationSet) contains(environ []string) bool {
 
 func (g orphanGenerationSet) empty() bool {
 	return !g.legacy && len(g.values) == 0
+}
+
+// markedSessionSurvivors attributes a live session's marked processes when the
+// kernel-side keys are gone — a dead pane tmux reports no pid for (tmux ≥ 3.8,
+// #5319). With the pid goes the pane's kernel session id, which is what the
+// detached-survivor lookup above is keyed on, so what remains is the launch
+// provenance af stamps into every pane it spawns (#1104): a process still
+// carrying this session's AF_SESSION marker AND this home's AF_HOME marker
+// provably came from it — the same evidence the vanished-session sweep stands
+// on, used here while the session still exists. A process whose environment
+// cannot be read is not evidence of membership, so it is skipped rather than
+// blocking the capture.
+func markedSessionSurvivors(snap map[int]proctree.Process, sanitizedName string) []proctree.Process {
+	home, err := afHomeDir()
+	if err != nil {
+		log.InfoLog.Printf("tmux session %s: cannot attribute a dead pane's survivors without resolving this home: %v",
+			sanitizedName, err)
+		return nil
+	}
+	cleanHome := filepath.Clean(home)
+	selfUID, selfUIDKnown := proctree.UID(os.Getpid())
+	var procs []proctree.Process
+	for _, process := range snap {
+		if isTeardownRequester(process) {
+			continue
+		}
+		if uid, known := proctree.UID(process.PID); !known || !selfUIDKnown || uid != selfUID {
+			continue
+		}
+		environ, envErr := proctree.Environ(process.PID)
+		if envErr != nil {
+			continue
+		}
+		session, ok := processEnvValue(environ, EnvMarkerSession)
+		if !ok || session != sanitizedName {
+			continue
+		}
+		processHome, ok := processEnvValue(environ, EnvMarkerHome)
+		if !ok || filepath.Clean(processHome) != cleanHome {
+			continue
+		}
+		procs = append(procs, process)
+	}
+	return procs
 }
 
 // refreshOrphanCandidates closes the capture-to-marker TOCTOU window. A pane
