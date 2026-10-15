@@ -166,17 +166,15 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		done  bool
 	}
 	scanMarkedSurvivors := func(row paneRow) ([]proctree.Process, error) {
-		if !mergeMarked {
-			// Diagnostic callers (CaptureVerifiedSessionProcessTrees) count
-			// only tree-verified members: marker-attributed survivors of a
-			// pid-less dead pane are exactly the escaped processes that
-			// caller is hunting, so merging them here would hide the
-			// finding. The dead pane contributes nothing — and errors
-			// nothing, because its verified member set is genuinely empty.
-			return nil, nil
-		}
 		if !markedScan.done {
-			markedScan.procs, markedScan.err = markedSessionSurvivors(cmdExec, sanitizedName, row)
+			// Diagnostic callers (CaptureVerifiedSessionProcessTrees) run
+			// the same scan with verifiedOnly: marker-attributed DETACHED
+			// survivors are exactly the escaped processes that caller is
+			// hunting, but a marker-matched process still parented by the
+			// server is the pane's live root — positively verifiable, so it
+			// counts as a member rather than an escapee. Failures here are
+			// blindness for that caller, not a clean empty.
+			markedScan.procs, markedScan.err = markedSessionSurvivors(cmdExec, sanitizedName, row, !mergeMarked)
 			markedScan.done = true
 		}
 		return markedScan.procs, markedScan.err

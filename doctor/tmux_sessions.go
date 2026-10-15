@@ -111,7 +111,7 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 		// fully inspected — the same treatment the unmeasurable counter gives
 		// CPU blindness. Partial captures still yield verified processes that
 		// are evaluated for runaway findings before recording the blindness.
-		procs, paneErr := tmux.CaptureVerifiedSessionProcessTrees(ctx.opts.Exec, name)
+		procs, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
 		if paneErr != nil {
 			// A vanished session is conclusively no longer live: it is not a
 			// blind live session, so it gets no blindness row and the operator

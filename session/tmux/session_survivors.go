@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ import (
 // A session that carries no launch markers at all predates the contract, so a
 // scan that finds nothing there proves nothing about its survivors: that is an
 // incomplete capture — reported as an error — not an empty one.
-func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row paneRow) ([]proctree.Process, error) {
+func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row paneRow, verifiedOnly bool) ([]proctree.Process, error) {
 	if !strings.HasPrefix(row.sessionID, "$") {
 		return nil, fmt.Errorf("tmux session %s: list-panes reported no usable session id, so a dead pane's survivors cannot be attributed",
 			sanitizedName)
@@ -114,6 +115,9 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		return nil, fmt.Errorf("tmux session %s (id %s) was replaced during marker reads, so a dead pane's survivors cannot be attributed",
 			sanitizedName, row.sessionID)
 	}
+	// The identity answer leads with the server's own pid: a marked process
+	// still parented directly by it is the pane's live root, not an escapee.
+	serverPID, _ := strconv.Atoi(strings.Fields(before)[0])
 	fresh, err := proctree.Snapshot()
 	if err != nil {
 		return nil, fmt.Errorf("cannot re-snapshot the process table for a dead pane's survivors: %w", err)
@@ -171,6 +175,12 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 		}
 		cur, err := proctree.Lookup(p.PID)
 		if err != nil {
+			if errors.Is(err, proctree.ErrProcessExited) {
+				// The marked process the environment read described has
+				// definitively exited: ordinary churn, not an incomplete
+				// capture — there is simply nothing left to attribute.
+				return proctree.Process{}, nil
+			}
 			return proctree.Process{}, fmt.Errorf("tmux session %s: marked pid %d changed identity during capture and its current occupant cannot be read: %w",
 				sanitizedName, p.PID, err)
 		}
@@ -208,15 +218,21 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 			// leader pid has plainly been recycled — a leader cannot start
 			// after its member) could be a detached `env -i` survivor. One
 			// started before the session existed provably cannot be, and a
-			// foreign uid's unreadable environment cannot be either.
+			// foreign uid's unreadable environment cannot be either. An
+			// unknown start time — StartedAt is zero when the platform
+			// cannot derive it — cannot clear by age either.
 			same, identityErr := proctree.SameIdentity(process)
 			switch {
 			case identityErr != nil:
 				return nil, fmt.Errorf("tmux session %s: cannot revalidate pid %d while attributing a dead pane's survivors: %w",
 					sanitizedName, process.PID, identityErr)
-			case same && !process.StartedAt.Before(sessionCreated):
+			case same && (process.StartedAt.IsZero() || !process.StartedAt.Before(sessionCreated)):
+				// Non-positive session ids are not membership evidence at
+				// all: kernel threads carry 0 and darwin records an
+				// unreadable session as -1, both excluded by
+				// proctree.SessionMembers for the same reason.
 				leader, leaderListed := fresh[process.SID]
-				orphanMember := process.SID != process.PID &&
+				orphanMember := process.SID > 0 && process.SID != process.PID &&
 					(!leaderListed || leader.StartedAt.After(process.StartedAt))
 				if uid, known := proctree.UID(process.PID); orphanMember && (!known || uid == selfUID) {
 					return nil, fmt.Errorf("tmux session %s: live pid %d's environment cannot be read and it wears an orphaned kernel session, so a dead pane's survivors cannot be attributed",
@@ -268,7 +284,12 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 				if attrErr != nil {
 					return nil, attrErr
 				}
-				if member.PID != 0 {
+				if member.PID != 0 && (!verifiedOnly || member.PPID == serverPID) {
+					// A marker-matched process NOT parented by this server
+					// escaped its pane's tree — exactly what the verified
+					// variant exists to leave out. A marker-matched DIRECT
+					// child is the pane's still-live root: positively
+					// verifiable, so it counts as a member.
 					addSurvivor(member)
 				}
 			}
@@ -276,6 +297,19 @@ func markedSessionSurvivors(cmdExec cmd.Executor, sanitizedName string, row pane
 			return nil, fmt.Errorf("tmux session %s: live pid %d carries only a partial set of launch markers, so it cannot be ruled out as a dead pane's survivor",
 				sanitizedName, process.PID)
 		}
+	}
+	if verifiedOnly {
+		// Everything below a verified root is a verified member by
+		// parentage — markers are what detached survivors need, not
+		// in-tree descendants.
+		for _, root := range procs {
+			for _, descendant := range proctree.TreeOf(fresh, root.PID) {
+				if !capturedPID[descendant.PID] && !selfChain[descendant.PID] {
+					addSurvivor(descendant)
+				}
+			}
+		}
+		return procs, nil
 	}
 	// Marker-less descendants of a captured survivor: a detached child that
 	// stripped its markers is invisible to the scan above, but while its
