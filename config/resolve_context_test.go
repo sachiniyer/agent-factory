@@ -324,3 +324,60 @@ func TestResolveConfigForRepoContextReReadsAfterAJoinedFlight(t *testing.T) {
 	require.Equal(t, int32(2), calls.Load(),
 		"B's re-read is one new worker after the joined flight finished")
 }
+
+// TestResolveConfigForRepoContextExpiredJoinerStartsNoFreshRead covers the
+// other half of the post-join bound (#4889 review): a caller parked on a
+// pre-existing flight whose context expires must not wake up and spawn a
+// fresh worker for the re-read it owes — that worker ignores ctx and would
+// run for a result nobody waits on.
+func TestResolveConfigForRepoContextExpiredJoinerStartsNoFreshRead(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	firstRunning := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	prev := resolveRepoForBound
+	resolveRepoForBound = func(*RepoContext) (*ResolvedConfig, error) {
+		if calls.Add(1) == 1 {
+			close(firstRunning)
+			<-releaseFirst
+		}
+		return nil, errors.New("flight result")
+	}
+	t.Cleanup(func() { resolveRepoForBound = prev })
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, aErr := ResolveConfigForRepoContext(context.Background(), repo)
+		aDone <- aErr
+	}()
+	<-firstRunning
+
+	bCtx, bCancel := context.WithCancel(context.Background())
+	bDone := make(chan error, 1)
+	go func() {
+		_, bErr := ResolveConfigForRepoContext(bCtx, repo)
+		bDone <- bErr
+	}()
+
+	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
+	require.Eventually(t, func() bool {
+		repoResolveFlightsMu.Lock()
+		f, ok := repoResolveFlights[key]
+		repoResolveFlightsMu.Unlock()
+		return ok && f.waiters.Load() == 2
+	}, 5*time.Second, time.Millisecond, "the joiner must attach to the in-flight flight")
+
+	// B's context dies while parked; flight one then completes. B must surface
+	// the cancellation rather than spawn the fresh read it owed a live ctx.
+	bCancel()
+	close(releaseFirst)
+	require.ErrorIs(t, <-bDone, context.Canceled)
+	require.EqualError(t, <-aDone, "flight result")
+	require.Equal(t, int32(1), calls.Load(),
+		"an expired joiner must not start the fresh read it owed")
+}

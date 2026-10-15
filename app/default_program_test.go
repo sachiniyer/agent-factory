@@ -859,3 +859,42 @@ func TestStaleAccountDefaultReplyCannotOverwriteTheRefetch(t *testing.T) {
 		"an older in-flight reply must not overwrite the newer preselection")
 	assert.Equal(t, 2, calls)
 }
+
+// TestFailedCreateDraftKeepsALaunchFixedProgram is the draft-capture half
+// (#4889 review): `af --program X` sends X concretely without the picker's
+// pendingProgramChosen bit, so the draft must record the program as CHOSEN —
+// otherwise a post-failure project switch's config-following reset makes the
+// restore re-resolve and swap the launch program for the moved default.
+func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+	// The --program shape: a concrete program with no config following.
+	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
+	require.False(t, h.programFollowsConfig, "precondition: --program pins, it does not follow")
+
+	var captured sessionStartRequest
+	t.Cleanup(SetSessionStarterForTest(func(inst *session.Instance, req sessionStartRequest) (*session.Instance, error) {
+		captured = req
+		return inst, errors.New("The daemon refused this create.")
+	}))
+
+	inst := startNaming(t, h, "demo")
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, tmux.ProgramGemini, captured.Program,
+		"the launch-fixed program goes out concretely")
+	require.True(t, captured.ProgramChosen,
+		"a concrete program is a chosen program — the retry must not re-resolve it")
+
+	// The refusal re-arms the form with the draft intact: the launch program
+	// stays the restored pick rather than being replaced by the default.
+	for _, msg := range msgs {
+		if _, ok := msg.(instanceStartedMsg); ok {
+			_, _ = h.Update(msg)
+		}
+	}
+	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
+	require.True(t, h.pendingProgramChosen,
+		"the launch-fixed draft restores as a choice, not an implicit field")
+	require.Equal(t, tmux.ProgramGemini, h.pendingProgram)
+	_ = inst
+}
