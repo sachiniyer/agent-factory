@@ -743,7 +743,9 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   // no row height, so only the open trace takes space in the frame.
   const explainTrigger = page.locator('.af-config-row[data-key="vscode_server_binary"] .af-config-explain-trigger');
   await explainTrigger.click();
-  await expect(page.locator(".af-config-explain .af-config-explain-cand").first()).toBeVisible();
+  const explainPanel = page.locator(".af-config-explain");
+  await expect(explainPanel.locator(".af-config-explain-cand").first()).toBeVisible();
+  await explainPanel.scrollIntoViewIfNeeded();
   await shot("config-explain");
   await explainTrigger.click();
   await expect(page.locator(".af-config-explain")).toHaveCount(0);
