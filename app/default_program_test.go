@@ -722,32 +722,50 @@ func TestFailedCreateRestoreRefetchesTheDefaultAccount(t *testing.T) {
 		"the restored form shows the default the retry will apply")
 }
 
-// TestFailedCreateRestoreKeepsAChosenAmbientAccount pins the ambient half of
-// the draft-flags finding (#4889 review): "Ambient identity" deliberately
-// picked sends Account="" — the same wire encoding as an untouched field —
-// so the draft's AccountChosen flag is the only thing distinguishing them.
-// A restore that inferred chosen-ness from the wire would re-preselect the
-// configured default over the user's deliberate ambient pick.
-func TestFailedCreateRestoreKeepsAChosenAmbientAccount(t *testing.T) {
+// TestFailedCreateRestoreFreshensAChosenAmbientAccount pins the #4889 review
+// finding on the chosen-EMPTY account: a deliberate "Ambient identity" pick
+// sends Account="" — the same wire encoding as an untouched field — so the
+// daemon resolves default_accounts fresh on retry. Skipping the refresh and
+// refetch would leave the display naming defaults that may already have moved:
+// the wire cannot see the difference, so restore treats it as unchosen and
+// freshens both fields (#4889 review).
+func TestFailedCreateRestoreFreshensAChosenAmbientAccount(t *testing.T) {
 	h := configFollowingHome(t)
 	recordStartRequest(t)
-	calls, _ := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
+	calls, _ := stubAccounts(t,
+		withDefaults(map[string]string{"claude": "work", "codex": "ci"}), nil)
 
 	inst := newLoadingInstance(t, "demo")
 	inst.Path = h.repoRoot
+	inst.Program = tmux.ProgramClaude
 	h.store.AddInstance(inst)
 	h.sidebar.SelectInstance(inst)
+
+	// Both defaults move after the failure — the wire's ""+"" resolves them
+	// fresh, so the restored display must too.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramCodex)
+	require.NoError(t, err)
 
 	// The failed submit carried an explicit ambient choice: Account="" on the
 	// wire, AccountChosen=true beside it.
 	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "", Account: "", AccountChosen: true}
-	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	_, cmd := h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
-	require.True(t, h.pendingAccountChosen,
-		"a deliberate ambient pick restores as chosen — never re-preselected")
-	require.Empty(t, h.pendingAccount, "ambient")
-	assert.Equal(t, 0, *calls,
-		"no default-account fetch runs for a field the user already decided")
+	require.False(t, h.pendingAccountChosen,
+		"an empty account pins nothing — the wire sends \"\" either way, so restore treats it as implicit")
+	require.Empty(t, h.pendingAccount, "ambient — until the refetch answers")
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
+		"the displayed program re-follows the live default — the retry resolves it too")
+
+	require.NotNil(t, cmd, "the restore re-fires the account-default fetch")
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if def, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(def)
+		}
+	}
+	assert.Equal(t, 1, *calls, "one ListAccounts for the restored form")
+	assert.Equal(t, "ci", h.pendingAccount,
+		"the refetch preselects the default for the LIVE program, not the failed one")
 }
 
 // TestFailedCreateRestoreUnpinsAnAccountPinnedProgram is the program half of
@@ -794,4 +812,46 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	assert.Empty(t, got.Program,
 		"with the account back at ambient, the retry follows the config default again")
 	assert.Empty(t, got.Account)
+}
+
+// TestStaleAccountDefaultReplyCannotOverwriteTheRefetch pins the #4889 review
+// finding on reply ordering: a submit issued while the form-open
+// fetchAccountDefault is still in flight, followed by a failure restore,
+// launches a SECOND fetch — and the daemon's default may have moved in
+// between. The older reply arriving LAST must not overwrite the newer
+// preselection, so each fetch is stamped with an issuance seq the handler
+// fences on.
+func TestStaleAccountDefaultReplyCannotOverwriteTheRefetch(t *testing.T) {
+	h := configFollowingHome(t)
+	recordStartRequest(t)
+
+	var calls int
+	t.Cleanup(SetAccountListerForTest(func(_, _ string) (daemon.ListAccountsResponse, error) {
+		calls++
+		if calls == 1 {
+			return withDefaults(map[string]string{"claude": "stale"}), nil
+		}
+		return withDefaults(map[string]string{"claude": "fresh"}), nil
+	}))
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+
+	// Fetch one is still in flight when the create fails and the restore
+	// launches fetch two — the replies return out of order.
+	first := h.fetchAccountDefault(naming, "claude")
+	second := h.fetchAccountDefault(naming, "claude")
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+
+	newer := second().(accountDefaultMsg) // fetch two answers first...
+	_, _ = h.Update(newer)
+	require.Equal(t, "fresh", h.pendingAccount, "the newer answer applies")
+
+	older := first().(accountDefaultMsg) // ...then the stale one lands last
+	_, _ = h.Update(older)
+	assert.Equal(t, "fresh", h.pendingAccount,
+		"an older in-flight reply must not overwrite the newer preselection")
+	assert.Equal(t, 2, calls)
 }

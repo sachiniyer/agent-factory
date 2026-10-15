@@ -453,6 +453,12 @@ type home struct {
 	// rows are built from the daemon's registry (plus a leading "ambient identity"
 	// row), so the overlay's index cannot be mapped back through any local list.
 	accountPickerChoices []accountChoice
+	// accountDefaultSeq is the issuance counter fetchAccountDefault stamps on
+	// each accountDefaultMsg it launches. Two preselect fetches can be in flight
+	// at once — a submit-then-fail restore re-fires one while the form-open fetch
+	// still pends — and the older reply landing last must not overwrite the
+	// newer answer (#4889 review).
+	accountDefaultSeq int64
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
 	// (capture-pane via runMetadataTick, refreshPanesCmd) is

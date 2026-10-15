@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -131,8 +132,17 @@ func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 // result is as live as its own read would have been. A completed flight is
 // removed before its result is published, so a caller can never attach to a
 // resolved flight's stale channel.
+// A flight BROADCASTS its outcome: done is closed (not sent on) after out is
+// set, so every waiter observing the close reads the same result — a channel
+// send would wake exactly one waiter and strand the rest until ctx expiry
+// (#4889 review). The close synchronizes-before every observing read, so out
+// needs no other guard.
 type repoResolveFlight struct {
-	done chan repoResolveOutcome
+	done chan struct{}
+	out  repoResolveOutcome
+	// Callers parked on done — tests read it to prove a join attached before
+	// releasing the flight, so the re-read path runs under a real pileup.
+	waiters atomic.Int32
 }
 
 type repoResolveOutcome struct {
@@ -177,36 +187,38 @@ func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*Resol
 		repoResolveFlightsMu.Lock()
 		flight, joined := repoResolveFlights[key]
 		if !joined {
-			flight = &repoResolveFlight{done: make(chan repoResolveOutcome, 1)}
+			flight = &repoResolveFlight{done: make(chan struct{})}
 			repoResolveFlights[key] = flight
 			go func() {
 				val, err := resolveRepoForBound(repo)
 				repoResolveFlightsMu.Lock()
 				delete(repoResolveFlights, key)
 				repoResolveFlightsMu.Unlock()
-				flight.done <- repoResolveOutcome{val, err}
+				flight.out = repoResolveOutcome{val, err}
+				close(flight.done)
 			}()
 		}
 		repoResolveFlightsMu.Unlock()
 
+		flight.waiters.Add(1)
 		select {
-		case outcome := <-flight.done:
+		case <-flight.done:
 			if joined && firstJoin {
 				// The flight predates this call — its snapshot can precede a
 				// change this read exists to observe. Wait done; read again.
 				firstJoin = false
 				continue
 			}
-			return outcome.val, outcome.err
+			return flight.out.val, flight.out.err
 		case <-ctx.Done():
 			// A completed read is an answer even if its caller's deadline
 			// became ready at the same instant — unless the flight predates
 			// this call, whose stale snapshot the loop still owes a
 			// replacement for and the expired ctx will not wait through.
 			select {
-			case outcome := <-flight.done:
+			case <-flight.done:
 				if !(joined && firstJoin) {
-					return outcome.val, outcome.err
+					return flight.out.val, flight.out.err
 				}
 			default:
 			}

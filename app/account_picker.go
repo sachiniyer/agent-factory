@@ -189,8 +189,13 @@ type accountRegistryMsg struct {
 type accountDefaultMsg struct {
 	naming *session.Instance
 	agent  string
-	resp   daemon.ListAccountsResponse
-	err    error
+	// seq is the fetch's place in the per-model issuance order: a second fetch
+	// (a program change, a failed-create restore) invalidates every earlier
+	// reply, and the oldest of two in-flight answers must not arrive last and
+	// overwrite the newer preselection (#4889 review).
+	seq  int64
+	resp daemon.ListAccountsResponse
+	err  error
 }
 
 // listAccountsThroughDaemon is the fetch seam, mirroring listBackendsThroughDaemon:
@@ -283,11 +288,13 @@ func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.C
 	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
 		return nil
 	}
+	m.accountDefaultSeq++
+	seq := m.accountDefaultSeq
 	fetch := listAccountsThroughDaemon
 	repoPath := m.repoRoot
 	return func() tea.Msg {
 		resp, err := fetch("", repoPath)
-		return accountDefaultMsg{naming: naming, agent: agent, resp: resp, err: err}
+		return accountDefaultMsg{naming: naming, agent: agent, seq: seq, resp: resp, err: err}
 	}
 }
 
@@ -314,6 +321,12 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	if m.namingInstance == nil || m.namingInstance != msg.naming {
+		return m, nil
+	}
+	if msg.seq != 0 && msg.seq != m.accountDefaultSeq {
+		// A newer fetch (a program change, a restore-time refetch) already
+		// superseded this reply — the older answer arriving last must not
+		// overwrite the fresher preselection (#4889 review).
 		return m, nil
 	}
 	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
