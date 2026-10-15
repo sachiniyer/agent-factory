@@ -51,6 +51,17 @@ func LoadTasks() ([]Task, error) {
 		return nil, err
 	}
 
+	// A DANGLING tasks.json symlink reads as ENOENT, which os.Stat below would
+	// take for "no store yet" and return an empty list — silently dropping every
+	// schedule, watcher, and row the TUI and CLI show. The write path refuses
+	// the same link (AtomicWriteFileFollowingLink → resolveWriteTarget), so the
+	// read path must refuse it too, naming both ends: the read/write contract for
+	// a followed file is symmetric (#3672 review). A simply-absent path stays an
+	// ordinary empty store.
+	if err := config.RefuseDanglingConfigLink(path); err != nil {
+		return nil, err
+	}
+
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return []Task{}, nil
@@ -130,6 +141,16 @@ var nowFn = time.Now
 // lock. If a legacy array sneaks in between the pre-lock migration and this
 // read, saveTasks will still write the updated v1 envelope.
 func loadTasksLocked(path string) ([]Task, error) {
+	// The same refusal LoadTasks makes. This is the WRITE path's loader — the
+	// mutation callers (AddTask, UpdateTask, RemoveTask) load here to find the
+	// row they change. A dangling link made it return an empty list, so every
+	// mutation then reported "task with id X not found" for a task that does
+	// exist in the unreachable target, and the write-side refusal was never
+	// reached. Refusing here surfaces the real cause before that misleading
+	// "not found" can (#3672 review).
+	if err := config.RefuseDanglingConfigLink(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -170,6 +191,13 @@ func loadTasksLocked(path string) ([]Task, error) {
 }
 
 func ensureTasksSchemaMigrated(path string) error {
+	// A dangling link made os.Stat return ENOENT, which skipped migration with
+	// nil error — so the daemon-load schema check passed a broken link as a
+	// migrated store, the same silent-empty shape LoadTasks and loadTasksLocked
+	// produced. Refuse it the same way they do (#3672 review).
+	if err := config.RefuseDanglingConfigLink(path); err != nil {
+		return err
+	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return nil

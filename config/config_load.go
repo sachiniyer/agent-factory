@@ -116,7 +116,7 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	//
 	// It is the same broken link AtomicWriteFileFollowingLink refuses, so it is
 	// refused the same way, naming both ends.
-	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 		return nil, err
 	}
 
@@ -176,7 +176,7 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	// defaults without stopping or naming the link, diverging from the
 	// dangling-config.toml behavior the tomlPath guard above guarantees.
 	// Refuse it the same way, naming both ends (#3660 review).
-	if err := refuseDanglingConfigLink(configPath); err != nil {
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(configPath)
@@ -236,7 +236,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	// to write defaults, while af itself refuses to start on that very link. A
 	// diagnostic that disagrees with the thing it diagnoses is worse than no
 	// diagnostic (#3660 review).
-	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 		return ReadOnlyConfigLoad{Path: tomlPath}, err
 	}
 
@@ -270,7 +270,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	// Missing — the exact diagnostic/startup divergence the tomlPath guard
 	// above was written to close, reproduced on the legacy path. Refuse it
 	// the same way, naming both ends (#3660 review).
-	if err := refuseDanglingConfigLink(configPath); err != nil {
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
 		return ReadOnlyConfigLoad{Path: configPath}, err
 	}
 
@@ -625,8 +625,8 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// exists because another process really can install one in this window.
 		// The exclusive create then reports EEXIST on the link and the reread
 		// fails, which would land right back on silent defaults — the exact
-		// outcome refuseDanglingConfigLink was added to stop (#3660 review).
-		if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		// outcome RefuseDanglingConfigLink was added to stop (#3660 review).
+		if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 			return nil, err
 		}
 	}
