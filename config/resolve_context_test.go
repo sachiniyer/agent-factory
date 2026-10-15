@@ -2,10 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,4 +174,140 @@ func TestRootAgentInspectionSnapshotRejectsCheckoutReplacementDuringCommandRead(
 	err = <-resolved
 	require.ErrorIs(t, err, ErrRootAgentInspectionIdentityChanged,
 		"checkout identity must remain stable across the command-layer read")
+}
+
+// TestResolveConfigForRepoContextBoundsFileLoads is the runtime-resolve half of
+// the bound above: the TUI's off-loop default_program refresh answers through
+// this entry point, so its TOML reads must honor the same deadline the repo
+// probe does rather than leaking a goroutine on every retry (#4889 review).
+func TestResolveConfigForRepoContextBoundsFileLoads(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+	dir, legacyPath, err := repoConfigPath(repo.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, exec.Command("mkfifo", legacyPath).Run())
+
+	release := make(chan struct{})
+	writerReady := make(chan error, 1)
+	writerDone := make(chan error, 1)
+	go func() {
+		f, openErr := os.OpenFile(legacyPath, os.O_RDWR, 0)
+		writerReady <- openErr
+		if openErr != nil {
+			writerDone <- openErr
+			return
+		}
+		_, writeErr := f.WriteString("{}")
+		<-release
+		closeErr := f.Close()
+		if writeErr != nil {
+			writerDone <- writeErr
+			return
+		}
+		writerDone <- closeErr
+	}()
+	require.NoError(t, <-writerReady)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = ResolveConfigForRepoContext(ctx, repo)
+	elapsed := time.Since(started)
+	close(release)
+	require.NoError(t, <-writerDone)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, elapsed, 8*time.Second, "a stalled config read must return on the caller's deadline rather than wait for the filesystem")
+}
+
+// TestResolveConfigForRepoContextSharesAWedgedRead is the accumulation half of
+// the bound (#4889 review): a read that never returns cannot be killed
+// mid-syscall, so retries must attach to the one in-flight worker rather than
+// stacking another abandoned goroutine on the same files per call.
+func TestResolveConfigForRepoContextSharesAWedgedRead(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	release := make(chan struct{})
+	prev := resolveRepoForBound
+	resolveRepoForBound = func(*RepoContext) (*ResolvedConfig, error) {
+		calls.Add(1)
+		<-release
+		return nil, errors.New("wedged read")
+	}
+	t.Cleanup(func() {
+		close(release)
+		resolveRepoForBound = prev
+	})
+
+	// Three calls, each bounding only its own wait while the worker stays
+	// wedged. Without dedup each would stack another blocked worker.
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err = ResolveConfigForRepoContext(ctx, repo)
+		cancel()
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	require.Equal(t, int32(1), calls.Load(),
+		"timed-out retries must share the wedged worker, not accumulate one per call")
+}
+
+// TestResolveConfigForRepoContextReReadsAfterAJoinedFlight is the freshness
+// half of the bound (#4889 review): a caller that attaches to a flight
+// in-flight when it arrived must not accept that snapshot — the read can
+// precede the config change this call exists to observe. The joiner waits for
+// the older worker to finish, then issues a read that provably starts after
+// its own call.
+func TestResolveConfigForRepoContextReReadsAfterAJoinedFlight(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	repo, err := RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	firstRunning := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	prev := resolveRepoForBound
+	resolveRepoForBound = func(*RepoContext) (*ResolvedConfig, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			close(firstRunning)
+			<-releaseFirst
+			return nil, errors.New("stale flight result")
+		}
+		return nil, errors.New("fresh flight result")
+	}
+	t.Cleanup(func() { resolveRepoForBound = prev })
+
+	// Caller A opens flight one and stays in it.
+	aDone := make(chan error, 1)
+	go func() {
+		_, aErr := ResolveConfigForRepoContext(context.Background(), repo)
+		aDone <- aErr
+	}()
+	<-firstRunning
+
+	// Caller B joins flight one — it started before B's call.
+	bDone := make(chan error, 1)
+	go func() {
+		_, bErr := ResolveConfigForRepoContext(context.Background(), repo)
+		bDone <- bErr
+	}()
+
+	// Flight one completes; the pileup stays at one worker while B re-reads.
+	close(releaseFirst)
+	require.EqualError(t, <-bDone, "fresh flight result",
+		"a joined flight's snapshot must not satisfy a later caller")
+	require.EqualError(t, <-aDone, "stale flight result",
+		"the flight's own caller takes its result — it is the live read")
+	require.Equal(t, int32(2), calls.Load(),
+		"B's re-read is one new worker after the joined flight finished")
 }

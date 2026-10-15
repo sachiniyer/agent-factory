@@ -31,8 +31,8 @@ type home struct {
 
 	// -- Storage and Configuration --
 
-	program string
-	repoID  string
+	programChoice
+	repoID string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
@@ -434,6 +434,15 @@ type home struct {
 	// would silently replace it — putting the session on an identity the user had
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
+	// pendingProgramChosen records that the USER confirmed this form's program
+	// through the picker (#4889 review) — including deliberately re-picking the
+	// value already shown. A confirmed choice submits the concrete program on
+	// the wire; an untouched config-derived seed submits "" so the daemon
+	// resolves default_program at create time. String equality cannot see the
+	// re-picked-same-value case — this flag is what can. Reset by
+	// startNewInstance; set by a program-picker submit and by a failed
+	// create's draft restore.
+	pendingProgramChosen bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the
@@ -458,7 +467,7 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
+func newHome(ctx context.Context, program, configuredDefault string, repo *config.RepoContext) *home {
 	// repo is nil when af was launched outside a git repository (#2477): the TUI
 	// opens in registry mode with no active project, and the user selects one
 	// from the Projects section. An empty repoID makes the cold-start snapshot an
@@ -525,7 +534,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
 		appConfig:                   appConfig,
-		program:                     program,
+		programChoice:               newProgramChoice(program, configuredDefault, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),

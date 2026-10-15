@@ -38,6 +38,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -177,6 +178,39 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// began — re-raising it here would be a second BeginCreate from OpCreating,
 		// an illegal edge the chokepoint rejects (#1350). Set it exactly once.
 		instance.Program = m.pendingProgram
+		// The WIRE value is different from the shown one (#4889 review): a
+		// program the field only DISPLAYS — the config-derived seed the
+		// synchronous refresh left — is submitted as "" so the daemon resolves
+		// default_program at create time, on the daemon's host, against the
+		// session's own repo. Committing the displayed string would freeze a
+		// stale cache into an explicit request.
+		//
+		// Only a choice the user actually made — a picker pick, a launch
+		// --program flag, or a restored failed-create draft — goes out as a
+		// concrete program. A remote target stays implicit the same way — ""
+		// asks the remote daemon to resolve ITS default_program, the only
+		// default a remote create can honor (#4889 review).
+		sendProgram := m.sendProgramForCreate()
+		// The account belongs to one agent's registry, so it must travel with
+		// the program it was chosen or preselected for (#4889 review). When the
+		// program goes out implicitly ("" resolves the live default on the
+		// daemon) a stale pairing is possible: an account the daemon PRESELECTED
+		// for the displayed program would be read as explicit for whatever
+		// program the daemon resolves now — refuse-worthy or silently wrong. A
+		// CHOSEN account is a commitment to the displayed program, so
+		// sendProgramForCreate already pins that program explicit; an unchosen
+		// preselect stays implicit alongside the program and lets the daemon
+		// resolve both.
+		sendAccount := m.pendingAccount
+		if sendProgram == "" {
+			sendAccount = ""
+		}
+		// The failed-create draft needs the user's CHOICES beside the wire
+		// values the rules above produced: an account-pinned program and a
+		// deliberate ambient pick are indistinguishable from their wire
+		// encodings once the pending flags clear (#4889 review).
+		programChosen := m.pendingProgramChosen
+		accountChosen := m.pendingAccountChosen
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -190,9 +224,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		backend := m.pendingBackend
 		m.pendingBackend = ""
 		m.backendPickerPending = false
-		// And for the ctrl+o account field (#3844), on the loop for the same reason.
-		account := m.pendingAccount
+		// And for the ctrl+o account field (#3844), on the loop for the same
+		// reason — sendAccount already captured its value above.
 		m.pendingAccount = ""
+		m.pendingAccountChosen = false
+		m.pendingProgramChosen = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -207,7 +243,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			req := sessionStartRequest{
 				Title:    instance.Title,
 				RepoPath: instance.Path,
-				Program:  instance.Program,
+				Program:  sendProgram,
 				// The initial prompt typed into the naming form's shift+tab
 				// field (#1936). session_control.go forwards it to the daemon,
 				// which delivers it once the agent is ready — the same path
@@ -225,7 +261,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
 				// before this field existed.
-				Account: account,
+				Account:       sendAccount,
+				ProgramChosen: programChosen,
+				AccountChosen: accountChosen,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -237,7 +275,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the daemon reports on the session it created (#3844 constraint 5).
 				// Read off the request rather than the model: by the time this lands
 				// the form has been reset, and a later create may hold a different one.
-				account: account,
+				account: sendAccount,
 			}
 		}
 
@@ -323,6 +361,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -339,8 +378,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // startNewInstance creates a new instance and enters stateNew for naming.
 func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.backendPickerPending = false
-	if m.restoreFailedCreate() {
-		return m, m.selectionChanged()
+	if restored, restoreCmd := m.restoreFailedCreate(); restored {
+		return m, tea.Batch(m.selectionChanged(), restoreCmd)
 	}
 	// A session lives in a project, and registry mode has none until the user
 	// selects one (#2477) — so refuse here rather than opening a form that cannot
@@ -356,12 +395,20 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	if m.repoRoot == "" {
 		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
-	m.pendingProgram = m.program
+	// Re-read the live default_program synchronously before seeding the field:
+	// `af config set default_program` applies live (#2480), so the launch-time
+	// cache alone can show a stale agent (#4889). The read is a bounded local
+	// probe — the same class of synchronous config read the project switch and
+	// preflight already run on this goroutine — and a remote target keeps the
+	// launch-time value untouched.
+	m.refreshDefaultProgram()
+	m.pendingProgram = m.defaultProgram()
 	// Every create starts with an empty prompt field and an unchosen backend. The
 	// cancel paths clear both too, but this is the authoritative reset: it also
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
+	m.pendingProgramChosen = false
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
