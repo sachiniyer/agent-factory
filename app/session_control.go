@@ -603,11 +603,11 @@ func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
 // per-project session count (#1461). A package var so the project-switch tests
 // can inject a fake multi-repo snapshot. It is a plain read — the switch itself
 // still re-scopes through home.snapshotFetcher(m.repoID).
-var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
+var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, error) {
 	var resp daemon.SnapshotResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: ""})
 		return e
 	})
 	if err != nil {
@@ -618,7 +618,7 @@ var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
 
 // SetAllReposSnapshotFetcherForTest swaps the all-repos discovery fetcher and
 // returns a restore func. Test-only.
-func SetAllReposSnapshotFetcherForTest(f func() ([]session.InstanceData, error)) func() {
+func SetAllReposSnapshotFetcherForTest(f func(context.Context) ([]session.InstanceData, error)) func() {
 	prev := allReposSnapshotFetcher
 	allReposSnapshotFetcher = f
 	return func() { allReposSnapshotFetcher = prev }

@@ -304,8 +304,17 @@ func (c *Client) RestartTask(id string, expect task.ProjectExpectation) error {
 // drops the alarms) stays the read path for CLI/API callers that only need the
 // session list.
 func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.SnapshotResponse, error) {
+	return c.SnapshotWithAlarmsCtx(context.Background(), req)
+}
+
+// SnapshotWithAlarmsCtx is SnapshotWithAlarms bounded by ctx. The local socket
+// carries no request deadline of its own, so a caller that must not park a
+// goroutine on a never-answered read — the rebind-conflict refresh, whose
+// deadline re-arms an inert form — bounds the transport itself rather than
+// only the wait on it (#4888 review).
+func (c *Client) SnapshotWithAlarmsCtx(ctx context.Context, req daemon.SnapshotRequest) (daemon.SnapshotResponse, error) {
 	var resp daemon.SnapshotResponse
-	if err := c.call("Snapshot", req, &resp); err != nil {
+	if err := c.callCtx(ctx, "Snapshot", req, &resp); err != nil {
 		return daemon.SnapshotResponse{}, err
 	}
 	return resp, nil

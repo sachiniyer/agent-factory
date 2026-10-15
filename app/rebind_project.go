@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
+
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -160,41 +161,29 @@ var rebindConflictRefreshTimeout = 10 * time.Second
 // all-repos poll (#4888 review). The fetcher var is captured on the loop
 // rather than read inside the goroutine, the same reason fetchSnapshotCmd
 // captures its seams: a reassignment mid-flight must not race the read. The
-// fetch itself is bounded by rebindConflictRefreshTimeout — a stalled reply is
-// reported as a failed fetch, which the preserve-merge treats as "session rows
-// unknown, registry truth still applies".
+// fetch itself carries rebindConflictRefreshTimeout as a real deadline on the
+// transport read — not merely a select beside it — so a daemon that accepts
+// the connection and never answers is cancelled outright rather than leaked
+// as a goroutine parked on an unanswered socket per conflict (#4888 review).
+// A stalled reply is reported as a failed fetch, which the preserve-merge
+// treats as "session rows unknown, registry truth still applies".
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
 	return func() tea.Msg {
-		type snapshotResult struct {
-			data []session.InstanceData
-			err  error
+		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
+		defer cancel()
+		data, err := fetch(ctx)
+		if err != nil && ctx.Err() != nil {
+			err = fmt.Errorf(
+				"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
+				rebindConflictRefreshTimeout)
 		}
-		// Buffered, so a fetch that outlives the deadline can still send its
-		// answer and exit rather than park a goroutine on a dead channel.
-		answered := make(chan snapshotResult, 1)
-		go func() {
-			data, err := fetch()
-			answered <- snapshotResult{data, err}
-		}()
-		select {
-		case r := <-answered:
-			return rebindConflictSnapshotMsg{
-				token:     msg.token,
-				projectID: msg.projectID,
-				refusal:   msg.err,
-				data:      r.data,
-				fetchErr:  r.err,
-			}
-		case <-time.After(rebindConflictRefreshTimeout):
-			return rebindConflictSnapshotMsg{
-				token:     msg.token,
-				projectID: msg.projectID,
-				refusal:   msg.err,
-				fetchErr: fmt.Errorf(
-					"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
-					rebindConflictRefreshTimeout),
-			}
+		return rebindConflictSnapshotMsg{
+			token:     msg.token,
+			projectID: msg.projectID,
+			refusal:   msg.err,
+			data:      data,
+			fetchErr:  err,
 		}
 	}
 }

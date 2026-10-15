@@ -23,7 +23,7 @@ func TestNewHomeRegistryModeSkipsRepoScopedTUIViewState(t *testing.T) {
 	// refreshSidebarProjects and the real cross-repo fetcher, so without a stub it
 	// spends the daemon HTTP timeout dialing a daemon no unit test has. Stub
 	// BEFORE newHome: the fetch happens during construction.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 

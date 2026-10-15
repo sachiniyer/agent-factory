@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -52,7 +53,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 // visible Projects section rebuilds from buildProjectListFrom on the background
 // poll instead (no second on-loop RPC).
 func (m *home) buildProjectList() ([]overlay.Project, bool) {
-	data, err := allReposSnapshotFetcher()
+	data, err := allReposSnapshotFetcher(context.Background())
 	if err != nil {
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		data = nil

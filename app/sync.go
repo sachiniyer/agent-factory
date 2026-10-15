@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"time"
@@ -118,7 +119,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		allReposData, allReposErr := allRepos()
+		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
 			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
