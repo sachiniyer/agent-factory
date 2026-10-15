@@ -59,6 +59,23 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	m.pendingAccountChosen = req.AccountChosen && req.Account != ""
 	m.pendingProgramChosen = req.ProgramChosen
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
+		if isRemoteTarget() {
+			// pendingProgram already holds the placeholder's remote-resolved
+			// seed; the local config read cannot see the daemon host's
+			// default_program, so re-ask ListPrograms and gate submit on the
+			// answer — the same contract a fresh remote form gets (#4889
+			// review).
+			m.remoteDefaultPending = true
+			m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
+			m.menu.SetNamingBackend(m.pendingBackend != "")
+			m.menu.SetNamingAccount(m.pendingAccount != "")
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			m.failedCreate = nil
+			return true, tea.Batch(
+				m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram)),
+				m.fetchRemoteDefaultProgram(instance))
+		}
 		// Re-resolve the live default for the restored field's seed: the
 		// displayed program is what a retry's implicit "" will resolve to, so
 		// it should be the CURRENT default, not the stale one the failed form

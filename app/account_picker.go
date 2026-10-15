@@ -341,6 +341,13 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	// time one of them was refreshed and the other was not.
 	preselect := msg.resp.Defaults[msg.agent]
 	if preselect == ambientAccount {
+		// An empty fresh answer must clear an unchosen preselect an earlier
+		// reply (or a restored draft's wire value) left behind — otherwise the
+		// field displays a name the retry would silently send (#4889 review).
+		if m.pendingAccount != ambientAccount {
+			m.pendingAccount = ambientAccount
+			m.menu.SetNamingAccount(false)
+		}
 		return m, nil
 	}
 	m.pendingAccount = preselect

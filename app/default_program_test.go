@@ -949,3 +949,117 @@ func TestRemoteTargetSeedsTheDaemonsDefault(t *testing.T) {
 	require.Equal(t, 2, fetches,
 		"the correction re-fetches the preselect under the resolved agent")
 }
+
+// TestRemoteSubmitWaitsForTheDefaultAnswer is the submit-gate half (#4889
+// review): while the remote ListPrograms fetch is unanswered, Enter must not
+// send "" — the daemon would resolve a default the field has not yet shown.
+func TestRemoteTargetSubmitWaitsForTheDefaultAnswer(t *testing.T) {
+	h := configFollowingHome(t)
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	t.Cleanup(SetProgramListerForTest(func(repoPath string) (daemon.ListProgramsResponse, error) {
+		<-release
+		return daemon.ListProgramsResponse{Default: tmux.ProgramCodex}, nil
+	}))
+	t.Cleanup(SetAccountListerForTest(func(agent, repoPath string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{}, nil
+	}))
+	got := recordStartRequest(t)
+
+	_, cmd := h.startNewInstance()
+	// The blocked fetch's msg never lands inside the drain window; the account
+	// fetch still does.
+	_ = drainCmd(t, cmd, 200*time.Millisecond)
+	require.True(t, h.remoteDefaultPending, "the remote fetch armed the submit gate")
+
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "a pending remote default must not be submitted past")
+	require.Equal(t, stateNew, h.state)
+
+	// The answer lands; the gate lifts and the corrected program shows.
+	_, _ = h.Update(remoteDefaultMsg{naming: h.namingInstance, program: tmux.ProgramCodex})
+	require.False(t, h.remoteDefaultPending)
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram)
+}
+
+// TestRemoteDefaultDoesNotReplaceALaunchFixedProgram guards the second guard
+// clause (#4889 review): a launch --program pins via programFollowsConfig, not
+// pendingProgramChosen — a remote default reply must not overwrite it (the
+// submit would then send the remote program CONCRETELY, replacing the flag's
+// program outright).
+func TestRemoteDefaultDoesNotReplaceALaunchFixedProgram(t *testing.T) {
+	h := configFollowingHome(t)
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
+
+	inst := startNaming(t, h, "demo")
+	h.pendingProgram = tmux.ProgramGemini
+	inst.Program = tmux.ProgramGemini
+
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex})
+	require.Equal(t, tmux.ProgramGemini, h.pendingProgram,
+		"the launch-fixed program survives the remote answer")
+	assert.Equal(t, tmux.ProgramGemini, h.sendProgramForCreate(),
+		"the wire keeps the user's --program, not the daemon's default")
+}
+
+// TestRemoteDefaultClearsTheOldAgentsAccount covers the cross-agent pair
+// (#4889 review): an account chosen or preselected under the local-guess agent
+// belongs to that agent's registry — a program correction must not carry it
+// onto the resolved agent.
+func TestRemoteDefaultClearsTheOldAgentsAccount(t *testing.T) {
+	h := configFollowingHome(t)
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+	t.Cleanup(SetAccountListerForTest(func(agent, repoPath string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{}, nil
+	}))
+
+	inst := startNaming(t, h, "demo")
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex})
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram)
+	assert.Empty(t, h.pendingAccount, "the old agent's account cannot pair with the new program")
+	assert.False(t, h.pendingAccountChosen)
+}
+
+// TestProgramPickerUsesTheRemoteCatalog covers the catalog half (#4889
+// review): a remote daemon newer than this client can report programs the
+// local enum lacks; the picker must offer the remote list so the resolved
+// default is a selectable, displayable row.
+func TestProgramPickerUsesTheRemoteCatalog(t *testing.T) {
+	h := configFollowingHome(t)
+	t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+
+	inst := startNaming(t, h, "demo")
+	_, _ = h.Update(remoteDefaultMsg{
+		naming: inst, program: "newagent",
+		programs: []string{"claude", "newagent"},
+	})
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
+	require.Equal(t, stateSelectProgram, h.state)
+	require.Equal(t, []string{"claude", "newagent"}, h.programPickerChoices,
+		"the picker offers the daemon's catalog")
+}
+
+// TestEmptyAccountDefaultClearsAStalePreselect covers the restore-echo half
+// (#4889 review): a refetch answering with no default must clear an unchosen
+// name an earlier reply left, not leave it to be echoed on the retry.
+func TestEmptyAccountDefaultClearsAStalePreselect(t *testing.T) {
+	h := configFollowingHome(t)
+
+	inst := startNaming(t, h, "demo")
+	h.pendingAccount = "work" // an unchosen preselect the first fetch applied
+
+	_, _ = h.Update(accountDefaultMsg{
+		naming: inst, agent: "claude",
+		resp: daemon.ListAccountsResponse{Defaults: map[string]string{}},
+	})
+	assert.Empty(t, h.pendingAccount,
+		"an empty live default must clear the stale name, not leave it to echo")
+}
