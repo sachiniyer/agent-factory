@@ -431,3 +431,64 @@ func TestClosedWebSocketUnregistersFromTracker(t *testing.T) {
 		5*time.Second, 10*time.Millisecond,
 		"a closed stream must unregister itself — the tracker may not hold it for the daemon's life")
 }
+
+// TestRefusalFreezesRetiredListenerOnServedPosture pins the drain window a bare
+// retire leaves open (#5137 review): retire lets in-flight handlers finish, and
+// an already-accepted keep-alive conn can dispatch a request that reaches
+// withLivePosture AFTER the refused config has published — reading live, that
+// request evaluates tokenless on a socket the daemon just refused. The retired
+// listener's posture must stay frozen on the config it was serving.
+func TestRefusalFreezesRetiredListenerOnServedPosture(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	wl.mu.Lock()
+	h := wl.webHandle
+	wl.mu.Unlock()
+	require.NotNil(t, h)
+	require.NotNil(t, h.live, "the control listener must carry a live posture")
+
+	// The ApplyConfig sequence, at the two points where it touches the
+	// listener: the pre-swap refusal retire, then the publish of the refused
+	// (tokenless, no opt-in) config.
+	next := *cfg
+	next.RequireToken = false
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	require.False(t, m.Config().RequireToken, "the refused tokenless config is now live")
+	require.NotNil(t, h.live.frozen,
+		"a refusal retire must pin the gate to the config the socket was serving")
+	require.True(t, h.live.current().RequireToken,
+		"drain-window requests must evaluate the posture they were admitted under")
+	require.False(t, h.live.current().AllowUnauthenticatedNetwork)
+}
+
+// TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side
+// (#2480): a retire that is NOT a refusal — here the listen_addr="" opt-out —
+// leaves the gate on the live read, so an auth tightening keeps applying to the
+// draining conn it arrived on rather than being latched off with the old socket.
+func TestNonRefusalRetireLeavesPostureLive(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = false
+	cfg.AllowUnauthenticatedNetwork = true
+	_, wl, _ := boundWebListeners(t, cfg)
+
+	wl.mu.Lock()
+	h := wl.webHandle
+	wl.mu.Unlock()
+	require.NotNil(t, h)
+
+	next := *cfg
+	next.ListenAddr = ""
+	next.RequireToken = true
+	failed, err := wl.reconcile(&next)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	require.Nil(t, h.live.frozen,
+		"a non-refusal retire must keep the live-posture read, not latch the old config")
+}
