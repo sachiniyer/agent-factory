@@ -91,7 +91,7 @@ func parsePaneRow(field string) (paneRow, error) {
 	// to cover. And the stamp counts only while it still names the pane's
 	// current incarnation — pane options outlive respawn-pane, so paneStampPID
 	// proves the stamp was written by the run that most recently died.
-	stampPID, stampFresh := 0, false
+	stampPID, verdict := 0, stampUnusable
 	if len(parts) > 3 {
 		var deaths, tty, cmdMatch string
 		if len(parts) > 4 {
@@ -103,15 +103,17 @@ func parsePaneRow(field string) (paneRow, error) {
 		if len(parts) > 6 {
 			cmdMatch = strings.TrimSpace(parts[6])
 		}
-		stampPID, stampFresh = paneStampPID(strings.TrimSpace(parts[3]), deaths, tty, cmdMatch)
+		stampPID, verdict = paneStampPID(strings.TrimSpace(parts[3]), deaths, tty, cmdMatch)
 	}
 	panePIDRaw := strings.TrimSpace(parts[0])
 	pid, err := strconv.Atoi(panePIDRaw)
 	switch {
 	case err == nil:
 		// pane_pid answered; the stamp is never consulted.
-	case panePIDRaw == "" && stampFresh:
+	case panePIDRaw == "" && verdict == stampFresh:
 		pid = stampPID
+	case panePIDRaw == "" && row.dead && verdict == stampPending:
+		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d whose incarnation proof is one counter short — tmux reports pane_dead before its queued pane-died hook increments the deaths counter, so the hook has not counted the death yet and the process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion: %w", PanePidMarker, stampPID, errPaneStampPending)
 	case panePIDRaw == "" && row.dead && stampPID > 0:
 		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d from an earlier incarnation — the pane was respawned or its stamp write failed, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
 	case panePIDRaw == "" && row.dead:
@@ -123,15 +125,50 @@ func parsePaneRow(field string) (paneRow, error) {
 	return row, nil
 }
 
+// paneStampVerdict is paneStampPID's ruling on the stamp read from one row:
+// how far the incarnation proof got, and specifically whether its only
+// shortfall is a counter the queued pane-died hook has not run yet (#5335).
+type paneStampVerdict int
+
+const (
+	// stampUnusable means the stamp names nobody: unset, malformed, or a
+	// non-positive pid — the pane reads exactly like an unstamped one.
+	stampUnusable paneStampVerdict = iota
+	// stampStale means a readable stamp that cannot name the pane's current
+	// incarnation: a deaths gap that is not 0-or-1, a moved pty, or a
+	// replaced start command — a respawn, or a stamp write that never
+	// landed.
+	stampStale
+	// stampPending means every freshness input matches except the deaths
+	// counter, whose gap is exactly 0 — the pane-died hook has not counted
+	// this death yet, not a stale record. tmux reports pane_dead before the
+	// queued hook runs (#5335), so a reader that can wait re-reads the row
+	// until the hook lands; one that cannot must treat the stamp as still
+	// unproven, never as proven-false.
+	stampPending
+	// stampFresh means the stamp names the run that most recently died:
+	// deaths gap exactly one, pty and command pins intact.
+	stampFresh
+)
+
+// errPaneStampPending marks a dead-pane row whose stamp is provable on every
+// input but the deaths counter — the pane-died hook has not run yet (#5335).
+// panePID re-reads on this error instead of refusing; by the time it escapes,
+// the wait deadline has passed and the message stands as the refusal.
+var errPaneStampPending = errors.New("the pane-died hook has not counted the death")
+
 // paneStampPID extracts the pane-root pid a @af_pane_pid stamp recorded —
-// "<pid>:<deaths>:<pane_tty>" — and reports whether it still names the
+// "<pid>:<deaths>:<pane_tty>" — and rules on whether it still names the
 // pane's current incarnation. The pane option outlives the run that wrote it
 // (respawn-pane keeps the pane struct and its options), so three proofs must
 // all hold before the pid is trusted:
 //
 //   - deathsNow == stamped deaths + 1: the pane-died hook bumps the counter
 //     on every natural root exit, so a stamp from an earlier run shows a
-//     wider gap.
+//     wider gap. A gap of exactly 0 is the one case that is NOT stale: the
+//     hook runs on tmux's command queue and pane_dead is observable first
+//     (#5335), so a fresh pane's own death can still be uncounted — that is
+//     stampPending, and it resolves when the queued hook runs.
 //   - stamp tty == the pane's reported tty: every respawn allocates a fresh
 //     pty. The name is only corroborating evidence — `respawn-pane -k` frees
 //     the devpts index before allocating the replacement and Linux can
@@ -155,37 +192,45 @@ func parsePaneRow(field string) (paneRow, error) {
 // malformed bundle) has no second colon and fails closed like an unstamped
 // pane. A deaths field left empty at stamp time is the counter's unset
 // state, i.e. zero.
-func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, bool) {
+func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerdict) {
 	pidRaw, rest, hasRest := strings.Cut(stamp, ":")
 	pid, err := strconv.Atoi(pidRaw)
 	if err != nil || pid <= 0 {
-		return 0, false
+		return 0, stampUnusable
 	}
 	if !hasRest {
 		// A bare pid is a stamp written before the incarnation proof
 		// existed: readable, but unprovable — it fails closed like an
 		// unstamped pane, only with a nameable pid.
-		return pid, false
+		return pid, stampStale
 	}
 	deathsRaw, ttyRaw, ok := strings.Cut(rest, ":")
 	if !ok {
-		return pid, false
+		return pid, stampStale
 	}
 	stampedDeaths := 0
 	if deathsRaw != "" {
 		stampedDeaths, err = strconv.Atoi(deathsRaw)
 		if err != nil || stampedDeaths < 0 {
-			return pid, false
+			return pid, stampStale
 		}
 	}
 	current := 0
 	if deathsNow != "" {
 		current, err = strconv.Atoi(deathsNow)
 		if err != nil || current < 0 {
-			return pid, false
+			return pid, stampStale
 		}
 	}
-	return pid, current-stampedDeaths == 1 && ttyRaw == ttyNow && cmdMatch == "1"
+	pins := ttyRaw == ttyNow && cmdMatch == "1"
+	switch gap := current - stampedDeaths; {
+	case gap == 1 && pins:
+		return pid, stampFresh
+	case gap == 0 && pins:
+		return pid, stampPending
+	default:
+		return pid, stampStale
+	}
 }
 
 // deadPaneProcesses resolves one held dead pane for the process capture.
@@ -262,7 +307,50 @@ func paneRowHasNoPane(trimmed string) bool {
 
 // panePID reads the session's pane pid and whether that pane is held dead. It
 // must run before kill-session, because afterwards there is nothing to ask.
+//
+// A stamped dead pane whose freshness inputs all match but whose deaths gap
+// is 0 is re-read until the pane-died hook lands — tmux reports pane_dead
+// before the queued hook increments the counter (#5335), so a gap of 0 is a
+// hook still running, never a stale stamp. The re-read is bounded by
+// paneDeathsWait, and each read inside it by what is left of that wait, so a
+// hook that never runs converts back into the same bounded refusal a stale
+// stamp gets rather than holding the teardown.
+//
+// The wait also nudges the server, because pane-died fires when the exit
+// status is collected, not when pane_dead is marked: on an Ubuntu-class
+// tmux the root's own SIGCHLD can be lost in utempter's SIG_DFL window
+// (#4682), which leaves pane_dead set forever with no collection and no
+// hook — measured ~1/4 of held deaths on a loaded 3.4. On a server that
+// merely queued the hook the nudge is a harmless trivial job.
 func (t *TmuxSession) panePID() (paneRow, error) {
+	row, err := t.readPaneRow(tmuxCommandTimeout)
+	deadline := time.Now().Add(paneDeathsWait)
+	pause := 5 * time.Millisecond
+	nudges := 0
+	for errors.Is(err, errPaneStampPending) {
+		budget := time.Until(deadline)
+		if budget <= 0 {
+			break
+		}
+		if nudges < maxReapNudges {
+			nudges++
+			t.nudgeReap(budget)
+		}
+		time.Sleep(min(pause, budget))
+		pause = min(2*pause, 50*time.Millisecond)
+		if budget = time.Until(deadline); budget <= 0 {
+			// The sleep consumed what was left of the wait: keep the
+			// pending verdict — an expired read would swap it for
+			// ErrTmuxTimeout and misreport a healthy server as wedged.
+			break
+		}
+		row, err = t.readPaneRow(budget)
+	}
+	return row, err
+}
+
+// readPaneRow performs one panePID read within budget.
+func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	// exactTarget forces an exact session match, mirroring ExistsOrUnknown.
 	// (The bare `=name` form returns an empty pane_pid for display-message —
 	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
@@ -270,12 +358,12 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 	// Bounded by tmuxCommandTimeout (#1917): this is the FIRST tmux command on
 	// the kill teardown, so an unbounded stall here wedges the kill before
 	// kill-session is even attempted.
-	ctx, cancel := tmuxTimeoutContext()
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
-			return paneRow{}, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return paneRow{}, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, min(budget, tmuxCommandTimeout))
 		}
 		// Diagnostic-only, deliberately: this is the half of
 		// sessionGoneWithNoPaneObserved that gates a worktree deletion, and
@@ -424,9 +512,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 			break
 		}
 		next, stillUncollected := t.readPaneExit(budget)
-		if !next.dead {
+		if !next.dead && exit.known {
 			// The root's exit is already established; a re-read that cannot
-			// confirm it (tmux failed, the session went away) must not undo it.
+			// confirm it (tmux failed, the session went away) must not undo
+			// it. A provisional pending reading — known=false — is no such
+			// established exit: a resolving re-read that reports the stamped
+			// pid still running answers live, and replaces it.
 			break
 		}
 		exit, uncollected = next, stillUncollected
@@ -447,6 +538,16 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // normally milliseconds; the bound only matters when tmux is stalled. var, not
 // const, so tests can lower it.
 var paneStatusWait = 2 * time.Second
+
+// paneDeathsWait bounds how long panePID re-reads a row whose stamp is pending
+// — dead on every freshness input but the deaths counter. The pane-died hook
+// runs on tmux's command queue and pane_dead is observable first (#5335), so a
+// gap of 0 resolves to 1 within milliseconds on a healthy server; the bound
+// only matters when the hook is gone entirely — including the Ubuntu-class
+// build that loses the root's SIGCHLD and never collects the death the hook
+// fires on (#4682), which panePID nudges the server out of first. var, not
+// const, so tests can lower it.
+var paneDeathsWait = 2 * time.Second
 
 // maxReapNudges caps how many times one probe nudges the server. One is enough
 // unless the nudge's own SIGCHLD lands in another pane's utempter window.
@@ -512,8 +613,22 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		// failure.
 		pid, perr := strconv.Atoi(field(4))
 		if perr != nil && field(4) == "" {
-			if stamped, fresh := paneStampPID(field(6), field(7), field(8), field(9)); fresh {
+			switch stamped, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict {
+			case stampFresh:
 				pid, perr = stamped, nil
+			case stampPending:
+				// pane_dead is visible before the queued pane-died hook
+				// increments the counter (#5335): the stamp cannot name the
+				// root yet, so keep probing inside the same uncollected wait
+				// the root's own reap races — dead:true is what keeps the
+				// wait alive. But pane_dead only says tmux MARKED the pane
+				// dead; the pid checks below are what prove the root is gone
+				// ("closed its terminal but still running" reads dead only
+				// when pidGone/exitedUncollected agree). Leaving known unset
+				// makes a hook that never lands answer unknown rather than a
+				// conclusively dead root — the difference between not stamping
+				// a TabExit and recording one a live root never earned.
+				return paneExit{dead: true, version: exit.version}, true
 			}
 		}
 		if perr != nil || pid <= 0 {

@@ -39,19 +39,20 @@ func TestTabbedWindowJumpToTab(t *testing.T) {
 	require.Equal(t, 0, tw.GetActiveTab())
 }
 
-// TestTabbedWindowSelectNeighbor covers SelectTab (used to land on a neighbor
-// after a close), including its clamping.
-func TestTabbedWindowSelectNeighbor(t *testing.T) {
+// TestTabbedWindowClampActiveTab covers ClampActiveTab directly: an index above
+// the last tab clamps to the last tab, and a negative index clamps to 0. This is
+// the only test that asserts ClampActiveTab's clamping (it is still live in
+// production, called after a tab close in home_panes).
+func TestTabbedWindowClampActiveTab(t *testing.T) {
 	tw := newTestTabbedWindow()
 	setWindowInstance(tw, instanceWithTabs(4))
 
-	tw.SelectTab(2)
-	require.Equal(t, 2, tw.GetActiveTab())
-
-	// Out-of-range selections clamp into range rather than dangling.
-	tw.SelectTab(99)
+	tw.setActiveTab(99)
+	tw.ClampActiveTab()
 	require.Equal(t, 3, tw.GetActiveTab())
-	tw.SelectTab(-5)
+
+	tw.setActiveTab(-5)
+	tw.ClampActiveTab()
 	require.Equal(t, 0, tw.GetActiveTab())
 }
 
