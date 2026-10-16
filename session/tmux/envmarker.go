@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // Ancestry env markers (#1104). Every process spawned inside an af tmux pane
@@ -40,6 +41,49 @@ const (
 	// the same string literal to diagnose test leaks without importing this package.
 	envMarkerTestguardRun = "AF_TESTGUARD_RUN"
 )
+
+// PanePidMarker is the pane-scoped user option that records a pane's identity
+// bundle — "<pane_pid>:<deaths>:<pane_tty>" — while it is alive. tmux ≥3.8
+// stops reporting pane_pid once a pane's root exits (#5319), but user options
+// live on the pane struct, which remain-on-exit preserves — so teardown can
+// keep naming the dead root by the pid it had while alive. The launch shim
+// stamps the bundle itself (sessionenv stamps — the shim IS the pane root),
+// which keeps the record current even across a user's commandless
+// respawn-pane, and ApplyRemainOnExit stamps still-alive pre-stamp panes as a
+// heal. The deaths and tty fields plus the @af_pane_cmd pin are what let the
+// reader distrust a stamp a respawn carried into a new incarnation.
+// Measured on tmux 3.8: a stamped pane answers `#{@af_pane_pid}` after
+// death while `#{pane_pid}` comes back empty. On tmux older than 3.8
+// pane_pid itself survives death, so a missing stamp loses nothing.
+const PanePidMarker = sessionenv.PanePidUserOption
+
+// paneDeathsMarker is the pane-died counter the freshness check compares the
+// stamp's deaths field against; paneCommandMarker pins the stamped
+// incarnation's pane_start_command for the byte-equality check. Both are
+// defined and documented in sessionenv beside the shim that writes them.
+const (
+	paneDeathsMarker  = sessionenv.PaneDeathsUserOption
+	paneCommandMarker = sessionenv.PaneCommandUserOption
+)
+
+// panePidStampArgs heals the pane identity record on an already-existing
+// pane: `-o` never overwrites a stamp that is already there (a pane that died
+// before the heal would re-expand #{pane_pid} to EMPTY on tmux ≥3.8 and
+// clobber its own good record), and `-F` expands the live pane_pid for a
+// still-running, pre-stamp pane. The pane-died hook is installed too — a
+// healed pane otherwise has no deaths counter, and its eventual death would
+// leave the stamp's freshness unprovable. Re-installing is idempotent:
+// set-hook without -a replaces the same-name entry rather than appending.
+//
+// paneTarget is any pane target: `=name:` resolves to the session's active
+// pane, and a `%N` id targets a specific pane exactly.
+func panePidStampArgs(paneTarget string) []string {
+	return []string{
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, PanePidMarker, sessionenv.PanePidStampFormat, ";",
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, paneCommandMarker, "#{pane_start_command}", ";",
+		"set-hook", "-p", "-t", paneTarget, "pane-died", sessionenv.PaneDeathsHookCommand,
+	}
+}
 
 // newSessionGeneration mints the process-generation identity stamped into one
 // tmux launch. It is a package var so tests can make exact argv assertions. The

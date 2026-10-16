@@ -3,11 +3,14 @@
 package sessionenv
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
@@ -133,6 +136,7 @@ func execInvocation(args []string, scoped bool) error {
 }
 
 func execInvocationMode(args []string, scoped, environmentOnly bool) error {
+	stampPaneRootPid()
 	trailing := 3
 	if scoped {
 		trailing = 6
@@ -207,7 +211,59 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	return processExec(shell, []string{shell, "-c", command}, environ)
 }
 
+// stampPaneRootPid records the pane's identity bundle in pane-scoped user
+// options, while the root is trivially alive to report it: this process IS
+// the pane root — the launch chain preserves the pid (the spawn's
+// shell-command execs this single simple invocation, and the processExec
+// below replaces the image without forking), so #{pane_pid} expands to this
+// process when the write runs. tmux >=3.8 stops answering pane_pid once the
+// root exits; the stamp is what lets a remain-on-exit dead pane still name
+// its root at teardown (#5319).
+//
+// The stamp is incarnation-bound because the pane option OUTLIVES the
+// incarnation that wrote it: `respawn-pane` reuses the pane struct — its
+// options and its %N id — while a later reader can never ask which run wrote
+// the stamp. tmux fires no hook for a respawn (measured on 3.8:
+// after-respawn-pane does not exist, and pane-died/pane-exited/
+// after-kill-pane are all silent through `respawn-pane -k`), so the proof is
+// built from the three things that do change or can be checked: the
+// pane-died hook this installs bumps @af_pane_deaths on every natural exit;
+// a respawn allocates a fresh pty, so the stamped #{pane_tty} no longer
+// matches; and @af_pane_cmd pins the stamped incarnation's recorded
+// pane_start_command, which a replacement respawn rewrites. A respawn that
+// bypasses this shim leaves the stamp stale on all three counts — a foreign
+// command, even one whose argv contains a launch marker, fails the command
+// equality; a commandless respawn re-runs this shim and restamps itself
+// whole. A pane-died hook for the kill half of `respawn-pane -k` never
+// exists, which is the one case the deaths counter cannot see — the pty and
+// command pins cover it. One client call carries install, stamp, and pin:
+// at most one partial write can be left by a shim killed mid-call, and a
+// torn record fails closed.
+//
+// Best-effort on purpose, and deliberately NOT version-gated: pane options
+// (`set-option -p`, tmux >=3.0), pane hooks (`set-hook -p`, tmux >=3.2), and
+// the `e|`/`==` format modifiers all exist below af's own floor; a tmux too
+// old for them just lacks the record, a launch must never fail over a
+// bookkeeping write, and an unparseable `tmux -V` cannot suppress it the way
+// a probe gate would. The bound keeps a wedged tmux server from delaying the
+// launch by more than a moment.
+func stampPaneRootPid() {
+	paneID := os.Getenv("TMUX_PANE")
+	if paneID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "tmux",
+		"set-hook", "-p", "-t", paneID, "pane-died", PaneDeathsHookCommand,
+		";",
+		"set-option", "-F", "-p", "-t", paneID, PanePidUserOption, PanePidStampFormat,
+		";",
+		"set-option", "-F", "-p", "-t", paneID, PaneCommandUserOption, "#{pane_start_command}").Run()
+}
+
 func agentServerExecInvocation(args []string) error {
+	stampPaneRootPid()
 	if len(args) < 2 {
 		return fmt.Errorf("malformed internal agent-server environment invocation")
 	}

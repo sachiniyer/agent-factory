@@ -12,6 +12,52 @@ import (
 // filtered session process. It is intentionally not a user-facing subcommand.
 const ExecMarker = "__af-session-env-exec"
 
+// PanePidUserOption is the pane-scoped tmux user option the exec shim stamps
+// the pane's identity bundle into at launch: "<pane_pid>:<deaths>:<pane_tty>"
+// (PanePidStampFormat). tmux >=3.8 stops reporting pane_pid once a pane's
+// root exits (#5319), but user options live on the pane struct, which
+// remain-on-exit preserves — so a held dead pane keeps answering
+// #{@af_pane_pid} with the pid it had while alive. session/tmux reads it back
+// as the fallback authority for a dead pane's empty pane_pid.
+//
+// The bundle is incarnation-bound because the option outlives the incarnation
+// that wrote it: respawn-pane keeps the pane struct (its options, its %N id)
+// while replacing the root, so a bare pid could name a previous run. tmux
+// offers no respawn hook and empties pane_pid before pane-died formats run
+// (measured on 3.8: after-respawn-pane does not exist, and
+// pane-died/pane-exited/after-kill-pane are all silent through
+// `respawn-pane -k`), so freshness is proven from what does change: the
+// deaths counter the pane-died hook bumps on every natural exit, the pty a
+// respawn reallocates, and the recorded start command the stamp pins below.
+const PanePidUserOption = "@af_pane_pid"
+
+// PaneDeathsUserOption counts the pane's natural root exits: the pane-died
+// hook (PaneDeathsHookCommand) increments it server-side each time the root
+// dies. A stamp records the count at stamp time; at teardown the counter has
+// moved exactly once, so a stamp carried into a later incarnation shows a gap
+// the reader refuses. The counter cannot see a `respawn-pane -k` kill — tmux
+// fires no hook for it — which is why the stamp also pins the pane's pty.
+const PaneDeathsUserOption = "@af_pane_deaths"
+
+// PaneCommandUserOption pins the pane's recorded start command at stamp time.
+// #{pane_start_command} survives respawn, so the reader compares it byte-for-
+// byte: a replacement command — including one that merely contains a launch
+// marker — fails the equality, while an identical re-run re-executed this shim
+// and was freshly restamped anyway.
+const PaneCommandUserOption = "@af_pane_cmd"
+
+// PaneDeathsHookCommand is the pane-died hook body: increment
+// PaneDeathsUserOption. It runs in the dying pane's own context, so it needs
+// no target; the -F expansion keeps the arithmetic server-side.
+const PaneDeathsHookCommand = `set-option -F -p ` + PaneDeathsUserOption +
+	` "#{e|+:#{` + PaneDeathsUserOption + `},1}"`
+
+// PanePidStampFormat is the single -F expansion recorded into
+// PanePidUserOption: the pane's live root pid, the deaths counter as it
+// stands at stamp time, and the pane's pty — all resolved against the pane
+// the option is set on, so the three stay consistent within one write.
+const PanePidStampFormat = "#{pane_pid}:#{" + PaneDeathsUserOption + "}:#{pane_tty}"
+
 // AgentServerExecMarker is the effect-bound variant used by af's Docker and SSH
 // launchers. It accepts only agent-server arguments, derives the credential
 // policy from the program those arguments will actually launch, and then execs

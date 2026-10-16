@@ -34,19 +34,34 @@ import (
 // process whose SID equals it was started inside that pane.
 
 // paneFieldSeparator keeps pane fields positional. tmux prints an unset field as
-// nothing, so a whitespace split would shift later fields left. Every value is
-// numeric, so the separator cannot occur inside one.
+// nothing, so a whitespace split would shift later fields left. Every field is
+// numeric, a pty name, or a predicate digit — none can contain the separator.
 const paneFieldSeparator = "|"
 
 // paneRowFormat is what the teardown asks list-panes and display-message for.
 // The third field concatenates every value tmux reports only after reaping the
-// root, so it is non-empty exactly when the root is known to be gone.
+// root, so it is non-empty exactly when the root is known to be gone. The
+// fourth carries the pane's @af_pane_pid identity stamp: tmux ≥3.8 empties
+// pane_pid once the root exits (#5319), and the stamp is how a held dead pane
+// still names its root. The last three fields are the stamp's freshness proof
+// — the deaths counter, the live pty name, and the command pin — because a
+// pane option outlives the pane incarnation that wrote it (see paneStampPID).
 //
 // A reply without the separator is a bare pane_pid, which is what a tmux that
 // cannot expand the later fields, or a test executor, returns. It reads as a
 // live pane, the behaviour from before #4479.
 const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + paneFieldSeparator +
-	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}"
+	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{" + PanePidMarker + "}" +
+	paneFieldSeparator + "#{" + paneDeathsMarker + "}" + paneFieldSeparator + "#{pane_tty}" +
+	paneFieldSeparator + paneCommandMatchField
+
+// paneCommandMatchField asks the server — not the row — whether the pane's
+// recorded start command is still the exact command the stamp pinned: one
+// digit, answered by == equality rather than a substring match, so a foreign
+// respawn whose argv merely contains a launch marker still answers 0. The
+// comparison runs server-side because the recorded command is free-form text
+// that can contain both spaces and the field separator.
+const paneCommandMatchField = "#{==:#{" + paneCommandMarker + "},#{pane_start_command}}"
 
 // paneRow is one pane of a list-panes or display-message reply.
 type paneRow struct {
@@ -59,18 +74,108 @@ type paneRow struct {
 
 func parsePaneRow(field string) (paneRow, error) {
 	parts := strings.Split(strings.TrimSpace(field), paneFieldSeparator)
-	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return paneRow{}, fmt.Errorf("invalid pane pid %q", field)
-	}
-	row := paneRow{pid: pid}
+	row := paneRow{}
 	if len(parts) > 1 {
 		row.dead = strings.TrimSpace(parts[1]) == "1"
 	}
 	if len(parts) > 2 {
 		row.reaped = row.dead && strings.TrimSpace(parts[2]) != ""
 	}
+	// The stamp is a fallback authority only, consulted when tmux itself can
+	// no longer answer: a held dead pane on tmux ≥3.8 reports the pane_pid
+	// FIELD EMPTY. A populated pane_pid is tmux's own maintained value and
+	// always wins — after a respawn-pane the new root has a different pid
+	// while the old stamp is simply stale — so the two are never compared
+	// against each other, only substituted. A malformed pane_pid stays
+	// malformed; only an empty one is the tmux ≥3.8 shape the stamp exists
+	// to cover. And the stamp counts only while it still names the pane's
+	// current incarnation — pane options outlive respawn-pane, so paneStampPID
+	// proves the stamp was written by the run that most recently died.
+	stampPID, stampFresh := 0, false
+	if len(parts) > 3 {
+		var deaths, tty, cmdMatch string
+		if len(parts) > 4 {
+			deaths = strings.TrimSpace(parts[4])
+		}
+		if len(parts) > 5 {
+			tty = strings.TrimSpace(parts[5])
+		}
+		if len(parts) > 6 {
+			cmdMatch = strings.TrimSpace(parts[6])
+		}
+		stampPID, stampFresh = paneStampPID(strings.TrimSpace(parts[3]), deaths, tty, cmdMatch)
+	}
+	panePIDRaw := strings.TrimSpace(parts[0])
+	pid, err := strconv.Atoi(panePIDRaw)
+	switch {
+	case err == nil:
+		// pane_pid answered; the stamp is never consulted.
+	case panePIDRaw == "" && stampFresh:
+		pid = stampPID
+	case panePIDRaw == "" && row.dead && stampPID > 0:
+		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d from an earlier incarnation — the pane was respawned or its stamp write failed, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
+	case panePIDRaw == "" && row.dead:
+		return paneRow{}, fmt.Errorf("dead pane reports no pane_pid and no %s stamp; it predates pid stamping or was not created by af, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker)
+	default:
+		return paneRow{}, fmt.Errorf("invalid pane pid %q", field)
+	}
+	row.pid = pid
 	return row, nil
+}
+
+// paneStampPID extracts the pane-root pid a @af_pane_pid stamp recorded —
+// "<pid>:<deaths>:<pane_tty>" — and reports whether it still names the pane's
+// current incarnation. The pane option outlives the run that wrote it
+// (respawn-pane keeps the pane struct and its options), so three proofs must
+// all hold before the pid is trusted:
+//
+//   - deathsNow == stamped deaths + 1: the pane-died hook bumps the counter
+//     on every natural root exit, so a stamp from an earlier run shows a
+//     wider gap. This is what catches a commandless respawn whose restamp
+//     silently failed.
+//   - stamp tty == the pane's live tty: every respawn allocates a fresh pty,
+//     so a respawn whose kill produced no pane-died (measured on tmux 3.8 —
+//     pane-died/pane-exited/after-kill-pane are all silent through
+//     `respawn-pane -k`) still leaves the stamped pty name behind.
+//   - cmdMatch == "1": the pane's recorded start command still byte-equals
+//     the command the stamp pinned, so a replacement respawn — even one
+//     whose argv happens to contain a launch marker — fails it, while an
+//     identical commandless re-run re-executed the shim and restamped.
+//
+// A stamp written before the incarnation proof existed (a bare pid) has no
+// second colon and fails closed like an unstamped pane. A deaths field left
+// empty at stamp time is the counter's unset state, i.e. zero.
+func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, bool) {
+	pidRaw, rest, hasRest := strings.Cut(stamp, ":")
+	pid, err := strconv.Atoi(pidRaw)
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	if !hasRest {
+		// A bare pid is a stamp written before the incarnation proof
+		// existed: readable, but unprovable — it fails closed like an
+		// unstamped pane, only with a nameable pid.
+		return pid, false
+	}
+	deathsRaw, ttyRaw, ok := strings.Cut(rest, ":")
+	if !ok {
+		return pid, false
+	}
+	stampedDeaths := 0
+	if deathsRaw != "" {
+		stampedDeaths, err = strconv.Atoi(deathsRaw)
+		if err != nil || stampedDeaths < 0 {
+			return pid, false
+		}
+	}
+	current := 0
+	if deathsNow != "" {
+		current, err = strconv.Atoi(deathsNow)
+		if err != nil || current < 0 {
+			return pid, false
+		}
+	}
+	return pid, current-stampedDeaths == 1 && ttyRaw == ttyNow && cmdMatch == "1"
 }
 
 // deadPaneProcesses resolves one held dead pane for the process capture.
@@ -133,6 +238,18 @@ func pidGone(pid int) bool {
 	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
+// paneRowHasNoPane recognizes the reply a missing session produces on this
+// multi-field format: every pane-sourced field empty. Field 1 — pane_dead —
+// is the discriminator because it is a boolean tmux always answers for a real
+// pane, while on an empty target it stays empty; the only non-empty field in
+// the missing-session reply is the trailing command-equality digit, which is
+// "1" even there (empty == empty). Measured on tmux 3.8: `||||||1`. A bare
+// pane_pid reply has no separator at all and is not this shape.
+func paneRowHasNoPane(trimmed string) bool {
+	parts := strings.Split(trimmed, paneFieldSeparator)
+	return len(parts) > 1 && strings.TrimSpace(parts[1]) == ""
+}
+
 // panePID reads the session's pane pid and whether that pane is held dead. It
 // must run before kill-session, because afterwards there is nothing to ask.
 func (t *TmuxSession) panePID() (paneRow, error) {
@@ -162,16 +279,17 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		return paneRow{}, fmt.Errorf("failed to query pane pid: %w", err)
 	}
 	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" || strings.Trim(trimmed, paneFieldSeparator) == "" {
+	if trimmed == "" || paneRowHasNoPane(trimmed) {
 		// tmux answered and named no pane. Measured: this is what a missing
 		// session produces — exit 0, empty output — so it is the one pane-query
 		// failure that is evidence of ABSENCE rather than of an unreadable answer.
-		// With this multi-field format that answer is the bare separators: `||`,
-		// exit 0 (measured, tmux 3.4).
 		return paneRow{}, errPaneQueryFoundNoPane
 	}
 	row, err := parsePaneRow(trimmed)
-	if err != nil || row.pid <= 0 {
+	if err != nil {
+		return paneRow{}, err
+	}
+	if row.pid <= 0 {
 		return paneRow{}, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}
 	return row, nil
@@ -226,7 +344,7 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	for _, field := range strings.Fields(string(output)) {
 		row, err := parsePaneRow(field)
 		if err != nil {
-			return false, fmt.Errorf("unexpected list-panes row %q", field)
+			return false, fmt.Errorf("%w (list-panes row %q)", err, field)
 		}
 		if row.pid != pid || row.reaped {
 			continue
@@ -375,8 +493,19 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		exit.at = time.Unix(unix, 0)
 	}
 	if field(1) == "" && field(2) == "" && field(3) == "" {
-		// tmux has not reaped the root, or is too old to say it did.
+		// tmux has not reaped the root, or is too old to say it did. On tmux
+		// ≥3.8 pane_pid is already empty for a dead pane (#5319); the stamped
+		// fallback names the same root while it was alive — but only while the
+		// stamp still names the pane's current incarnation (paneStampPID).
+		// The fallback engages only on an EMPTY pane_pid: a populated one is
+		// tmux's maintained value and wins, and a malformed one is itself the
+		// failure.
 		pid, perr := strconv.Atoi(field(4))
+		if perr != nil && field(4) == "" {
+			if stamped, fresh := paneStampPID(field(6), field(7), field(8), field(9)); fresh {
+				pid, perr = stamped, nil
+			}
+		}
 		if perr != nil || pid <= 0 {
 			return paneExit{}, false
 		}
@@ -402,11 +531,17 @@ func exitedUncollected(pid int) bool {
 // paneExitFormat keeps the probe's fields positional: tmux leaves
 // pane_dead_status EMPTY for a command killed by a signal while still filling
 // pane_dead_time, so a whitespace-separated answer collapses and reads the death
-// time as the exit status (#4506 review). The last field is the server's
-// version, for the nudge's log line.
+// time as the exit status (#4506 review). The last fields are the server's
+// version, for the nudge's log line, and the pane's @af_pane_pid stamp plus
+// its incarnation proof (deaths counter, pty name, command pin — see
+// paneStampPID): tmux ≥3.8 empties pane_pid on death (#5319), the
+// uncollected-root check below needs a pid to test either way, and the stamp
+// is trusted only while it still names the pane's current incarnation.
 const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status}" + paneFieldSeparator +
 	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}" +
-	paneFieldSeparator + "#{version}"
+	paneFieldSeparator + "#{version}" + paneFieldSeparator + "#{" + PanePidMarker + "}" +
+	paneFieldSeparator + "#{" + paneDeathsMarker + "}" + paneFieldSeparator + "#{pane_tty}" +
+	paneFieldSeparator + paneCommandMatchField
 
 // LaunchPending reports whether the pane's root is still af's launch shim, the
 // environment filter that execs the pane command, so the command itself has
