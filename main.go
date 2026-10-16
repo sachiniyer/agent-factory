@@ -35,11 +35,12 @@ func main() {
 	}
 	sessionenv.HandleInternalExec()
 	// Strip the watch-generation marker (AF_WATCH_GEN only) before anything
-	// below can spawn a child (#5329). Everything downstream — the dedicated
-	// tmux server, upgrade recovery, an ad-hoc daemon launch — must not forward
-	// a watch command's generation to processes that are not one. AF_HOME stays:
-	// it is the #1104 pane ancestry marker, and alone it never makes a process
-	// reapable.
+	// below can spawn a child (#5329). Defense in depth: tmux servers and panes
+	// already get an allowlisted environment that never carries it; this makes
+	// sure af's own direct children — an ad-hoc daemon launch, the dedicated
+	// tmux-server wrapper, upgrade recovery — cannot forward it either. AF_HOME
+	// stays: it is the #1104 pane ancestry marker, and alone it never makes a
+	// process reapable.
 	sessionenv.StripOwnershipMarkers()
 	sessiontmux.HandleDedicatedServerExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery

@@ -411,3 +411,57 @@ func TestSweepSparesGroupsHoldingAfInfrastructure(t *testing.T) {
 		})
 	}
 }
+
+// markedOrphanEnv returns a fake environ marking a process as a previous
+// generation's watch command in home.
+func markedOrphanEnv(t *testing.T, home string) []string {
+	t.Helper()
+	canonicalHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{"AF_HOME=" + canonicalHome, envWatchGeneration + "=previous-generation", "AF_TASK_ID=t1"}
+}
+
+// TestSweepReapsAncestorInForeignGroup is the play-test's leg-D shape (#5329):
+// a watch script that runs `af` while the daemon is down is still mid-call when
+// the daemon it ad-hoc-spawned sweeps, so the orphan is this daemon's ANCESTOR.
+// It sits in a foreign process group (startDaemonChild Setsids the daemon), so
+// it must be reaped now rather than survive a whole extra generation.
+func TestSweepReapsAncestorInForeignGroup(t *testing.T) {
+	home := t.TempDir()
+	self := os.Getpid()
+	const orphan = 500
+	procs := []fakeOrphanProc{
+		// The orphaned watch loop and its pending `af` call, which is this
+		// daemon's parent: orphan → af CLI → self.
+		{proc: proctree.Process{PID: orphan, PPID: 1, SID: 77, Comm: "sh"}, pgid: orphan, env: markedOrphanEnv(t, home)},
+		{proc: proctree.Process{PID: orphan + 1, PPID: orphan, SID: 77, Comm: "af"}, pgid: orphan, env: markedOrphanEnv(t, home)},
+		{proc: proctree.Process{PID: self, PPID: orphan + 1, SID: self, Comm: "af"}, pgid: 42},
+	}
+
+	termed := sweepFakeTable(t, home, procs)
+
+	if len(termed) != 1 || termed[0] != orphan {
+		t.Fatalf("SIGTERMed groups %v, want the ancestor orphan's group %d", termed, orphan)
+	}
+}
+
+// TestSweepSparesOwnGroup pins what replaced the ancestor exclusion: whatever
+// a process carries, a group that shares this daemon's own pgid is never
+// signaled, while an ordinary marked group in the same table still is.
+func TestSweepSparesOwnGroup(t *testing.T) {
+	home := t.TempDir()
+	const ownGroupMember, control = 600, 900
+	procs := []fakeOrphanProc{
+		// sweepFakeTable reports pgid 42 for this daemon.
+		{proc: proctree.Process{PID: ownGroupMember, PPID: 1, SID: 77, Comm: "sh"}, pgid: 42, env: markedOrphanEnv(t, home)},
+		{proc: proctree.Process{PID: control, PPID: 1, SID: control, Comm: "sh"}, pgid: control, env: markedOrphanEnv(t, home)},
+	}
+
+	termed := sweepFakeTable(t, home, procs)
+
+	if len(termed) != 1 || termed[0] != control {
+		t.Fatalf("SIGTERMed groups %v, want only the control group %d (never the daemon's own group 42)", termed, control)
+	}
+}

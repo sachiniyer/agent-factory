@@ -8,18 +8,25 @@ import "os"
 // The daemon stamps AF_HOME and AF_WATCH_GEN into every watch command it spawns
 // (daemon/watcher_orphans.go, envWatchGeneration), and a restarted daemon reaps
 // any same-home process group carrying a foreign generation. That proof is only
-// sound if the generation stays on the watch command's own processes. A watch
-// script that runs `af` while the daemon is down makes af ad-hoc-spawn a daemon,
-// which re-execs `af --daemon` with the caller's environment — so without this
-// strip that daemon, its tmux server and every session under it would inherit
-// the stale generation, and the next restart's sweep would reap the user's
-// whole session fleet.
+// sound if the generation stays on the watch command's own processes.
+//
+// This strip is defense in depth, not the sole guarantee. tmux servers and
+// panes already receive an allowlisted environment (Filter/FilterForCommand
+// over commonNames, which never lists AF_WATCH_GEN), so the generation cannot
+// reach a session through tmux — the #5329 play-test confirmed a pre-strip
+// build's sessions survive. What the strip adds is that an af process's OWN
+// direct children cannot forward it either: a watch script that runs `af`
+// while the daemon is down makes af ad-hoc-spawn a daemon that re-execs
+// `af --daemon` with the caller's environment, and the dedicated tmux-server
+// wrapper and upgrade recovery exec the same way. Without the strip that daemon
+// would carry the stale generation, and so would anything it later starts
+// outside the allowlist.
 //
 // Only AF_WATCH_GEN is stripped. AF_HOME deliberately survives: it is the
 // existing pane/session ancestry marker (#1104, session/tmux/envmarker.go's
 // EnvMarkerHome) that session/tmux/reap.go and `af doctor` rely on, and agents
-// run af from inside panes all the time. The leak is closed anyway, because the
-// sweep requires BOTH a foreign AF_WATCH_GEN AND a matching AF_HOME — a process
+// run af from inside panes all the time. Stripping the generation alone is
+// enough, because the sweep requires BOTH a foreign AF_WATCH_GEN AND a matching AF_HOME — a process
 // carrying only AF_HOME is never reapable. AF_SESSION/AF_SESSION_GEN stay
 // because `af sessions whoami` reads its own AF_SESSION to cross-check its
 // pane, AF_DAEMON_URL/AF_DAEMON_TOKEN because panes need them to reach the

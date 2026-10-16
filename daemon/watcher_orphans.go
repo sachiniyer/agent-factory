@@ -66,6 +66,18 @@ import (
 // (watchOrphanInfraReason) — a stale watch command is cheaper than a reaped
 // session fleet.
 //
+// Why an ancestor of this daemon is still reapable: a watch script that runs
+// `af` while the daemon is down is mid-call when this daemon sweeps — its
+// pending `af` is blocked on the ping to the daemon it just ad-hoc-spawned — so
+// the orphan is this daemon's grandparent. Excluding ancestors let exactly that
+// orphan survive a whole extra generation beside its replacement (found by the
+// #5329 play-test). What makes signaling its group safe is not ancestry but the
+// group boundary: startDaemonChild Setsids the daemon into its own session and
+// group, the sweep never signals its own pgid, and killing the orphan's group
+// only ends the pending `af` call, which the detached daemon does not need. Its
+// own descendants stay excluded: those are this generation's live children,
+// whatever stale marker an older binary may have let them inherit.
+//
 // The residual gap, stated so it is not rediscovered: a descendant that both
 // leaves the watch command's process group (setsid) AND scrubs its environment
 // carries no evidence we could act on. That is out of reach by design.
@@ -277,11 +289,11 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 		log.WarningLog.Printf("watch orphan sweep skipped: cannot read the daemon's own process group: %v", err)
 		return nil
 	}
-	ancestors := watchOrphanAncestors(snap, self)
 
 	byGroup := make(map[int]*watchOrphanGroup)
 	for pid, p := range snap {
-		if pid <= 1 || pid == self || ancestors[pid] || watchOrphanDescendsFrom(snap, pid, self) {
+		// Ancestors are deliberately NOT excluded (see the file comment).
+		if pid <= 1 || pid == self || watchOrphanDescendsFrom(snap, pid, self) {
 			continue
 		}
 		if procUID, ok := watchOrphanUID(pid); !ok || procUID != uid {
@@ -488,21 +500,6 @@ func (s *watcherSupervisor) pruneStoppedWatchGroups(pending []*watchOrphanGroup)
 		kept = append(kept, g)
 	}
 	return kept
-}
-
-// watchOrphanAncestors returns the PPID chain above pid in snap. Bounded so a
-// malformed or racing snapshot cannot loop forever.
-func watchOrphanAncestors(snap map[int]proctree.Process, pid int) map[int]bool {
-	ancestors := make(map[int]bool)
-	for range 256 {
-		p, ok := snap[pid]
-		if !ok || p.PPID <= 0 || ancestors[p.PPID] {
-			break
-		}
-		ancestors[p.PPID] = true
-		pid = p.PPID
-	}
-	return ancestors
 }
 
 // watchOrphanDescendsFrom reports whether root appears in pid's PPID chain.
