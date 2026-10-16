@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Reaping the watch commands a previous daemon generation left behind (#5329).
@@ -110,15 +111,26 @@ func watchMarkerHome() (string, error) {
 	return dir, nil
 }
 
-// watchChildEnvOverrides are the variables watchChildEnv sets itself, and so
-// drops from the inherited environment first.
-var watchChildEnvOverrides = []string{
+// watchChildEnvDropped are the inherited variables watchChildEnv removes before
+// building a watch command's environment.
+//
+// Most are variables it then sets itself. The tmux pane-ancestry markers are
+// dropped outright: a daemon launched from inside an af pane inherits that
+// pane's AF_SESSION/AF_SESSION_GEN, but a watch command is not a member of that
+// pane. Passing the markers on would misattribute it to an unrelated session,
+// and the tmux session orphan reaper (session/tmux/reap.go) keys on exactly
+// those markers plus AF_HOME — so tearing that pane session down could kill
+// this home's watch commands (#5329). AF_TESTGUARD_RUN is deliberately kept: it
+// only attributes processes leaked by a test run, which stays useful here.
+var watchChildEnvDropped = []string{
 	"AF_TASK_ID", "AF_TASK_NAME", "AF_PROJECT_PATH", envWatchGeneration, "AF_HOME",
+	tmux.EnvMarkerSession, tmux.EnvMarkerGeneration,
 }
 
 // watchChildEnv builds a watch command's environment: the daemon's own, plus
 // the AF_TASK_* script contract, plus the ownership markers (#5329).
 //
+// Inherited tmux pane-ancestry markers are dropped (see watchChildEnvDropped).
 // Inherited copies of every variable set here are dropped first, because
 // environ readers — the sweep included — take the FIRST match. A daemon started
 // inside another home's tmux pane inherits that home's AF_HOME, which would
@@ -128,9 +140,9 @@ var watchChildEnvOverrides = []string{
 // then never be reaped, which is the safe direction.
 func (s *watcherSupervisor) watchChildEnv(taskID, name, dir string) []string {
 	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+len(watchChildEnvOverrides))
+	env := make([]string, 0, len(inherited)+len(watchChildEnvDropped))
 	for _, kv := range inherited {
-		if !hasEnvKeyIn(kv, watchChildEnvOverrides) {
+		if !hasEnvKeyIn(kv, watchChildEnvDropped) {
 			env = append(env, kv)
 		}
 	}

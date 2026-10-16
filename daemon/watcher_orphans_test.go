@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -199,6 +200,9 @@ func TestWatchChildEnvOverridesInheritedMarkers(t *testing.T) {
 	t.Setenv("AF_TASK_ID", "stale-task")
 	t.Setenv("AF_TASK_NAME", "stale-name")
 	t.Setenv("AF_PROJECT_PATH", "/stale/project")
+	t.Setenv(tmux.EnvMarkerSession, "af_unrelated_pane")
+	t.Setenv(tmux.EnvMarkerGeneration, "pane-generation")
+	t.Setenv("AF_TESTGUARD_RUN", "testguard-run")
 
 	env := s.watchChildEnv("task-1", "name-1", "/project")
 
@@ -226,6 +230,16 @@ func TestWatchChildEnvOverridesInheritedMarkers(t *testing.T) {
 		if got, _ := firstEnv(env, key); got != value {
 			t.Errorf("%s = %q, want %q", key, got, value)
 		}
+	}
+	// Pane ancestry must not reach a process that is not in that pane, or the
+	// tmux session orphan reaper could kill it with the unrelated session.
+	for _, key := range []string{tmux.EnvMarkerSession, tmux.EnvMarkerGeneration} {
+		if got, ok := firstEnv(env, key); ok {
+			t.Errorf("%s = %q leaked into the watch env; inherited pane markers must be dropped", key, got)
+		}
+	}
+	if got, _ := firstEnv(env, "AF_TESTGUARD_RUN"); got != "testguard-run" {
+		t.Errorf("AF_TESTGUARD_RUN = %q, want it kept for leak attribution", got)
 	}
 }
 
