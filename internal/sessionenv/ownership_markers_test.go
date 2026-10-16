@@ -8,10 +8,12 @@ import (
 )
 
 // TestStripOwnershipMarkers pins exactly which variables cross the af boundary
-// (#5329): the watch-ownership markers are removed, and everything a pane or
-// CLI legitimately needs survives — including in a child spawned afterwards.
+// (#5329): only the watch-generation marker is removed, and everything a pane
+// or CLI legitimately needs survives — AF_HOME, the #1104 ancestry marker,
+// included — in this process and in a child spawned afterwards.
 func TestStripOwnershipMarkers(t *testing.T) {
 	kept := map[string]string{
+		"AF_HOME":            "/some/home",
 		"AF_SESSION":         "af_pane",
 		"AF_SESSION_GEN":     "pane-gen",
 		"AF_DAEMON_URL":      "http://127.0.0.1:1",
@@ -23,14 +25,11 @@ func TestStripOwnershipMarkers(t *testing.T) {
 		t.Setenv(key, value)
 	}
 	t.Setenv("AF_WATCH_GEN", "old-generation")
-	t.Setenv("AF_HOME", "/some/home")
 
 	StripOwnershipMarkers()
 
-	for _, name := range []string{"AF_WATCH_GEN", "AF_HOME"} {
-		if value, ok := os.LookupEnv(name); ok {
-			t.Errorf("%s = %q survived the strip", name, value)
-		}
+	if value, ok := os.LookupEnv("AF_WATCH_GEN"); ok {
+		t.Errorf("AF_WATCH_GEN = %q survived the strip", value)
 	}
 	for key, want := range kept {
 		if got := os.Getenv(key); got != want {
@@ -42,7 +41,7 @@ func TestStripOwnershipMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
-	if got, want := strings.TrimSpace(string(out)), "unset:unset:af_pane"; got != want {
+	if got, want := strings.TrimSpace(string(out)), "unset:/some/home:af_pane"; got != want {
 		t.Fatalf("child saw %q, want %q", got, want)
 	}
 }

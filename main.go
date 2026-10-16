@@ -34,11 +34,12 @@ func main() {
 		return agentaccount.Selected(home, agent, name)
 	}
 	sessionenv.HandleInternalExec()
-	// Strip the watch-ownership markers before anything below can spawn a child
-	// (#5329). After HandleInternalExec on purpose: the pane shim must keep its
-	// inherited AF_HOME, and never returns. Everything downstream — the
-	// dedicated tmux server, upgrade recovery, an ad-hoc daemon launch — must
-	// not forward a watch command's markers to processes that are not one.
+	// Strip the watch-generation marker (AF_WATCH_GEN only) before anything
+	// below can spawn a child (#5329). Everything downstream — the dedicated
+	// tmux server, upgrade recovery, an ad-hoc daemon launch — must not forward
+	// a watch command's generation to processes that are not one. AF_HOME stays:
+	// it is the #1104 pane ancestry marker, and alone it never makes a process
+	// reapable.
 	sessionenv.StripOwnershipMarkers()
 	sessiontmux.HandleDedicatedServerExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery

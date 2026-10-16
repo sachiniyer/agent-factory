@@ -59,9 +59,9 @@ import (
 // Markers are proof that a group is ours to reap, but an af-owned member means
 // the group is af infrastructure regardless of what the markers say. A watch
 // script that runs `af` while the daemon is down ad-hoc-spawns a daemon from its
-// own environment; main strips the markers before that daemon can forward them
+// own environment; main strips AF_WATCH_GEN before that daemon can forward it
 // (sessionenv.StripOwnershipMarkers), but its OWN environ is fixed at exec and
-// still carries them. So a group holding a tmux server, an af session-marked
+// still carries the stale generation. So a group holding a tmux server, an af session-marked
 // process, or an af binary leading its own session is spared outright
 // (watchOrphanInfraReason) — a stale watch command is cheaper than a reaped
 // session fleet.
