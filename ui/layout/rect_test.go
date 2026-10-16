@@ -56,8 +56,20 @@ func TestRectLocal(t *testing.T) {
 	assert.Equal(t, layout.Point{X: 3, Y: 2}, r.Local(layout.Point{X: 8, Y: 12}))
 }
 
-// requireTiles asserts that parts exactly tile whole: each inside whole,
-// and areas summing to whole's area.
+// rectsIntersect reports whether two rects share at least one cell. Empty
+// rects intersect nothing. This is a local test-only copy of the logic that
+// the production Rect.Intersects method used; it is kept here so requireTiles
+// can assert pairwise disjointness without a production method that has no
+// other callers.
+func rectsIntersect(a, b layout.Rect) bool {
+	if a.Empty() || b.Empty() {
+		return false
+	}
+	return a.X < b.Right() && b.X < a.Right() && a.Y < b.Bottom() && b.Y < a.Bottom()
+}
+
+// requireTiles asserts that parts exactly tile whole: pairwise disjoint,
+// each inside whole, and areas summing to whole's area.
 func requireTiles(t *testing.T, whole layout.Rect, parts []layout.Rect) {
 	t.Helper()
 	area := 0
@@ -72,6 +84,9 @@ func requireTiles(t *testing.T, whole layout.Rect, parts []layout.Rect) {
 		require.LessOrEqual(t, p.Right(), whole.Right(), "part %d overflows right", i)
 		require.LessOrEqual(t, p.Bottom(), whole.Bottom(), "part %d overflows bottom", i)
 		area += p.W * p.H
+		for j := i + 1; j < len(parts); j++ {
+			require.False(t, rectsIntersect(p, parts[j]), "parts %d and %d overlap: %+v vs %+v", i, j, p, parts[j])
+		}
 	}
 	require.Equal(t, whole.W*whole.H, area, "parts do not cover the whole rect")
 }
