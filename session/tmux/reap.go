@@ -164,12 +164,17 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 	// hardened ownership rules — AF_HOME, uid, identity revalidation,
 	// self-chain — rather than a second scanner with its own answers. It runs
 	// once per capture, not once per pid-less pane.
-	// observedSessionID is the $id list-panes reported for this session —
+	// observedSessionID is the $id list-panes reported for this session, and
+	// observedServer is the tmux server process the same row reported —
 	// captured from any parsed row below, where every row of one query shares
-	// the session. The generation seed below reads markers through it rather
-	// than through the name so a same-named replacement cannot answer for the
-	// incarnation this capture described (#5319 review).
+	// both. The generation seed below reads markers through the $id rather
+	// than the name so a same-named replacement cannot answer for the
+	// incarnation this capture described, and it re-proves observedServer
+	// still lives across the reads so a fresh server that recycled the $id
+	// cannot answer either (#5319 review).
 	var observedSessionID string
+	var observedServer proctree.Process
+	var serverSeen bool
 	var markedScan struct {
 		procs []proctree.Process
 		err   error
@@ -195,13 +200,24 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 					// cohort from the very processes being considered for
 					// reaping. The read binds to the observed $id, not the
 					// name: a name lookup after the session exits would
-					// silently answer for its replacement (#5319 review).
-					if observedSessionID == "" {
+					// silently answer for its replacement. And it is
+					// bracketed by proof the observed server still lives:
+					// a fresh server can recycle the $id onto a same-named
+					// session whose markers would otherwise pass (#5319
+					// review).
+					verifyServer := func() error {
+						if !serverSeen || !proctree.AliveSame(observedServer) {
+							return fmt.Errorf("tmux server pid %d observed by list-panes is gone or replaced; cannot bind a pid-less dead pane's generation to that incarnation",
+								observedServer.PID)
+						}
+						return nil
+					}
+					if observedSessionID == "" || observedServer.PID == 0 {
 						markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
-							"session %s: list-panes reported no session_id, so a pid-less dead pane's generation cannot be bound to the observed incarnation",
+							"session %s: list-panes reported no session_id or server pid, so a pid-less dead pane's generation cannot be bound to the observed incarnation",
 							sanitizedName))
 					} else {
-						generation, genFound, genErr := SessionGenerationMarkerForIncarnation(cmdExec, observedSessionID, sanitizedName)
+						generation, genFound, genErr := SessionGenerationMarkerForIncarnation(cmdExec, observedSessionID, sanitizedName, verifyServer)
 						switch {
 						case genErr != nil:
 							markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
@@ -244,6 +260,9 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		}
 		if observedSessionID == "" {
 			observedSessionID = row.sessionID
+		}
+		if observedServer.PID == 0 && row.serverPID > 0 {
+			observedServer, serverSeen = snap[row.serverPID]
 		}
 		if row.dead && row.pidAbsent {
 			// tmux ≥ 3.8 reports no pid for a held dead pane, so its marker

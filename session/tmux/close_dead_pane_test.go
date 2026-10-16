@@ -248,6 +248,10 @@ func paneRowExecGeneration(name, pid, dead, status, signal, deadTime, gen string
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$1",
+		// The test process stands in for the tmux server: live and identity-
+		// stable across the whole test, so the server-incarnation check
+		// passes while the marker answers decide the outcome.
+		"#{pid}", strconv.Itoa(os.Getpid()),
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -316,8 +320,9 @@ func sessionEnvBlock(name string, gen *string) []byte {
 // by the test, keyed on the -t TARGET: showEnv receives the exact target
 // string the query carried — "=name:" for a name-shaped lookup, "$N" for an
 // incarnation lookup — so a test can tell which binding the code used, and
-// sessionID controls the #{session_id} the row expands to.
-func paneRowExecShowEnv(pid, dead, status, signal, deadTime, sessionID string,
+// sessionID/serverPID control the #{session_id} and #{pid} the row expands
+// to.
+func paneRowExecShowEnv(pid, dead, status, signal, deadTime, sessionID, serverPID string,
 	showEnv func(target, key string) ([]byte, error), killed *bool) cmd_test.MockCmdExec {
 	expand := strings.NewReplacer(
 		"#{pane_pid}", pid,
@@ -326,6 +331,7 @@ func paneRowExecShowEnv(pid, dead, status, signal, deadTime, sessionID string,
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", sessionID,
+		"#{pid}", serverPID,
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -361,6 +367,7 @@ func deadPaneCohortExec(name string, anchorPID int, status, signal, deadTime str
 		"#{pane_dead_signal}", signal,
 		"#{pane_dead_time}", deadTime,
 		"#{session_id}", "$0",
+		"#{pid}", strconv.Itoa(os.Getpid()),
 	)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -386,7 +393,8 @@ func deadPaneCohortExec(name string, anchorPID int, status, signal, deadTime str
 				}
 				return []byte("-" + key + "\n"), nil
 			case strings.Contains(s, "list-panes"):
-				return []byte(fmt.Sprintf("%d|0||$0\n|1|%s%s%s|$0\n", anchorPID, status, signal, deadTime)), nil
+				return []byte(fmt.Sprintf("%d|0||$0|%d\n|1|%s%s%s|$0|%d\n",
+					anchorPID, os.Getpid(), status, signal, deadTime, os.Getpid())), nil
 			case strings.Contains(s, "display-message"):
 				return []byte(rowExpand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
@@ -637,7 +645,7 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneReadsGenerationThroughObservedSessi
 	name := toTmuxName("dead-pane-no-pid-incarnation", "")
 	survivor := startStranger(t, markerEnv(name, home, "gen1"))
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
-		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$1",
+		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$1", strconv.Itoa(os.Getpid()),
 			func(target, key string) ([]byte, error) {
 				gen1, zzz := "gen1", "zzz"
 				if target != "$1" {
@@ -679,7 +687,7 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneRefusesWhenObservedIncarnationIsGon
 	name := toTmuxName("dead-pane-no-pid-gone-incarnation", "")
 	survivor := startStranger(t, markerEnv(name, home, "gen1"))
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
-		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$7",
+		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$7", strconv.Itoa(os.Getpid()),
 			func(target, key string) ([]byte, error) {
 				gen1 := "gen1"
 				if target == "$7" {
@@ -719,7 +727,7 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneRefusesMismatchedIncarnation(t *tes
 	name := toTmuxName("dead-pane-no-pid-mismatched", "")
 	survivor := startStranger(t, markerEnv(name, home, "gen1"))
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
-		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$0",
+		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$0", strconv.Itoa(os.Getpid()),
 			func(target, key string) ([]byte, error) {
 				gen1 := "gen1"
 				if key == "" {
@@ -740,6 +748,36 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneRefusesMismatchedIncarnation(t *tes
 		"an incarnation whose AF_SESSION names another session must refuse")
 	require.True(t, proctree.AliveSame(survivor),
 		"a mismatched incarnation authorizes nothing")
+}
+
+// TestCloseAndWaitForPaneExit_...RefusesWhenObservedServerIsGone covers the
+// restart half of incarnation binding (#5319 review): a row's #{pid} is the
+// tmux server that produced the row, and a fresh server can recycle the same
+// $id onto a same-named session whose markers answer correctly. When the
+// observed server process cannot be proven to still be that server — here the
+// reported pid was never even alive — the generation lookup must refuse
+// before trusting any marker answer, and the worktree must stay.
+func TestCloseAndWaitForPaneExit_RefusesWhenObservedServerIsGone(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-server-restart", "")
+	var queries []string
+	// A pid above the platform maximum was never alive on this host, let
+	// alone as the tmux server that produced this row: the incarnation check
+	// must refuse on the FIRST server proof, before either marker read.
+	ex := paneRowExecShowEnv("", "1", "7", "", "1726000000", "$0", "4194305",
+		func(target, key string) ([]byte, error) {
+			queries = append(queries, target+":"+key)
+			return []byte(name + "\n"), nil
+		}, nil)
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t), ex)
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a tmux server that cannot be proven to still be the observed one must refuse")
+	require.Empty(t, queries,
+		"a dead observed server must refuse before trusting any marker answer")
 }
 
 // Processes the sweep cannot attribute are not evidence of membership: an

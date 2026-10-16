@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 		"#{pane_dead_signal}", p.signal,
 		"#{pane_dead_time}", p.at,
 		"#{session_id}", "$0",
+		"#{pid}", strconv.Itoa(os.Getpid()),
 	).Replace(c.Args[len(c.Args)-1]) + "\n", true
 }
 

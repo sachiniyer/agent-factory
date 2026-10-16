@@ -48,13 +48,17 @@ const paneFieldSeparator = "|"
 // The third field concatenates every value tmux reports only after reaping the
 // root, so it is non-empty exactly when the root is known to be gone. The
 // fourth carries the session's concrete incarnation id, which names the exact
-// session a row belongs to in a way a reused name cannot.
+// session a row belongs to in a way a reused name cannot. The fifth carries
+// the tmux SERVER's pid — the only handle that lets a later read prove the
+// server that answered is the server that produced this row, since a fresh
+// server can recycle session $ids (#5319 review).
 //
 // A reply without the separator is a bare pane_pid, which is what a tmux that
 // cannot expand the later fields, or a test executor, returns. It reads as a
 // live pane, the behaviour from before #4479.
 const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + paneFieldSeparator +
-	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{session_id}"
+	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{session_id}" +
+	paneFieldSeparator + "#{pid}"
 
 // paneRow is one pane of a list-panes or display-message reply.
 type paneRow struct {
@@ -72,6 +76,10 @@ type paneRow struct {
 	// sessionID: the $id of the session incarnation list-panes observed —
 	// stable across a same-named replacement in a way the name is not.
 	sessionID string
+	// serverPID: the tmux server's pid when the row was produced — the
+	// handle for proving a later answer still came from that server,
+	// because a restarted server can recycle session $ids (#5319 review).
+	serverPID int
 }
 
 func parsePaneRow(field string) (paneRow, error) {
@@ -85,6 +93,12 @@ func parsePaneRow(field string) (paneRow, error) {
 	}
 	if len(parts) > 3 {
 		row.sessionID = strings.TrimSpace(parts[3])
+	}
+	if len(parts) > 4 {
+		// An empty or unreadable field leaves 0, which the caller treats
+		// the same as a row that never carried it: no server-incarnation
+		// evidence, rather than a malformed row.
+		row.serverPID, _ = strconv.Atoi(strings.TrimSpace(parts[4]))
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 	switch {
