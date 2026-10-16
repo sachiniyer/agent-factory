@@ -26,11 +26,18 @@ func (t *TmuxSession) SetRemainOnExit() {
 
 // ApplyRemainOnExit sets the window option on a session that already exists,
 // healing a process tab spawned before #4479 so its eventual exit still records
-// a dead pane rather than vanishing into an ambiguous absence. Best-effort: a
-// wedged server just loses the heal, never the tab.
+// a dead pane rather than vanishing into an ambiguous absence. It also stamps
+// the pane's @af_pane_pid while the root is still alive to answer: tmux ≥3.8
+// stops reporting pane_pid at death (#5319), and a pane launched by a
+// pre-stamp af has no shim-recorded value. `-o` never overwrites — a pane
+// already dead is exactly when re-expanding #{pane_pid} would come back
+// empty and clobber a good stamp. Best-effort: a wedged server just loses
+// the heal, never the tab.
 func (t *TmuxSession) ApplyRemainOnExit() {
 	ctx, cancel := tmuxTimeoutContext()
-	_ = t.runTmuxBounded(ctx, "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	args := []string{"set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on"}
+	args = append(append(args, ";"), panePidStampArgs(exactTarget(t.sanitizedName))...)
+	_ = t.runTmuxBounded(ctx, args...)
 	cancel()
 }
 

@@ -79,7 +79,10 @@ func (t *TmuxSession) Start(workDir string) error {
 	t.programMu.RUnlock()
 	if remainOnExit {
 		// Atomic with new-session so even a command that exits instantly is
-		// held as a dead pane rather than racing the option (#4479).
+		// held as a dead pane rather than racing the option (#4479). The pane's
+		// own @af_pane_pid stamp is written by the launch shim inside the pane
+		// (sessionenv stamps its own pid — the shim IS the pane root), so no
+		// spawn-side command is needed and nothing here races death (#5319).
 		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
