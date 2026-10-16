@@ -293,7 +293,7 @@ func TestStampPaneRootPidRefusesARespawnItCannotRestamp(t *testing.T) {
 		wantRead  bool
 	}{
 		{"write lands: fresh stamp, no readback needed", nil, "99999:0:/dev/pts/0", nil, false, false},
-		{"channel fully blind: the pane cannot be proven fresh, so it must not launch", writeErr, "", errors.New("read failed"), true, true},
+		{"channel fully blind: a first launch never dies over bookkeeping (accepted residual for a blind respawn)", writeErr, "", errors.New("read failed"), false, true},
 		{"first launch, read proves the pane is new", writeErr, "", nil, false, true},
 		{"first launch, stamp is whitespace", writeErr, "  \n", nil, false, true},
 		{"write landed but the client reported an error: stamp names this pid", writeErr,

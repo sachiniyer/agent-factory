@@ -136,14 +136,16 @@ func parsePaneRow(field string) (paneRow, error) {
 //     pty. The name is only corroborating evidence — `respawn-pane -k` frees
 //     the devpts index before allocating the replacement and Linux can
 //     reissue the same pathname to the new allocation (#5328 review), so a
-//     matching name alone proves nothing. What makes the stale record
-//     unreachable for a re-run is the shim's restamp-or-die
+//     matching name alone proves nothing. What normally makes the stale
+//     record unreachable for a re-run is the shim's restamp-or-die
 //     (sessionenv.stampPaneRootPid): a respawn re-executes the shim, which
-//     either lands a fresh bundle or, unable to prove the pane is fresh —
-//     an unwritable or unreadable stamp — exits without running the
-//     command, so a live pane can never hide a replacement root behind the
-//     previous incarnation's record. The trusted stamp can therefore name
-//     only this session's own earlier dead run.
+//     either lands a fresh bundle or, when the option provably still names
+//     an earlier run, exits without running the command. The accepted
+//     residual is the shim that can neither write nor read the option at
+//     all — manual `respawn-pane -e` sabotage of the pane env — which
+//     launches anyway because a first launch must never die over
+//     bookkeeping; a stale record that survives these pins is bounded to
+//     the stamped session's own earlier run.
 //   - cmdMatch == "1": the pane's recorded start command still byte-equals
 //     the command the stamp pinned, so a replacement respawn — even one
 //     whose argv happens to contain a launch marker — fails it, while an

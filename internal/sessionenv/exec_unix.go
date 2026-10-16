@@ -246,10 +246,10 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 // What remains unprovable is a respawn that never runs this shim at all —
 // one respawning a foreign command bypasses it — and that case the command
 // pin catches at the row instead: the pinned pane_start_command no longer
-// equals the recorded one. A shim that does run and cannot reach its tmux
-// channel at all launches nothing: the write below failing over an
-// unreadable stamp is itself refused, so the only fresh pane that dies is
-// one whose channel was dead at birth.
+// equals the recorded one. And a respawned pane whose shim can neither
+// write nor read the option launches under the stale record — the accepted
+// residual above — because a first launch must never be refused over
+// bookkeeping.
 //
 // Best-effort on purpose on the FIRST launch, and deliberately NOT
 // version-gated: pane options (`set-option -p`, tmux >=3.0), pane hooks
@@ -278,20 +278,18 @@ func stampPaneRootPid() error {
 	// without its command running, and the dead stamp can then only point at
 	// a run that genuinely produced no processes. A stamp naming THIS pid
 	// means the write actually landed and only the error report was lost —
-	// already fresh, so launch. And if the read itself fails the pane cannot
-	// be proven fresh at all: a fresh af pane's own tmux channel works (af
-	// spawned it through that server and controls its env), so a channel
-	// dead at birth is the sabotage shape — `respawn-pane -e` poisoning the
-	// pane env — and refusing is the only way that respawn cannot hide its
-	// replacement root behind the stale record.
+	// already fresh, so launch. And if the READ fails the pane cannot be
+	// told from a fresh one at all: a first launch must never die over
+	// bookkeeping, so it launches. That is the accepted residual — a respawn
+	// whose shim can neither write nor read the option (`respawn-pane -e`
+	// poisoning the pane env, a tmux channel dead at birth) runs under the
+	// stale record, which is manual respawn-pane sabotage beyond the
+	// deaths/command/pty pins the row checks below keep.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel2()
 	prior, readErr := paneStampRead(ctx2, paneID)
 	if readErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr,
-			"af: pane %s bookkeeping is unwritable and unreadable; refusing to launch a pane whose incarnation cannot be proven\n",
-			paneID)
-		return fmt.Errorf("pane %s bookkeeping write failed and its identity stamp is unreadable", paneID)
+		return nil
 	}
 	if pidField, _, _ := strings.Cut(prior, ":"); pidField == strconv.Itoa(os.Getpid()) {
 		return nil

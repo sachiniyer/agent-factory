@@ -31,9 +31,12 @@ const ExecMarker = "__af-session-env-exec"
 // So freshness is proven two ways at once: the deaths counter the pane-died
 // hook bumps on every natural exit, the recorded start command the stamp
 // pins, and the tty name as corroborating evidence at the row; and at the
-// shim a respawn must restamp before its command runs or not run at all —
-// the dangerous state is a LIVE pane running under the previous run's stamp,
-// and the shim refuses to create it (see stampPaneRootPid).
+// shim a respawn must restamp before its command runs, unless the option
+// provably still names an earlier run — the dangerous state is a LIVE pane
+// running under the previous run's stamp, and the shim refuses to create it
+// when it can prove that is what it is (see stampPaneRootPid; a shim that
+// can neither write nor read the option launches anyway, the accepted
+// residual of never refusing a first launch over bookkeeping).
 const PanePidUserOption = "@af_pane_pid"
 
 // PaneDeathsUserOption counts the pane's natural root exits: the pane-died
@@ -42,8 +45,8 @@ const PanePidUserOption = "@af_pane_pid"
 // moved exactly once, so a stamp carried into a later incarnation shows a gap
 // the reader refuses. The counter cannot see a `respawn-pane -k` kill — tmux
 // fires no hook for it — which is why the stamp also pins the pane's pty
-// name and recorded command, and why the shim refuses to launch a respawn it
-// cannot restamp (see stampPaneRootPid).
+// name and recorded command, and why the shim refuses to launch a respawn
+// whose record it can prove still names an earlier run (see stampPaneRootPid).
 const PaneDeathsUserOption = "@af_pane_deaths"
 
 // PaneCommandUserOption pins the pane's recorded start command at stamp time.
