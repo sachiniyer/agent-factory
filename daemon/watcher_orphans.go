@@ -263,52 +263,101 @@ func watchOrphanGroupAlive(pgid int) (bool, error) {
 // generation of this AF home left running (#5329). It runs at most once per
 // supervisor, under s.mu, from the first reconcile — see the file comment.
 func (s *watcherSupervisor) sweepOrphanedWatchCommands() {
-	groups := s.findOrphanedWatchGroups()
+	scope, ok := currentWatchOrphanScope()
+	if !ok {
+		return
+	}
+	groups := s.findOrphanedWatchGroups(scope)
 	if len(groups) == 0 {
 		return
 	}
-	s.stopOrphanedWatchGroups(groups)
+	s.stopOrphanedWatchGroups(scope, groups)
+}
+
+// watchOrphanScope is what every ownership check is judged against: this
+// home, and this daemon's own pid, uid and process group.
+type watchOrphanScope struct {
+	home    string
+	self    int
+	uid     int
+	ownPGID int
+}
+
+// currentWatchOrphanScope resolves the sweep's scope; any failure disables
+// the sweep (fail open) and says why.
+func currentWatchOrphanScope() (watchOrphanScope, bool) {
+	rawHome, err := watchMarkerHome()
+	if err != nil {
+		log.WarningLog.Printf("watch orphan sweep skipped: cannot resolve AF home: %v", err)
+		return watchOrphanScope{}, false
+	}
+	home, err := canonicalDir(rawHome)
+	if err != nil {
+		log.WarningLog.Printf("watch orphan sweep skipped: cannot canonicalize AF home %q: %v", rawHome, err)
+		return watchOrphanScope{}, false
+	}
+	self := os.Getpid()
+	uid, ok := watchOrphanUID(self)
+	if !ok {
+		log.WarningLog.Printf("watch orphan sweep skipped: cannot determine the daemon's own uid")
+		return watchOrphanScope{}, false
+	}
+	ownPGID, err := watchOrphanPGID(self)
+	if err != nil {
+		log.WarningLog.Printf("watch orphan sweep skipped: cannot read the daemon's own process group: %v", err)
+		return watchOrphanScope{}, false
+	}
+	return watchOrphanScope{home: home, self: self, uid: uid, ownPGID: ownPGID}, true
 }
 
 // findOrphanedWatchGroups scans the process table for processes that are
 // provably a previous generation's watch commands, grouped by process group.
 // Any failure to read the table itself returns nothing (fail open); any doubt
 // about an individual process skips it (fail closed).
-func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
-	rawHome, err := watchMarkerHome()
-	if err != nil {
-		log.WarningLog.Printf("watch orphan sweep skipped: cannot resolve AF home: %v", err)
-		return nil
-	}
-	home, err := canonicalDir(rawHome)
-	if err != nil {
-		log.WarningLog.Printf("watch orphan sweep skipped: cannot canonicalize AF home %q: %v", rawHome, err)
-		return nil
-	}
+func (s *watcherSupervisor) findOrphanedWatchGroups(scope watchOrphanScope) []*watchOrphanGroup {
 	snap, err := watchOrphanSnapshot()
 	if err != nil {
 		log.WarningLog.Printf("watch orphan sweep skipped: cannot read the process table: %v", err)
 		return nil
 	}
-	self := os.Getpid()
-	uid, ok := watchOrphanUID(self)
-	if !ok {
-		log.WarningLog.Printf("watch orphan sweep skipped: cannot determine the daemon's own uid")
-		return nil
-	}
-	ownPGID, err := watchOrphanPGID(self)
-	if err != nil {
-		log.WarningLog.Printf("watch orphan sweep skipped: cannot read the daemon's own process group: %v", err)
-		return nil
-	}
 
 	byGroup := make(map[int]*watchOrphanGroup)
-	for pid, p := range snap {
-		// Ancestors are deliberately NOT excluded (see the file comment).
-		if pid <= 1 || pid == self || watchOrphanDescendsFrom(snap, pid, self) {
+	s.collectMarkedOrphans(snap, scope, byGroup)
+
+	// Second channel: groups whose leader a previous generation recorded. Its
+	// candidates merge into the same map, so the infrastructure check and the
+	// TERM→KILL escalation below apply to both channels identically.
+	s.collectRecordedOrphans(snap, scope.uid, scope.ownPGID, byGroup)
+
+	if len(byGroup) == 0 {
+		return nil
+	}
+	spared := watchOrphanInfraGroups(snap, byGroup)
+
+	groups := make([]*watchOrphanGroup, 0, len(byGroup))
+	for pgid, g := range byGroup {
+		if reason, ok := spared[pgid]; ok {
+			log.WarningLog.Printf("not reaping %s although a previous daemon generation marked it: "+
+				"the group holds af infrastructure (%s)", g.describe(), reason)
 			continue
 		}
-		if procUID, ok := watchOrphanUID(pid); !ok || procUID != uid {
+		sort.Strings(g.taskIDs)
+		groups = append(groups, g)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].pgid < groups[j].pgid })
+	return groups
+}
+
+// collectMarkedOrphans is the environ channel: every process in snap whose
+// environ proves it a previous generation's watch command in this home is
+// added to byGroup under its process group.
+func (s *watcherSupervisor) collectMarkedOrphans(snap map[int]proctree.Process, scope watchOrphanScope, byGroup map[int]*watchOrphanGroup) {
+	for pid, p := range snap {
+		// Ancestors are deliberately NOT excluded (see the file comment).
+		if pid <= 1 || pid == scope.self || watchOrphanDescendsFrom(snap, pid, scope.self) {
+			continue
+		}
+		if procUID, ok := watchOrphanUID(pid); !ok || procUID != scope.uid {
 			continue
 		}
 		environ, err := watchOrphanEnviron(pid)
@@ -329,14 +378,14 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 			continue
 		}
 		canonicalProcHome, err := canonicalDir(procHome)
-		if err != nil || canonicalProcHome != home {
+		if err != nil || canonicalProcHome != scope.home {
 			continue
 		}
 		if same, err := watchOrphanSameIdentity(p); err != nil || !same {
 			continue
 		}
 		pgid, err := watchOrphanPGID(pid)
-		if err != nil || pgid <= 1 || pgid == ownPGID {
+		if err != nil || pgid <= 1 || pgid == scope.ownPGID {
 			continue
 		}
 		g := byGroup[pgid]
@@ -349,29 +398,40 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 			g.taskIDs = append(g.taskIDs, id)
 		}
 	}
+}
 
-	// Second channel: groups whose leader a previous generation recorded. Its
-	// candidates merge into the same map, so the infrastructure check and the
-	// TERM→KILL escalation below apply to both channels identically.
-	s.collectRecordedOrphans(snap, uid, ownPGID, byGroup)
-
-	if len(byGroup) == 0 {
-		return nil
+// rescanOrphanGroup re-proves g from a fresh snapshot once every member the
+// collection captured is gone but the group still holds processes. A SIGTERM
+// handler may fork a cleanup or replacement child that ignores SIGTERM and
+// then exit, leaving a member the first snapshot never saw; since the sweep
+// runs once, refusing SIGKILL there would leave that child beside its
+// replacement (#5329). The fresh members must clear the same environ proof as
+// the first pass, and the group must still hold no af infrastructure; anything
+// less keeps the fail-closed refusal. Records cannot help here: they prove only
+// the leader, which is already gone.
+func (s *watcherSupervisor) rescanOrphanGroup(scope watchOrphanScope, g *watchOrphanGroup) bool {
+	snap, err := watchOrphanSnapshot()
+	if err != nil {
+		return false
 	}
-	spared := watchOrphanInfraGroups(snap, byGroup)
-
-	groups := make([]*watchOrphanGroup, 0, len(byGroup))
-	for pgid, g := range byGroup {
-		if reason, ok := spared[pgid]; ok {
-			log.WarningLog.Printf("not reaping %s although a previous daemon generation marked it: "+
-				"the group holds af infrastructure (%s)", g.describe(), reason)
-			continue
+	fresh := make(map[int]*watchOrphanGroup)
+	s.collectMarkedOrphans(snap, scope, fresh)
+	found := fresh[g.pgid]
+	if found == nil {
+		return false
+	}
+	if reason, spared := watchOrphanInfraGroups(snap, map[int]*watchOrphanGroup{g.pgid: found})[g.pgid]; spared {
+		log.WarningLog.Printf("orphaned watch command %s: refusing SIGKILL, the group now holds af infrastructure (%s)",
+			g.describe(), reason)
+		return false
+	}
+	g.members = found.members
+	for _, id := range found.taskIDs {
+		if !slices.Contains(g.taskIDs, id) {
+			g.taskIDs = append(g.taskIDs, id)
 		}
-		sort.Strings(g.taskIDs)
-		groups = append(groups, g)
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].pgid < groups[j].pgid })
-	return groups
+	return true
 }
 
 // watchOrphanInfraGroups returns, for each candidate group that holds af
@@ -404,15 +464,18 @@ func watchOrphanInfraGroups(snap map[int]proctree.Process, candidates map[int]*w
 // sweep may signal.
 //
 // The comm checks are a refusal heuristic, not ownership matching: they can
-// only spare a group the markers already proved ours, never condemn one. A
-// tmux server's comm is "tmux" or "tmux: server". An af binary counts only as
+// only spare a group the markers already proved ours, never condemn one. Only a
+// tmux SERVER spares the group (proctree.IsTmuxServerEntry): a watch script
+// that happens to be running an ordinary tmux client at snapshot time is still
+// an orphan, and since the sweep runs once, sparing it on a client that exits a
+// moment later would leave it beside its replacement (#5329). An af binary counts only as
 // a SESSION LEADER: startDaemonChild Setsids the ad-hoc daemon, so it leads its
 // own session, while a transient `af` CLI call inside a watch script keeps the
 // script's session and must not shield an orphaned watch command forever.
 // A member whose environ cannot be read does not disqualify the group: the
 // marked-member gate already restricts signaling to verified groups.
 func watchOrphanInfraReason(p proctree.Process, afComm string) (string, bool) {
-	if strings.HasPrefix(p.Comm, "tmux") {
+	if proctree.IsTmuxServerEntry(p) {
 		return fmt.Sprintf("tmux server pid %d", p.PID), true
 	}
 	if afComm != "" && p.SID == p.PID && watchOrphanCommMatches(p.Comm, afComm) {
@@ -441,7 +504,7 @@ func watchOrphanCommMatches(comm, base string) bool {
 // stopOrphanedWatchGroups SIGTERMs every group in one batch, waits for all of
 // them against one shared deadline (s.stopGrace), and SIGKILLs the ones whose
 // marked members are still alive at that deadline.
-func (s *watcherSupervisor) stopOrphanedWatchGroups(groups []*watchOrphanGroup) {
+func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, groups []*watchOrphanGroup) {
 	var pending []*watchOrphanGroup
 	for _, g := range groups {
 		// Re-verify right before signaling: the snapshot is evidence about
@@ -471,10 +534,11 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(groups []*watchOrphanGroup) 
 	pending = s.pruneStoppedWatchGroups(pending)
 
 	for _, g := range pending {
-		if !g.anyMemberAlive() {
-			// The marked members are gone but something still holds the
-			// pgid — an unmarked escapee, or a pgid already reused. Neither is
-			// provably ours, so the group gets no SIGKILL (fail closed).
+		if !g.anyMemberAlive() && !s.rescanOrphanGroup(scope, g) {
+			// The marked members are gone and a fresh scan proves no new
+			// one: whatever still holds the pgid is an unmarked escapee or a
+			// pgid already reused. Neither is provably ours, so the group gets
+			// no SIGKILL (fail closed).
 			log.WarningLog.Printf("orphaned watch command %s: group outlived its marked members; "+
 				"refusing SIGKILL on an unverifiable group", g.describe())
 			continue

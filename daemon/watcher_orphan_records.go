@@ -35,7 +35,10 @@ import (
 //
 // Pid reuse cannot turn a stale record into a kill: StartID pins the process
 // instance, BootID and the PID namespace pin the kernel and container it ran
-// in, and the process's CURRENT pgid must still equal the recorded one. The
+// in, and the process's CURRENT pgid must still equal the recorded one. A
+// record also never overrules a live answer: it is consulted only when the
+// leader's environ is unreadable, and not at all when the boot identity is the
+// reboot-unstable PID-namespace fallback (proctree.BootIDIsFallback). The
 // record proves only the group LEADER; a group whose leader has exited while
 // children carry on is reachable through the environ channel alone.
 //
@@ -196,6 +199,15 @@ func (s *watcherSupervisor) collectRecordedOrphans(snap map[int]proctree.Process
 		log.WarningLog.Printf("watch orphan sweep: ignoring watch child records: kernel boot identity: %v", err)
 		return
 	}
+	if proctree.BootIDIsFallback(bootID) {
+		// A subset=pid procfs hides the boot UUID, and the PID-namespace
+		// fallback can repeat after a host reboot, so a stale record could line
+		// up with an unrelated process. proctree's contract requires live proof
+		// alongside it for destructive work; the record channel exists precisely
+		// for processes that offer none, so it stands down here (#5329).
+		log.InfoLog.Printf("watch orphan sweep: ignoring watch child records: boot identity %q is not reboot-stable", bootID)
+		return
+	}
 	pidNamespace, err := watchRecordPIDNamespace()
 	if err != nil {
 		log.WarningLog.Printf("watch orphan sweep: ignoring watch child records: PID namespace: %v", err)
@@ -214,6 +226,13 @@ func (s *watcherSupervisor) collectRecordedOrphans(snap map[int]proctree.Process
 			continue
 		}
 		if procUID, ok := watchOrphanUID(r.PID); !ok || procUID != uid {
+			continue
+		}
+		// The record speaks only for a leader whose environ the kernel
+		// withholds. A readable environ is the stronger, live answer, and the
+		// environ channel has already acted on it: marked means collected
+		// there, unmarked means not ours — and no record may overrule that.
+		if _, err := watchOrphanEnviron(r.PID); !errors.Is(err, proctree.ErrEnvUnreadable) {
 			continue
 		}
 		pgid, err := watchOrphanPGID(r.PID)

@@ -84,6 +84,16 @@ func IsTmuxServer(pid int) bool {
 	return tmuxServerIdentity(p)
 }
 
+// IsTmuxServerEntry is IsTmuxServer's decision over a process-table entry the
+// caller already holds, without the argv read. It is for callers that only
+// SPARE what it names, never signal it: the comm alone cannot prove the image
+// is tmux, but "tmux: server" or a `tmux`-named daemon(3) shape is enough to
+// refuse. A client — `tmux: client`, or an un-retitled `tmux` that still has a
+// live parent or no session of its own — reports false (#5329).
+func IsTmuxServerEntry(p Process) bool {
+	return tmuxServerIdentity(p)
+}
+
 // tmuxServerIdentity is IsTmuxServer's decision over a process-table entry whose
 // argv already names tmux. It is separate so that every shape can be pinned
 // without a live tmux.

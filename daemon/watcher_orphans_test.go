@@ -385,10 +385,18 @@ func TestSweepSparesGroupsHoldingAfInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "unmarked tmux member beside a marked watch command",
+			name: "unmarked tmux server beside a marked watch command",
 			members: []fakeOrphanProc{
 				{proc: proctree.Process{PID: 200, PPID: 1, SID: 200, Comm: "sh"}, pgid: 200, env: marked()},
-				{proc: proctree.Process{PID: 201, PPID: 200, SID: 200, Comm: "tmux"}, pgid: 200},
+				{proc: proctree.Process{PID: 201, PPID: 200, SID: 200, Comm: "tmux: server"}, pgid: 200},
+			},
+		},
+		{
+			// darwin cannot retitle: a server there is a `tmux` comm in the
+			// daemon(3) shape — its own session leader, reparented to init.
+			name: "un-retitled tmux server",
+			members: []fakeOrphanProc{
+				{proc: proctree.Process{PID: 500, PPID: 1, SID: 500, Comm: "tmux"}, pgid: 500, env: marked()},
 			},
 		},
 		{
