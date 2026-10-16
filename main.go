@@ -34,6 +34,12 @@ func main() {
 		return agentaccount.Selected(home, agent, name)
 	}
 	sessionenv.HandleInternalExec()
+	// Strip the watch-ownership markers before anything below can spawn a child
+	// (#5329). After HandleInternalExec on purpose: the pane shim must keep its
+	// inherited AF_HOME, and never returns. Everything downstream — the
+	// dedicated tmux server, upgrade recovery, an ad-hoc daemon launch — must
+	// not forward a watch command's markers to processes that are not one.
+	sessionenv.StripOwnershipMarkers()
 	sessiontmux.HandleDedicatedServerExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery
 	// job execs the preserved previous binary this way) before Cobra, exactly as

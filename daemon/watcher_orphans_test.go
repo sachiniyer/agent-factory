@@ -183,9 +183,11 @@ func TestSweepSkipsForeignUID(t *testing.T) {
 func stubWatchOrphanSeams() func() {
 	snapshot, environ, uid, pgid, kill, sleep :=
 		watchOrphanSnapshot, watchOrphanEnviron, watchOrphanUID, watchOrphanPGID, watchOrphanKillGroup, watchOrphanSleep
+	identity, executable := watchOrphanSameIdentity, watchOrphanExecutable
 	return func() {
 		watchOrphanSnapshot, watchOrphanEnviron, watchOrphanUID, watchOrphanPGID, watchOrphanKillGroup, watchOrphanSleep =
 			snapshot, environ, uid, pgid, kill, sleep
+		watchOrphanSameIdentity, watchOrphanExecutable = identity, executable
 	}
 }
 
@@ -281,5 +283,131 @@ func TestNewWatchGenerationIsUnique(t *testing.T) {
 	a, b := newWatchGeneration(), newWatchGeneration()
 	if a == "" || a == b {
 		t.Fatalf("generation tokens %q and %q must be non-empty and distinct", a, b)
+	}
+}
+
+// fakeOrphanProc is one row of a fabricated process table for the
+// infrastructure-sparing tests: its group, and the environment it reports.
+type fakeOrphanProc struct {
+	proc proctree.Process
+	pgid int
+	env  []string
+}
+
+// sweepFakeTable runs the sweep over a fabricated, same-uid process table and
+// returns the groups it SIGTERMed. Every process reports as alive until
+// signaled, and every signal-0 probe answers ESRCH so the wait ends at once.
+func sweepFakeTable(t *testing.T, home string, procs []fakeOrphanProc) []int {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	s, _ := newTestSupervisor(t, staticTasks())
+	self := os.Getpid()
+
+	restore := stubWatchOrphanSeams()
+	t.Cleanup(restore)
+	byPID := make(map[int]fakeOrphanProc)
+	watchOrphanSnapshot = func() (map[int]proctree.Process, error) {
+		snap := make(map[int]proctree.Process)
+		for _, p := range procs {
+			snap[p.proc.PID] = p.proc
+			byPID[p.proc.PID] = p
+		}
+		return snap, nil
+	}
+	watchOrphanUID = func(int) (int, bool) { return 1000, true }
+	watchOrphanPGID = func(pid int) (int, error) {
+		if pid == self {
+			return 42, nil
+		}
+		if p, ok := byPID[pid]; ok {
+			return p.pgid, nil
+		}
+		return 0, syscall.ESRCH
+	}
+	watchOrphanEnviron = func(pid int) ([]string, error) {
+		if p, ok := byPID[pid]; ok && p.env != nil {
+			return p.env, nil
+		}
+		return nil, proctree.ErrEnvUnreadable
+	}
+	watchOrphanSameIdentity = func(proctree.Process) (bool, error) { return true, nil }
+	watchOrphanExecutable = func() (string, error) { return "/usr/local/bin/af", nil }
+	watchOrphanSleep = func(time.Duration) {}
+	var termed []int
+	watchOrphanKillGroup = func(pgid int, sig syscall.Signal) error {
+		switch sig {
+		case syscall.SIGTERM:
+			termed = append(termed, pgid)
+			return nil
+		default:
+			return syscall.ESRCH
+		}
+	}
+
+	s.sweepOrphanedWatchCommands()
+	return termed
+}
+
+// TestSweepSparesGroupsHoldingAfInfrastructure is the #5329 review's hole: a
+// watch script that runs `af` while the daemon is down ad-hoc-spawns a daemon
+// whose own environ still carries the stale markers, and so does the tmux
+// server and every session it starts. Those groups are af infrastructure and
+// must never be signaled, while an ordinary marked group still is.
+func TestSweepSparesGroupsHoldingAfInfrastructure(t *testing.T) {
+	home := t.TempDir()
+	canonicalHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := func(extra ...string) []string {
+		return append([]string{"AF_HOME=" + canonicalHome, envWatchGeneration + "=previous-generation", "AF_TASK_ID=t1"}, extra...)
+	}
+	const control = 900
+	cases := []struct {
+		name    string
+		members []fakeOrphanProc
+	}{
+		{
+			name: "tmux server member",
+			members: []fakeOrphanProc{
+				{proc: proctree.Process{PID: 100, PPID: 1, SID: 100, Comm: "tmux: server"}, pgid: 100, env: marked()},
+			},
+		},
+		{
+			name: "unmarked tmux member beside a marked watch command",
+			members: []fakeOrphanProc{
+				{proc: proctree.Process{PID: 200, PPID: 1, SID: 200, Comm: "sh"}, pgid: 200, env: marked()},
+				{proc: proctree.Process{PID: 201, PPID: 200, SID: 200, Comm: "tmux"}, pgid: 200},
+			},
+		},
+		{
+			name: "af session-marked member",
+			members: []fakeOrphanProc{
+				{proc: proctree.Process{PID: 300, PPID: 1, SID: 300, Comm: "claude"}, pgid: 300, env: marked("AF_SESSION=af_pane")},
+			},
+		},
+		{
+			name: "af daemon leading its own session",
+			members: []fakeOrphanProc{
+				{proc: proctree.Process{PID: 400, PPID: 1, SID: 400, Comm: "af"}, pgid: 400, env: marked()},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			procs := append([]fakeOrphanProc{
+				// The control: an ordinary marked watch command, plus a
+				// transient af CLI call inside the same group. The CLI is not
+				// a session leader, so it must not shield the orphan.
+				{proc: proctree.Process{PID: control, PPID: 1, SID: control, Comm: "sh"}, pgid: control, env: marked()},
+				{proc: proctree.Process{PID: control + 1, PPID: control, SID: control, Comm: "af"}, pgid: control, env: marked()},
+			}, tc.members...)
+
+			termed := sweepFakeTable(t, home, procs)
+
+			if len(termed) != 1 || termed[0] != control {
+				t.Fatalf("SIGTERMed groups %v, want only the control group %d", termed, control)
+			}
+		})
 	}
 }

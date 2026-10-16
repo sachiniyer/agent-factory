@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -55,6 +56,16 @@ import (
 // Fail closed on every ownership doubt: an unreadable uid, environ, identity or
 // pgid means the process is skipped, never signaled.
 //
+// Markers are proof that a group is ours to reap, but an af-owned member means
+// the group is af infrastructure regardless of what the markers say. A watch
+// script that runs `af` while the daemon is down ad-hoc-spawns a daemon from its
+// own environment; main strips the markers before that daemon can forward them
+// (sessionenv.StripOwnershipMarkers), but its OWN environ is fixed at exec and
+// still carries them. So a group holding a tmux server, an af session-marked
+// process, or an af binary leading its own session is spared outright
+// (watchOrphanInfraReason) — a stale watch command is cheaper than a reaped
+// session fleet.
+//
 // The residual gap, stated so it is not rediscovered: a descendant that both
 // leaves the watch command's process group (setsid) AND scrubs its environment
 // carries no evidence we could act on. That is out of reach by design.
@@ -82,6 +93,12 @@ var (
 	watchOrphanPGID      = syscall.Getpgid
 	watchOrphanKillGroup = func(pgid int, sig syscall.Signal) error { return syscall.Kill(-pgid, sig) }
 	watchOrphanSleep     = time.Sleep
+	// watchOrphanSameIdentity re-verifies a snapshotted process instance; a
+	// seam so fake-table tests can reach the kill path.
+	watchOrphanSameIdentity = proctree.SameIdentity
+	// watchOrphanExecutable names the running af binary, whose basename is how
+	// an af daemon is recognized among a group's members.
+	watchOrphanExecutable = os.Executable
 )
 
 // newWatchGeneration mints the random token that distinguishes this daemon
@@ -205,7 +222,7 @@ func (g *watchOrphanGroup) describe() string {
 // member grants no such license.
 func (g *watchOrphanGroup) anyMemberAlive() bool {
 	for _, p := range g.members {
-		if same, err := proctree.SameIdentity(p); err == nil && same {
+		if same, err := watchOrphanSameIdentity(p); err == nil && same {
 			return true
 		}
 	}
@@ -291,7 +308,7 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 		if err != nil || canonicalProcHome != home {
 			continue
 		}
-		if same, err := proctree.SameIdentity(p); err != nil || !same {
+		if same, err := watchOrphanSameIdentity(p); err != nil || !same {
 			continue
 		}
 		pgid, err := watchOrphanPGID(pid)
@@ -309,13 +326,87 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 		}
 	}
 
+	if len(byGroup) == 0 {
+		return nil
+	}
+	spared := watchOrphanInfraGroups(snap, byGroup)
+
 	groups := make([]*watchOrphanGroup, 0, len(byGroup))
-	for _, g := range byGroup {
+	for pgid, g := range byGroup {
+		if reason, ok := spared[pgid]; ok {
+			log.WarningLog.Printf("not reaping %s although a previous daemon generation marked it: "+
+				"the group holds af infrastructure (%s)", g.describe(), reason)
+			continue
+		}
 		sort.Strings(g.taskIDs)
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].pgid < groups[j].pgid })
 	return groups
+}
+
+// watchOrphanInfraGroups returns, for each candidate group that holds af
+// infrastructure, why it must be spared (see the file comment). It enumerates
+// EVERY snapshot member of each candidate group, marked or not. Group
+// membership is closed — no process can join a group in another session — so a
+// check at collection time suffices: the kill window can only lose members.
+func watchOrphanInfraGroups(snap map[int]proctree.Process, candidates map[int]*watchOrphanGroup) map[int]string {
+	afComm := ""
+	if exe, err := watchOrphanExecutable(); err == nil {
+		afComm = filepath.Base(exe)
+	}
+	spared := make(map[int]string)
+	for pid, p := range snap {
+		pgid, err := watchOrphanPGID(pid)
+		if err != nil || candidates[pgid] == nil {
+			continue
+		}
+		if _, done := spared[pgid]; done {
+			continue
+		}
+		if reason, ok := watchOrphanInfraReason(p, afComm); ok {
+			spared[pgid] = reason
+		}
+	}
+	return spared
+}
+
+// watchOrphanInfraReason reports whether p is af infrastructure that no orphan
+// sweep may signal.
+//
+// The comm checks are a refusal heuristic, not ownership matching: they can
+// only spare a group the markers already proved ours, never condemn one. A
+// tmux server's comm is "tmux" or "tmux: server". An af binary counts only as
+// a SESSION LEADER: startDaemonChild Setsids the ad-hoc daemon, so it leads its
+// own session, while a transient `af` CLI call inside a watch script keeps the
+// script's session and must not shield an orphaned watch command forever.
+// A member whose environ cannot be read does not disqualify the group: the
+// marked-member gate already restricts signaling to verified groups.
+func watchOrphanInfraReason(p proctree.Process, afComm string) (string, bool) {
+	if strings.HasPrefix(p.Comm, "tmux") {
+		return fmt.Sprintf("tmux server pid %d", p.PID), true
+	}
+	if afComm != "" && p.SID == p.PID && watchOrphanCommMatches(p.Comm, afComm) {
+		return fmt.Sprintf("af process pid %d leading its own session", p.PID), true
+	}
+	if environ, err := watchOrphanEnviron(p.PID); err == nil {
+		if session, ok := firstEnv(environ, "AF_SESSION"); ok && session != "" {
+			return fmt.Sprintf("pid %d belongs to af session %s", p.PID, session), true
+		}
+	}
+	return "", false
+}
+
+// watchOrphanCommMatches compares a kernel comm against an executable
+// basename. The kernel truncates comm — to 15 bytes on Linux (TASK_COMM_LEN-1),
+// 16 on darwin (MAXCOMLEN) — so a longer basename matches on a truncated prefix
+// of at least 15 bytes.
+func watchOrphanCommMatches(comm, base string) bool {
+	const commMin = 15
+	if comm == base {
+		return true
+	}
+	return len(base) > commMin && len(comm) >= commMin && strings.HasPrefix(base, comm)
 }
 
 // stopOrphanedWatchGroups SIGTERMs every group in one batch, waits for all of
