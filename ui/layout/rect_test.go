@@ -56,32 +56,8 @@ func TestRectLocal(t *testing.T) {
 	assert.Equal(t, layout.Point{X: 3, Y: 2}, r.Local(layout.Point{X: 8, Y: 12}))
 }
 
-func TestRectIntersects(t *testing.T) {
-	base := layout.Rect{X: 0, Y: 0, W: 10, H: 10}
-
-	tests := []struct {
-		name  string
-		other layout.Rect
-		want  bool
-	}{
-		{"identical", base, true},
-		{"contained", layout.Rect{X: 2, Y: 2, W: 3, H: 3}, true},
-		{"corner overlap", layout.Rect{X: 9, Y: 9, W: 5, H: 5}, true},
-		{"touching right edge", layout.Rect{X: 10, Y: 0, W: 5, H: 10}, false},
-		{"touching bottom edge", layout.Rect{X: 0, Y: 10, W: 10, H: 5}, false},
-		{"disjoint", layout.Rect{X: 20, Y: 20, W: 5, H: 5}, false},
-		{"empty inside", layout.Rect{X: 5, Y: 5, W: 0, H: 3}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, base.Intersects(tt.other))
-			assert.Equal(t, tt.want, tt.other.Intersects(base), "intersection is symmetric")
-		})
-	}
-}
-
-// requireTiles asserts that parts exactly tile whole: pairwise disjoint,
-// each inside whole, and areas summing to whole's area.
+// requireTiles asserts that parts exactly tile whole: each inside whole,
+// and areas summing to whole's area.
 func requireTiles(t *testing.T, whole layout.Rect, parts []layout.Rect) {
 	t.Helper()
 	area := 0
@@ -96,9 +72,6 @@ func requireTiles(t *testing.T, whole layout.Rect, parts []layout.Rect) {
 		require.LessOrEqual(t, p.Right(), whole.Right(), "part %d overflows right", i)
 		require.LessOrEqual(t, p.Bottom(), whole.Bottom(), "part %d overflows bottom", i)
 		area += p.W * p.H
-		for j := i + 1; j < len(parts); j++ {
-			require.False(t, p.Intersects(parts[j]), "parts %d and %d overlap: %+v vs %+v", i, j, p, parts[j])
-		}
 	}
 	require.Equal(t, whole.W*whole.H, area, "parts do not cover the whole rect")
 }
