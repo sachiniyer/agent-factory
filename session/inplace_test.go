@@ -30,12 +30,15 @@ type inPlaceTmuxWorld struct {
 	// created holds sanitized session names spawned via new-session.
 	created map[string]bool
 	// startDirs records each spawn's -c dir, reported back on the
-	// pane_start_path query as a real tmux stores it (#5172).
+	// pane_start_path query as a real tmux stores it (#5172). gens does the
+	// same for the -e AF_SESSION_GEN marker the post-spawn ownership read
+	// asks after (#5174 review).
 	startDirs map[string]string
+	gens      map[string]string
 }
 
 func newInPlaceTmuxWorld(t *testing.T) *inPlaceTmuxWorld {
-	return &inPlaceTmuxWorld{t: t, created: make(map[string]bool), startDirs: make(map[string]string)}
+	return &inPlaceTmuxWorld{t: t, created: make(map[string]bool), startDirs: make(map[string]string), gens: make(map[string]string)}
 }
 
 // argAfter returns the argument following flag in args, or "".
@@ -56,6 +59,13 @@ func (w *inPlaceTmuxWorld) Start(c *exec.Cmd) (*os.File, error) {
 		w.mu.Lock()
 		w.created[name] = true
 		w.startDirs[name] = argAfter(c.Args, "-c")
+		for i, a := range c.Args {
+			if a == "-e" && i+1 < len(c.Args) {
+				if g, ok := strings.CutPrefix(c.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+					w.gens[name] = g
+				}
+			}
+		}
 		w.mu.Unlock()
 	}
 	path := filepath.Join(w.t.TempDir(), fmt.Sprintf("pty-%d", rand.Int31()))
@@ -84,6 +94,21 @@ func (w *inPlaceTmuxWorld) exec() cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "show-environment") {
+				name := argAfter(c.Args, "-t")
+				for _, a := range c.Args {
+					if strings.HasPrefix(a, "-t=") {
+						name = strings.TrimPrefix(a, "-t=")
+					}
+				}
+				name = strings.TrimSuffix(strings.TrimPrefix(name, "="), ":")
+				w.mu.Lock()
+				defer w.mu.Unlock()
+				if g, ok := w.gens[name]; ok {
+					return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+				}
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
 			if strings.Contains(c.String(), "pane_start_path") {
 				name := argAfter(c.Args, "-t")
 				for _, a := range c.Args {

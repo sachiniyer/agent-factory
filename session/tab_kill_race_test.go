@@ -47,7 +47,7 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 	// startDirs records each spawn's -c argument and reports it back on the
 	// pane_start_path query, as a real tmux does (#5172).
 	startDirs := map[string]string{}
-	exec := cmd_test.MockCmdExec{
+	exec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -86,7 +86,7 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	isAlive := func(name string) bool { return existing[name] }
 	return exec, isAlive
 }

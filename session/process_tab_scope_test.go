@@ -47,8 +47,13 @@ type tmuxModel struct {
 	// startDirs records each spawn's -c dir, reported on the pane_start_path
 	// query as a real tmux stores it (#5172).
 	startDirs map[string]string
-	started   []string
-	killed    []string
+	// gens records each spawn's -e AF_SESSION_GEN marker the way a real
+	// server stores session environment at creation, so the post-spawn
+	// ownership read answers with the generation that launch minted (#5174
+	// review).
+	gens    map[string]string
+	started []string
+	killed  []string
 	// unkillable names sessions whose kill-session refuses — the survivor an
 	// unconfirmed teardown leaves behind (#5174 review).
 	unkillable map[string]bool
@@ -69,7 +74,7 @@ func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
 	m := &tmuxModel{
 		t: t, alive: map[string]bool{}, finished: map[string]finishedPane{},
 		failOnStart: map[string]finishedPane{}, launching: map[string]*launchingPane{}, output: map[string]string{},
-		startDirs: map[string]string{}, unkillable: map[string]bool{},
+		startDirs: map[string]string{}, gens: map[string]string{}, unkillable: map[string]bool{},
 		vanishAfterExit: map[string]bool{}, exitObserved: map[string]bool{},
 		missing: missing,
 	}
@@ -148,6 +153,13 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		m.started = append(m.started, name)
 		m.alive[name] = true
 		m.startDirs[name] = argAfter(c.Args, "-c")
+		for i, a := range c.Args {
+			if a == "-e" && i+1 < len(c.Args) {
+				if g, ok := strings.CutPrefix(c.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+					m.gens[name] = g
+				}
+			}
+		}
 		if pane, ok := m.failOnStart[name]; ok && m.launching[name] == nil {
 			m.finished[name] = pane
 		}
@@ -190,7 +202,17 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		delete(m.alive, name)
 		delete(m.finished, name)
 		delete(m.startDirs, name)
+		delete(m.gens, name)
 		return nil, nil
+	}
+	if strings.Contains(joined, "show-environment") {
+		// The post-spawn ownership read: a live tmux reports back the
+		// generation its new-session stamped; a session without one (foreign,
+		// pre-marker) answers absent-marker.
+		if g, ok := m.gens[name]; ok {
+			return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+		}
+		return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
 	}
 	if strings.Contains(joined, "pane_start_path") {
 		if dir, ok := m.startDirs[name]; ok {

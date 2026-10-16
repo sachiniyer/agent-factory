@@ -171,7 +171,31 @@ var spawnedPaneDirUnusableLogged sync.Once
 // ErrSessionNotStarted joins a returned error only when teardown of the
 // misplaced pane is conclusive, the same contract the readiness-timeout
 // path keeps.
-func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) error {
+func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo, spawnGeneration string) error {
+	// The name that answered the existence poll must still belong to THIS
+	// launch before anything underneath it is inspected or torn down: a pane
+	// that exits before the poll frees the name for a foreign actor, whose
+	// session would then wear this spawn's placement verdicts — and its
+	// teardown — without af having created it (#5174 review). The generation
+	// stamped at new-session is the ownership proof; a mismatch, an absent
+	// marker, or an unreadable answer all make the occupant unverifiable.
+	// Unverifiable placement preserves the pane — it is never a teardown
+	// license, the same contract every other inconclusive arm here keeps.
+	// tmux < 3.2 cannot carry session env at creation, so those servers have
+	// nothing to compare and the check does not apply.
+	if SessionEnvSupported() {
+		gen, present, markerErr := SessionGenerationMarker(t.cmdExec, t.sanitizedName)
+		if markerErr != nil {
+			return fmt.Errorf(
+				"%w: could not confirm session %s belongs to this spawn: %v",
+				ErrSpawnDirUnknown, t.sanitizedName, markerErr)
+		}
+		if !present || gen != spawnGeneration {
+			return fmt.Errorf(
+				"%w: session %s answering the spawn poll does not carry this launch's generation",
+				ErrSpawnDirUnknown, t.sanitizedName)
+		}
+	}
 	// The sources speak first, always against `want` — the admitted inode —
 	// never the re-stat of the path. A rename or unlink of the admitted
 	// directory between checkSpawnDir and here leaves the PATHNAME dead but

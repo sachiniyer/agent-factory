@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -57,7 +58,7 @@ func tabNameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 		}
 		return ""
 	}
-	return cmd_test.MockCmdExec{
+	return tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -87,12 +88,83 @@ func tabNameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 }
 
 type tabNoSessionErr struct{}
 
 func (*tabNoSessionErr) Error() string { return "session does not exist" }
+
+// tabGenerationRecordingExec wraps a tab fixture exec so it stores each
+// new-session's `-e AF_SESSION_GEN=` marker — the way a real server keeps
+// session environment at creation — and answers the post-spawn ownership
+// read (`show-environment AF_SESSION_GEN`) with it, or with tmux's
+// absent-marker answer when the spawn carried none. Start re-reads that
+// marker to confirm the session answering its existence poll is the launch
+// it minted before inspecting or tearing down the pane (#5174 review), so
+// every fixture whose session survives the poll needs the channel modeled.
+func tabGenerationRecordingExec(ex cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	var mu sync.Mutex
+	gens := map[string]string{}
+	nameOf := func(cmd *exec.Cmd) string {
+		for i, a := range cmd.Args {
+			switch {
+			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimPrefix(a, "-t=")
+			case strings.HasPrefix(a, "-s="):
+				return strings.TrimPrefix(a, "-s=")
+			}
+		}
+		return ""
+	}
+	record := func(cmd *exec.Cmd) {
+		s := cmd.String()
+		n := nameOf(cmd)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(s, "new-session"):
+			for i, a := range cmd.Args {
+				if a == "-e" && i+1 < len(cmd.Args) {
+					if g, ok := strings.CutPrefix(cmd.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+						gens[n] = g
+					}
+				}
+			}
+		case strings.Contains(s, "kill-session"):
+			delete(gens, n)
+		}
+	}
+	run := ex.RunFunc
+	ex.RunFunc = func(cmd *exec.Cmd) error {
+		record(cmd)
+		if run == nil {
+			return nil
+		}
+		return run(cmd)
+	}
+	out := ex.OutputFunc
+	ex.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
+		record(cmd)
+		if strings.Contains(cmd.String(), "show-environment") &&
+			strings.Contains(cmd.String(), tmux.EnvMarkerGeneration) {
+			mu.Lock()
+			g, ok := gens[nameOf(cmd)]
+			mu.Unlock()
+			if !ok {
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
+			return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+		}
+		if out == nil {
+			return nil, nil
+		}
+		return out(cmd)
+	}
+	return ex
+}
 
 // remoteTypeBackend is a FakeBackend that reports a WorkspaceRemote capability
 // descriptor, letting CreateTab's remote-rejection branch (no TabManagement) be

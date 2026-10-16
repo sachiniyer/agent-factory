@@ -35,6 +35,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	t.setSpawnAttempted(false)
+	t.setSpawnGeneration("")
 	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
 	// same-object restart (agent swap) it describes the session af just closed,
 	// which is still what the status monitor would report gone if this Start
@@ -111,8 +112,13 @@ func (t *TmuxSession) Start(workDir string) error {
 	// verdict (exit code + scrollback marker) tied to THIS spawn — evidence
 	// a point-in-time re-check can never forge or lose (#5174 review).
 	wrappedProgram = sessionenv.SpawnDirPrefix(workDir, admittedSpawnDir) + wrappedProgram
+	// Minted once here and carried into the post-spawn ownership check: the
+	// generation is how verifySpawnedPaneDir confirms the session answering
+	// the existence poll is THIS launch's, not a foreign actor's that claimed
+	// the name after an instant-exiting pane freed it (#5174 review).
+	spawnGeneration := newSessionGeneration()
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, spawnGeneration)...)
 	for _, entry := range sessionEnv {
 		args = append(args, "-e", entry)
 	}
@@ -182,6 +188,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// failure from here can leave an af pane behind the name — the boundary a
 	// caller's cleanup retention keys on (#5174 review).
 	t.setSpawnAttempted(true)
+	t.setSpawnGeneration(spawnGeneration)
 	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
@@ -288,7 +295,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// Verify the pane actually started inside the admitted directory before
 	// configuring anything: a pane af cannot place there is torn down, never
 	// left running under a row that will report ready (#5172).
-	if verr := t.verifySpawnedPaneDir(workDir, admittedSpawnDir); verr != nil {
+	if verr := t.verifySpawnedPaneDir(workDir, admittedSpawnDir, spawnGeneration); verr != nil {
 		return verr
 	}
 

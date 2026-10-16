@@ -30,9 +30,10 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	baseOutput := cmdExec.OutputFunc
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
-		if strings.Contains(cmd.String(), "pane_start_path") {
-			// Defer to raceHookExec's recorded spawn dir, which is what a real
-			// tmux reports (#5172).
+		if strings.Contains(cmd.String(), "pane_start_path") ||
+			strings.Contains(cmd.String(), "show-environment") {
+			// Defer to raceHookExec's recorded spawn dir and generation marker,
+			// which are what a real tmux reports (#5172, #5174 review).
 			return baseOutput(cmd)
 		}
 		if strings.Contains(cmd.String(), "display-message") {

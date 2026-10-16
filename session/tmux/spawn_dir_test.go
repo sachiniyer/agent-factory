@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -18,6 +19,38 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// spawnTestGeneration is the generation the fixtures pin and answer the
+// post-spawn ownership read with.
+const spawnTestGeneration = "af-spawn-test-generation"
+
+// spawnGenExec pins the generation Start mints and wraps a fixture's
+// OutputFunc so the post-spawn ownership read — `show-environment
+// AF_SESSION_GEN` — answers the way a live tmux does for the session its
+// new-session stamped. Every fixture whose session survives the existence
+// poll reaches that read now: the poll alone only proves SOME session
+// answered, and a foreign actor re-using the name after an instant-exiting
+// pane freed it must never inherit this spawn's verdicts or teardown (#5174
+// review). A fixture that wants the mismatch shape answers its own
+// show-environment instead of wrapping.
+func spawnGenExec(t *testing.T, ex cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	t.Helper()
+	old := newSessionGeneration
+	newSessionGeneration = func() string { return spawnTestGeneration }
+	t.Cleanup(func() { newSessionGeneration = old })
+	inner := ex.OutputFunc
+	ex.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
+		s := cmd.String()
+		if strings.Contains(s, "show-environment") && strings.Contains(s, EnvMarkerGeneration) {
+			return []byte(EnvMarkerGeneration + "=" + spawnTestGeneration + "\n"), nil
+		}
+		if inner == nil {
+			return nil, nil
+		}
+		return inner(cmd)
+	}
+	return ex
+}
 
 // absentSessionExec answers every has-session with "not found": the session
 // never exists server-side, so a Start must reach new-session to create it.
@@ -56,7 +89,7 @@ func absentSessionExec(t *testing.T) cmd_test.MockCmdExec {
 func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]string, killed *bool) cmd_test.MockCmdExec {
 	t.Helper()
 	probed := false
-	return cmd_test.MockCmdExec{
+	return spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -113,7 +146,7 @@ func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]stri
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 }
 
 // TestStartRefusesMissingWorkDir is the #5172 refusal: a spawn whose start
@@ -405,7 +438,7 @@ func TestStartSucceedsOnWedgedDirQuery(t *testing.T) {
 	var killed bool
 	sessionName := toTmuxName("wedged-dir", "")
 	probed := false
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -433,7 +466,7 @@ func TestStartSucceedsOnWedgedDirQuery(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory, cmdExec)
 
@@ -530,7 +563,7 @@ func TestStartTearsDownWhenWorktreeInodeSwapped(t *testing.T) {
 	var killed, swapped bool
 	probed := 0
 	sessionName := toTmuxName("inode-swap-dir", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -570,7 +603,7 @@ func TestStartTearsDownWhenWorktreeInodeSwapped(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory, exec)
 
@@ -594,7 +627,7 @@ func TestStartTearDownWaitsForPaneExit(t *testing.T) {
 	var killed, paneRowQueried bool
 	probed := false
 	sessionName := toTmuxName("wait-exit-dir", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -635,7 +668,7 @@ func TestStartTearDownWaitsForPaneExit(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory, exec)
 
@@ -739,7 +772,7 @@ func TestStartStopsDirQueriesOnServerTimeout(t *testing.T) {
 	var dirQueries atomic.Int32
 	probed := false
 	sessionName := toTmuxName("wedged-sources", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -770,7 +803,7 @@ func TestStartStopsDirQueriesOnServerTimeout(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	require.NoError(t, session.Start(workDir),
@@ -802,7 +835,7 @@ func TestStartSkipsProcCwdForDeadPane(t *testing.T) {
 	var killed bool
 	probed := false
 	sessionName := toTmuxName("dead-pane-proc", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -841,7 +874,7 @@ func TestStartSkipsProcCwdForDeadPane(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	require.NoError(t, session.Start(workDir),
@@ -930,7 +963,7 @@ func TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn(t *testing.T) {
 		"pane_current_path": renamed,
 	}, &killed)
 	probed, renamedOnce := false, false
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			// The rename lands INSIDE the spawn seam: new-session travels the
 			// pty factory, so the first POST-spawn has-session — after
@@ -946,7 +979,7 @@ func TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn(t *testing.T) {
 			return inner.Run(cmd)
 		},
 		OutputFunc: inner.Output,
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	require.NoError(t, session.Start(workDir),
@@ -1069,4 +1102,197 @@ func TestStartRefusesUnenterableWorkDir(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist,
 		"the WORKTREE_MISSING classification the rebuild path keys on")
 	assert.Empty(t, ptyFactory.cmds, "new-session must never run for an unenterable start dir")
+}
+
+// TestStartRefusesASessionThatIsNotThisLaunch is the #5174-review ownership
+// check: the existence poll accepts ANY session carrying the name — including
+// a foreign actor's that claimed it after this launch's pane exited instantly
+// and freed it. The generation marker minted at new-session is the proof of
+// ownership; a session that cannot show it must never have this spawn's
+// placement verdicts read into its pane, and must NEVER be torn down — it is
+// not af's to kill. Unverifiable ownership is ErrSpawnDirUnknown: the row is
+// held for retry, not declared missing.
+func TestStartRefusesASessionThatIsNotThisLaunch(t *testing.T) {
+	forceNewSessionEnvMarkers(t, true)
+	workDir := t.TempDir()
+	sessionName := toTmuxName("foreign-occupant", "")
+
+	old := newSessionGeneration
+	newSessionGeneration = func() string { return spawnTestGeneration }
+	t.Cleanup(func() { newSessionGeneration = old })
+
+	cases := []struct {
+		name      string
+		markerOut []byte // the targeted show-environment answer
+		markerErr error  // ...or its failure
+	}{
+		// Another af launch's session: it carries a generation, just not this
+		// one's (a sibling Start re-spawning the same name after this pane
+		// exited is the realistic shape).
+		{"a different generation answers", []byte(EnvMarkerGeneration + "=foreign-launch\n"), nil},
+		// A non-af occupant, or a pre-marker pane: tmux answered authoritatively
+		// and the session simply has no AF_SESSION_GEN.
+		{"no generation marker at all", []byte("-" + EnvMarkerGeneration + "\n"), nil},
+		// The marker channel itself failed: ownership is undetermined, which is
+		// not a teardown license either.
+		{"unreadable generation marker", nil, errors.New("show-environment exploded")},
+	}
+	parentT := t
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var killed, probed bool
+			// MockPtyFactory names its temp file for the test — a SUBTEST's
+			// name carries the parent/child separator and breaks the path —
+			// so the factory is built on the parent t.
+			ptyFactory := NewMockPtyFactory(parentT)
+			// The fixture's pre-spawn probe answers absent; every later probe
+			// finds a session — the occupant, whatever it is. Its pane answers
+			// the placement fields with a FOREIGN cwd and a live pid so the
+			// pre-check code path would convict and tear it down — the exact
+			// harm the ownership read exists to prevent.
+			exec := cmd_test.MockCmdExec{
+				RunFunc: func(cmd *exec.Cmd) error {
+					s := cmd.String()
+					switch {
+					case strings.Contains(s, "has-session"):
+						if killed || !probed {
+							probed = true
+							return fmt.Errorf("can't find session")
+						}
+						return nil
+					case strings.Contains(s, "kill-session"):
+						killed = true
+						return nil
+					}
+					return nil
+				},
+				OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+					s := cmd.String()
+					switch {
+					case strings.Contains(s, "show-options"):
+						return nil, fmt.Errorf("no server running")
+					case strings.Contains(s, "show-environment"):
+						return tc.markerOut, tc.markerErr
+					case strings.Contains(s, "display-message"):
+						switch {
+						case strings.Contains(s, "pane_current_path"):
+							return []byte(t.TempDir() + "\n"), nil
+						case strings.Contains(s, "pane_pid"):
+							return []byte(strconv.Itoa(os.Getpid()) + "\n"), nil
+						case strings.Contains(s, "pane_dead"):
+							return []byte("0\n"), nil
+						}
+						return nil, nil
+					}
+					return []byte("output"), nil
+				},
+			}
+			session := newTmuxSession(sessionName, "claude", ptyFactory, exec)
+
+			err := session.Start(workDir)
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrSpawnDirUnknown,
+				"an occupant whose ownership cannot be proven is undetermined placement, not a verdict")
+			require.NotErrorIs(t, err, ErrSessionNotStarted,
+				"no teardown ran, so nothing entitles the not-started sentinel")
+			require.False(t, killed,
+				"a session that is not this launch's must never be torn down")
+		})
+	}
+}
+
+// TestCloseRefusesToKillANameClaimedByAnotherGeneration is the same ownership
+// rule at the kill seam: the verify-side check alone leaves the window where
+// this launch's pane exits after a successful Start and a foreign actor claims
+// the name before a later close — a cleanup retry, a process-tab failure
+// teardown, a recover rollback — which would then kill-session the occupant
+// af never created. Close must refuse while the answering session's marker is
+// absent or not this spawn's, and resume normal teardown only when it matches.
+func TestCloseRefusesToKillANameClaimedByAnotherGeneration(t *testing.T) {
+	forceNewSessionEnvMarkers(t, true)
+	workDir := t.TempDir()
+	sessionName := toTmuxName("close-foreign-occupant", "")
+
+	old := newSessionGeneration
+	newSessionGeneration = func() string { return spawnTestGeneration }
+	t.Cleanup(func() { newSessionGeneration = old })
+
+	// The pane pid's /proc/<pid>/cwd is the strongest placement source, so a
+	// passing Start needs it pointing inside the admitted worktree.
+	procRoot := t.TempDir()
+	panePID := "424242"
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, panePID), 0o755))
+	require.NoError(t, os.Symlink(workDir, filepath.Join(procRoot, panePID, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	var probed, killed, flipped bool
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed {
+					return fmt.Errorf("can't find session")
+				}
+				if !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-environment"):
+				if flipped {
+					return []byte(EnvMarkerGeneration + "=foreign-launch\n"), nil
+				}
+				return []byte(EnvMarkerGeneration + "=" + spawnTestGeneration + "\n"), nil
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "pane_current_path"):
+					return []byte(workDir + "\n"), nil
+				case strings.Contains(s, "pane_pid"):
+					return []byte(panePID + "\n"), nil
+				case strings.Contains(s, "pane_dead"):
+					return []byte("0\n"), nil
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return []byte(panePID + "\n"), nil
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	require.NoError(t, session.Start(workDir),
+		"the matching-marker launch verifies and starts")
+
+	// Our pane exits and a foreign actor claims the name before this close:
+	// the generation answering is no longer this spawn's.
+	flipped = true
+	state, err := session.Close()
+	require.ErrorIs(t, err, ErrSpawnDirUnknown,
+		"an occupant carrying another generation is unverifiable, not ours to kill")
+	require.Equal(t, PaneStateUnknown, state,
+		"we cannot claim our session dead — the alive name belongs to someone else")
+	require.False(t, killed,
+		"kill-session must never run against a session that is not this launch's")
+
+	// Control: while the answering session still carries THIS spawn's
+	// generation, the same close tears it down as before.
+	killed = false
+	flipped = false
+	state, err = session.Close()
+	require.NoError(t, err)
+	require.True(t, killed,
+		"the matching-marker session is still this launch's and closes normally")
 }

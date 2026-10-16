@@ -24,7 +24,7 @@ func TestHandoffAccountPartialStopRecordsLostRecovery(t *testing.T) {
 	const agentName = "af_partial_account"
 	inner := tabNameKeyedExec(map[string]bool{agentName: true})
 	sibling := ""
-	executor := cmd_test.MockCmdExec{
+	executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if sibling != "" && strings.Contains(cmd.String(), "kill-session") && strings.Contains(cmd.String(), sibling) {
 				return errors.New("sibling teardown refused")
@@ -32,7 +32,7 @@ func TestHandoffAccountPartialStopRecordsLostRecovery(t *testing.T) {
 			return inner.Run(cmd)
 		},
 		OutputFunc: inner.Output,
-	}
+	})
 	inst.SetBackend(&session.LocalBackend{})
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
 	_, err = inst.AddProcessTab("cat", "worker")
@@ -69,7 +69,7 @@ func TestHandoffAccountSiblingBlindStopRecordsStartupUnknown(t *testing.T) {
 	vanished := false
 	started := false
 	inner := tabNameKeyedExec(map[string]bool{agentName: true, siblingName: true})
-	executor := cmd_test.MockCmdExec{
+	executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if vanished && strings.Contains(cmd.String(), "has-session") && strings.Contains(cmd.String(), siblingName) {
 				return errors.New("session does not exist")
@@ -93,7 +93,7 @@ func TestHandoffAccountSiblingBlindStopRecordsStartupUnknown(t *testing.T) {
 			}
 			return inner.Output(cmd)
 		},
-	}
+	})
 	inst.SetBackend(&session.LocalBackend{})
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
 	_, err := inst.AddProcessTab("cat", siblingName)
@@ -119,7 +119,7 @@ func TestHandoffAccountSiblingUnknownStopRecordsStartupUnknown(t *testing.T) {
 	const agentName = "af_unknown_sibling_agent"
 	const siblingName = "af_unknown_sibling_tab"
 	inner := tabNameKeyedExec(map[string]bool{agentName: true, siblingName: true})
-	executor := cmd_test.MockCmdExec{
+	executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: inner.Run,
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
 			if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), siblingName) {
@@ -127,7 +127,7 @@ func TestHandoffAccountSiblingUnknownStopRecordsStartupUnknown(t *testing.T) {
 			}
 			return inner.Output(cmd)
 		},
-	}
+	})
 	inst.SetBackend(&session.LocalBackend{})
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
 	_, err := inst.AddProcessTab("cat", siblingName)

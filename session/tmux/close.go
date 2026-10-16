@@ -159,6 +159,47 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		return r.state(), errors.Join(errs...), closeProcessOutcome{}
 	}
 
+	// The name must still belong to THIS launch before kill-session runs: a
+	// pane that exits before af's post-spawn poll frees it for a foreign actor,
+	// whose session would otherwise eat a teardown af never owed it (#5174
+	// review). The generation stamped at new-session is the ownership proof;
+	// verifying it HERE — the one seam every af-initiated teardown passes
+	// through — covers the spawn-verify refusals and every post-failure close
+	// uniformly, not just the arm that happened to notice first. A mismatch or
+	// an absent marker means the occupant is provably not this launch's (af
+	// always stamps it on a server that can carry it); an unreadable answer
+	// while something still responds to the name is likewise not a teardown
+	// licence — inconclusive never kills. Objects that only attached or
+	// adopted record no generation and skip the check entirely.
+	if gen := t.currentSpawnGeneration(); gen != "" && SessionEnvSupported() {
+		marker, present, markerErr := SessionGenerationMarker(t.cmdExec, t.sanitizedName)
+		refuse := false
+		switch {
+		case markerErr == nil:
+			refuse = !present || marker != gen
+		default:
+			// The env read failed. If the name now answers to nothing the kill
+			// would be the idempotent no-op #967 already handles; if a session
+			// still answers it, that occupant is unverifiable, and if the probe
+			// cannot say either way the run is unknown — neither is a kill.
+			exists, ok := r.probe()
+			switch {
+			case !ok:
+				errs = append(errs, fmt.Errorf("%w: ownership probe after unreadable generation marker (%v)", ErrTmuxTimeout, markerErr))
+				return r.state(), errors.Join(errs...), closeProcessOutcome{}
+			case exists:
+				refuse = true
+			}
+		}
+		if refuse {
+			r.unknown = true
+			errs = append(errs, fmt.Errorf(
+				"%w: session %s does not carry this spawn's generation — not killing what may be a foreign session",
+				ErrSpawnDirUnknown, t.sanitizedName))
+			return r.state(), errors.Join(errs...), closeProcessOutcome{}
+		}
+	}
+
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).

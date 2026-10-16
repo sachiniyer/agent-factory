@@ -96,6 +96,9 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
 				return nil, fmt.Errorf("no server running")
 			}
+			if strings.Contains(cmd.String(), "show-environment") {
+				return []byte(EnvMarkerGeneration + "=generation-1\n"), nil
+			}
 			if strings.Contains(cmd.String(), "pane_start_path") {
 				return []byte(workdir + "\n"), nil
 			}

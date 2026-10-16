@@ -42,7 +42,7 @@ func unkillableTabExec(alive map[string]bool, unkillable map[string]bool) (cmd_t
 		}
 		return ""
 	}
-	mockExec := cmd_test.MockCmdExec{
+	mockExec := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := nameOf(cmd)
@@ -75,7 +75,7 @@ func unkillableTabExec(alive map[string]bool, unkillable map[string]bool) (cmd_t
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	return mockExec, func(name string) bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -327,7 +327,7 @@ func failingSpawnTabExec(alive map[string]bool, unkillable map[string]bool, outs
 		}
 		return ""
 	}
-	mockExec := cmd_test.MockCmdExec{
+	mockExec := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := nameOf(cmd)
@@ -368,7 +368,7 @@ func failingSpawnTabExec(alive map[string]bool, unkillable map[string]bool, outs
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	return mockExec, func(name string) bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -461,6 +461,69 @@ func TestCreateTab_FailedSpawnWithoutHandlePersistsNothing(t *testing.T) {
 	if len(data.PendingTabCleanup) != 0 {
 		t.Fatalf("persisted cleanup handles = %d, want 0: a spawn that never reached "+
 			"new-session leaves nothing to reap, and a live session's name is never staged",
+			len(data.PendingTabCleanup))
+	}
+}
+
+// TestCreateTab_FailedSpawnUnpersistedHandleReportsCommitted is the #5174
+// review follow-up to the retention fix: when the spawn error leaves a
+// possibly-live survivor and the staged handle's durable write itself fails,
+// the error CreateTab returns must not read as a clean, freely retryable
+// failure — a blind retry mints a fresh tmux name while the orphan's only
+// handle sits in memory. The reply must report the committed/uncertain
+// outcome AND carry both causes: the spawn error (sentinel chain intact) and
+// the persistence failure.
+func TestCreateTab_FailedSpawnUnpersistedHandleReportsCommitted(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	agentName := "af_" + title + "_agent"
+	siblingName := agentName + "__shell"
+	outside := t.TempDir()
+	mockExec, aliveFn := failingSpawnTabExec(
+		map[string]bool{agentName: true},
+		map[string]bool{siblingName: true},
+		outside)
+	startedLocalTabInstanceWithExec(t, manager, repo.ID, repoPath, title, agentName, mockExec)
+
+	// Fail only the durable write that carries the staged handle: the
+	// setup-path persist wrote no pendingTabCleanup, so keying on it keeps the
+	// seam scoped to the write under test.
+	diskFull := errors.New("no space left on device")
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if len(data.PendingTabCleanup) > 0 {
+			return diskFull
+		}
+		return nil
+	}
+
+	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	if err == nil {
+		t.Fatal("CreateTab must fail: the pane spawned outside its worktree and teardown was refused")
+	}
+	if !aliveFn(siblingName) {
+		t.Fatal("precondition: the refused kill leaves the survivor live under its spawned name")
+	}
+	if !isMutationCommitted(err) {
+		t.Fatalf("CreateTab error must report committed/uncertain outcome — the survivor is real "+
+			"and its cleanup handle is memory-only: %v", err)
+	}
+	if !errors.Is(err, diskFull) {
+		t.Fatalf("the durability failure must ride the returned error so the caller sees it: %v", err)
+	}
+	if data := persistedInstance(t, repo.ID); len(data.PendingTabCleanup) != 0 {
+		t.Fatalf("the failed write must not reach disk: persisted cleanup handles = %d, want 0",
 			len(data.PendingTabCleanup))
 	}
 }

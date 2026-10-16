@@ -246,7 +246,7 @@ func TestPreviewScrollModeViewportContentCleared(t *testing.T) {
 func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 	var sessionCreated, sessionGone atomic.Bool
 
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 			if strings.Contains(cmdStr, "has-session") {
@@ -274,7 +274,7 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()

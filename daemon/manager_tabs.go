@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -173,6 +174,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		if len(instance.PendingTabCleanup()) > 0 {
 			if perr := persistInstanceData(repoID, instance.ToInstanceData()); perr != nil {
 				m.warn().Printf("CreateTab %q: spawn failed and persisting the retained cleanup handle failed too: %v", title, perr)
+				// A plain spawn error invites a blind retry, which mints a fresh
+				// tmux name while the possibly-live survivor's only cleanup
+				// handle sits in memory — an unclean exit then strands the
+				// orphan entirely. Something irreversible landed, so this is the
+				// committed/uncertain outcome, not a clean failure; the join
+				// keeps both causes — and the spawn error's sentinel chain —
+				// visible to the caller (#5174 review).
+				return CreateTabResponse{}, &mutationCommittedError{err: errors.Join(
+					err,
+					fmt.Errorf("persisting the retained cleanup handle for the possibly-live pane: %w", perr))}
 			}
 		}
 		return CreateTabResponse{}, err

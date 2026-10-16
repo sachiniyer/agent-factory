@@ -147,7 +147,7 @@ func TestPreviewScrolling(t *testing.T) {
 	fullContent := strings.Join(lines, "\n")
 
 	// Mock command execution
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 			executedCommands = append(executedCommands, cmdStr)
@@ -220,7 +220,7 @@ func TestPreviewScrolling(t *testing.T) {
 
 			return []byte(""), nil
 		},
-	}
+	})
 
 	// Setup test environment
 	setup := setupTestEnvironment(t, cmdExec)
@@ -324,7 +324,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	sessionCreated := false
 
 	// Mock command execution
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 
@@ -356,7 +356,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 
 			return []byte(""), nil
 		},
-	}
+	})
 
 	// Setup test environment
 	setup := setupTestEnvironment(t, cmdExec)
@@ -748,7 +748,7 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 		return ""
 	}
 
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 			name := sessionFor(cmd)
@@ -777,7 +777,7 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 			}
 			return []byte(previewA), nil
 		},
-	}
+	})
 
 	mkInstance := func(suffix string) *session.Instance {
 		title := fmt.Sprintf("test-switch-%s-%d-%s", t.Name(), time.Now().UnixNano(), suffix)
@@ -814,7 +814,7 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 	var sessionCreated, sessionGone atomic.Bool
 
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 			if strings.Contains(cmdStr, "has-session") {
@@ -842,7 +842,7 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
@@ -888,7 +888,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	const expectedContent = "$ terminal output"
 
 	sessionCreated := false
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			cmdStr := cmd.String()
 			if strings.Contains(cmdStr, "has-session") {
@@ -910,7 +910,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()

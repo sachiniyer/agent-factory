@@ -47,7 +47,7 @@ func TestStartPreservesFinishedPaneAcrossPostExitPermissionChange(t *testing.T) 
 
 	var killed, probed bool
 	sessionName := toTmuxName("dead-pane-silent", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -88,7 +88,7 @@ func TestStartPreservesFinishedPaneAcrossPostExitPermissionChange(t *testing.T) 
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	require.NoError(t, session.Start(workDir),
@@ -139,7 +139,7 @@ func TestStartWithholdsNotStartedAfterBlindTeardown(t *testing.T) {
 
 	var killed, probed, gone bool
 	sessionName := toTmuxName("blind-teardown", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -182,7 +182,7 @@ func TestStartWithholdsNotStartedAfterBlindTeardown(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	err := session.Start(workDir)
@@ -318,7 +318,7 @@ func deadFlipExec(t *testing.T, sessionName string, deadAnswers []string, fields
 		}
 		return deadAnswers[min(idx, len(deadAnswers)-1)]
 	}
-	return cmd_test.MockCmdExec{
+	return spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -362,7 +362,7 @@ func deadFlipExec(t *testing.T, sessionName string, deadAnswers []string, fields
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 }
 
 // TestStartRevalidatesDeathBeforeEchoConfirms is the confirm-only half of the
@@ -566,7 +566,7 @@ func TestStartHoldsFinishedPaneWhenRefusalChannelUnread(t *testing.T) {
 
 	var killed, probed bool
 	sessionName := toTmuxName("dead-channel-unread", "")
-	exec := cmd_test.MockCmdExec{
+	exec := spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -607,7 +607,7 @@ func TestStartHoldsFinishedPaneWhenRefusalChannelUnread(t *testing.T) {
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
 	err := session.Start(workDir)
@@ -664,7 +664,7 @@ func TestStartPreservesFinishedPaneWhenPathStatUnverifiable(t *testing.T) {
 func wrappedScrollbackExec(t *testing.T, sessionName, joined, wrapped string, killed *bool) cmd_test.MockCmdExec {
 	t.Helper()
 	probed := false
-	return cmd_test.MockCmdExec{
+	return spawnGenExec(t, cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			switch {
@@ -711,7 +711,7 @@ func wrappedScrollbackExec(t *testing.T, sessionName, joined, wrapped string, ki
 			}
 			return []byte("output"), nil
 		},
-	}
+	})
 }
 
 // TestStartTearsDownOnWrappedShimRefusalMarker is the scrollback read's

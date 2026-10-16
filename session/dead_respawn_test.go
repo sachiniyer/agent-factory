@@ -52,7 +52,7 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 	// cannot satisfy it (#5174 review).
 	_, noServerErr := exec.Command("sh", "-c",
 		`echo 'no server running on /tmp/tmux-1000/default' >&2; exit 1`).Output()
-	return cmd_test.MockCmdExec{
+	return generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -101,7 +101,7 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 }
 
 // deadInstanceData builds a persisted record for a local instance with the given

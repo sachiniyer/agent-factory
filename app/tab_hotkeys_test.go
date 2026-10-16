@@ -62,6 +62,10 @@ func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 		}
 		return ""
 	}
+	// gens records each spawn's -e AF_SESSION_GEN marker the way a real
+	// server stores session environment at creation — Start's post-spawn
+	// ownership read asks after it (#5174 review).
+	gens := map[string]string{}
 	exec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
@@ -74,14 +78,28 @@ func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 				return fmt.Errorf("session does not exist")
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
+				for i, a := range cmd.Args {
+					if a == "-e" && i+1 < len(cmd.Args) {
+						if g, ok := strings.CutPrefix(cmd.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+							gens[n] = g
+						}
+					}
+				}
 				return nil
 			case strings.Contains(s, "kill-session"):
 				delete(existing, n)
+				delete(gens, n)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "show-environment") {
+				if g, ok := gens[nameOf(cmd)]; ok {
+					return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+				}
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
 			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so the
 			// generic stub is not neutral there: it reads as a pane whose pid is
 			// unreadable, i.e. a process set that could not be established, which

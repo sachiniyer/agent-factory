@@ -226,7 +226,7 @@ func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			switch {
@@ -250,7 +250,8 @@ func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 			}
 			return nil, nil
 		},
-	}
+	})
+	ptyFactory.cmdExec = cmdExec
 
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-descope", "handoff-descope-branch", "", false, false)
 	require.NoError(t, err)

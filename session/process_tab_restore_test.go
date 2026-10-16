@@ -25,7 +25,7 @@ func processTabRestoreInstance(t *testing.T, cmdExec cmd_test.MockCmdExec) (*Ins
 	repoRoot := initTempGitRepo(t)
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, t.TempDir(), "proc-restore", "proc-restore-branch", "", false, false)
 	require.NoError(t, err)
-	pty := &recordingPtyFactory{t: t}
+	pty := &recordingPtyFactory{t: t, cmdExec: cmdExec}
 	agentTmux := tmux.NewTmuxSessionWithDeps("proc-restore", tmux.ProgramClaude, pty, cmdExec)
 	procTmux := agentTmux.NewSiblingSession("proc-restore-proc", "echo hi")
 	procTab := &Tab{ID: "proc-tab", Name: "proc", Kind: TabKindProcess, Command: "echo hi", tmux: procTmux}

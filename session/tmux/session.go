@@ -250,6 +250,15 @@ type TmuxSession struct {
 	// spawn-dir refusal) never ran new-session, so the only session the name
 	// could possibly hold belongs to someone else.
 	spawnAttempted bool
+	// spawnGeneration records the AF_SESSION_GEN this TmuxSession stamped into
+	// new-session -e on its most recent spawn — the proof that a session
+	// answering under this name is THIS launch rather than a foreign actor that
+	// claimed the name after our pane exited before the existence poll ran
+	// (#5174 review). verifySpawnedPaneDir consults it before inspecting or
+	// tearing down; the kill path consults it before kill-session. Empty on
+	// objects that have only ever attached to or adopted a session, so those
+	// keep the pre-marker kill semantics. Guarded by provenMu.
+	spawnGeneration string
 	// closedConclusively records that closeAndWaitForPaneExit completed a
 	// conclusive non-blind close — the pane was observed to exit. It is scoped to
 	// the account-swap redundant-stop path: a redundant stopForAccountSwap can skip
@@ -607,6 +616,27 @@ func (t *TmuxSession) setSpawnAttempted(attempted bool) {
 	t.provenMu.Lock()
 	t.spawnAttempted = attempted
 	t.provenMu.Unlock()
+}
+
+// setSpawnGeneration records the generation this Start stamped into
+// new-session -e. It is set alongside spawnAttempted — both describe the same
+// boundary, the tracked launch having reached the server — and cleared at the
+// top of every Start so a failed attempt never carries a stale identity into
+// the next one.
+func (t *TmuxSession) setSpawnGeneration(generation string) {
+	t.provenMu.Lock()
+	t.spawnGeneration = generation
+	t.provenMu.Unlock()
+}
+
+// currentSpawnGeneration returns the generation this TmuxSession's most recent
+// spawn stamped, or "" when this object never reached a launch (attach-only,
+// adopted, or a Start that failed before new-session). Empty means the kill
+// path has no af-minted identity to compare and keeps pre-marker semantics.
+func (t *TmuxSession) currentSpawnGeneration() string {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.spawnGeneration
 }
 
 func (t *TmuxSession) setClosedConclusively(closed bool) {

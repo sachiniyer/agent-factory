@@ -39,7 +39,7 @@ func tabKillRefusedExec(alive map[string]bool) cmd_test.MockCmdExec {
 		}
 		return ""
 	}
-	return cmd_test.MockCmdExec{
+	return tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -65,7 +65,7 @@ func tabKillRefusedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 }
 
 // startedTabInstanceWithExec is startedLocalTabInstance with a caller-chosen

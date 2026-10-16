@@ -456,7 +456,7 @@ func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killSta
 		}
 		return ""
 	}
-	exec := cmd_test.MockCmdExec{
+	exec := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := nameOf(cmd)
@@ -499,7 +499,7 @@ func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killSta
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	return exec, func(name string) bool {
 		mu.Lock()
 		defer mu.Unlock()
