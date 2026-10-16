@@ -108,6 +108,8 @@ func TestFromInstanceData_LiveRowAbsentWorktreeLoadsLost(t *testing.T) {
 		"the absent-session + missing-worktree row must surface as Lost")
 	assert.True(t, restored.Started(),
 		"the row must stay started so the lost-restore loop admits it for rebuild+respawn")
+	require.NotNil(t, restored.tmuxLocked(),
+		"the agent's persisted tmux binding must survive — Recover respawns that exact name")
 	assert.Equal(t, 0, newSessions,
 		"no tmux spawn may be attempted for a worktree that is not there")
 }
