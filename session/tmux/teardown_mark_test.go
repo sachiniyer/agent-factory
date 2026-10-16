@@ -554,3 +554,49 @@ func TestWedgedCaptureDuringTeardownStaysError(t *testing.T) {
 		"a wedged server is a fault the teardown request cannot explain")
 	require.False(t, strings.Contains(infos.String(), "during af-initiated teardown"))
 }
+
+// TestProbeFailureDuringTeardownStaysError pins the demotion's other edge
+// (Codex on #5327): the INFO case exists for failures OF capture-pane inside
+// an af-requested teardown. An UNANSWERED identity probe ends the poll before
+// capture-pane ever runs — an exec-level fault like fork/exec exhaustion is
+// infrastructure af's teardown request cannot explain, so it must log at
+// ERROR under either attribution source, described as the probe failure it
+// is rather than as a capture failure.
+func TestProbeFailureDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mark   bool
+		expect func() bool
+	}{
+		{name: "this object's close() marked the generation", mark: true},
+		{name: "instance state records a teardown", expect: func() bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+			session, m := boundSession(t, gen)
+			if tc.mark {
+				// The name still resolves to the bound generation, so the
+				// mark's resolution lets close()'s mark land.
+				m.nameGen.Store("$5 111 222")
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+
+			// The identity probe fails at exec level — the poll ends on it
+			// and capture-pane is never attempted.
+			m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+			m.idErrOn.Store(true)
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Zero(t, m.captureCalls.Load(), "an unanswered probe ends the poll before capture-pane runs")
+			require.Contains(t, errs.String(), "identity probe failed in status monitor",
+				"a probe failure is not a capture failure and teardown attribution cannot quiet it")
+			require.NotContains(t, errs.String(), "capturing pane content")
+			require.NotContains(t, infos.String(), "during af-initiated teardown")
+			require.False(t, session.monitor.dead, "an unanswered probe proves nothing about the generation's fate")
+		})
+	}
+}

@@ -353,6 +353,16 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 
 	captureStartedAt := time.Now()
 	var err error
+	// probeUnanswered records WHERE the error came from: an identity probe
+	// that ended the poll without an answer, so capture-pane never ran. The
+	// mid-teardown demotion below exists only for failures OF the capture —
+	// a pane dead under a session tmux has not finished removing is the
+	// expected shape of af's own teardown — while an unanswered probe is an
+	// infrastructure fault (exec-level failure, wedge) that request cannot
+	// explain: it keeps ERROR under an active mark or predicate, and is
+	// logged as the probe failure it is, never as a capture failure (Codex
+	// on #5327).
+	probeUnanswered := false
 	// An id-bound monitor owes its liveness question to the GENERATION, not
 	// to whatever session currently answers at the id: tmux ids are
 	// per-server counters, so a replacement server can reissue the same $N
@@ -386,6 +396,7 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 			// generationMatches never reports it as ErrSessionGone, so the
 			// monitor stays retryable and the dead latch stays unset.
 			err = probeErr
+			probeUnanswered = true
 		}
 	}
 	if err == nil {
@@ -423,6 +434,8 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 			log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 		case gone:
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+		case probeUnanswered:
+			log.ErrorLog.Printf("tmux session %s: identity probe failed in status monitor: %v", t.sanitizedName, err)
 		case initiated && !errors.Is(err, ErrTmuxTimeout):
 			// The same attribution covers the failure a step earlier in
 			// the teardown: a pane can die under a session object tmux
