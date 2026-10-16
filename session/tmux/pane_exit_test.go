@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,32 @@ func TestProbePaneExitBoundsAStalledRereadByTheWait(t *testing.T) {
 	case <-time.After(tmuxCommandTimeout):
 		t.Fatalf("a stalled re-read held the probe for a whole %s command timeout", tmuxCommandTimeout)
 	}
+}
+
+// #5335: a stamped dead pane whose deaths counter still reads 0 is pending,
+// not uncollectible — the queued pane-died hook has not run yet. While it is
+// pending the pid checks that prove the root is gone cannot run, so the probe
+// must not answer a conclusive dead: when the hook lands the stamp validates
+// and the probe completes; when it never lands the answer stays unknown and no
+// durable TabExit is stamped for a root that may still be running.
+func TestProbePaneExitWaitsOutAPendingStamp(t *testing.T) {
+	gone := exitedProcess(t).PID
+	fresh := paneState{deaths: "1", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/0"
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-stamp", "true", nil,
+		laggingDeathsExec(t, "", stamp, fresh, "", "", "", nil))
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+}
+
+func TestProbePaneExitPendingStampStaysUnknown(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	pending := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-forever", "true", nil,
+		deadPaneExec(t, "", "456:0:/dev/pts/0", pending, "", "", "", nil))
+	_, _, _, _, known := ts.ProbePaneExit()
+	require.False(t, known, "a stamp that never becomes provable must not stamp a durable exit")
 }
 
 // shrinkPaneStatusWait bounds ProbePaneExit's wait for an uncollected root, so a

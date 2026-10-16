@@ -550,6 +550,8 @@ func TestCloseAndWaitForPaneExit_PendingStampRefusesWhenTheHookNeverLands(t *tes
 	require.Error(t, err)
 	require.Equal(t, PaneStateUnknown, state)
 	require.True(t, killed, "kill-session still runs — refusal is about the process tree, not the session")
+	require.ErrorIs(t, err, errPaneStampPending,
+		"the wait expiring must keep the pending verdict, not degrade it into a tmux timeout")
 	require.Contains(t, err.Error(), "pane-died",
 		"the refusal must name the counter that never counted the death")
 }
@@ -651,6 +653,11 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 	startHeldPane(t, name, "sh -c 'exit 7'")
 
 	var fields []string
+	verdict := stampUnusable
+	// pane_dead itself lands quickly; the hook is a queued tmux command and a
+	// loaded box can hold it for seconds, so this wait is deliberately longer
+	// than the production paneDeathsWait: the test is measuring that the hook
+	// lands at all, not how fast a teardown should give up waiting for it.
 	require.Eventually(t, func() bool {
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), paneRowFormat).Output()
 		if err != nil {
@@ -660,9 +667,10 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 		if len(fields) != 7 {
 			return false
 		}
-		_, verdict := paneStampPID(fields[3], fields[4], fields[5], fields[6])
+		_, verdict = paneStampPID(fields[3], fields[4], fields[5], fields[6])
 		return verdict == stampFresh
-	}, 5*time.Second, 20*time.Millisecond, "the pane-died hook never counted this death")
+	}, 30*time.Second, 25*time.Millisecond,
+		"the pane-died hook never counted this death (last row %q, verdict %d)", fields, verdict)
 	require.Equal(t, "1", fields[1])
 	stampParts := strings.SplitN(fields[3], ":", 3)
 	require.Len(t, stampParts, 3, "the record must carry pid:deaths:tty, got %q", fields[3])

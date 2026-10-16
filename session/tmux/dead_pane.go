@@ -326,7 +326,13 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 		}
 		time.Sleep(min(pause, budget))
 		pause = min(2*pause, 50*time.Millisecond)
-		row, err = t.readPaneRow(time.Until(deadline))
+		if budget = time.Until(deadline); budget <= 0 {
+			// The sleep consumed what was left of the wait: keep the
+			// pending verdict — an expired read would swap it for
+			// ErrTmuxTimeout and misreport a healthy server as wedged.
+			break
+		}
+		row, err = t.readPaneRow(budget)
 	}
 	return row, err
 }
@@ -596,9 +602,16 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 			case stampPending:
 				// pane_dead is visible before the queued pane-died hook
 				// increments the counter (#5335): the stamp cannot name the
-				// root yet, but a re-read shortly can — keep probing inside
-				// the same uncollected wait the root's own reap races.
-				return exit, true
+				// root yet, so keep probing inside the same uncollected wait
+				// the root's own reap races — dead:true is what keeps the
+				// wait alive. But pane_dead only says tmux MARKED the pane
+				// dead; the pid checks below are what prove the root is gone
+				// ("closed its terminal but still running" reads dead only
+				// when pidGone/exitedUncollected agree). Leaving known unset
+				// makes a hook that never lands answer unknown rather than a
+				// conclusively dead root — the difference between not stamping
+				// a TabExit and recording one a live root never earned.
+				return paneExit{dead: true, version: exit.version}, true
 			}
 		}
 		if perr != nil || pid <= 0 {
