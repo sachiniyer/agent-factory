@@ -124,27 +124,35 @@ func parsePaneRow(field string) (paneRow, error) {
 }
 
 // paneStampPID extracts the pane-root pid a @af_pane_pid stamp recorded —
-// "<pid>:<deaths>:<pane_tty>" — and reports whether it still names the pane's
-// current incarnation. The pane option outlives the run that wrote it
+// "<pid>:<deaths>:<pane_tty>" — and reports whether it still names the
+// pane's current incarnation. The pane option outlives the run that wrote it
 // (respawn-pane keeps the pane struct and its options), so three proofs must
 // all hold before the pid is trusted:
 //
 //   - deathsNow == stamped deaths + 1: the pane-died hook bumps the counter
 //     on every natural root exit, so a stamp from an earlier run shows a
-//     wider gap. This is what catches a commandless respawn whose restamp
-//     silently failed.
-//   - stamp tty == the pane's live tty: every respawn allocates a fresh pty,
-//     so a respawn whose kill produced no pane-died (measured on tmux 3.8 —
-//     pane-died/pane-exited/after-kill-pane are all silent through
-//     `respawn-pane -k`) still leaves the stamped pty name behind.
+//     wider gap.
+//   - stamp tty == the pane's reported tty: every respawn allocates a fresh
+//     pty. The name is only corroborating evidence — `respawn-pane -k` frees
+//     the devpts index before allocating the replacement and Linux can
+//     reissue the same pathname to the new allocation (#5328 review), so a
+//     matching name alone proves nothing. What makes the stale record
+//     unreachable for a re-run is the shim's restamp-or-die
+//     (sessionenv.stampPaneRootPid): a respawn re-executes the shim, which
+//     either lands a fresh bundle or, unable to prove the pane is fresh —
+//     an unwritable or unreadable stamp — exits without running the
+//     command, so a live pane can never hide a replacement root behind the
+//     previous incarnation's record. The trusted stamp can therefore name
+//     only this session's own earlier dead run.
 //   - cmdMatch == "1": the pane's recorded start command still byte-equals
 //     the command the stamp pinned, so a replacement respawn — even one
 //     whose argv happens to contain a launch marker — fails it, while an
 //     identical commandless re-run re-executed the shim and restamped.
 //
-// A stamp written before the incarnation proof existed (a bare pid) has no
-// second colon and fails closed like an unstamped pane. A deaths field left
-// empty at stamp time is the counter's unset state, i.e. zero.
+// A stamp written before the incarnation proof existed (a bare pid, or a
+// malformed bundle) has no second colon and fails closed like an unstamped
+// pane. A deaths field left empty at stamp time is the counter's unset
+// state, i.e. zero.
 func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, bool) {
 	pidRaw, rest, hasRest := strings.Cut(stamp, ":")
 	pid, err := strconv.Atoi(pidRaw)

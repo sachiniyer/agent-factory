@@ -50,8 +50,10 @@ const (
 // stamps the bundle itself (sessionenv stamps — the shim IS the pane root),
 // which keeps the record current even across a user's commandless
 // respawn-pane, and ApplyRemainOnExit stamps still-alive pre-stamp panes as a
-// heal. The deaths and tty fields plus the @af_pane_cmd pin are what let the
-// reader distrust a stamp a respawn carried into a new incarnation.
+// heal. The deaths, tty-name and @af_pane_cmd proofs are what let the reader
+// distrust a stamp a respawn carried into a new incarnation; what keeps a
+// respawn from running under the stale record at all is the shim's own
+// restamp-or-die (sessionenv).
 // Measured on tmux 3.8: a stamped pane answers `#{@af_pane_pid}` after
 // death while `#{pane_pid}` comes back empty. On tmux older than 3.8
 // pane_pid itself survives death, so a missing stamp loses nothing.
@@ -72,8 +74,9 @@ const (
 // clobber its own good record), and `-F` expands the live pane_pid for a
 // still-running, pre-stamp pane. The pane-died hook is installed too — a
 // healed pane otherwise has no deaths counter, and its eventual death would
-// leave the stamp's freshness unprovable. Re-installing is idempotent:
-// set-hook without -a replaces the same-name entry rather than appending.
+// leave the stamp's freshness unprovable. The hook installs under a
+// dedicated array key (sessionenv.PaneDeathsHookName) so it neither clobbers
+// nor is clobbered by an operator's own pane-died hook.
 //
 // paneTarget is any pane target: `=name:` resolves to the session's active
 // pane, and a `%N` id targets a specific pane exactly.
@@ -81,7 +84,7 @@ func panePidStampArgs(paneTarget string) []string {
 	return []string{
 		"set-option", "-o", "-F", "-p", "-t", paneTarget, PanePidMarker, sessionenv.PanePidStampFormat, ";",
 		"set-option", "-o", "-F", "-p", "-t", paneTarget, paneCommandMarker, "#{pane_start_command}", ";",
-		"set-hook", "-p", "-t", paneTarget, "pane-died", sessionenv.PaneDeathsHookCommand,
+		"set-hook", "-p", "-t", paneTarget, sessionenv.PaneDeathsHookName, sessionenv.PaneDeathsHookCommand,
 	}
 }
 

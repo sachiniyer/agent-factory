@@ -50,7 +50,7 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := NewTmuxSessionWithDeps("pane-exit", "true", nil,
-				heldPaneExec(tc.pid, tc.status, tc.signal, tc.deadTime, nil))
+				heldPaneExec(t, tc.pid, tc.status, tc.signal, tc.deadTime, nil))
 			dead, status, statusKnown, at, known := ts.ProbePaneExit()
 			assert.True(t, known)
 			assert.Equal(t, tc.wantDead, dead)
@@ -68,8 +68,8 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
-	after := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
+	after := heldPaneExec(t, uncollected, "7", "", "1726000000", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-pending", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -96,8 +96,8 @@ func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 func TestProbePaneExitNudgesTheServerToCollectAStrandedRoot(t *testing.T) {
 	uncollected := uncollectedProcess(t)
 	nudges := 0
-	stranded := heldPaneExec(uncollected, "", "", "", nil)
-	collected := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	stranded := heldPaneExec(t, uncollected, "", "", "", nil)
+	collected := heldPaneExec(t, uncollected, "7", "", "1726000000", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-stranded", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(c.String(), "run-shell") {
@@ -126,7 +126,7 @@ func TestProbePaneExitCapsItsNudges(t *testing.T) {
 	shrinkPaneStatusWait(t)
 	uncollected := uncollectedProcess(t)
 	nudges := 0
-	stranded := heldPaneExec(uncollected, "", "", "", nil)
+	stranded := heldPaneExec(t, uncollected, "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-never-collected", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(c.String(), "run-shell") {
@@ -160,7 +160,7 @@ func TestProbePaneExitLogsTheServersVersionWithoutRunningTheClient(t *testing.T)
 	aflog.InfoLog.SetOutput(&info)
 	t.Cleanup(func() { aflog.InfoLog.SetOutput(previous) })
 
-	stranded := heldPaneExec(uncollectedProcess(t), "", "", "", nil)
+	stranded := heldPaneExec(t, uncollectedProcess(t), "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-version", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: stranded.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -183,7 +183,7 @@ func TestProbePaneExitLogsTheServersVersionWithoutRunningTheClient(t *testing.T)
 func TestProbePaneExitKeepsTheExitWhenARereadFails(t *testing.T) {
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-reread-fails", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -211,7 +211,7 @@ func TestProbePaneExitBoundsAStalledRereadByTheWait(t *testing.T) {
 	require.NoError(t, err)
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-reread-stalls", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {

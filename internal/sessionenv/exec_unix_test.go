@@ -3,9 +3,11 @@
 package sessionenv
 
 import (
+	"context"
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -267,5 +269,96 @@ func TestAgentServerExecInvocationDoesNotCompareSymlinkSpelling(t *testing.T) {
 	}
 	if !slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
 		t.Fatal("the generated symlink-path handoff lost the selected agent credential")
+	}
+}
+
+// #5328 review: pane options outlive the incarnation that wrote them, so a
+// respawned pane can carry the PREVIOUS run's @af_pane_pid stamp. The only
+// state teardown cannot survive is a LIVE pane hiding a replacement root
+// behind that stale record — tmux fires no respawn hook, and every field the
+// row exposes (deaths gap, recorded command, even the /dev/pts/N name, which
+// respawns recycle) can line up behind the old stamp. The stamp's restamp is
+// therefore not best-effort on a respawn: a shim that cannot write its
+// bookkeeping over an existing stamp must refuse to exec the command, so the
+// pane dies carrying a record that can only ever name af's own earlier run.
+func TestStampPaneRootPidRefusesARespawnItCannotRestamp(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%7")
+	writeErr := errors.New("tmux write failed")
+	for _, tc := range []struct {
+		name      string
+		writeErr  error
+		prior     string
+		readErr   error
+		wantError bool
+		wantRead  bool
+	}{
+		{"write lands: fresh stamp, no readback needed", nil, "99999:0:/dev/pts/0", nil, false, false},
+		{"channel fully blind: the pane cannot be proven fresh, so it must not launch", writeErr, "", errors.New("read failed"), true, true},
+		{"first launch, read proves the pane is new", writeErr, "", nil, false, true},
+		{"first launch, stamp is whitespace", writeErr, "  \n", nil, false, true},
+		{"write landed but the client reported an error: stamp names this pid", writeErr,
+			strconv.Itoa(os.Getpid()) + ":0:/dev/pts/0", nil, false, true},
+		{"respawn, restamp failed: the stale stamp names an earlier run", writeErr,
+			"99999:0:/dev/pts/0", nil, true, true},
+		{"respawn, restamp failed: a torn stamp still names an earlier run", writeErr,
+			"99999", nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := false
+			prevWrite, prevRead := paneBookkeepingWrite, paneStampRead
+			paneBookkeepingWrite = func(context.Context, string) error { return tc.writeErr }
+			paneStampRead = func(context.Context, string) (string, error) {
+				read = true
+				return tc.prior, tc.readErr
+			}
+			t.Cleanup(func() { paneBookkeepingWrite, paneStampRead = prevWrite, prevRead })
+
+			err := stampPaneRootPid()
+			if tc.wantError && err == nil {
+				t.Fatal("a respawn the shim cannot restamp must not launch under the stale record")
+			}
+			if !tc.wantError && err != nil {
+				t.Fatalf("stampPaneRootPid() = %v, want nil", err)
+			}
+			if read != tc.wantRead {
+				t.Fatalf("read-back ran %v, want %v", read, tc.wantRead)
+			}
+		})
+	}
+}
+
+// The same refusal reaches the exec paths: a respawn that cannot restamp must
+// return before processExec replaces the shim with the pane's command.
+func TestExecInvocationRefusesToLaunchUnderAStaleStamp(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%7")
+	prevWrite, prevRead, prevExec := paneBookkeepingWrite, paneStampRead, processExec
+	paneBookkeepingWrite = func(context.Context, string) error { return errors.New("write failed") }
+	paneStampRead = func(context.Context, string) (string, error) { return "99999:0:/dev/pts/0", nil }
+	processExec = func(string, []string, []string) error {
+		return errors.New("processExec ran under a stale stamp")
+	}
+	t.Cleanup(func() { paneBookkeepingWrite, paneStampRead, processExec = prevWrite, prevRead, prevExec })
+
+	if err := execInvocation([]string{"codex", "0", "command --flag"}, false); err == nil ||
+		!strings.Contains(err.Error(), "stale identity stamp") {
+		t.Fatalf("execInvocation() error = %v, want the stale-stamp refusal", err)
+	}
+}
+
+// The stamp format the shim expands is the server-side bundle — pid, deaths
+// counter, and pty name in one -F expansion — and the deaths hook installs
+// under a dedicated array index so it neither clobbers nor is clobbered by an
+// operator's own pane-died hook (#5328 review).
+func TestPaneBookkeepingRecordCarriesTheIncarnationFields(t *testing.T) {
+	for _, field := range []string{"#{pane_pid}", "#{@af_pane_deaths}", "#{pane_tty}"} {
+		if !strings.Contains(PanePidStampFormat, field) {
+			t.Fatalf("stamp format %q lost %s", PanePidStampFormat, field)
+		}
+	}
+	if !strings.HasPrefix(PaneDeathsHookName, "pane-died[") || !strings.HasSuffix(PaneDeathsHookName, "]") {
+		t.Fatalf("the deaths hook must install under a dedicated array index, got %q", PaneDeathsHookName)
+	}
+	if !strings.Contains(PaneDeathsHookCommand, "#{e|+:#{@af_pane_deaths},1}") {
+		t.Fatalf("the deaths hook must increment the counter server-side, got %q", PaneDeathsHookCommand)
 	}
 }

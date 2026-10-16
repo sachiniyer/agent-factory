@@ -26,9 +26,14 @@ const ExecMarker = "__af-session-env-exec"
 // offers no respawn hook and empties pane_pid before pane-died formats run
 // (measured on 3.8: after-respawn-pane does not exist, and
 // pane-died/pane-exited/after-kill-pane are all silent through
-// `respawn-pane -k`), so freshness is proven from what does change: the
-// deaths counter the pane-died hook bumps on every natural exit, the pty a
-// respawn reallocates, and the recorded start command the stamp pins below.
+// `respawn-pane -k`), and the only per-allocation value tmux reports —
+// pane_tty — survives death as a NAME, whose devpts index respawns recycle.
+// So freshness is proven two ways at once: the deaths counter the pane-died
+// hook bumps on every natural exit, the recorded start command the stamp
+// pins, and the tty name as corroborating evidence at the row; and at the
+// shim a respawn must restamp before its command runs or not run at all —
+// the dangerous state is a LIVE pane running under the previous run's stamp,
+// and the shim refuses to create it (see stampPaneRootPid).
 const PanePidUserOption = "@af_pane_pid"
 
 // PaneDeathsUserOption counts the pane's natural root exits: the pane-died
@@ -36,7 +41,9 @@ const PanePidUserOption = "@af_pane_pid"
 // dies. A stamp records the count at stamp time; at teardown the counter has
 // moved exactly once, so a stamp carried into a later incarnation shows a gap
 // the reader refuses. The counter cannot see a `respawn-pane -k` kill — tmux
-// fires no hook for it — which is why the stamp also pins the pane's pty.
+// fires no hook for it — which is why the stamp also pins the pane's pty
+// name and recorded command, and why the shim refuses to launch a respawn it
+// cannot restamp (see stampPaneRootPid).
 const PaneDeathsUserOption = "@af_pane_deaths"
 
 // PaneCommandUserOption pins the pane's recorded start command at stamp time.
@@ -46,6 +53,15 @@ const PaneDeathsUserOption = "@af_pane_deaths"
 // and was freshly restamped anyway.
 const PaneCommandUserOption = "@af_pane_cmd"
 
+// PaneDeathsHookName installs the counter under a dedicated pane-died array
+// key. tmux hooks are arrays: an unindexed `set-hook pane-died` clears the
+// array and writes member 0, so a user hook installed before a commandless
+// respawn would silently stop running when the shim sets the counter again
+// (#5328 review). Key 99 is far enough out not to collide with an
+// operator's own members, and re-setting the same key is an idempotent
+// replace rather than an append — verified on tmux 3.2a and 3.8.
+const PaneDeathsHookName = "pane-died[99]"
+
 // PaneDeathsHookCommand is the pane-died hook body: increment
 // PaneDeathsUserOption. It runs in the dying pane's own context, so it needs
 // no target; the -F expansion keeps the arithmetic server-side.
@@ -54,8 +70,8 @@ const PaneDeathsHookCommand = `set-option -F -p ` + PaneDeathsUserOption +
 
 // PanePidStampFormat is the single -F expansion recorded into
 // PanePidUserOption: the pane's live root pid, the deaths counter as it
-// stands at stamp time, and the pane's pty — all resolved against the pane
-// the option is set on, so the three stay consistent within one write.
+// stands at stamp time, and the pane's pty name — all resolved against the
+// pane the option is set on, so the three stay consistent within one write.
 const PanePidStampFormat = "#{pane_pid}:#{" + PaneDeathsUserOption + "}:#{pane_tty}"
 
 // AgentServerExecMarker is the effect-bound variant used by af's Docker and SSH

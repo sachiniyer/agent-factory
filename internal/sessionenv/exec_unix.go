@@ -136,7 +136,9 @@ func execInvocation(args []string, scoped bool) error {
 }
 
 func execInvocationMode(args []string, scoped, environmentOnly bool) error {
-	stampPaneRootPid()
+	if err := stampPaneRootPid(); err != nil {
+		return err
+	}
 	trailing := 3
 	if scoped {
 		trailing = 6
@@ -225,45 +227,106 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 // options and its %N id — while a later reader can never ask which run wrote
 // the stamp. tmux fires no hook for a respawn (measured on 3.8:
 // after-respawn-pane does not exist, and pane-died/pane-exited/
-// after-kill-pane are all silent through `respawn-pane -k`), so the proof is
-// built from the three things that do change or can be checked: the
-// pane-died hook this installs bumps @af_pane_deaths on every natural exit;
-// a respawn allocates a fresh pty, so the stamped #{pane_tty} no longer
-// matches; and @af_pane_cmd pins the stamped incarnation's recorded
-// pane_start_command, which a replacement respawn rewrites. A respawn that
-// bypasses this shim leaves the stamp stale on all three counts — a foreign
-// command, even one whose argv contains a launch marker, fails the command
-// equality; a commandless respawn re-runs this shim and restamps itself
-// whole. A pane-died hook for the kill half of `respawn-pane -k` never
-// exists, which is the one case the deaths counter cannot see — the pty and
-// command pins cover it. One client call carries install, stamp, and pin:
-// at most one partial write can be left by a shim killed mid-call, and a
-// torn record fails closed.
+// after-kill-pane are all silent through `respawn-pane -k`), and the only
+// per-allocation field tmux reports after death — pane_tty — is just a name:
+// `respawn-pane -k` frees the old devpts index before allocating the
+// replacement, so Linux can hand the same pathname (even the same inode
+// slot) straight back, and the node itself is gone by teardown regardless,
+// so nothing post-mortem can read a per-allocation value off it. What makes
+// the stale record impossible to RUN under is this function instead: a
+// respawn re-executes this shim through the recorded start command, and the
+// write below either lands a fresh bundle or, when it fails and the option
+// already names an earlier run, the shim returns an error rather than exec
+// the command — the pane then dies carrying a stale stamp with NO
+// replacement process behind it, which teardown can trust harmlessly (the
+// stamped pid's session is still only this session's own dead run). The
+// alternative — launching anyway — is what lets the stale record hide a
+// live replacement root.
 //
-// Best-effort on purpose, and deliberately NOT version-gated: pane options
-// (`set-option -p`, tmux >=3.0), pane hooks (`set-hook -p`, tmux >=3.2), and
-// the `e|`/`==` format modifiers all exist below af's own floor; a tmux too
-// old for them just lacks the record, a launch must never fail over a
-// bookkeeping write, and an unparseable `tmux -V` cannot suppress it the way
-// a probe gate would. The bound keeps a wedged tmux server from delaying the
+// What remains unprovable is a respawn that never runs this shim at all —
+// one respawning a foreign command bypasses it — and that case the command
+// pin catches at the row instead: the pinned pane_start_command no longer
+// equals the recorded one. A shim that does run and cannot reach its tmux
+// channel at all launches nothing: the write below failing over an
+// unreadable stamp is itself refused, so the only fresh pane that dies is
+// one whose channel was dead at birth.
+//
+// Best-effort on purpose on the FIRST launch, and deliberately NOT
+// version-gated: pane options (`set-option -p`, tmux >=3.0), pane hooks
+// (`set-hook -p`, tmux >=3.2), and the `e|`/`==` format modifiers all exist
+// below af's own floor; a tmux too old for them just lacks the record, a
+// launch must never fail over a bookkeeping write it has no way to prove
+// needed one, and an unparseable `tmux -V` cannot suppress it the way a
+// probe gate would. The bound keeps a wedged tmux server from delaying the
 // launch by more than a moment.
-func stampPaneRootPid() {
+func stampPaneRootPid() error {
 	paneID := os.Getenv("TMUX_PANE")
 	if paneID == "" {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "tmux",
-		"set-hook", "-p", "-t", paneID, "pane-died", PaneDeathsHookCommand,
+	err := paneBookkeepingWrite(ctx, paneID)
+	if err == nil {
+		return nil
+	}
+	// The write failed. If the option is EMPTY the pane is a fresh launch —
+	// run without the record, exactly like a pre-stamp pane. If it still
+	// names an earlier run, this IS a respawn, and launching would leave the
+	// stale stamp covering a live replacement root: the one state teardown
+	// can mistake for fresh bookkeeping. Refuse instead — the pane dies
+	// without its command running, and the dead stamp can then only point at
+	// a run that genuinely produced no processes. A stamp naming THIS pid
+	// means the write actually landed and only the error report was lost —
+	// already fresh, so launch. And if the read itself fails the pane cannot
+	// be proven fresh at all: a fresh af pane's own tmux channel works (af
+	// spawned it through that server and controls its env), so a channel
+	// dead at birth is the sabotage shape — `respawn-pane -e` poisoning the
+	// pane env — and refusing is the only way that respawn cannot hide its
+	// replacement root behind the stale record.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	prior, readErr := paneStampRead(ctx2, paneID)
+	if readErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"af: pane %s bookkeeping is unwritable and unreadable; refusing to launch a pane whose incarnation cannot be proven\n",
+			paneID)
+		return fmt.Errorf("pane %s bookkeeping write failed and its identity stamp is unreadable", paneID)
+	}
+	if pidField, _, _ := strings.Cut(prior, ":"); pidField == strconv.Itoa(os.Getpid()) {
+		return nil
+	}
+	if strings.TrimSpace(prior) != "" {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"af: pane %s still carries an earlier run's identity stamp and its restamp failed; refusing to launch under a record teardown would misattribute\n",
+			paneID)
+		return fmt.Errorf("pane %s carries a stale identity stamp and could not be restamped", paneID)
+	}
+	return nil
+}
+
+// paneBookkeepingWrite and paneStampRead are seams for tests: one client call
+// installs the deaths hook, the pid/deaths/tty stamp, and the command pin
+// (atomic at tmux's command queue), and one reads the stamp back.
+var paneBookkeepingWrite = func(ctx context.Context, paneID string) error {
+	return exec.CommandContext(ctx, "tmux",
+		"set-hook", "-p", "-t", paneID, PaneDeathsHookName, PaneDeathsHookCommand,
 		";",
 		"set-option", "-F", "-p", "-t", paneID, PanePidUserOption, PanePidStampFormat,
 		";",
 		"set-option", "-F", "-p", "-t", paneID, PaneCommandUserOption, "#{pane_start_command}").Run()
 }
 
+var paneStampRead = func(ctx context.Context, paneID string) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux",
+		"display-message", "-p", "-t", paneID, "#{"+PanePidUserOption+"}").Output()
+	return string(out), err
+}
+
 func agentServerExecInvocation(args []string) error {
-	stampPaneRootPid()
+	if err := stampPaneRootPid(); err != nil {
+		return err
+	}
 	if len(args) < 2 {
 		return fmt.Errorf("malformed internal agent-server environment invocation")
 	}
