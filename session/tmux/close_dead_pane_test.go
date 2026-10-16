@@ -225,7 +225,18 @@ func heldPaneExec(pid int, status, signal, deadTime string, killed *bool) cmd_te
 // the given row fields: an empty pid is tmux ≥ 3.8's answer for a pane whose
 // terminal is gone (#5319), an empty dead flag is tmux's answer for a target
 // that names no pane at all. Every command is accepted, including kill-session.
+// The session answers the generation-marker read the empty-cohort scan makes
+// with a fixed nonempty generation — the same stamp survivors in these tests
+// carry — via paneRowExecGeneration.
 func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	return paneRowExecGeneration(pid, dead, status, signal, deadTime, "gen1", true, killed)
+}
+
+// paneRowExecGeneration is paneRowExec with control over the session's
+// AF_SESSION_GEN answer: present=false emits tmux's absent-variable line,
+// present=true with gen="" emits a present-but-empty marker, and a nonempty
+// gen answers with that value.
+func paneRowExecGeneration(pid, dead, status, signal, deadTime, gen string, present bool, killed *bool) cmd_test.MockCmdExec {
 	expand := strings.NewReplacer(
 		"#{pane_pid}", pid,
 		"#{pane_dead}", dead,
@@ -243,7 +254,13 @@ func paneRowExec(pid, dead, status, signal, deadTime string, killed *bool) cmd_t
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
-			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+			switch {
+			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerGeneration:
+				if !present {
+					return []byte("-" + EnvMarkerGeneration + "\n"), nil
+				}
+				return []byte(EnvMarkerGeneration + "=" + gen + "\n"), nil
+			case strings.Contains(s, "list-panes") || strings.Contains(s, "display-message"):
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
 			return nil, nil
@@ -274,6 +291,8 @@ func deadPaneCohortExec(anchorPID int, status, signal, deadTime string, killed *
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
 			switch {
+			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerGeneration:
+				return []byte(EnvMarkerGeneration + "=gen1\n"), nil
 			case strings.Contains(s, "list-panes"):
 				return []byte(fmt.Sprintf("%d|0||$0\n|1|%s%s%s|$0\n", anchorPID, status, signal, deadTime)), nil
 			case strings.Contains(s, "display-message"):
@@ -448,10 +467,12 @@ func TestCloseAndWaitForPaneExit_UnreapedHeldPaneWithNoReportedPidRefuses(t *tes
 		"an unreaped pid-less pane with no attributed process must not authorize worktree cleanup")
 }
 
-// The same unreaped row stops refusing once the scan positively attributes a
-// live process: positive membership is the only conclusive evidence a
-// pid-less row can give when tmux has not reaped the root (#5319 review).
-func TestCloseAndWaitForPaneExit_UnreapedHeldPaneWithNoReportedPidReapsMarkedProcess(t *testing.T) {
+// A marked process the scan attributes still rides along to the reap set
+// when the row is unreaped — session-level markers cannot prove WHICH
+// process was this pane's root, so the pane stays inconclusive and teardown
+// refuses, but the positively identified member is reaped alongside the
+// refusal rather than left running (#5319 review).
+func TestCloseAndWaitForPaneExit_UnreapedHeldPaneRefusesButReapsMarkedProcess(t *testing.T) {
 	shrinkReapWaits(t)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -461,10 +482,55 @@ func TestCloseAndWaitForPaneExit_UnreapedHeldPaneWithNoReportedPidReapsMarkedPro
 		paneRowExec("", "1", "", "", "", nil))
 
 	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an unreaped pid-less pane stays inconclusive even with attributed survivors")
+	require.False(t, proctree.AliveSame(survivor),
+		"a positively attributed process must still be reaped alongside the refusal")
+}
+
+// A session that carries no AF_SESSION_GEN at all — launched before the
+// marker existed or on tmux < 3.2 — leaves only the legacy cohort, the same
+// answer orphanGenerations gives a captured member with no generation. Its
+// gen-less marked survivor still attributes and reaps (#5319 review).
+func TestCloseAndWaitForPaneExit_LoneHeldPaneWithNoGenerationMarkerReapsLegacySurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-legacy", "")
+	survivor := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+	})
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExecGeneration("", "1", "7", "", "1726000000", "", false, nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
 	require.False(t, proctree.AliveSame(survivor),
-		"a positively attributed process must be reaped even when the row carries no reap evidence")
+		"a gen-less marked survivor of a legacy session must not survive its teardown")
+}
+
+// A session whose AF_SESSION_GEN is present-but-empty matches nothing while
+// survivors keep their nonempty stamps — malformed rather than absent, so
+// the capture stays incomplete instead of returning a successful empty scan
+// (#5319 review).
+func TestCloseAndWaitForPaneExit_LoneHeldPaneWithEmptyGenerationMarkerRefuses(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-empty-gen", "")
+	survivor := startStranger(t, markerEnv(name, home, "gen1"))
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		paneRowExecGeneration("", "1", "7", "", "1726000000", "", true, nil))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"an empty session generation marker must not produce a successful-empty scan")
+	require.True(t, proctree.AliveSame(survivor),
+		"the survivor is unattributable behind the refusal, so it must be left alone")
 }
 
 // Processes the sweep cannot attribute are not evidence of membership: an
@@ -605,6 +671,21 @@ func TestCaptureVerifiedSessionProcessTrees_LeavesMarkerSurvivorUnclaimed(t *tes
 		}
 	}
 	require.True(t, found, "the teardown capture must still attribute the marked survivor")
+}
+
+// An UNREAPED pid-less row is different for the verified capture: its root
+// can still be alive carrying this session's markers, and a complete-looking
+// tree would let doctor misclassify that root as an escapee — the capture
+// reports incompleteness instead (#5319 review).
+func TestCaptureVerifiedSessionProcessTrees_UnreapedPidLessRowIsIncomplete(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-no-pid-verified-unreaped", "")
+
+	_, err := CaptureVerifiedSessionProcessTrees(
+		paneRowExec("", "1", "", "", "", nil), name)
+	require.Error(t, err,
+		"an unreaped pid-less row must read as an incomplete capture, not a complete empty tree")
 }
 
 // A live member that carries no AF_SESSION marker at all is the bounded

@@ -181,18 +181,34 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 					// A session holding ONLY pid-less dead panes — the
 					// single-pane process-tab case — captured no members, so
 					// no live pane seeded the cohort and the generation
-					// filter would reject every marked survivor. This is the
-					// same situation reapVanishedSessionProcessCohort solves
-					// for its lifecycle-locked callers by seeding the cohort
-					// from the live marker scan (#3413): this teardown holds
-					// the session's lifecycle, so no same-named replacement
-					// can mint mid-sweep. A cohort still empty afterwards
-					// means nothing marked exists — a true empty rather than
-					// a filtered one.
-					seeded, seedErr := refreshOrphanCandidates(candidates, sanitizedName, nil)
-					candidates = seeded
-					generations = orphanGenerations(candidates, sanitizedName)
-					markedScan.err = errors.Join(markedScan.err, seedErr)
+					// filter would reject every marked survivor. Seed it
+					// from the session's OWN generation marker instead: a
+					// live marker scan cannot substitute — it would admit
+					// every same-name AF_SESSION process, including a
+					// previous incarnation's leftovers, and re-seed the
+					// cohort from the very processes being considered for
+					// reaping (#5319 review).
+					generation, genFound, genErr := SessionGenerationMarker(cmdExec, sanitizedName)
+					switch {
+					case genErr != nil:
+						markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
+							"cannot read the generation of the session owning a pid-less dead pane: %w", genErr))
+					case genFound && generation != "":
+						generations.values[generation] = true
+					case !genFound:
+						// A session launched before AF_SESSION_GEN existed
+						// (or on tmux < 3.2) leaves only the legacy cohort —
+						// the same answer orphanGenerations gives a captured
+						// member carrying no generation marker.
+						generations.legacy = true
+					default:
+						// A present-but-empty marker matches nothing while
+						// survivors keep their nonempty stamps — malformed,
+						// not absent (#5319 review).
+						markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
+							"session %s carries an empty %s marker, so a pid-less dead pane's survivors cannot be attributed",
+							sanitizedName, EnvMarkerGeneration))
+					}
 				}
 				refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations)
 				marked, inspectErr := markedOrphanProcesses(refreshed, sanitizedName, ownHome, generations)
@@ -263,16 +279,26 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		}
 	}
 	for _, field := range deferred {
+		row, err := parsePaneRow(field)
+		if err != nil {
+			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			continue
+		}
 		if !mergeMarked {
 			// A dead pane has no live root for the verified capture to
 			// include, and the processes its launch markers would name are
 			// precisely the escaped ones this variant exists to report —
-			// so the pid-less dead row contributes nothing here (#5319).
-			continue
-		}
-		row, err := parsePaneRow(field)
-		if err != nil {
-			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
+			// so a REAPED pid-less row contributes nothing here (#5319).
+			// An UNREAPED one is different: its root can still be alive
+			// carrying this session's markers, and reporting the tree as
+			// complete would let doctor misclassify that root as an
+			// escapee — the capture stays incomplete instead (#5319
+			// review).
+			if !row.reaped {
+				captureErrs = append(captureErrs, fmt.Errorf(
+					"session %s dead pane reports no pid and no reap evidence; the verified tree cannot prove its root gone",
+					sanitizedName))
+			}
 			continue
 		}
 		survivors, _, err := deadPaneProcesses(snap, sanitizedName, row, scanMarkedSurvivors)
