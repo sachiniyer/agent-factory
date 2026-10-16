@@ -121,23 +121,59 @@ func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (genera
 // within a server's lifetime, so the read can only answer for the session
 // list-panes observed: a dead incarnation's $id resolves nowhere and the
 // query fails closed instead of returning a same-named replacement's
-// generation. The AF_SESSION marker at the same $id must still name this
-// session first — the one place an $id CAN resolve to another session is a
-// fresh server that recycled the counter, and a mismatched answer is
-// reported, not trusted (#5319 review).
+// generation. The AF_SESSION marker must still name this session — the one
+// place an $id CAN resolve to another session is a fresh server that
+// recycled the counter — and both markers come from ONE unfiltered
+// show-environment answer, so the owner check and the generation it guards
+// cannot straddle a server restart between two queries (#5319 review).
+//
+// Unfiltered output is the only atomic shape the query has, and it reopens
+// the forgery channel the targeted read exists to close: a newline inside an
+// unrelated variable's value prints as a phantom AF_SESSION= line. The parse
+// therefore requires EXACTLY ONE line per marker — a forged duplicate reads
+// as ambiguous, not as whichever value happened to sort first.
 func SessionGenerationMarkerForIncarnation(cmdExec cmd.Executor, sessionID, sanitizedName string) (generation string, present bool, err error) {
-	owner, found, err := sessionEnvMarkerAt(cmdExec, sessionID, sanitizedName, EnvMarkerSession)
+	ctx, cancel := tmuxTimeoutContext()
+	out, queryErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", sessionID)
+	timedOut := ctx.Err() != nil
+	cancel()
+	if queryErr != nil {
+		if timedOut {
+			return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		}
+		return "", false, fmt.Errorf("read markers for tmux session %s incarnation %s: %w",
+			sanitizedName, sessionID, queryErr)
+	}
+	var owners, gens []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\r\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if value, ok := strings.CutPrefix(line, EnvMarkerSession+"="); ok {
+			owners = append(owners, value)
+		}
+		if value, ok := strings.CutPrefix(line, EnvMarkerGeneration+"="); ok {
+			gens = append(gens, value)
+		}
+	}
 	switch {
-	case err != nil:
-		return "", false, err
-	case !found:
+	case len(owners) == 0:
 		return "", false, fmt.Errorf("tmux session incarnation %s carries no %s marker; cannot prove it is still session %s",
 			sessionID, EnvMarkerSession, sanitizedName)
-	case owner != sanitizedName:
+	case len(owners) > 1:
+		return "", false, fmt.Errorf("tmux session incarnation %s answered %d %s lines; the owning session is ambiguous",
+			sessionID, len(owners), EnvMarkerSession)
+	case owners[0] != sanitizedName:
 		return "", false, fmt.Errorf("tmux session incarnation %s now belongs to session %s, not %s",
-			sessionID, owner, sanitizedName)
+			sessionID, owners[0], sanitizedName)
 	}
-	return sessionEnvMarkerAt(cmdExec, sessionID, sanitizedName, EnvMarkerGeneration)
+	switch len(gens) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return gens[0], true, nil
+	default:
+		return "", false, fmt.Errorf("tmux session incarnation %s answered %d %s lines; the generation is ambiguous",
+			sessionID, len(gens), EnvMarkerGeneration)
+	}
 }
 
 // SessionEnvVar reads a named variable from a tmux session's environment with

@@ -259,19 +259,57 @@ func paneRowExecGeneration(name, pid, dead, status, signal, deadTime, gen string
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
 			switch {
-			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerSession:
-				return []byte(EnvMarkerSession + "=" + name + "\n"), nil
-			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerGeneration:
-				if !present {
-					return []byte("-" + EnvMarkerGeneration + "\n"), nil
+			case strings.Contains(s, "show-environment"):
+				_, key := showEnvQuery(c)
+				if key == "" {
+					if !present {
+						return sessionEnvBlock(name, nil), nil
+					}
+					return sessionEnvBlock(name, &gen), nil
 				}
-				return []byte(EnvMarkerGeneration + "=" + gen + "\n"), nil
+				switch key {
+				case EnvMarkerSession:
+					return []byte(EnvMarkerSession + "=" + name + "\n"), nil
+				case EnvMarkerGeneration:
+					if !present {
+						return []byte("-" + EnvMarkerGeneration + "\n"), nil
+					}
+					return []byte(EnvMarkerGeneration + "=" + gen + "\n"), nil
+				}
+				return []byte("-" + key + "\n"), nil
 			case strings.Contains(s, "list-panes") || strings.Contains(s, "display-message"):
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
 			return nil, nil
 		},
 	}
+}
+
+// showEnvQuery extracts the -t target and optional variable name from a
+// show-environment command line: (target, "") for the unfiltered whole-
+// environment form, (target, name) for a targeted single-variable read.
+func showEnvQuery(c *exec.Cmd) (target, key string) {
+	for i, a := range c.Args {
+		if a == "-t" && i+1 < len(c.Args) {
+			target = c.Args[i+1]
+		}
+	}
+	if last := c.Args[len(c.Args)-1]; last != target {
+		key = last
+	}
+	return target, key
+}
+
+// sessionEnvBlock renders an unfiltered show-environment answer for a
+// session carrying AF_SESSION=name and, when gen is non-nil, AF_SESSION_GEN
+// — absent variables simply do not appear in the real output.
+func sessionEnvBlock(name string, gen *string) []byte {
+	var b strings.Builder
+	b.WriteString(EnvMarkerSession + "=" + name + "\n")
+	if gen != nil {
+		b.WriteString(EnvMarkerGeneration + "=" + *gen + "\n")
+	}
+	return []byte(b.String())
 }
 
 // paneRowExecShowEnv is paneRowExec with the show-environment answer supplied
@@ -300,16 +338,7 @@ func paneRowExecShowEnv(pid, dead, status, signal, deadTime, sessionID string,
 			s := c.String()
 			switch {
 			case strings.Contains(s, "show-environment"):
-				target, key := "", ""
-				for i, a := range c.Args {
-					if a == "-t" && i+1 < len(c.Args) {
-						target = c.Args[i+1]
-					}
-				}
-				if last := c.Args[len(c.Args)-1]; last != target {
-					key = last
-				}
-				return showEnv(target, key)
+				return showEnv(showEnvQuery(c))
 			case strings.Contains(s, "list-panes") || strings.Contains(s, "display-message"):
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
@@ -343,10 +372,19 @@ func deadPaneCohortExec(name string, anchorPID int, status, signal, deadTime str
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
 			switch {
-			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerSession:
-				return []byte(EnvMarkerSession + "=" + name + "\n"), nil
-			case strings.Contains(s, "show-environment") && c.Args[len(c.Args)-1] == EnvMarkerGeneration:
-				return []byte(EnvMarkerGeneration + "=gen1\n"), nil
+			case strings.Contains(s, "show-environment"):
+				gen1 := "gen1"
+				_, key := showEnvQuery(c)
+				if key == "" {
+					return sessionEnvBlock(name, &gen1), nil
+				}
+				switch key {
+				case EnvMarkerSession:
+					return []byte(EnvMarkerSession + "=" + name + "\n"), nil
+				case EnvMarkerGeneration:
+					return []byte(EnvMarkerGeneration + "=gen1\n"), nil
+				}
+				return []byte("-" + key + "\n"), nil
 			case strings.Contains(s, "list-panes"):
 				return []byte(fmt.Sprintf("%d|0||$0\n|1|%s%s%s|$0\n", anchorPID, status, signal, deadTime)), nil
 			case strings.Contains(s, "display-message"):
@@ -601,11 +639,18 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneReadsGenerationThroughObservedSessi
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
 		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$1",
 			func(target, key string) ([]byte, error) {
+				gen1, zzz := "gen1", "zzz"
 				if target != "$1" {
 					// A name-shaped query answers for a same-named
 					// replacement whose generation does not match the
 					// survivor's — the reap must not be authorized by it.
+					if key == "" {
+						return sessionEnvBlock(name, &zzz), nil
+					}
 					return []byte(key + "=zzz\n"), nil
+				}
+				if key == "" {
+					return sessionEnvBlock(name, &gen1), nil
 				}
 				switch key {
 				case EnvMarkerSession:
@@ -636,12 +681,16 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneRefusesWhenObservedIncarnationIsGon
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
 		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$7",
 			func(target, key string) ([]byte, error) {
+				gen1 := "gen1"
 				if target == "$7" {
 					return nil, fmt.Errorf("can't find session: $7")
 				}
 				// The name still answers — a replacement holds it — with
 				// markers that would match the survivor. A correct
 				// implementation never asks it.
+				if key == "" {
+					return sessionEnvBlock(name, &gen1), nil
+				}
 				switch key {
 				case EnvMarkerSession:
 					return []byte(EnvMarkerSession + "=" + name + "\n"), nil
@@ -672,6 +721,10 @@ func TestCloseAndWaitForPaneExit_LoneHeldPaneRefusesMismatchedIncarnation(t *tes
 	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
 		paneRowExecShowEnv("", "1", "7", "", "1726000000", "$0",
 			func(target, key string) ([]byte, error) {
+				gen1 := "gen1"
+				if key == "" {
+					return sessionEnvBlock("af_other_incarnation", &gen1), nil
+				}
 				switch key {
 				case EnvMarkerSession:
 					return []byte(EnvMarkerSession + "=af_other_incarnation\n"), nil
