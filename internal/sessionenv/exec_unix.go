@@ -17,6 +17,65 @@ import (
 
 var processExec = syscall.Exec
 
+// spawnDirChdir is os.Chdir behind the same kind of test seam as processExec:
+// the pane-side chdir it stands for is what the spawn-dir refusal is made of.
+var spawnDirChdir = os.Chdir
+
+// spawnDirStat is os.Stat behind the same seam: the entered-directory inode
+// check must be drivable without a real chdir (#5174 review).
+var spawnDirStat = os.Stat
+
+// enterSpawnDir applies the pane's own placement enforcement: the directory
+// SpawnDirPrefix baked into the launch line is the ONE the command must run
+// in, so the shim chdirs there itself — repairing tmux's silent -c fallback
+// when the server could not honor it — and reports failure to the caller,
+// which refuses rather than let the command run wherever tmux happened to
+// leave it (#5172, #5174 review). An unset variable means a launcher that
+// predates the prefix: nothing to enforce.
+func enterSpawnDir() error {
+	want := os.Getenv(SpawnDirEnv)
+	if want == "" {
+		return nil
+	}
+	if err := spawnDirChdir(want); err != nil {
+		return err
+	}
+	return verifyEnteredInode()
+}
+
+// verifyEnteredInode checks that the chdir landed on the inode af ADMITTED,
+// not just the pathname af recorded: between checkSpawnDir's stat and this
+// chdir, a rename-and-replace or a retargeted worktree symlink can make the
+// recorded path resolve to a directory af never approved — and once the
+// command execs there, no post-spawn teardown can undo its filesystem or
+// network side effects (#5174 review). The launch line carries the admitted
+// inode pair in SpawnDirInodeEnv; an unset value means a launcher that
+// predates the pair — nothing to verify — while a SET but malformed value
+// refuses, because a corrupted identity claim must not silently skip the
+// check it exists to perform.
+func verifyEnteredInode() error {
+	devIno := os.Getenv(SpawnDirInodeEnv)
+	if devIno == "" {
+		return nil
+	}
+	wantDev, wantIno, ok := parseSpawnDirInode(devIno)
+	if !ok {
+		return fmt.Errorf("malformed %s %q", SpawnDirInodeEnv, devIno)
+	}
+	info, err := spawnDirStat(".")
+	if err != nil {
+		return fmt.Errorf("stat the entered directory: %w", err)
+	}
+	gotDev, gotIno, ok := spawnDirInodeID(info)
+	if !ok {
+		return fmt.Errorf("the entered directory exposes no inode identity")
+	}
+	if gotDev != wantDev || gotIno != wantIno {
+		return fmt.Errorf("entered directory is not the admitted inode")
+	}
+	return nil
+}
+
 // WrapCommand builds the shell command handed to tmux. It contains only the af
 // executable path, the selected agent, explicit variable NAMES, and the
 // original pane command; environment values never enter argv.
@@ -174,6 +233,27 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	// argv is what the boundary's whole claim rests on.
 	if len(args) != offset+count+1 {
 		return fmt.Errorf("malformed internal session environment invocation")
+	}
+	// The spawn's own placement record, applied HERE — inside the pane, at the
+	// instant the command would run, and BEFORE anything else reads the pane's
+	// cwd. tmux's -c is only a request: an unusable one is answered by falling
+	// back to the server's cwd with no error (#5172), and no post-spawn
+	// filesystem check can later say whether the chdir tmux attempted succeeded,
+	// because an enterability flap can be undone before the verifier reads it
+	// (#5174 review). The shim's chdir is the last point misplacement can still
+	// be prevented: it repairs the fallback outright, and the refusal — exit
+	// code plus scrollback marker — is evidence tied to this spawn rather than
+	// a second point-in-time accessibility sample.
+	//
+	// The position is load-bearing, not just the act: the grant derivation
+	// below reads the pane's working directory (#5270), and FilterForCommand,
+	// the account boundary, and the final exec must all see the directory the
+	// command will actually run in. Chdir after any of them would judge or
+	// launch against tmux's fallback — the server's cwd, often $HOME — the
+	// exact wrong-directory case this refusal exists for.
+	if err := enterSpawnDir(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", SpawnDirRefusalMarker, err)
+		os.Exit(SpawnDirRefusalExitCode)
 	}
 	extras, err := NormalizeExtraNames(args[offset : offset+count])
 	if err != nil {

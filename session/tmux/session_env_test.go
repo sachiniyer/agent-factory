@@ -38,6 +38,18 @@ func wrappedProgramForTest(t *testing.T, executable, program string) string {
 	return wrapped
 }
 
+// spawnWrappedForTest renders the pane command as Start now emits it: the
+// spawn-directory env assignment ahead of the wrapped program — the placement
+// record the pane's exec shim enforces at the spawn instant (#5174 review).
+func spawnWrappedForTest(t *testing.T, workdir, executable, program string) string {
+	t.Helper()
+	info, err := os.Stat(workdir)
+	if err != nil {
+		t.Fatalf("spawnWrappedForTest needs a real workdir to admit: %v", err)
+	}
+	return sessionenv.SpawnDirPrefix(workdir, info) + wrappedProgramForTest(t, executable, program)
+}
+
 // TestStartDoesNotGiveTmuxAmbientSecrets exercises Start's production spawn
 // choke point. A nil Cmd.Env means os/exec inherits the daemon's entire
 // environment, so inspect the effective environment rather than treating nil

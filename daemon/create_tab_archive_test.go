@@ -35,7 +35,7 @@ func archivableTabExec(agentName string) (cmd_test.MockCmdExec, func(string) boo
 		}
 		return ""
 	}
-	e := cmd_test.MockCmdExec{
+	e := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -65,7 +65,7 @@ func archivableTabExec(agentName string) (cmd_test.MockCmdExec, func(string) boo
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	return e, func(name string) bool { return existing[name] }
 }
 

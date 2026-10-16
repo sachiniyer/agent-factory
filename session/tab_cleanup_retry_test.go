@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -312,4 +314,176 @@ func TestUniqueTabTmuxName_ReservesPendingCleanupTokens(t *testing.T) {
 	// tabTmuxToken applies rather than deriving a token it cannot trust.
 	foreign := []TabCleanupData{{TabID: "closed", TmuxName: "af_other_agent__fresh"}}
 	assert.Equal(t, agentName+"__fresh", uniqueTabTmuxName(tabs, foreign, agentName, "fresh"))
+}
+
+// spawnMisplacedUnkillableExec models the exact survivor the #5174 placement
+// teardown can leave behind: the sibling's new-session lands, its
+// pane_current_path reports tmux's fallback directory (a POSITIVE outside
+// verdict — the worktree it was handed is nowhere in the ancestry), and
+// kill-session then fails, so the misplaced-pane teardown returns its
+// classification without ErrSessionNotStarted. The name is only safe to
+// lose if nothing can be running — this one may be.
+func spawnMisplacedUnkillableExec(agentName string, outsideDir string) (cmd_test.MockCmdExec, func(string) bool) {
+	existing := map[string]bool{agentName: true}
+	var mu sync.Mutex
+	nameOf := func(cmd *exec.Cmd) string {
+		for i, a := range cmd.Args {
+			switch {
+			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimPrefix(a, "-t=")
+			case strings.HasPrefix(a, "-s="):
+				return strings.TrimPrefix(a, "-s=")
+			}
+		}
+		return ""
+	}
+	mockExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			name := nameOf(cmd)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if existing[name] {
+					return nil
+				}
+				return errors.New("can't find session")
+			case strings.Contains(s, "new-session"):
+				existing[name] = true
+			case strings.Contains(s, "kill-session"):
+				// The misplaced survivor REFUSES to die — the unconfirmed-
+				// teardown shape that makes dropping its name a leak.
+				return errors.New("kill-session refused")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "display-message") && strings.Contains(s, "#{pane_current_path}"):
+				return []byte(outsideDir + "\n"), nil
+			case strings.Contains(s, "list-panes"):
+				return nil, nil
+			}
+			return []byte("content"), nil
+		},
+	}
+	return mockExec, func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return existing[name]
+	}
+}
+
+// TestAddShellTab_RetainsNameWhenSpawnTeardownUnconfirmed is the #5174
+// spawn-side half of the retained-handle contract: the tab caller drops the
+// session object on Start's error, so without this the unconfirmed survivor
+// is invisible to every later teardown AND its name blocks every retry —
+// the startup sweep can only kill a name something recorded.
+func TestAddShellTab_RetainsNameWhenSpawnTeardownUnconfirmed(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_spawn-cleanup_agent"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	outsideDir := t.TempDir()
+	mockExec, aliveFn := spawnMisplacedUnkillableExec(agentName, outsideDir)
+	pty := persistPtyFactory{t: t, cmdExec: mockExec}
+
+	repoPath := "/tmp/spawn-cleanup-repo"
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
+	gw, err := git.NewGitWorktreeFromStorage(repoPath, worktreeDir, agentName,
+		agentName+"-branch", "", false, true)
+	require.NoError(t, err)
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, mockExec)
+	inst := &Instance{
+		Title:       agentName,
+		Path:        repoPath,
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs:        []*Tab{newAgentTab(agentTs)},
+	}
+
+	_, err = inst.AddShellTab()
+	require.Error(t, err, "a misplaced pane must fail the spawn")
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"the teardown was unconfirmed, so Start correctly claims nothing about the pane being gone")
+	assert.True(t, aliveFn(shellName), "fixture: the misplaced survivor is still up under its exact name")
+	assert.Equal(t, []TabCleanupData{{TmuxName: shellName}}, inst.PendingTabCleanup(),
+		"the failed spawn's tmux name must be retained for the startup sweep, not dropped with the session object")
+}
+
+// TestAddShellTab_DoesNotRetainWhenSpawnNeverAttempted is the #5174 review
+// fix for the retention boundary: a Start that never reached new-session —
+// here refused by checkSpawnDir because the worktree path does not exist —
+// cannot have left an af pane behind the name. When the has-session probe
+// also fails to prove the name absent (a plain error, not tmux's determinate
+// answer), staging a cleanup handle would point the sweep's exact-name kill
+// at a pane this attempt never created — a foreign session hiding under the
+// wedged probe. The attempted boundary is what keeps the handle off the
+// list (#5174 review).
+func TestAddShellTab_DoesNotRetainWhenSpawnNeverAttempted(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_spawn-refused_agent"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	mockExec, aliveFn, _ := cleanupExec(map[string]bool{agentName: true}, nil)
+	pty := persistPtyFactory{t: t, cmdExec: mockExec}
+
+	repoPath := "/tmp/spawn-refused-repo"
+	// The worktree path names a directory that does NOT exist: the spawn-dir
+	// seam refuses before new-session, so no pane this attempt made can sit
+	// behind the name.
+	worktreeDir := filepath.Join(t.TempDir(), "wt-missing")
+	gw, err := git.NewGitWorktreeFromStorage(repoPath, worktreeDir, agentName,
+		agentName+"-branch", "", false, true)
+	require.NoError(t, err)
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, mockExec)
+	inst := &Instance{
+		Title:       agentName,
+		Path:        repoPath,
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs:        []*Tab{newAgentTab(agentTs)},
+	}
+
+	_, err = inst.AddShellTab()
+	require.Error(t, err)
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"the probe's plain error cannot prove the name absent — the error stays unproven")
+	assert.False(t, aliveFn(shellName), "fixture: new-session never ran, so nothing af made owns the name")
+	assert.Empty(t, inst.PendingTabCleanup(),
+		"a spawn that never reached new-session must not stage an exact-name kill")
+}
+
+// TestAddShellTab_DoesNotRetainWhenNameTaken is the control half: a name held
+// by a LIVE session is not af's to clean up. ErrSessionNameTaken wraps
+// ErrSessionNotStarted deliberately — staging a handle here would let the
+// startup sweep kill someone else's session by exact name.
+func TestAddShellTab_DoesNotRetainWhenNameTaken(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const agentName = "af_name-taken_agent"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	inst := startedMockInstance(t, agentName, shellName)
+
+	_, err := inst.AddShellTab()
+	require.ErrorIs(t, err, tmux.ErrSessionNameTaken)
+	require.ErrorIs(t, err, tmux.ErrSessionNotStarted)
+	assert.Empty(t, inst.PendingTabCleanup(),
+		"a name held by a live session must never be staged for cleanup")
 }

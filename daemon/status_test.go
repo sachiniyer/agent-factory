@@ -299,7 +299,7 @@ func TestRefreshStatuses_DeadNilMonitorDoesNotPanic(t *testing.T) {
 	// has-session reports "gone" so the idle-branch liveness probe confirms the
 	// vanished session; the nil monitor would panic HasUpdated before the fix
 	// regardless.
-	mockExec := cmd_test.MockCmdExec{
+	mockExec := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error { return errSessionAbsent },
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
 			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so the
@@ -312,7 +312,7 @@ func TestRefreshStatuses_DeadNilMonitorDoesNotPanic(t *testing.T) {
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_999_nil_monitor", "claude", tmux.MakePtyFactory(), mockExec)
 	backend := nilMonitorBackend{FakeBackend: session.NewFakeBackend(), ts: ts}
 	registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Lost)

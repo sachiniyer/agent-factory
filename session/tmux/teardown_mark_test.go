@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,13 @@ type teardownMarkTmux struct {
 	killFails   atomic.Bool // kill-session answers a failure instead of removing the session
 	captureOK   atomic.Bool // capture-pane succeeds
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
+	// absentOnce/absentErr lazily build what has-session returns for a dead
+	// session: a REAL *exec.ExitError carrying tmux's no-server diagnostic.
+	// The strict probe behind Start's refusal paths only accepts tmux's own
+	// diagnostics as determinate absence (#5174 review); a synthesized error
+	// would leave the name unproven and withhold ErrSessionNotStarted.
+	absentOnce sync.Once
+	absentErr  error
 	// nameGen, when set, is what display-message answers for the NAME target:
 	// "$id pid created" — the session generation currently behind the name.
 	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
@@ -84,6 +92,10 @@ type teardownMarkTmux struct {
 	// stages a resolution that STRADDLES a close: the probe has already begun
 	// when close() settles its mark (#4473 review).
 	duringNameProbe func()
+	// spawnDir is the -c argument of the latest new-session, recorded by
+	// liveOnSpawn — what a real server reports back on the pane_start_path
+	// query Start's post-spawn dir check issues (#5172).
+	spawnDir atomic.Value
 }
 
 func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
@@ -97,7 +109,7 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		if m.alive.Load() {
 			return nil, nil
 		}
-		return nil, errors.New("can't find session")
+		return nil, m.absentError()
 	case strings.Contains(args, "kill-session"):
 		m.killCalls.Add(1)
 		if m.killFails.Load() {
@@ -119,6 +131,12 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 			return []byte(v.(string)), nil
 		}
 		return nil, nil
+	case strings.Contains(args, "pane_start_path"):
+		// Start's post-spawn dir check: tmux records the -c it was handed.
+		if v := m.spawnDir.Load(); v != nil {
+			return []byte(v.(string) + "\n"), nil
+		}
+		return nil, errors.New("no recorded start path")
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
 		m.nameProbeCalls.Add(1)
@@ -181,9 +199,27 @@ type liveOnSpawn struct {
 func (f liveOnSpawn) Start(c *exec.Cmd) (*os.File, error) {
 	file, err := f.inner.Start(c)
 	if err == nil {
+		for i, a := range c.Args {
+			if a == "-c" && i+1 < len(c.Args) {
+				f.m.spawnDir.Store(c.Args[i+1])
+			}
+		}
 		f.m.alive.Store(true)
 	}
 	return file, err
+}
+
+// absentError answers the strict probe's determinate absence with tmux's real
+// no-server diagnostic. Built lazily because several fixtures construct the
+// struct literal directly, where no *testing.T is in scope for the require-
+// based helpers.
+func (m *teardownMarkTmux) absentError() error {
+	m.absentOnce.Do(func() {
+		_, err := exec.Command("sh", "-c",
+			`echo 'no server running on /tmp/tmux-1000/default' >&2; exit 1`).Output()
+		m.absentErr = err
+	})
+	return m.absentErr
 }
 
 // newMarkedTeardownSession builds a monitored, live session, as the daemon holds

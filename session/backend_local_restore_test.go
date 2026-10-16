@@ -83,9 +83,11 @@ func TestLocalBackendPrepareAgentSwapSnapshotsCommandSpecificCodexHome(t *testin
 
 func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			switch {
@@ -100,15 +102,18 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
+			if strings.Contains(joined, "display-message") {
 				return nil, errors.New("pane pid unavailable")
 			}
 			return nil, nil
 		},
-	}
+	})
+	ptyFactory.cmdExec = cmdExec
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-broker", "handoff-broker-branch", "", false, false)
 	require.NoError(t, err)
 	ts := tmux.NewTmuxSessionWithDeps("handoff-broker", tmux.ProgramClaude, ptyFactory, cmdExec)
@@ -163,9 +168,11 @@ func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
 	cfg.ProgramOverrides = map[string]string{tmux.ProgramGemini: geminiBin}
 	require.NoError(t, config.SaveConfig(cfg))
 
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			switch {
@@ -180,15 +187,18 @@ func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
+			if strings.Contains(joined, "display-message") {
 				return nil, errors.New("pane pid unavailable")
 			}
 			return nil, nil
 		},
-	}
+	})
+	ptyFactory.cmdExec = cmdExec
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-records", "handoff-records-branch", "", false, false)
 	require.NoError(t, err)
 	ts := tmux.NewTmuxSessionWithDeps("handoff-records", tmux.ProgramClaude, ptyFactory, cmdExec)
@@ -222,6 +232,11 @@ func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
 type recordingPtyFactory struct {
 	t    *testing.T
 	cmds []*exec.Cmd
+	// cmdExec forwards each launched command to the fixture's mock executor —
+	// new-session's -e markers must reach it for the server-side state the
+	// post-spawn ownership read depends on (same role persistPtyFactory's
+	// forward plays elsewhere) (#5174 review).
+	cmdExec cmd_test.MockCmdExec
 }
 
 func (p *recordingPtyFactory) Start(c *exec.Cmd) (*os.File, error) {
@@ -231,6 +246,9 @@ func (p *recordingPtyFactory) Start(c *exec.Cmd) (*os.File, error) {
 		return nil, err
 	}
 	p.cmds = append(p.cmds, c)
+	if p.cmdExec.RunFunc != nil {
+		_ = p.cmdExec.Run(c)
+	}
 	return f, nil
 }
 
@@ -250,12 +268,16 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 
 	ptyFactory := &recordingPtyFactory{t: t}
 
+	repoRoot := initTempGitRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
+
 	// First two has-session calls report missing (the outer Restore check, then
 	// the existence check at the top of Start). After tmux new-session runs,
 	// subsequent has-session calls report exists so Start's poll loop and the
 	// inner Restore("") attach call succeed.
 	hasSessionCalls := 0
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(c.String(), "has-session") {
 				hasSessionCalls++
@@ -266,12 +288,14 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
 			return []byte("output"), nil
 		},
-	}
+	})
+	ptyFactory.cmdExec = cmdExec
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "respawn-511", "respawn-511-branch", "", false, false)
 	require.NoError(t, err)
 
@@ -525,7 +549,7 @@ func TestInstanceRemoteTerminalCapability(t *testing.T) {
 func TestLocalBackendKillRunsKillSession(t *testing.T) {
 	var mu sync.Mutex
 	var killed bool
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(strings.Join(c.Args, " "), "kill-session") {
 				mu.Lock()
@@ -535,7 +559,7 @@ func TestLocalBackendKillRunsKillSession(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
-	}
+	})
 
 	ts := tmux.NewTmuxSessionWithDeps("genuine-kill", "claude", nil, cmdExec)
 	inst := &Instance{
@@ -561,7 +585,7 @@ func TestLocalBackendKillRunsKillSession(t *testing.T) {
 func TestLocalBackendCloseAttachOnlyNeverKillsSharedSession(t *testing.T) {
 	var mu sync.Mutex
 	var ran []string
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := generationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			mu.Lock()
 			ran = append(ran, strings.Join(c.Args, " "))
@@ -569,7 +593,7 @@ func TestLocalBackendCloseAttachOnlyNeverKillsSharedSession(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("output"), nil },
-	}
+	})
 
 	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent", "claude", nil, cmdExec)
 	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__shell", "/bin/sh", nil, cmdExec)

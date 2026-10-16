@@ -6,8 +6,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// refuseUnstartedStart annotates a failure that happens before new-session's
+// process begins. The only cleanup-authorizing basis at that point is the
+// name's occupancy — and ONLY the strict probe's determinate "not there" may
+// grant it. The loose has-session at the top of Start collapses non-answer
+// failures (a socket-policy denial, a transient exec error) into absence;
+// attaching ErrSessionNotStarted on that reading would authorize
+// LocalBackend.launch's gw.Cleanup to delete the worktree while a same-named
+// pane is still rooted inside it (#5174 review). Unproven absence returns the
+// error bare, which preserves the workspace the same way ErrPaneMayBeLive
+// does for post-spawn failures.
+func (t *TmuxSession) refuseUnstartedStart(err error) error {
+	if t.proveNoPaneIfDeterminatelyAbsent() {
+		return fmt.Errorf("%w: %w", ErrSessionNotStarted, err)
+	}
+	return err
+}
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
@@ -16,6 +34,8 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	t.setSpawnAttempted(false)
+	t.setSpawnGeneration("")
 	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
 	// same-object restart (agent swap) it describes the session af just closed,
 	// which is still what the status monitor would report gone if this Start
@@ -41,6 +61,24 @@ func (t *TmuxSession) Start(workDir string) error {
 		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
+
+	// Refuse to spawn a pane af cannot prove will start in the requested
+	// directory. tmux answers an unusable `new-session -c` by falling back to
+	// the SERVER's cwd — no error — which is how a restore once landed an
+	// agent in the daemon's own working directory while the row reported
+	// ready (#5172). The check lives here at the single spawn seam every
+	// route (create, restore, recover, swap, tab) funnels through, so no
+	// caller can bypass it. Same proven boundary as the env-preparation
+	// failures below: nothing has run new-session, so a name determinately
+	// absent proves no pane exists. The returned FileInfo pins the admitted
+	// inode so the post-spawn check compares the pane against the directory
+	// that was validated — not against whatever the path might resolve to
+	// after a mid-spawn rename-and-recreate (#5174 review).
+	admittedSpawnDir, spawnDirErr := checkSpawnDir(workDir)
+	if spawnDirErr != nil {
+		return t.refuseUnstartedStart(spawnDirErr)
+	}
+
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
@@ -62,11 +100,25 @@ func (t *TmuxSession) Start(workDir string) error {
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
-		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
+		return t.refuseUnstartedStart(fmt.Errorf("prepare filtered session environment: %v", envErr))
 	}
+	// Hand the pane's exec shim the directory checkSpawnDir just admitted —
+	// and its inode identity — as env assignments inside the launch line
+	// itself, the one channel every supported tmux carries. The shim chdirs
+	// to it at the instant the command would run and then verifies the
+	// entered inode is the admitted one: that repairs tmux's silent -c
+	// fallback outright and closes the rename-and-replace window between
+	// admission and chdir, and on failure the pane dies with a refusal
+	// verdict (exit code + scrollback marker) tied to THIS spawn — evidence
+	// a point-in-time re-check can never forge or lose (#5174 review).
+	wrappedProgram = sessionenv.SpawnDirPrefix(workDir, admittedSpawnDir) + wrappedProgram
+	// Minted once here and carried into the post-spawn ownership check: the
+	// generation is how verifySpawnedPaneDir confirms the session answering
+	// the existence poll is THIS launch's, not a foreign actor's that claimed
+	// the name after an instant-exiting pane freed it (#5174 review).
+	spawnGeneration := newSessionGeneration()
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, spawnGeneration)...)
 	for _, entry := range sessionEnv {
 		args = append(args, "-e", entry)
 	}
@@ -94,8 +146,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
-		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
+		return t.refuseUnstartedStart(fmt.Errorf("prepare existing tmux session environment: %v", envErr))
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
@@ -133,9 +184,14 @@ func (t *TmuxSession) Start(workDir string) error {
 				go reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 			}
 		}
-		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
+		return t.refuseUnstartedStart(fmt.Errorf("error starting tmux session: %w", err))
 	}
 
+	// The launch process began: new-session has reached the server, so every
+	// failure from here can leave an af pane behind the name — the boundary a
+	// caller's cleanup retention keys on (#5174 review).
+	t.setSpawnAttempted(true)
+	t.setSpawnGeneration(spawnGeneration)
 	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
@@ -237,6 +293,14 @@ func (t *TmuxSession) Start(workDir string) error {
 		}
 	}
 	ptmx.Close()
+
+	// The existence poll answered — but that only proves the SESSION exists.
+	// Verify the pane actually started inside the admitted directory before
+	// configuring anything: a pane af cannot place there is torn down, never
+	// left running under a row that will report ready (#5172).
+	if verr := t.verifySpawnedPaneDir(workDir, admittedSpawnDir, spawnGeneration); verr != nil {
+		return verr
+	}
 
 	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for
 	// more history). Bounded like every other tmux command in this package (#1917/

@@ -42,7 +42,7 @@ func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 			t.Run(string(status)+lv.name, func(t *testing.T) {
 				inst := confirmableManualSwap(status)
 				inst.liveness = lv.lv
-				require.Error(t, inst.TabSpawnBlocked(), "fixture: the pending swap blocks tab creation")
+				require.Error(t, inst.TabSpawnBlocked(TabKindProcess), "fixture: the pending swap blocks tab creation")
 				require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
 
 				require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
@@ -50,7 +50,7 @@ func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 				swapPending, _ := inst.PendingManualAccountSwap()
 				require.False(t, swapPending, "the confirm retires the pending swap")
 				require.Nil(t, inst.accountSwapLaunch, "the confirm retires the admitted launch plan with it")
-				require.NoError(t, inst.TabSpawnBlocked(),
+				require.NoError(t, inst.TabSpawnBlocked(TabKindProcess),
 					"a confirmed swap must not keep refusing new tabs")
 				require.Equal(t, LiveRunning, inst.GetLiveness(),
 					"a confirmed delivery is a working session (#5023): the agent already has its mission, "+
@@ -86,7 +86,7 @@ func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 		t.Fatal("the limit reset time must survive the confirm or the resume pass loses its schedule")
 	}
 	require.Nil(t, inst.accountSwapLaunch)
-	require.NoError(t, inst.TabSpawnBlocked())
+	require.NoError(t, inst.TabSpawnBlocked(TabKindProcess))
 }
 
 func TestCanConfirmPendingManualAccountSwapDelivery(t *testing.T) {

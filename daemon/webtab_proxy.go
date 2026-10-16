@@ -215,7 +215,7 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	// teardown) and most of the kill window; the post-spawn check below and each
 	// destructive verb's confirmed final stop catch anything that still races in,
 	// so the invariant holds on timing rather than on luck.
-	if err := instance.TabSpawnBlocked(); err != nil {
+	if err := instance.TabSpawnBlocked(session.TabKindVSCode); err != nil {
 		return vscodeEndpoint{}, err
 	}
 	if instance.UserKilled() {
@@ -287,7 +287,7 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 		if err := m.requireCurrentVSCodeInstance(instance, key, title); err != nil {
 			return err
 		}
-		if err := instance.TabSpawnBlocked(); err != nil {
+		if err := instance.TabSpawnBlocked(session.TabKindVSCode); err != nil {
 			return err
 		}
 		if instance.UserKilled() {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -132,7 +133,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
 	// this session and reject if it is archived/mid-archive (#1195); see
 	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
-	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance)
+	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance, effectiveKind)
 	if err != nil {
 		return CreateTabResponse{}, err
 	}
@@ -161,6 +162,30 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		tab, err = instance.AddProcessTab(req.Command, req.Name)
 	}
 	if err != nil {
+		// A spawn that crossed the tmux boundary but could not be confirmed
+		// torn down stages an exact-name handle on the instance's
+		// pendingTabCleanup (#5174). That handle is the only record the
+		// startup sweep has to reap the survivor, and it lives in memory until
+		// the next successful mutation persists it — an unclean daemon exit in
+		// between strands the orphan and leaves its tmux name blocking later
+		// spawns. Persist before the error returns whenever handles are
+		// staged; a persist failure is reported but cannot withdraw the staged
+		// handle, so the spawn error still answers.
+		if len(instance.PendingTabCleanup()) > 0 {
+			if perr := persistInstanceData(repoID, instance.ToInstanceData()); perr != nil {
+				m.warn().Printf("CreateTab %q: spawn failed and persisting the retained cleanup handle failed too: %v", title, perr)
+				// A plain spawn error invites a blind retry, which mints a fresh
+				// tmux name while the possibly-live survivor's only cleanup
+				// handle sits in memory — an unclean exit then strands the
+				// orphan entirely. Something irreversible landed, so this is the
+				// committed/uncertain outcome, not a clean failure; the join
+				// keeps both causes — and the spawn error's sentinel chain —
+				// visible to the caller (#5174 review).
+				return CreateTabResponse{}, &mutationCommittedError{err: errors.Join(
+					err,
+					fmt.Errorf("persisting the retained cleanup handle for the possibly-live pane: %w", perr))}
+			}
+		}
 		return CreateTabResponse{}, err
 	}
 

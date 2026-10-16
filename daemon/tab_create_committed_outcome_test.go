@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ func tabKillRefusedExec(alive map[string]bool) cmd_test.MockCmdExec {
 		}
 		return ""
 	}
-	return cmd_test.MockCmdExec{
+	return tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -64,7 +65,7 @@ func tabKillRefusedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			}
 			return []byte("content"), nil
 		},
-	}
+	})
 }
 
 // startedTabInstanceWithExec is startedLocalTabInstance with a caller-chosen
@@ -73,8 +74,15 @@ func startedTabInstanceWithExec(t *testing.T, m *Manager, repoID, repoPath, titl
 	t.Helper()
 	pty := tabPtyFactory{t: t, cmdExec: exec}
 
+	// The worktree must exist on disk: the spawn seam refuses new-session into
+	// a missing directory (#5172), so a fixture-only wt path fails the pre-spawn
+	// stat long before anything these tests exercise.
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll fixture worktree: %v", err)
+	}
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), title,
+		repoPath, wtPath, title,
 		title+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)

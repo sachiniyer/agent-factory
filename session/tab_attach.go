@@ -25,7 +25,7 @@ func (i *Instance) AttachVSCodeTab(name, tabID string) (*Tab, error) {
 	if tab, ok, err := i.resolveAttachedTabLocked(name, tabID); ok || err != nil {
 		return tab, err
 	}
-	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+	if spawnErr := i.tabSpawnBlockedLocked(TabKindVSCode); spawnErr != nil {
 		return nil, spawnErr
 	}
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {

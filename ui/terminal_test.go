@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,13 +43,70 @@ func tmuxTargetName(cmd *exec.Cmd) string {
 	return ""
 }
 
+// genRecordingExec wraps a tmux fixture exec so it stores each new-session's
+// `-e AF_SESSION_GEN=` marker — the way a real server keeps session
+// environment at creation — and answers the post-spawn ownership read
+// (`show-environment AF_SESSION_GEN`) with it. Start re-reads that marker to
+// confirm the session answering its existence poll is the launch it minted
+// before inspecting or tearing down the pane (#5174 review), so every fixture
+// whose session survives the poll needs the channel modeled.
+func genRecordingExec(ex cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	var mu sync.Mutex
+	gens := map[string]string{}
+	record := func(cmd *exec.Cmd) {
+		s := cmd.String()
+		n := tmuxTargetName(cmd)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(s, "new-session"):
+			for i, a := range cmd.Args {
+				if a == "-e" && i+1 < len(cmd.Args) {
+					if g, ok := strings.CutPrefix(cmd.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+						gens[n] = g
+					}
+				}
+			}
+		case strings.Contains(s, "kill-session"):
+			delete(gens, n)
+		}
+	}
+	run := ex.RunFunc
+	ex.RunFunc = func(cmd *exec.Cmd) error {
+		record(cmd)
+		if run == nil {
+			return nil
+		}
+		return run(cmd)
+	}
+	out := ex.OutputFunc
+	ex.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
+		record(cmd)
+		if strings.Contains(cmd.String(), "show-environment") &&
+			strings.Contains(cmd.String(), tmux.EnvMarkerGeneration) {
+			mu.Lock()
+			g, ok := gens[tmuxTargetName(cmd)]
+			mu.Unlock()
+			if !ok {
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
+			return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+		}
+		if out == nil {
+			return nil, nil
+		}
+		return out(cmd)
+	}
+	return ex
+}
+
 // shellMockExec returns a tmux mock that tracks session existence per name, so
 // an instance's agent session and its shell sibling are independent (sharing a
 // single existence flag would make the shell session's Start fail with "already
 // exists"). capture-pane returns captureContent.
 func shellMockExec(captureContent string) cmd_test.MockCmdExec {
 	existing := map[string]bool{}
-	return cmd_test.MockCmdExec{
+	return genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := tmuxTargetName(cmd)
@@ -73,7 +131,7 @@ func shellMockExec(captureContent string) cmd_test.MockCmdExec {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 }
 
 // makeShellInstance creates a started local instance with a live agent + shell
@@ -338,7 +396,7 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 
 	var gone atomic.Bool
 	existing := map[string]bool{}
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := tmuxTargetName(cmd)
@@ -366,7 +424,7 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()
@@ -420,7 +478,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 	const scrollback = "scrollback-line-from-live-shell"
 	var gone atomic.Bool
 	existing := map[string]bool{}
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := tmuxTargetName(cmd)
@@ -450,7 +508,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()
@@ -514,7 +572,7 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 	const liveCapture = "live-shell-output-before-death"
 	var gone atomic.Bool
 	existing := map[string]bool{}
-	cmdExec := cmd_test.MockCmdExec{
+	cmdExec := genRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			name := tmuxTargetName(cmd)
@@ -542,7 +600,7 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 			}
 			return []byte(""), nil
 		},
-	}
+	})
 
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()

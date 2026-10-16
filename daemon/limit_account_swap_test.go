@@ -1032,7 +1032,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	const agentName = "af_pending_swap"
 	innerExecutor := tabNameKeyedExec(map[string]bool{agentName: true})
 	blockedSibling := ""
-	executor := cmd_test.MockCmdExec{
+	executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if blockedSibling != "" && strings.Contains(cmd.String(), "new-session") &&
 				strings.Contains(cmd.String(), blockedSibling) {
@@ -1041,7 +1041,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 			return innerExecutor.Run(cmd)
 		},
 		OutputFunc: innerExecutor.Output,
-	}
+	})
 	pty := tabPtyFactory{t: t, cmdExec: executor}
 	agent := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, executor)
 	inst.SetGitWorktreeForTest(gw)
@@ -1169,7 +1169,7 @@ func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *test
 
 	const agentName = "af_swap_fallback"
 	inner := tabNameKeyedExec(map[string]bool{agentName: true})
-	executor := cmd_test.MockCmdExec{
+	executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "kill-session") {
 				return errors.New("tmux did not confirm teardown")
@@ -1177,7 +1177,7 @@ func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *test
 			return inner.Run(cmd)
 		},
 		OutputFunc: inner.Output,
-	}
+	})
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", nil, executor))
 	inst.SetBackend(&session.LocalBackend{})
 	worktreePath := filepath.Join(t.TempDir(), "worktree")

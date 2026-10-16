@@ -42,15 +42,18 @@ var errRenameTabFixedLabel = errors.New("Agent and Terminal tabs can't be rename
 // resting-liveness check covers the rest — a lost/dead row owns no runtime a
 // tab could spawn into, and reads liveness rather than LifecycleAction so a
 // fenced resting row (startup-unknown, mid-restore) is refused too (#4755
-// review): a picker that could never submit never opens.
-func tabPickerRefusal(selected *session.Instance) error {
+// review): a picker that could never submit never opens. kind is the tab
+// kind the caller would create — the post-submit recheck knows it, and the
+// pre-modal gate passes the spawn-required representative since every
+// choice this picker offers needs the local worktree (#5174 review).
+func tabPickerRefusal(selected *session.Instance, kind session.TabKind) error {
 	// The capability refusal outranks the resting one: an off-box backend
 	// (docker/ssh/hook) can never take a tab — a restore changes nothing —
 	// so it names the permanent reason, not the transient one (#4755 review).
 	if !selected.Capabilities().TabManagement {
 		return fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in")
 	}
-	if err := selected.TabSpawnBlocked(); err != nil {
+	if err := selected.TabSpawnBlocked(kind); err != nil {
 		return err
 	}
 	if selected.IsResting() {
@@ -74,7 +77,7 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 	// owns its own tab answer — refuse BEFORE the picker opens, since the
 	// picker could never submit (#4755's `t` dead end). The same goes for
 	// the other resting rows the footer withholds `t` from.
-	if err := tabPickerRefusal(selected); err != nil {
+	if err := tabPickerRefusal(selected, session.TabKindShell); err != nil {
 		return m, m.handleNotice(err)
 	}
 
@@ -139,7 +142,7 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	}
 	// Same gate as the picker, re-checked after the modal resolves its captured
 	// target: an archive or a pending swap can land while the picker is open.
-	if err := tabPickerRefusal(selected); err != nil {
+	if err := tabPickerRefusal(selected, kind); err != nil {
 		return m, m.handleNotice(err)
 	}
 

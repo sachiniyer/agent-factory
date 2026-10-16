@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -152,6 +153,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+		}
+		if errors.Is(err, tmux.ErrSpawnDirMissing) {
+			// Same missing-worktree verdict as the os.Stat gate above,
+			// reached on the TOCTOU between it and the spawn or on the
+			// post-spawn pane-dir check: the typed error is what the
+			// restore loop's WORKTREE_MISSING classification keys on (#5172).
+			return markRecoverRebuilt(rebuilt,
+				&WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err})
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}

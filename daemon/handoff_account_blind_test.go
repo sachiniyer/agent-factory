@@ -32,7 +32,7 @@ func TestHandoffAccountBlindAgentStaysInert(t *testing.T) {
 			missing.Stderr = []byte("can't find session: " + name)
 			vanished := false
 			inner := tabNameKeyedExec(map[string]bool{name: true})
-			executor := cmd_test.MockCmdExec{
+			executor := tabGenerationRecordingExec(cmd_test.MockCmdExec{
 				RunFunc: func(c *exec.Cmd) error {
 					if vanished && strings.Contains(c.String(), "has-session") {
 						return errors.New("session does not exist")
@@ -50,7 +50,7 @@ func TestHandoffAccountBlindAgentStaysInert(t *testing.T) {
 					}
 					return inner.Output(c)
 				},
-			}
+			})
 			inst.SetBackend(&session.LocalBackend{})
 			inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
 			_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})

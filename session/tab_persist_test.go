@@ -1,10 +1,12 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -52,6 +54,13 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 	for k, v := range alive {
 		existing[k] = v
 	}
+	// startDirs records each spawn's -c argument and reports it back on the
+	// pane_start_path query — exactly what a real tmux stores for a session it
+	// created — so Start's post-spawn dir check (#5172) reads the same answer
+	// a live server gives. gens does the same for the -e AF_SESSION_GEN
+	// marker, which Start's post-spawn ownership read asks for (#5174 review).
+	startDirs := map[string]string{}
+	gens := map[string]string{}
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -79,14 +88,38 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 				return assertNoSession
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
+				for i, a := range cmd.Args {
+					if a == "-c" && i+1 < len(cmd.Args) {
+						startDirs[n] = cmd.Args[i+1]
+					}
+					if a == "-e" && i+1 < len(cmd.Args) {
+						if g, ok := strings.CutPrefix(cmd.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+							gens[n] = g
+						}
+					}
+				}
 				return nil
 			case strings.Contains(s, "kill-session"):
 				delete(existing, n)
+				delete(startDirs, n)
+				delete(gens, n)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "show-environment") {
+				if g, ok := gens[nameOf(cmd)]; ok {
+					return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+				}
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				if d, ok := startDirs[nameOf(cmd)]; ok {
+					return []byte(d), nil
+				}
+				return nil, fmt.Errorf("no recorded start path for session %q", nameOf(cmd))
+			}
 			if pane, ok := finished[tmuxTarget(cmd)]; ok && existing[tmuxTarget(cmd)] {
 				if answer, ok := pane.answer(cmd); ok {
 					return []byte(answer), nil
@@ -108,6 +141,66 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 }
 
 var assertNoSession = &noSessionErr{}
+
+// generationRecordingExec wraps a tmux fixture exec so it stores each
+// new-session's `-e AF_SESSION_GEN=` marker — the way a real server keeps
+// session environment at creation — and answers the post-spawn ownership
+// read (`show-environment AF_SESSION_GEN`) with it, or with tmux's
+// absent-marker answer when the spawn carried none. Start re-reads that
+// marker to confirm the session answering its existence poll is the launch
+// it minted before inspecting or tearing down the pane (#5174 review), so
+// every fixture whose session survives the poll needs the channel modeled.
+// A fixture that deliberately stages a foreign occupant answers
+// show-environment itself and must not be wrapped.
+func generationRecordingExec(ex cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	var mu sync.Mutex
+	gens := map[string]string{}
+	record := func(c *exec.Cmd) {
+		s := c.String()
+		n := tmuxTarget(c)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(s, "new-session"):
+			for i, a := range c.Args {
+				if a == "-e" && i+1 < len(c.Args) {
+					if g, ok := strings.CutPrefix(c.Args[i+1], tmux.EnvMarkerGeneration+"="); ok {
+						gens[n] = g
+					}
+				}
+			}
+		case strings.Contains(s, "kill-session"):
+			delete(gens, n)
+		}
+	}
+	run := ex.RunFunc
+	ex.RunFunc = func(c *exec.Cmd) error {
+		record(c)
+		if run == nil {
+			return nil
+		}
+		return run(c)
+	}
+	out := ex.OutputFunc
+	ex.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
+		record(c)
+		if strings.Contains(c.String(), "show-environment") &&
+			strings.Contains(c.String(), tmux.EnvMarkerGeneration) {
+			mu.Lock()
+			g, ok := gens[tmuxTarget(c)]
+			mu.Unlock()
+			if !ok {
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
+			return []byte(tmux.EnvMarkerGeneration + "=" + g + "\n"), nil
+		}
+		if out == nil {
+			return nil, nil
+		}
+		return out(c)
+	}
+	return ex
+}
 
 type noSessionErr struct{}
 
@@ -135,8 +228,12 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	origExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	pty := persistPtyFactory{t: t, cmdExec: origExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "restart",
+		repoPath, worktreeDir, "restart",
 		"restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -218,8 +315,12 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-restart",
+		repoPath, worktreeDir, "account-restart",
 		"account-restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -312,8 +413,12 @@ func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 		return baseRun(cmd)
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-respawn",
+		repoPath, worktreeDir, "account-respawn",
 		"account-respawn-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -363,8 +468,12 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-refusal",
+		repoPath, worktreeDir, "account-refusal",
 		"account-refusal-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -423,7 +532,7 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 		TmuxName: legacyName, // legacy single-session field; NO Tabs
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"),
+			WorktreePath: t.TempDir(), // live worktree: reattach path (#5172)
 			SessionName:  "legacy",
 			BranchName:   "legacy-branch",
 		},

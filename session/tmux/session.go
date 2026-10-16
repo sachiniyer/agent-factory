@@ -241,6 +241,24 @@ type TmuxSession struct {
 	// behind it, and a teardown must gate on liveness for all of them. Only Start
 	// can establish otherwise, and only at the two points below.
 	provenNoPane bool
+	// spawnAttempted records that a Start reached the point of issuing tmux
+	// new-session — the boundary between "this Start error cannot have created
+	// an af pane" and "this Start error may have left one". Guarded by provenMu;
+	// cleared at the top of every Start, set only after the tracked launch
+	// process actually begins (#5174 review). It is the caller-side answer the
+	// pending-cleanup retention needs: a pre-attempt failure (a wedged probe, a
+	// spawn-dir refusal) never ran new-session, so the only session the name
+	// could possibly hold belongs to someone else.
+	spawnAttempted bool
+	// spawnGeneration records the AF_SESSION_GEN this TmuxSession stamped into
+	// new-session -e on its most recent spawn — the proof that a session
+	// answering under this name is THIS launch rather than a foreign actor that
+	// claimed the name after our pane exited before the existence poll ran
+	// (#5174 review). verifySpawnedPaneDir consults it before inspecting or
+	// tearing down; the kill path consults it before kill-session. Empty on
+	// objects that have only ever attached to or adopted a session, so those
+	// keep the pre-marker kill semantics. Guarded by provenMu.
+	spawnGeneration string
 	// closedConclusively records that closeAndWaitForPaneExit completed a
 	// conclusive non-blind close — the pane was observed to exit. It is scoped to
 	// the account-swap redundant-stop path: a redundant stopForAccountSwap can skip
@@ -320,6 +338,30 @@ var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 // a blocker that exits before the second probe leaves the name free while the
 // launch still never ran, which is a launch failure, not a finished flow.
 var ErrSessionNameTaken = errors.New("tmux session already exists")
+
+// ErrSpawnDirMissing marks a spawn refused or reverted because the requested
+// start directory is unusable: an empty path, a path that does not exist, a
+// path that is not a directory, or — checked after the spawn — a pane whose
+// recorded start directory is not the requested one. tmux answers an unusable
+// `new-session -c` by silently starting the pane in the SERVER's cwd instead of
+// failing, so an unchecked spawn can land an agent in the daemon's own working
+// directory while the session row reports ready (#5172). os.ErrNotExist rides
+// in the chain when the path is conclusively absent — that is what the daemon's
+// WORKTREE_MISSING classification keys on — and ErrSessionNotStarted rides
+// alongside whenever the spawn was refused outright or the misplaced pane was
+// conclusively killed.
+var ErrSpawnDirMissing = errors.New("spawn start directory missing")
+
+// ErrSpawnDirUnknown marks a spawn refused because the requested start
+// directory could not be positively verified: a stat error other than ENOENT.
+// Absence is not proven — a permission or I/O failure is not evidence the
+// worktree is gone — so callers must hold the row and retry rather than
+// declare it missing. ErrSessionNotStarted still rides alongside, since the
+// refusal happens before new-session runs. (The post-spawn pane-dir check is
+// deliberately NOT part of this class: a tmux that cannot report where the
+// pane is — pane_start_path is empty before tmux 3.4 — is skipped, never
+// torn down, per #5174 review.)
+var ErrSpawnDirUnknown = errors.New("spawn start directory state unknown")
 
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
 // session environment or default command could not be upgraded in place.
@@ -539,17 +581,62 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 // which means a create that fails while tmux is unreachable in an indeterminate way
 // still leaves a tombstone. That is the correct trade: a tombstone is recoverable
 // by the user, a worktree deleted under a running agent is not.
-func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
+//
+// The bool is THIS call's verdict — the only basis on which a caller may attach
+// ErrSessionNotStarted's cleanup authorization (#5174 review). The latch is the
+// same proof retained for teardown gating; it is deliberately never unset here
+// because a later unknown answer does not repeal an earlier proven absence.
+func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() bool {
 	exists, known, _ := probeSessionStrict(t.cmdExec, t.sanitizedName)
-	if known && !exists {
+	proven := known && !exists
+	if proven {
 		t.setProvenNoPane(true)
 	}
+	return proven
 }
 
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
 	t.provenMu.Unlock()
+}
+
+// SpawnAttempted reports whether this Start actually issued tmux new-session.
+// Callers that keep a cleanup handle for a failed spawn must check it: a
+// Start that never reached the launch could not have left an af pane behind
+// the name, so the handle would point the exact-name kill at a session some
+// other owner may hold (#5174 review).
+func (t *TmuxSession) SpawnAttempted() bool {
+	t.provenMu.Lock()
+	defer t.provenMu.Unlock()
+	return t.spawnAttempted
+}
+
+func (t *TmuxSession) setSpawnAttempted(attempted bool) {
+	t.provenMu.Lock()
+	t.spawnAttempted = attempted
+	t.provenMu.Unlock()
+}
+
+// setSpawnGeneration records the generation this Start stamped into
+// new-session -e. It is set alongside spawnAttempted — both describe the same
+// boundary, the tracked launch having reached the server — and cleared at the
+// top of every Start so a failed attempt never carries a stale identity into
+// the next one.
+func (t *TmuxSession) setSpawnGeneration(generation string) {
+	t.provenMu.Lock()
+	t.spawnGeneration = generation
+	t.provenMu.Unlock()
+}
+
+// currentSpawnGeneration returns the generation this TmuxSession's most recent
+// spawn stamped, or "" when this object never reached a launch (attach-only,
+// adopted, or a Start that failed before new-session). Empty means the kill
+// path has no af-minted identity to compare and keeps pre-marker semantics.
+func (t *TmuxSession) currentSpawnGeneration() string {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.spawnGeneration
 }
 
 func (t *TmuxSession) setClosedConclusively(closed bool) {

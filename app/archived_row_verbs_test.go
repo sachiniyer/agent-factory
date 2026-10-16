@@ -321,7 +321,7 @@ func TestTabPickerRefusal_PrefersCapabilityGate(t *testing.T) {
 	inst.SetBackend(capsBackend{Backend: session.NewFakeBackend(),
 		caps: session.Capabilities{TabManagement: false}})
 
-	err := tabPickerRefusal(inst)
+	err := tabPickerRefusal(inst, session.TabKindShell)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "only local sessions",
 		"the permanent capability refusal must outrank the restore hint")
