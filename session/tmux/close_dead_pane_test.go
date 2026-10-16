@@ -46,6 +46,25 @@ import (
 // #{pane_pid} is still the dead root's.
 func startHeldPane(t *testing.T, name, command string) {
 	t.Helper()
+	startHeldPaneWithHook(t, name, command, nil)
+}
+
+// startHeldPaneWithHookLag is startHeldPane with the pane-died hook's
+// increment delayed behind a blocking run-shell: pane_dead becomes
+// observable while @af_pane_deaths is still unset — the #5335 window,
+// measured on tmux 3.8.
+func startHeldPaneWithHookLag(t *testing.T, name, command string) {
+	t.Helper()
+	startHeldPaneWithHook(t, name, command,
+		[]string{`run-shell "sleep 0.5" ; ` + sessionenv.PaneDeathsHookCommand})
+}
+
+// startHeldPaneWithHook is startHeldPane with an optional pane-died hook
+// override: nil installs the production hook verbatim through
+// panePidStampArgs; anything else replaces sessionenv.PaneDeathsHookName
+// after the stamp lands, still before the pane is released to die.
+func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []string) {
+	t.Helper()
 	dir := t.TempDir()
 	release := filepath.Join(dir, "release")
 	script := filepath.Join(dir, "run.sh")
@@ -54,6 +73,11 @@ func startHeldPane(t *testing.T, name, command string) {
 	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, "sh "+strconv.Quote(script),
 		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
 	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
+	if hookOverride != nil {
+		require.NoError(t, exec.Command("tmux", append([]string{
+			"set-hook", "-p", "-t", exactTarget(name), sessionenv.PaneDeathsHookName},
+			hookOverride...)...).Run())
+	}
 	require.NoError(t, os.WriteFile(release, nil, 0o600))
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
 	require.Eventually(t, func() bool {
@@ -260,14 +284,9 @@ func heldPaneExec(t *testing.T, pid int, status, signal, deadTime string, killed
 	return deadPaneExec(t, strconv.Itoa(pid), strconv.Itoa(pid)+":0:/dev/pts/0", freshPane(), status, signal, deadTime, killed)
 }
 
-// deadPaneExec is heldPaneExec with independent control over the pid fields
-// and the pane's incarnation state: panePID is what #{pane_pid} expands to —
-// "" models tmux ≥3.8's held dead pane (#5319) — stamp is what the pane's
-// @af_pane_pid bundle answers ("" for a pane that was never recorded), and
-// state carries the freshness inputs: the deaths counter, the reported pty
-// name, and the stamped/recorded commands the server-side equality reads.
-func deadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
-	expand := strings.NewReplacer(
+// deadPaneExpand builds the row expander deadPaneExec answers with.
+func deadPaneExpand(panePID, stamp string, state paneState, status, signal, deadTime string) *strings.Replacer {
+	return strings.NewReplacer(
 		"#{pane_pid}", panePID,
 		"#{pane_dead}", "1",
 		"#{pane_dead_status}", status,
@@ -278,6 +297,16 @@ func deadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, 
 		"#{pane_tty}", state.tty,
 		paneCommandMatchField, state.cmdMatch(),
 	)
+}
+
+// deadPaneExec is heldPaneExec with independent control over the pid fields
+// and the pane's incarnation state: panePID is what #{pane_pid} expands to —
+// "" models tmux ≥3.8's held dead pane (#5319) — stamp is what the pane's
+// @af_pane_pid bundle answers ("" for a pane that was never recorded), and
+// state carries the freshness inputs: the deaths counter, the reported pty
+// name, and the stamped/recorded commands the server-side equality reads.
+func deadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	expand := deadPaneExpand(panePID, stamp, state, status, signal, deadTime)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(c.String(), "kill-session") && killed != nil {
@@ -288,6 +317,44 @@ func deadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, 
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
 			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
+			}
+			return nil, nil
+		},
+	}
+}
+
+// laggingDeathsExec is deadPaneExec whose deaths counter stays empty for the
+// first 150ms of row reads — pane_dead already visible while the queued
+// pane-died hook has not incremented @af_pane_deaths yet (#5335) — then
+// counts the death. The lag is wall-clock, not read-counted: the race is a
+// server-queue delay, and both the panePID read AND the later list-panes
+// capture have to see it for the window to matter.
+func laggingDeathsExec(t *testing.T, panePID, stamp string, state paneState, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	lagging := state
+	lagging.deaths = ""
+	lagExpand := deadPaneExpand(panePID, stamp, lagging, status, signal, deadTime)
+	liveExpand := deadPaneExpand(panePID, stamp, state, status, signal, deadTime)
+	var lagUntil time.Time
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "kill-session") && killed != nil {
+				*killed = true
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			s := c.String()
+			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+				expand := liveExpand
+				if strings.HasPrefix(c.Args[len(c.Args)-1], "#{pane_pid}") {
+					if lagUntil.IsZero() {
+						lagUntil = time.Now().Add(150 * time.Millisecond)
+					}
+					if time.Now().Before(lagUntil) {
+						expand = lagExpand
+					}
+				}
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
 			return nil, nil
@@ -445,6 +512,67 @@ func TestCloseAndWaitForPaneExit_RespawnedShimPaneStampStaysFresh(t *testing.T) 
 		"a survivor of a shim-respawned pane's dead root must be reaped through the restamped pid")
 }
 
+// #5335: tmux exposes pane_dead=1 before the queued pane-died hook has
+// incremented @af_pane_deaths, so a row read in that window shows a deaths
+// gap of 0 with every other pin intact — a hook still running, not a stale
+// record. The teardown must re-read the row until the counter lands rather
+// than refuse the fresh stamp.
+func TestCloseAndWaitForPaneExit_WaitsForTheDeathsHook(t *testing.T) {
+	shrinkReapWaits(t)
+	leaderPID, child := startDeadLeaderWithSessionChild(t)
+	killed := false
+	s := newTmuxSession(toTmuxName("dead-pane-hook-lag", ""), "sh", NewMockPtyFactory(t),
+		laggingDeathsExec(t, "", strconv.Itoa(leaderPID)+":0:/dev/pts/0", freshPane(), "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed, "the stamped dead pane's session must still be killed")
+	require.False(t, proctree.AliveSame(child),
+		"the dead root's kernel-session survivor must be reaped through the stamp once the hook lands")
+}
+
+// The same window held open forever — the counter never counts the death —
+// must still fail closed inside a bounded wait: a missing or clobbered
+// pane-died hook is exactly what a gap of 0 cannot distinguish from lag, so
+// the teardown waits, then refuses with the hook named.
+func TestCloseAndWaitForPaneExit_PendingStampRefusesWhenTheHookNeverLands(t *testing.T) {
+	shrinkReapWaits(t)
+	old := paneDeathsWait
+	paneDeathsWait = 200 * time.Millisecond
+	t.Cleanup(func() { paneDeathsWait = old })
+	killed := false
+	pending := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	s := newTmuxSession(toTmuxName("dead-pane-hook-missing", ""), "sh", NewMockPtyFactory(t),
+		deadPaneExec(t, "", "456:0:/dev/pts/0", pending, "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state)
+	require.True(t, killed, "kill-session still runs — refusal is about the process tree, not the session")
+	require.Contains(t, err.Error(), "pane-died",
+		"the refusal must name the counter that never counted the death")
+}
+
+// The #5335 race on real tmux, held open by the fixture: the pane-died hook
+// is delayed behind a blocking run-shell, so pane_dead=1 is observable while
+// @af_pane_deaths is still unset — the window CI hit (measured on tmux 3.8).
+// On tmux ≥3.8 the stamp is what the teardown consults, so this is the
+// end-to-end proof; on older tmux pane_pid still reports the root and the
+// stamp is unused, which makes the same run a no-op pass.
+func TestCloseAndWaitForPaneExit_DeathsHookLagOnRealTmux(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	name := fmt.Sprintf("af_test_deaths_lag_%d", time.Now().UnixNano())
+	startHeldPaneWithHookLag(t, name, "sh -c 'exit 7'")
+
+	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	requireSessionGone(t, name)
+}
+
 // A held dead pane that was never stamped — created by a pre-#5319 af, or not
 // created by af at all — reports nothing usable on tmux ≥3.8: pane_pid is
 // empty and @af_pane_pid is unset. Teardown must fail closed exactly as
@@ -485,7 +613,7 @@ func TestParsePaneRowStampedPid(t *testing.T) {
 		{"|1|71726000000|456:0:/dev/pts/0|1|/dev/pts/0|0", 0, true, true, "respawn"},       // command pin moved
 		{"|1|71726000000|456:0:/dev/pts/0|2|/dev/pts/0|1", 0, true, true, "respawn"},       // deaths gap > 1
 		{"|1|71726000000|456:0:/dev/pts/0|1|/dev/pts/9|1", 0, true, true, "respawn"},       // pty moved
-		{"|1|71726000000|456:0:/dev/pts/0|0|/dev/pts/0|1", 0, true, true, "respawn"},       // no death counted
+		{"|1|71726000000|456:0:/dev/pts/0|0|/dev/pts/0|1", 0, true, true, "pane-died"},     // no death counted — hook still queued
 		{"|1|71726000000|456:0|1|/dev/pts/0|1", 0, true, true, "respawn"},                  // two-part stamp: no pty pin
 		{"|1|71726000000|456|1|/dev/pts/0|1", 0, true, true, "respawn"},                    // pre-proof bare-pid stamp
 		{"|1|71726000000|456", 0, true, true, "respawn"},                                   // no freshness fields at all
@@ -512,15 +640,29 @@ func TestParsePaneRowStampedPid(t *testing.T) {
 // equal to pane_pid wherever tmux still reports it — and the freshness inputs
 // the dead row must satisfy are all present: one death counted, the pty
 // unchanged, the start command pinned.
+//
+// pane_dead is observable before the queued pane-died hook increments
+// @af_pane_deaths (#5335), so the row is re-read until the stamp's verdict is
+// fresh — the same condition teardown waits on — instead of expecting one
+// read to see the hook already landed.
 func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 	testguard.IsolateTmux(t)
 	name := fmt.Sprintf("af_test_dead_pane_stamp_%d", time.Now().UnixNano())
 	startHeldPane(t, name, "sh -c 'exit 7'")
 
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), paneRowFormat).Output()
-	require.NoError(t, err)
-	fields := strings.Split(strings.TrimSpace(string(out)), "|")
-	require.Len(t, fields, 7)
+	var fields []string
+	require.Eventually(t, func() bool {
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), paneRowFormat).Output()
+		if err != nil {
+			return false
+		}
+		fields = strings.Split(strings.TrimSpace(string(out)), "|")
+		if len(fields) != 7 {
+			return false
+		}
+		_, verdict := paneStampPID(fields[3], fields[4], fields[5], fields[6])
+		return verdict == stampFresh
+	}, 5*time.Second, 20*time.Millisecond, "the pane-died hook never counted this death")
 	require.Equal(t, "1", fields[1])
 	stampParts := strings.SplitN(fields[3], ":", 3)
 	require.Len(t, stampParts, 3, "the record must carry pid:deaths:tty, got %q", fields[3])
