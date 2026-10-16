@@ -361,10 +361,11 @@ For a wrapper payload the obvious move is to read its TypeScript interface. That
 is wrong in the dangerous direction: an interface says what is **possible**, and
 a client that never sends a field still passes.
 
-`TaskUpdate` declares seven options; the single call site
-(`web/src/index.ts:862`) sends `{ enabled }`. Reading the type credited the web
-with six options it cannot reach and reported parity over them. Reading the
-values it actually passes reports them as the gaps they are (#1935).
+`TaskUpdate` declares nine options, and neither call site sends them all: the
+edit form patches eight — every option except `enabled`, which the toggle owns —
+and the toggle (`toggleTask` in `web/src/index.ts`) sends `{ enabled }` alone.
+Reading the type credits each call site with fields it cannot reach; reading
+the values it actually passes reports reach honestly (#1935).
 
 ## "Could not check" is a third answer
 
