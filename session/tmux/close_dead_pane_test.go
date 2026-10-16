@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -360,6 +361,59 @@ func laggingDeathsExec(t *testing.T, panePID, stamp string, state paneState, sta
 	}
 }
 
+// uncollectedDeathsExec models the Ubuntu utempter failure mode the deaths
+// wait must survive: tmux marks pane_dead but never collects the root's exit
+// status — SIGCHLD lost in utempter's SIG_DFL window (#4682) — and pane-died,
+// which fires on collection rather than on pane_dead, never increments the
+// counter. The first run-shell nudge delivers the SIGCHLD that collects the
+// root; the status bundle and the deaths counter then land together.
+func uncollectedDeathsExec(t *testing.T, panePID, stamp string, state paneState, status, signal, deadTime string, killed *bool) cmd_test.MockCmdExec {
+	before := deadPaneExpand(panePID, stamp,
+		paneState{deaths: "", tty: state.tty, stampCmd: state.stampCmd, startCmd: state.startCmd}, "", "", "")
+	after := deadPaneExpand(panePID, stamp, state, status, signal, deadTime)
+	var collected bool
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			s := c.String()
+			if strings.Contains(s, "kill-session") && killed != nil {
+				*killed = true
+			}
+			if strings.Contains(s, "run-shell") {
+				collected = true
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			s := c.String()
+			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+				expand := before
+				if collected {
+					expand = after
+				}
+				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
+			}
+			return nil, nil
+		},
+	}
+}
+
+// The #4682 shape through the #5335 wait: pane_dead is up, the status bundle
+// is empty, and @af_pane_deaths stays unset — not a lagging hook, a death the
+// server never collected, so pane-died can never fire. panePID's nudge
+// delivers the SIGCHLD that collects the root; the hook then counts the death
+// and the stamp resolves fresh.
+func TestCloseAndWaitForPaneExit_NudgesTheServerToCountTheDeath(t *testing.T) {
+	shrinkReapWaits(t)
+	killed := false
+	s := newTmuxSession(toTmuxName("dead-pane-uncollected", ""), "sh", NewMockPtyFactory(t),
+		uncollectedDeathsExec(t, "", "456:0:/dev/pts/0", freshPane(), "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed, "kill-session still runs — the nudge heals the stamp, not the refusal")
+}
+
 // The mock form of the defect: a held dead pane reports a pid that is absent
 // from the process table. Refusing it made a finished process tab impossible to
 // archive or kill.
@@ -651,24 +705,42 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 	startHeldPane(t, name, "sh -c 'exit 7'")
 
 	var fields []string
+	var lastErr error
 	verdict := stampUnusable
+	nudges := 0
 	// pane_dead itself lands quickly; the hook is a queued tmux command and a
 	// loaded box can hold it for seconds, so this wait is deliberately longer
 	// than the production paneDeathsWait: the test is measuring that the hook
 	// lands at all, not how fast a teardown should give up waiting for it.
-	require.Eventually(t, func() bool {
+	// assert.Eventually reports its message eagerly, so the diagnosis is
+	// asserted separately below with the values the callback last saw.
+	gotFresh := assert.Eventually(t, func() bool {
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), paneRowFormat).Output()
 		if err != nil {
+			lastErr = err
 			return false
 		}
+		lastErr = nil
 		fields = strings.Split(strings.TrimSpace(string(out)), "|")
 		if len(fields) != 7 {
 			return false
 		}
+		// pane-died fires when the server collects the exit status, not on
+		// pane_dead: an Ubuntu-class tmux can lose the root's SIGCHLD in
+		// utempter's SIG_DFL window (#4682), which leaves dead with no
+		// status bundle and never runs the hook — ~1/4 of held deaths on a
+		// loaded 3.4. Teardown recovers by nudging the server (nudgeReap);
+		// the test does the same so it measures the counter, not the kernel
+		// race.
+		if fields[1] == "1" && fields[2] == "" && nudges < maxReapNudges {
+			nudges++
+			_ = exec.Command("tmux", "run-shell", "-b", "true").Run()
+		}
 		_, verdict = paneStampPID(fields[3], fields[4], fields[5], fields[6])
 		return verdict == stampFresh
-	}, 30*time.Second, 25*time.Millisecond,
-		"the pane-died hook never counted this death (last row %q, verdict %d)", fields, verdict)
+	}, 30*time.Second, 25*time.Millisecond)
+	require.True(t, gotFresh,
+		"the pane-died hook never counted this death (last row %q, verdict %d, err %v)", fields, verdict, lastErr)
 	require.Equal(t, "1", fields[1])
 	stampParts := strings.SplitN(fields[3], ":", 3)
 	require.Len(t, stampParts, 3, "the record must carry pid:deaths:tty, got %q", fields[3])

@@ -315,14 +315,26 @@ func paneRowHasNoPane(trimmed string) bool {
 // paneDeathsWait, and each read inside it by what is left of that wait, so a
 // hook that never runs converts back into the same bounded refusal a stale
 // stamp gets rather than holding the teardown.
+//
+// The wait also nudges the server, because pane-died fires when the exit
+// status is collected, not when pane_dead is marked: on an Ubuntu-class
+// tmux the root's own SIGCHLD can be lost in utempter's SIG_DFL window
+// (#4682), which leaves pane_dead set forever with no collection and no
+// hook — measured ~1/4 of held deaths on a loaded 3.4. On a server that
+// merely queued the hook the nudge is a harmless trivial job.
 func (t *TmuxSession) panePID() (paneRow, error) {
 	row, err := t.readPaneRow(tmuxCommandTimeout)
 	deadline := time.Now().Add(paneDeathsWait)
 	pause := 5 * time.Millisecond
+	nudges := 0
 	for errors.Is(err, errPaneStampPending) {
 		budget := time.Until(deadline)
 		if budget <= 0 {
 			break
+		}
+		if nudges < maxReapNudges {
+			nudges++
+			t.nudgeReap(budget)
 		}
 		time.Sleep(min(pause, budget))
 		pause = min(2*pause, 50*time.Millisecond)
@@ -531,8 +543,10 @@ var paneStatusWait = 2 * time.Second
 // — dead on every freshness input but the deaths counter. The pane-died hook
 // runs on tmux's command queue and pane_dead is observable first (#5335), so a
 // gap of 0 resolves to 1 within milliseconds on a healthy server; the bound
-// only matters when the hook is gone entirely. var, not const, so tests can
-// lower it.
+// only matters when the hook is gone entirely — including the Ubuntu-class
+// build that loses the root's SIGCHLD and never collects the death the hook
+// fires on (#4682), which panePID nudges the server out of first. var, not
+// const, so tests can lower it.
 var paneDeathsWait = 2 * time.Second
 
 // maxReapNudges caps how many times one probe nudges the server. One is enough
