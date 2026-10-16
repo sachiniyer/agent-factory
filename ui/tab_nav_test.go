@@ -39,22 +39,6 @@ func TestTabbedWindowJumpToTab(t *testing.T) {
 	require.Equal(t, 0, tw.GetActiveTab())
 }
 
-// TestTabbedWindowSelectNeighbor covers SelectTab (used to land on a neighbor
-// after a close), including its clamping.
-func TestTabbedWindowSelectNeighbor(t *testing.T) {
-	tw := newTestTabbedWindow()
-	setWindowInstance(tw, instanceWithTabs(4))
-
-	tw.SelectTab(2)
-	require.Equal(t, 2, tw.GetActiveTab())
-
-	// Out-of-range selections clamp into range rather than dangling.
-	tw.SelectTab(99)
-	require.Equal(t, 3, tw.GetActiveTab())
-	tw.SelectTab(-5)
-	require.Equal(t, 0, tw.GetActiveTab())
-}
-
 // TestTabbedWindowClampsActiveTabOnInstanceSwitch is the audit guard: switching
 // to an instance with fewer tabs must not leave activeTab pointing past the end
 // (which would make isAgentSlot() lie and capture a phantom slot).

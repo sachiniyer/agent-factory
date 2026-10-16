@@ -300,13 +300,6 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	return true
 }
 
-// SelectTab sets the pane's tab to idx, clamped into range. Used after a tab
-// close to land on a neighbor.
-func (w *TabbedWindow) SelectTab(idx int) {
-	w.setActiveTab(idx)
-	w.ClampActiveTab()
-}
-
 // tabLabels returns the labels for the bound instance's tabs. The label
 // derivation lives in tree.TabLabels (#1024 PR 3), shared with the sidebar tree
 // and the 1-9 jump keys. Never empty.
