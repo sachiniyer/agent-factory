@@ -160,8 +160,13 @@ type watcherSupervisor struct {
 	// because the per-home singleton lock it already holds is what makes
 	// "marked with a foreign generation" mean "orphaned". Test supervisors
 	// leave it false so a `go test` process can never signal a live same-home
-	// daemon's watchers.
+	// daemon's watchers. It also gates writing the home's watch child record
+	// file, the sweep's fallback ownership proof, for the same reason.
 	reapOrphans bool
+	// recordMu serializes the read-modify-write of this home's watch child
+	// record file (#5329, watcher_orphan_records.go); runOnce records from
+	// every watcher goroutine. Records are written only when reapOrphans is set.
+	recordMu sync.Mutex
 	// orphanSweepOnce runs that sweep in whichever reconcile comes first,
 	// before it spawns anything.
 	orphanSweepOnce sync.Once
@@ -559,6 +564,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 			_ = stderrW.Close()
 		}
 		return tail, err
+	}
+	if w.sup.reapOrphans {
+		// The ownership record a later daemon falls back on when the kernel
+		// withholds this child's environ (#5329). Best effort by design.
+		w.sup.recordWatchChild(w.taskID, cmd.Process.Pid)
 	}
 	if w.startedCh != nil {
 		w.startedOnce.Do(func() { close(w.startedCh) })

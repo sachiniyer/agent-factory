@@ -34,9 +34,17 @@ import (
 // The fix is ownership markers, never argv: every watch command is spawned with
 // AF_HOME (this daemon's canonical AF home) and AF_WATCH_GEN (a random token
 // minted once per daemon generation). /proc/<pid>/environ keeps a process's
-// initial environment through orphaning and reparenting, so the marker IS the
-// durable record — no state file to write, corrupt, or forget to delete. The
-// same scheme already authorizes tmux orphan reaping (session/tmux/envmarker.go).
+// initial environment through orphaning and reparenting, so the marker is a
+// durable record the orphan carries itself. The same scheme already authorizes
+// tmux orphan reaping (session/tmux/envmarker.go).
+//
+// Two proof channels feed the same candidate set. The environ markers are
+// primary. The fallback is a record af writes at spawn — leader pid, pgid,
+// start stamp, boot and PID namespace, generation — for kernels that withhold a
+// process's environment: SIP-enabled macOS does so for Apple platform binaries,
+// so a watch command made only of /bin/sh and /bin/sleep has no readable
+// member. A process whose environ the kernel will not show still cannot evade a
+// record af wrote itself (watcher_orphan_records.go).
 //
 // Why a foreign generation means "orphaned": RunDaemon holds the per-home
 // singleton lock before it arms anything, so at most one daemon generation of
@@ -78,9 +86,13 @@ import (
 // own descendants stay excluded: those are this generation's live children,
 // whatever stale marker an older binary may have let them inherit.
 //
-// The residual gap, stated so it is not rediscovered: a descendant that both
-// leaves the watch command's process group (setsid) AND scrubs its environment
-// carries no evidence we could act on. That is out of reach by design.
+// The residual gaps, stated so they are not rediscovered: a descendant that
+// both leaves the watch command's process group (setsid) AND scrubs its
+// environment carries no evidence we could act on; and where the kernel
+// withholds every member's environ, only the record channel applies, which
+// proves the group LEADER — if the leader has already exited, that group is
+// out of reach. Both are out of reach by design: guessing would mean signaling
+// processes we cannot prove are ours.
 
 // envWatchGeneration names the per-daemon-generation marker stamped into every
 // watch command's environment (#5329).
@@ -337,6 +349,11 @@ func (s *watcherSupervisor) findOrphanedWatchGroups() []*watchOrphanGroup {
 			g.taskIDs = append(g.taskIDs, id)
 		}
 	}
+
+	// Second channel: groups whose leader a previous generation recorded. Its
+	// candidates merge into the same map, so the infrastructure check and the
+	// TERM→KILL escalation below apply to both channels identically.
+	s.collectRecordedOrphans(snap, uid, ownPGID, byGroup)
 
 	if len(byGroup) == 0 {
 		return nil

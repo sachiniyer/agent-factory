@@ -299,6 +299,14 @@ type fakeOrphanProc struct {
 // signaled, and every signal-0 probe answers ESRCH so the wait ends at once.
 func sweepFakeTable(t *testing.T, home string, procs []fakeOrphanProc) []int {
 	t.Helper()
+	return sweepFakeTableWith(t, home, procs, nil)
+}
+
+// sweepFakeTableWith is sweepFakeTable with a hook that runs after every seam
+// is stubbed and before the sweep, so a test can see the supervisor (its
+// generation) or override a seam for one process.
+func sweepFakeTableWith(t *testing.T, home string, procs []fakeOrphanProc, before func(s *watcherSupervisor)) []int {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	s, _ := newTestSupervisor(t, staticTasks())
 	self := os.Getpid()
@@ -344,6 +352,9 @@ func sweepFakeTable(t *testing.T, home string, procs []fakeOrphanProc) []int {
 		}
 	}
 
+	if before != nil {
+		before(s)
+	}
 	s.sweepOrphanedWatchCommands()
 	return termed
 }
