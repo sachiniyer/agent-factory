@@ -39,6 +39,23 @@ func TestTabbedWindowJumpToTab(t *testing.T) {
 	require.Equal(t, 0, tw.GetActiveTab())
 }
 
+// TestTabbedWindowClampActiveTab covers ClampActiveTab directly: an index above
+// the last tab clamps to the last tab, and a negative index clamps to 0. This is
+// the only test that asserts ClampActiveTab's clamping (it is still live in
+// production, called after a tab close in home_panes).
+func TestTabbedWindowClampActiveTab(t *testing.T) {
+	tw := newTestTabbedWindow()
+	setWindowInstance(tw, instanceWithTabs(4))
+
+	tw.setActiveTab(99)
+	tw.ClampActiveTab()
+	require.Equal(t, 3, tw.GetActiveTab())
+
+	tw.setActiveTab(-5)
+	tw.ClampActiveTab()
+	require.Equal(t, 0, tw.GetActiveTab())
+}
+
 // TestTabbedWindowClampsActiveTabOnInstanceSwitch is the audit guard: switching
 // to an instance with fewer tabs must not leave activeTab pointing past the end
 // (which would make isAgentSlot() lie and capture a phantom slot).
