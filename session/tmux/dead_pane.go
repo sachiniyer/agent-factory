@@ -500,9 +500,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 			break
 		}
 		next, stillUncollected := t.readPaneExit(budget)
-		if !next.dead {
+		if !next.dead && exit.known {
 			// The root's exit is already established; a re-read that cannot
-			// confirm it (tmux failed, the session went away) must not undo it.
+			// confirm it (tmux failed, the session went away) must not undo
+			// it. A provisional pending reading — known=false — is no such
+			// established exit: a resolving re-read that reports the stamped
+			// pid still running answers live, and replaces it.
 			break
 		}
 		exit, uncollected = next, stillUncollected

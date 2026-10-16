@@ -255,6 +255,25 @@ func TestProbePaneExitWaitsOutAPendingStamp(t *testing.T) {
 	require.True(t, dead)
 }
 
+// A pending stamp that resolves to a root still running — pane_dead fired on
+// the terminal closing, not on the process ending — must replace the
+// provisional dead answer with a live one: known=true, dead=false, and
+// promptly rather than after paneStatusWait. An older draft of the pending
+// fold kept the provisional reading because the re-read loop only discarded
+// live answers while guarding an ESTABLISHED exit; a provisional one is not.
+func TestProbePaneExitPendingStampAcceptsALiveRoot(t *testing.T) {
+	fresh := paneState{deaths: "1", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	stamp := strconv.Itoa(os.Getpid()) + ":0:/dev/pts/0"
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-live", "true", nil,
+		laggingDeathsExec(t, "", stamp, fresh, "", "", "", nil))
+	start := time.Now()
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "the stamped pid is alive — pane_dead marked the closed terminal, not the root")
+	require.Less(t, time.Since(start), paneStatusWait,
+		"a resolving live answer must not burn the whole uncollected wait")
+}
+
 func TestProbePaneExitPendingStampStaysUnknown(t *testing.T) {
 	shrinkPaneStatusWait(t)
 	pending := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}

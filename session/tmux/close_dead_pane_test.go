@@ -346,14 +346,12 @@ func laggingDeathsExec(t *testing.T, panePID, stamp string, state paneState, sta
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
 			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+				if lagUntil.IsZero() {
+					lagUntil = time.Now().Add(150 * time.Millisecond)
+				}
 				expand := liveExpand
-				if strings.HasPrefix(c.Args[len(c.Args)-1], "#{pane_pid}") {
-					if lagUntil.IsZero() {
-						lagUntil = time.Now().Add(150 * time.Millisecond)
-					}
-					if time.Now().Before(lagUntil) {
-						expand = lagExpand
-					}
+				if time.Now().Before(lagUntil) {
+					expand = lagExpand
 				}
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
