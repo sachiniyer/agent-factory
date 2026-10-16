@@ -164,6 +164,12 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 	// hardened ownership rules — AF_HOME, uid, identity revalidation,
 	// self-chain — rather than a second scanner with its own answers. It runs
 	// once per capture, not once per pid-less pane.
+	// observedSessionID is the $id list-panes reported for this session —
+	// captured from any parsed row below, where every row of one query shares
+	// the session. The generation seed below reads markers through it rather
+	// than through the name so a same-named replacement cannot answer for the
+	// incarnation this capture described (#5319 review).
+	var observedSessionID string
 	var markedScan struct {
 		procs []proctree.Process
 		err   error
@@ -187,27 +193,36 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 					// every same-name AF_SESSION process, including a
 					// previous incarnation's leftovers, and re-seed the
 					// cohort from the very processes being considered for
-					// reaping (#5319 review).
-					generation, genFound, genErr := SessionGenerationMarker(cmdExec, sanitizedName)
-					switch {
-					case genErr != nil:
+					// reaping. The read binds to the observed $id, not the
+					// name: a name lookup after the session exits would
+					// silently answer for its replacement (#5319 review).
+					if observedSessionID == "" {
 						markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
-							"cannot read the generation of the session owning a pid-less dead pane: %w", genErr))
-					case genFound && generation != "":
-						generations.values[generation] = true
-					case !genFound:
-						// A session launched before AF_SESSION_GEN existed
-						// (or on tmux < 3.2) leaves only the legacy cohort —
-						// the same answer orphanGenerations gives a captured
-						// member carrying no generation marker.
-						generations.legacy = true
-					default:
-						// A present-but-empty marker matches nothing while
-						// survivors keep their nonempty stamps — malformed,
-						// not absent (#5319 review).
-						markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
-							"session %s carries an empty %s marker, so a pid-less dead pane's survivors cannot be attributed",
-							sanitizedName, EnvMarkerGeneration))
+							"session %s: list-panes reported no session_id, so a pid-less dead pane's generation cannot be bound to the observed incarnation",
+							sanitizedName))
+					} else {
+						generation, genFound, genErr := SessionGenerationMarkerForIncarnation(cmdExec, observedSessionID, sanitizedName)
+						switch {
+						case genErr != nil:
+							markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
+								"cannot read the generation of the session owning a pid-less dead pane: %w", genErr))
+						case genFound && generation != "":
+							generations.values[generation] = true
+						case !genFound:
+							// A session launched before AF_SESSION_GEN
+							// existed (or on tmux < 3.2) leaves only the
+							// legacy cohort — the same answer
+							// orphanGenerations gives a captured member
+							// carrying no generation marker.
+							generations.legacy = true
+						default:
+							// A present-but-empty marker matches nothing
+							// while survivors keep their nonempty stamps —
+							// malformed, not absent (#5319 review).
+							markedScan.err = errors.Join(markedScan.err, fmt.Errorf(
+								"session %s carries an empty %s marker, so a pid-less dead pane's survivors cannot be attributed",
+								sanitizedName, EnvMarkerGeneration))
+						}
 					}
 				}
 				refreshed, refreshErr := refreshOrphanCandidates(candidates, sanitizedName, &generations)
@@ -226,6 +241,9 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string, merg
 		if err != nil || (panePID <= 1 && !row.pidAbsent) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
+		}
+		if observedSessionID == "" {
+			observedSessionID = row.sessionID
 		}
 		if row.dead && row.pidAbsent {
 			// tmux ≥ 3.8 reports no pid for a held dead pane, so its marker
