@@ -161,6 +161,20 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		tab, err = instance.AddProcessTab(req.Command, req.Name)
 	}
 	if err != nil {
+		// A spawn that crossed the tmux boundary but could not be confirmed
+		// torn down stages an exact-name handle on the instance's
+		// pendingTabCleanup (#5174). That handle is the only record the
+		// startup sweep has to reap the survivor, and it lives in memory until
+		// the next successful mutation persists it — an unclean daemon exit in
+		// between strands the orphan and leaves its tmux name blocking later
+		// spawns. Persist before the error returns whenever handles are
+		// staged; a persist failure is reported but cannot withdraw the staged
+		// handle, so the spawn error still answers.
+		if len(instance.PendingTabCleanup()) > 0 {
+			if perr := persistInstanceData(repoID, instance.ToInstanceData()); perr != nil {
+				m.warn().Printf("CreateTab %q: spawn failed and persisting the retained cleanup handle failed too: %v", title, perr)
+			}
+		}
 		return CreateTabResponse{}, err
 	}
 

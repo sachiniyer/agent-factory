@@ -653,3 +653,91 @@ func TestStartPreservesFinishedPaneWhenPathStatUnverifiable(t *testing.T) {
 	assert.False(t, killed,
 		"an unverifiable pathname must not tear down the pane it cannot place")
 }
+
+// wrappedScrollbackExec is liveAfterSpawnExec with one difference: the
+// capture-pane arm models tmux's line wrapping. A pane narrower than the
+// refusal marker returns it split across physical lines, so the verdict can
+// only see it when the capture passes -J — tmux(1) documents -J as the flag
+// that joins wrapped lines. Without -J this fixture answers the wrapped
+// text: an answer that arrived (the channel is not unread) but that
+// strings.Contains cannot match (#5174 review).
+func wrappedScrollbackExec(t *testing.T, sessionName, joined, wrapped string, killed *bool) cmd_test.MockCmdExec {
+	t.Helper()
+	probed := false
+	return cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if *killed || !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				*killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "#{pane_pid}") && strings.Contains(s, "#{pane_dead}"):
+					// paneRowFormat — the teardown's dead row.
+					return []byte("98765|1|\n"), nil
+				case strings.Contains(s, "#{pane_dead}"):
+					return []byte("1\n"), nil
+				case strings.Contains(s, "#{pane_dead_status}"):
+					return nil, nil // tmux without the field expands it empty
+				}
+				return nil, nil
+			case strings.Contains(s, "capture-pane"):
+				for _, a := range cmd.Args {
+					if a == "-J" {
+						return []byte(joined), nil
+					}
+				}
+				return []byte(wrapped), nil
+			case strings.Contains(s, "list-panes"):
+				if *killed {
+					return nil, tmuxCantFindSessionError(t, sessionName)
+				}
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+}
+
+// TestStartTearsDownOnWrappedShimRefusalMarker is the scrollback read's
+// width hazard: a pane narrower than the marker splits it across lines, and
+// a capture without -J sees the pieces — answered but unmatched — which the
+// dead arm used to read as the shim having passed. With -J the joined
+// scrollback still carries the refusal line, so the pane convicts and is
+// torn down exactly like the unwrapped case.
+func TestStartTearsDownOnWrappedShimRefusalMarker(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("shim-refusal-wrapped", "")
+	marker := sessionenv.SpawnDirRefusalMarker
+	require.Greater(t, len(marker), 2)
+	joined := marker + ": chdir /x: permission denied\n"
+	wrapped := marker[:len(marker)/2] + "\n" + marker[len(marker)/2:] +
+		": chdir /x: permission denied\n"
+	require.NotContains(t, wrapped, marker,
+		"the fixture's wrap must actually split the marker, or the test proves nothing")
+
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		wrappedScrollbackExec(t, sessionName, joined, wrapped, &killed))
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed, "a joined scrollback refusal convicts the same as an unwrapped one")
+}

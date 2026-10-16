@@ -461,13 +461,15 @@ func (t *TmuxSession) paneLiveOrDeadNow() (live, dead bool) {
 // leaves the field empty there too, so the marker is what separates "the
 // shim refused to enter" from "the command ran and was signaled"). The pane
 // this session's only window holds is the one remain-on-exit retained, so
-// the session target reads it directly. The second result reports whether
-// the scrollback could be read at all: a failed capture answers (false,
-// false) — evidence that never arrived, which the caller treats as
+// the session target reads it directly. -J joins wrapped lines: a pane
+// narrower than the marker otherwise splits it across physical lines and
+// strings.Contains never sees it (#5174 review). The second result reports
+// whether the scrollback could be read at all: a failed capture answers
+// (false, false) — evidence that never arrived, which the caller treats as
 // inconclusive rather than as "no refusal" (#5174 review).
 func (t *TmuxSession) paneShowsSpawnDirRefusal() (refused, answered bool) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", exactTarget(t.sanitizedName))
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-t", exactTarget(t.sanitizedName))
 	cancel()
 	if err != nil {
 		return false, false

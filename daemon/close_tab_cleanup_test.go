@@ -303,3 +303,164 @@ func TestSweepStartupTabCleanup_RetiresConfirmedHandlesOnDisk(t *testing.T) {
 			"retry the finished teardown (%d handle(s) still on disk)", len(got))
 	}
 }
+
+// failingSpawnTabExec models a tmux server where the sibling's new-session
+// lands but its pane reads outside the worktree, and kill-session refuses to
+// reap the survivor — the exact orphan shape #5174 review retention exists
+// for: spawn attempted, verdict Missing, teardown unconfirmed.
+func failingSpawnTabExec(alive map[string]bool, unkillable map[string]bool, outsideCwd string) (cmd_test.MockCmdExec, func(string) bool) {
+	var mu sync.Mutex
+	existing := map[string]bool{}
+	for name, ok := range alive {
+		existing[name] = ok
+	}
+	nameOf := func(cmd *exec.Cmd) string {
+		for i, a := range cmd.Args {
+			switch {
+			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimPrefix(a, "-t=")
+			case strings.HasPrefix(a, "-s="):
+				return strings.TrimPrefix(a, "-s=")
+			}
+		}
+		return ""
+	}
+	mockExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			name := nameOf(cmd)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if existing[name] {
+					return nil
+				}
+				return &tabNoSessionErr{}
+			case strings.Contains(s, "new-session"):
+				existing[name] = true
+			case strings.Contains(s, "kill-session"):
+				if unkillable[name] {
+					return errors.New("kill-session refused")
+				}
+				delete(existing, name)
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "#{pane_pid}") && strings.Contains(s, "#{pane_dead}"):
+					// paneRowFormat — the teardown's live row.
+					return []byte("98765|0|0\n"), nil
+				case strings.Contains(s, "#{pane_current_path}"):
+					return []byte(outsideCwd + "\n"), nil
+				case strings.Contains(s, "#{pane_dead}"):
+					return []byte("0\n"), nil
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return nil, nil
+			}
+			return []byte("content"), nil
+		},
+	}
+	return mockExec, func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return existing[name]
+	}
+}
+
+// TestCreateTab_FailedSpawnPersistsRetainedCleanupHandle is the #5174 review
+// regression at the storage boundary: AddShellTab's unconfirmed-survivor
+// handle lives in memory until the next successful mutation persists the
+// instance, so a CreateTab that returns the spawn error without persisting
+// leaves the orphan untracked across an unclean daemon exit — no startup
+// sweep can reap it and its tmux name blocks later spawns. The error path
+// must persist the staged handle before it answers.
+func TestCreateTab_FailedSpawnPersistsRetainedCleanupHandle(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	agentName := "af_" + title + "_agent"
+	siblingName := agentName + "__shell"
+	// An existing directory outside the worktree: the placement walk resolves
+	// it to a foreign inode and convicts.
+	outside := t.TempDir()
+	mockExec, aliveFn := failingSpawnTabExec(
+		map[string]bool{agentName: true},
+		map[string]bool{siblingName: true},
+		outside)
+	startedLocalTabInstanceWithExec(t, manager, repo.ID, repoPath, title, agentName, mockExec)
+
+	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	if err == nil {
+		t.Fatal("CreateTab must fail: the pane spawned outside its worktree and teardown was refused")
+	}
+	if !aliveFn(siblingName) {
+		t.Fatal("precondition: the refused kill leaves the survivor live under its spawned name")
+	}
+
+	data := persistedInstance(t, repo.ID)
+	if len(data.PendingTabCleanup) != 1 {
+		t.Fatalf("persisted cleanup handles = %d, want 1: the unconfirmed survivor's name must reach "+
+			"the durable record even though the tab spawn failed", len(data.PendingTabCleanup))
+	}
+	if got := data.PendingTabCleanup[0].TmuxName; got != siblingName {
+		t.Fatalf("persisted cleanup handle names %q, want the spawned survivor %q", got, siblingName)
+	}
+}
+
+// TestCreateTab_FailedSpawnWithoutHandlePersistsNothing is the companion
+// negative: a spawn refused by the positive-existence gate (the sibling name
+// is already live) stages no handle — ErrSessionNameTaken wraps
+// ErrSessionNotStarted, and a name legitimately held by a live session is
+// never staged for the sweep's exact-name kill — so the error path must not
+// write a cleanup record at all.
+func TestCreateTab_FailedSpawnWithoutHandlePersistsNothing(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	agentName := "af_" + title + "_agent"
+	siblingName := agentName + "__shell"
+	// The derived sibling name is already live on the fixture's server: the
+	// spawn's existence gate refuses before new-session, so nothing af owns
+	// could be left behind it.
+	mockExec, _ := unkillableTabExec(
+		map[string]bool{agentName: true, siblingName: true}, nil)
+	startedLocalTabInstanceWithExec(t, manager, repo.ID, repoPath, title, agentName, mockExec)
+
+	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	if err == nil {
+		t.Fatal("CreateTab must fail: the derived sibling tmux name is already live")
+	}
+	data := persistedInstance(t, repo.ID)
+	if len(data.PendingTabCleanup) != 0 {
+		t.Fatalf("persisted cleanup handles = %d, want 0: a spawn that never reached "+
+			"new-session leaves nothing to reap, and a live session's name is never staged",
+			len(data.PendingTabCleanup))
+	}
+}
