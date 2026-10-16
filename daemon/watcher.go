@@ -30,7 +30,10 @@ import (
 //     truncated with a logged note
 //   - stderr appends to ~/.agent-factory/logs/task-<id>.log, size-capped by
 //     the same log_max_size_mb/log_max_backups rotation as the main log (#1062)
-//   - env: AF_TASK_ID, AF_TASK_NAME, AF_PROJECT_PATH
+//   - env: AF_TASK_ID, AF_TASK_NAME, AF_PROJECT_PATH, plus af's own ownership
+//     markers AF_HOME and AF_WATCH_GEN so a restarted daemon can reap the
+//     watch commands an uncleanly-killed predecessor left running (#5329,
+//     see watcher_orphans.go)
 //   - exit 0 = intentional stop (status "stopped"); non-zero = restart with
 //     exponential backoff
 //   - ≥5 non-zero exits within 10 minutes = crash loop (status "errored",
@@ -147,6 +150,21 @@ type watcherSupervisor struct {
 	drainBaseBackoff time.Duration
 	drainMaxBackoff  time.Duration
 	queueMaxAge      time.Duration
+
+	// generation is this supervisor's AF_WATCH_GEN token, stamped into every
+	// watch command it spawns so a later daemon can tell them apart from its
+	// own (#5329).
+	generation string
+	// reapOrphans enables the once-per-generation sweep of watch commands a
+	// previous daemon generation left running (#5329). Only RunDaemon sets it,
+	// because the per-home singleton lock it already holds is what makes
+	// "marked with a foreign generation" mean "orphaned". Test supervisors
+	// leave it false so a `go test` process can never signal a live same-home
+	// daemon's watchers.
+	reapOrphans bool
+	// orphanSweepOnce runs that sweep in whichever reconcile comes first,
+	// before it spawns anything.
+	orphanSweepOnce sync.Once
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
@@ -178,6 +196,7 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		drainBaseBackoff: watcherDrainBaseBackoff,
 		drainMaxBackoff:  watcherDrainMaxBackoff,
 		queueMaxAge:      watcherQueueMaxAge,
+		generation:       newWatchGeneration(),
 	}
 }
 
@@ -468,11 +487,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	tail := &tailBuffer{}
 	cmd := systemdunit.NewBoundChildCommand(w.sup.shell, "-c", w.cmdStr)
 	cmd.Dir = w.dir
-	cmd.Env = append(os.Environ(),
-		"AF_TASK_ID="+w.taskID,
-		"AF_TASK_NAME="+w.name,
-		"AF_PROJECT_PATH="+w.dir,
-	)
+	cmd.Env = w.sup.watchChildEnv(w.taskID, w.name, w.dir)
 	// Own process group so the whole tree — including grandchildren the
 	// script backgrounded with `&` or `disown` — can be signaled together,
 	// mirroring the post-worktree hook runner (#610, #769).

@@ -386,6 +386,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
+	// Only RunDaemon reaps orphaned watch commands (#5329): the per-home
+	// singleton lock this daemon already holds is what makes a watch command
+	// marked with a foreign generation an orphan rather than a sibling
+	// daemon's live work. Test supervisors leave this off so a `go test`
+	// process can never signal a live same-home daemon's watchers.
+	watchers.reapOrphans = true
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 
 	shutdownCh := make(chan struct{})
