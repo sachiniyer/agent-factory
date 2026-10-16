@@ -1291,7 +1291,7 @@ func TestCloseRefusesToKillANameClaimedByAnotherGeneration(t *testing.T) {
 	// generation, the same close tears it down as before.
 	killed = false
 	flipped = false
-	state, err = session.Close()
+	_, err = session.Close()
 	require.NoError(t, err)
 	require.True(t, killed,
 		"the matching-marker session is still this launch's and closes normally")
