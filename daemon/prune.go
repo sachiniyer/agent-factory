@@ -246,7 +246,11 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 	var skips []config.RepoInstancesSkip
 	if req.All {
 		var err error
-		rows, skips, err = config.LoadAllRepoInstancesReportingSkipDetails()
+		// Silent form: inside the daemon the default loader's warning is a
+		// log-file write in AF home, which the read-only run must not cause
+		// — the skip detail already reaches the caller through warnings
+		// (#5136 Codex round 12).
+		rows, skips, err = config.LoadAllRepoInstancesReportingSkipDetailsSilent()
 		if err != nil {
 			return nil, []string{fmt.Sprintf("could not enumerate repo session records for ghost detection: %v", err)}
 		}
