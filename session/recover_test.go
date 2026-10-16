@@ -253,8 +253,10 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	}
 	t.Cleanup(func() { restoreTmuxSession = prev })
 
-	// Worktree path deliberately NOT created.
-	restored, err := FromInstanceData(deadInstanceData(t, Lost, agentName, shellName))
+	// Worktree path deliberately absent.
+	data := deadInstanceData(t, Lost, agentName, shellName)
+	require.NoError(t, os.RemoveAll(data.Worktree.WorktreePath))
+	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 
 	err = restored.Recover()
