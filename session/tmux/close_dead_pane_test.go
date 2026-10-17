@@ -774,6 +774,50 @@ func startDeadLeaderWithSessionChild(t *testing.T) (leaderPID int, child proctre
 	return cmd.Process.Pid, child
 }
 
+// startDeadLeaderWithSetsidChild spawns a setsid'd child that carries this
+// session's AF_SESSION/AF_HOME markers, then exits a short-lived leader whose
+// pid the test reports as the dead pane's root. The child calls setsid(2) (via
+// SysProcAttr), so it holds its own SID — invisible to SessionMembers — and
+// /proc/<pid>/environ preserves the markers it inherited, so a marker scan
+// finds it. This is the setsid() escapee the reaper was built to catch: after
+// the pane root is reaped the helper is reparented to init, and neither the
+// SID scan nor any ppid walk can recover it. Returns (leaderPID, child).
+func startDeadLeaderWithSetsidChild(t *testing.T, sessionName string) (leaderPID int, child proctree.Process) {
+	t.Helper()
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	// The child calls setsid() (via SysProcAttr, so this works on macOS too),
+	// publishes its PID, and stays alive — the exact shape of a pane command's
+	// setsid'd helper after the pane root is reaped.
+	childCmd := exec.Command("sh", "-c",
+		"echo $$ > \"$1\"; exec sleep 300 </dev/null >/dev/null 2>&1", "sh", childFile)
+	childCmd.Env = append(os.Environ(),
+		EnvMarkerSession+"="+sessionName,
+		EnvMarkerHome+"="+home)
+	childCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, childCmd.Start())
+	childPID := readPIDFile(t, childFile)
+	child = processIdentity(t, childPID)
+	require.Equal(t, childPID, child.SID,
+		"the fixture must leave the survivor with its own SID (setsid'd)")
+	// The leader is a short-lived process whose pid the test reports as the
+	// dead pane's root. It exits immediately so it is absent from the
+	// process-table snapshot — the state tmux reaches after reaping the root.
+	leaderCmd := exec.Command("sh", "-c", "exit 7")
+	leaderCmd.Env = append(os.Environ(),
+		EnvMarkerSession+"="+sessionName,
+		EnvMarkerHome+"="+home)
+	require.NoError(t, leaderCmd.Start())
+	leaderPID = leaderCmd.Process.Pid
+	_ = leaderCmd.Wait()
+	require.NotEqual(t, leaderPID, child.SID,
+		"the fixture must leave the survivor with its own SID, not the dead leader's")
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	return leaderPID, child
+}
+
 // startStranger starts a process the teardown under test must leave alone.
 //
 // It leads its own kernel session, and that is a safety property rather than
@@ -807,4 +851,97 @@ func readPIDFile(t *testing.T, path string) int {
 		return err == nil && pid > 1
 	}, 3*time.Second, 20*time.Millisecond)
 	return pid
+}
+
+// A setsid'd helper that escaped the SID scan must be found by the marker scan
+// and reaped through it. This is the setsid() escapee the reaper was built to
+// catch: the pane command started a helper with setsid(), the root was reaped,
+// and the helper holds its own SID (invisible to SessionMembers) while still
+// carrying AF_SESSION/AF_HOME in its environ (visible to a marker scan).
+// Without the fix, deadPaneProcesses returned an empty set with a nil error
+// for this case, and the worktree was deleted underneath the live helper.
+func TestCloseAndWaitForPaneExit_DeadPaneReapsSetsidSurvivor(t *testing.T) {
+	shrinkReapWaits(t)
+	name := toTmuxName("dead-pane-setsid", "")
+	leaderPID, child := startDeadLeaderWithSetsidChild(t, name)
+	killed := false
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneExec(t, "", strconv.Itoa(leaderPID)+":0:/dev/pts/0", freshPane(), "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed, "the dead pane's session must still be killed")
+	require.False(t, proctree.AliveSame(child),
+		"a setsid'd helper that escaped the SID scan must be reaped through the marker scan")
+}
+
+// The marker scan must not adopt a process from another session: AF_SESSION
+// scoping is what keeps a same-named stranger from a different af session
+// from being reaped as a survivor of this dead pane.
+func TestCloseAndWaitForPaneExit_DeadPaneDoesNotReapStrangerFromOtherSession(t *testing.T) {
+	shrinkReapWaits(t)
+	name := toTmuxName("dead-pane-setsid-other-session", "")
+	leaderPID, child := startDeadLeaderWithSetsidChild(t, name)
+	stranger := startStranger(t, []string{EnvMarkerSession + "=af_someone_else"})
+	killed := false
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneExec(t, "", strconv.Itoa(leaderPID)+":0:/dev/pts/0", freshPane(), "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed)
+	require.False(t, proctree.AliveSame(child),
+		"the dead pane's own setsid'd helper must be reaped")
+	require.True(t, proctree.AliveSame(stranger),
+		"a process marked for another session must not be reaped")
+}
+
+// The marker scan must not adopt a process from another agent-factory home:
+// AF_HOME scoping is what keeps a same-named session from a temp/dev install
+// from being reaped as a survivor of this dead pane.
+func TestCloseAndWaitForPaneExit_DeadPaneDoesNotReapStrangerFromOtherHome(t *testing.T) {
+	shrinkReapWaits(t)
+	name := toTmuxName("dead-pane-setsid-other-home", "")
+	leaderPID, child := startDeadLeaderWithSetsidChild(t, name)
+	stranger := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + t.TempDir(),
+	})
+	killed := false
+	s := newTmuxSession(name, "sh", NewMockPtyFactory(t),
+		deadPaneExec(t, "", strconv.Itoa(leaderPID)+":0:/dev/pts/0", freshPane(), "7", "", "1726000000", &killed))
+
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.True(t, killed)
+	require.False(t, proctree.AliveSame(child),
+		"the dead pane's own setsid'd helper must be reaped")
+	require.True(t, proctree.AliveSame(stranger),
+		"a process from another agent-factory home must not be reaped")
+}
+
+// deadPaneMarkerSurvivors directly: a setsid'd child carrying this session's
+// markers is found, and a stranger carrying a different session's markers (or
+// no markers at all) is not.
+func TestDeadPaneMarkerSurvivors_FindsSetsidHelperNotStranger(t *testing.T) {
+	name := toTmuxName("dead-pane-marker-scan", "")
+	leaderPID, child := startDeadLeaderWithSetsidChild(t, name)
+	otherSession := startStranger(t, []string{EnvMarkerSession + "=af_someone_else"})
+	noMarker := startStranger(t, nil)
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+
+	survivors, err := deadPaneMarkerSurvivors(snap, name)
+	require.NoError(t, err)
+	require.Len(t, survivors, 1, "only the setsid'd helper carrying this session's markers should be found")
+	require.Contains(t, []int{survivors[0].PID}, child.PID)
+	require.True(t, proctree.AliveSame(otherSession), "a stranger from another session must not be found")
+	require.True(t, proctree.AliveSame(noMarker), "an unmarked stranger must not be found")
+	// leaderPID is the dead leader — it should not be in the snapshot at all.
+	_, leaderPresent := snap[leaderPID]
+	require.False(t, leaderPresent, "the dead leader must be absent from the snapshot")
 }
