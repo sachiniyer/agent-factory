@@ -26,11 +26,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:260 ListBackends -> web/src/backends.ts renders the picker"
+        "pointer": "web/src/api.ts:388 ListBackends -> web/src/backends.ts renders the picker"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:332 ListBackends"
+        "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:567 ListBackends"
       },
       "verdict": "parity",
       "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally — which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view — a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
@@ -67,7 +67,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:580-581 --json (persistent on sessions/tasks/projects); per-command on config/token/daemon/api/bug-report"
+        "pointer": "api/api.go:645-646,755 --json (persistent on sessions/tasks/projects); per-command on config/token/daemon/api/bug-report"
       },
       "verdict": "deliberate",
       "notes": "An output FORMAT for scripts consuming stdout, not a product capability. The UIs render the same data as pixels; there is nothing for --json to mean there."
@@ -99,7 +99,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/config.ts:447 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
+        "pointer": "web/src/config.ts:446 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
       },
       "cli": {
         "status": "no",
@@ -132,15 +132,15 @@
       "title": "Read global config",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:267 (,) config_editor -> ui/config_target.go:62 ReadConfigForEditor (the local manifest, or the targeted daemon's GetConfig)"
+        "pointer": "keys/keys.go:320 (,) config_editor -> ui/config_target.go:61 ReadConfigForEditor (the local manifest, or the targeted daemon's GetConfig)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:475 GetConfig"
+        "pointer": "web/src/api.ts:1164 GetConfig"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configcmd.go:140,170 config get/list"
+        "pointer": "commands/configcmd.go:280,410 config get/list"
       },
       "verdict": "parity",
       "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes. #3708 routed the TUI read through the daemon's GetConfig when --daemon-url/AF_DAEMON_URL names one, so all three surfaces now answer about the SAME machine; `af config get`/`list` stay local-only by #3661's decision, which is about what those verbs claim to resolve rather than about what the daemon serves."
@@ -223,15 +223,15 @@
       "title": "Set a global config key",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:267 (,) config_editor -> ui/config_target.go:114 applyingConfigSet (the local control socket, or the targeted daemon's SetConfigValue)"
+        "pointer": "keys/keys.go:320 (,) config_editor -> ui/config_target.go:113 applyingConfigSet (the local control socket, or the targeted daemon's SetConfigValue)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:487 SetConfigValue"
+        "pointer": "web/src/api.ts:1176 SetConfigValue"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configcmd.go:193 config set"
+        "pointer": "commands/configcmd.go:506 config set"
       },
       "verdict": "parity",
       "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 — together with its read, which had to move at the same time or the editor would write values it never read."
@@ -286,7 +286,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/daemoncmd.go:66,83,189,220; commands/daemonadoptcmd.go:45"
+        "pointer": "commands/daemoncmd.go:27,70,87,371,402; commands/daemonadoptcmd.go:45"
       },
       "verdict": "deliberate",
       "notes": "Both UIs are clients OF the daemon: the web is served BY it (a web button to stop the daemon would kill the page), and the TUI needs it running to render. Host-lifecycle control belongs to the CLI."
@@ -296,7 +296,7 @@
       "title": "Point a client at a remote daemon (URL + bearer token)",
       "tui": {
         "status": "yes",
-        "pointer": "commands/root.go:267,274 persistent --daemon-url/--token (inherited by the TUI launch)"
+        "pointer": "commands/root.go:386,393 persistent --daemon-url/--token (inherited by the TUI launch)"
       },
       "web": {
         "status": "n/a",
@@ -304,7 +304,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:267,274 --daemon-url/--token"
+        "pointer": "commands/root.go:386,393 --daemon-url/--token"
       },
       "verdict": "deliberate",
       "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction — it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
@@ -332,7 +332,7 @@
       "title": "Offer the full set of agent programs af supports",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_input.go:121-123 reads tmux.SupportedPrograms"
+        "pointer": "app/handle_input.go:247-249 reads tmux.SupportedPrograms"
       },
       "web": {
         "status": "yes",
@@ -340,7 +340,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:246 + api/api.go:586 advertise tmux.SupportedProgramsString()"
+        "pointer": "commands/root.go:362 + api/api.go:651 advertise tmux.SupportedProgramsString()"
       },
       "verdict": "parity",
       "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src — the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
@@ -376,7 +376,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/doctorcmd.go:21"
+        "pointer": "commands/doctorcmd.go:34"
       },
       "verdict": "deliberate",
       "notes": "Diagnoses the host install, including the case where the daemon is down — exactly when neither UI can run."
@@ -394,7 +394,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/reset.go:122"
+        "pointer": "commands/reset.go:170"
       },
       "verdict": "deliberate",
       "notes": "Destroys the state both UIs are rendering, daemon included. Owner-locked as a typed-confirmation CLI op (#1736)."
@@ -412,7 +412,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/upgrade.go:105"
+        "pointer": "commands/upgrade.go:104"
       },
       "verdict": "deliberate",
       "notes": "Replaces the running binary; cannot be driven from a client the binary is serving."
@@ -422,7 +422,7 @@
       "title": "Discover version, keys, API catalog, debug paths, and built-in help",
       "tui": {
         "status": "partial",
-        "pointer": "keys/keys.go:150 (?) help overlay"
+        "pointer": "keys/keys.go:275 (?) help overlay"
       },
       "web": {
         "status": "no",
@@ -430,7 +430,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:139,166,175; api/apicmd.go:25"
+        "pointer": "commands/root.go:173,201,210; api/apicmd.go:26"
       },
       "verdict": "deliberate",
       "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking — see docs/dev/surface-parity.md."
@@ -496,15 +496,15 @@
       "title": "Delete a project (archive its sessions, drop the grouping)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:162 (D on projects focus) -> app/switch_project.go:223"
+        "pointer": "keys/keys.go:305 (D on projects focus) -> app/switch_project.go:602"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:304 deleteProject"
+        "pointer": "web/src/api.ts:663 deleteProject"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go:25 projectsDeleteCmd"
+        "pointer": "api/projects.go:125 projectsDeleteCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -552,15 +552,15 @@
       "title": "Scope the view to one project",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:172 (ctrl+p)"
+        "pointer": "keys/keys.go:321 (ctrl+p)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/ui.ts:1047 switchProject"
+        "pointer": "web/src/ui.ts:2039 switchProject"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:572 --repo (per-invocation scoping)"
+        "pointer": "api/api.go:637-638 --repo (per-invocation scoping)"
       },
       "verdict": "parity",
       "notes": "The CLI expresses this as per-command --repo scoping rather than sticky state."
@@ -626,15 +626,15 @@
       "title": "Archive a session (restorable)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:147 (a) -> app/handle_actions.go:305"
+        "pointer": "keys/keys.go:260 (a) -> app/handle_actions.go:305"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:287 archiveSession"
+        "pointer": "web/src/api.ts:494 archiveSession"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:741 sessionsArchiveCmd"
+        "pointer": "api/sessions_lifecycle.go:78 sessionsArchiveCmd"
       },
       "verdict": "parity",
       "notes": "Reachable everywhere. Restorable everywhere too as of #1932 — see session.restore, which closed the web's archive-only one-way door."
@@ -644,15 +644,15 @@
       "title": "Attach to a session's terminal",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:143 (o) -> app/handle_actions.go:712"
+        "pointer": "keys/keys.go:256 (o) -> app/handle_actions.go:828"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts:205-223 (WS /v1/sessions/{id}/stream)"
+        "pointer": "web/src/stream_endpoint.ts:38 sessionStreamEndpoint + web/src/terminal.ts:1272-1274 (WS /v1/sessions/{id}/stream)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:854 sessionsAttachCmd"
+        "pointer": "api/sessions.go:737 sessionsAttachCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -662,15 +662,15 @@
       "title": "Create a session",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:145 (n) -> app/handle_input.go:181"
+        "pointer": "keys/keys.go:258 (n) -> app/handle_input.go:339"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:251 createSession"
+        "pointer": "web/src/api.ts:414 createSession"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:245 sessionsCreateCmd"
+        "pointer": "api/sessions.go:372 sessionsCreateCmd"
       },
       "verdict": "parity",
       "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows — no surface is a superset of another."
@@ -703,11 +703,11 @@
       },
       "web": {
         "status": "no",
-        "pointer": "web/src/api.ts:251-264 never sends in_place"
+        "pointer": "web/src/api.ts:414-437 never sends in_place"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:587-588 --here / --in-place"
+        "pointer": "api/api.go:653-654 --here / --in-place"
       },
       "verdict": "unclear",
       "notes": "CLI-only. Plausibly deliberate: --here is a scripting affordance for 'run an agent right here in my checkout', and the TUI/web are worktree-oriented session managers. Needs an owner call before filing."
@@ -717,15 +717,15 @@
       "title": "Choose the agent program at create time",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_input.go:119-134 (Tab -> stateSelectProgram)"
+        "pointer": "app/handle_input.go:245-259 (Tab -> stateSelectProgram)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/modals.ts:170-175 programSelect"
+        "pointer": "web/src/modals.ts:133 programSelect"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:586 --program"
+        "pointer": "api/api.go:651 --program"
       },
       "verdict": "parity",
       "notes": ""
@@ -739,11 +739,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/modals.ts:177 promptArea -> web/src/api.ts:258"
+        "pointer": "web/src/modals.ts:370 promptArea -> web/src/api.ts:419"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:585 --prompt"
+        "pointer": "api/api.go:650 --prompt"
       },
       "verdict": "parity",
       "issue": "#1936",
@@ -773,15 +773,15 @@
       "title": "Set the new session's title",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_input.go:135-158 (typed during stateNew)"
+        "pointer": "app/handle_input.go:279-303 (typed during stateNew)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/modals.ts:148 titleInput"
+        "pointer": "web/src/modals.ts:100 titleInput"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:584 --name (required)"
+        "pointer": "api/api.go:649 --name (required)"
       },
       "verdict": "parity",
       "notes": "TUI/web send title_base so the daemon auto-suffixes collisions; the CLI sends title and errors on collision instead."
@@ -799,7 +799,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:288 sessionsGetCmd"
+        "pointer": "api/sessions.go:301 sessionsGetCmd"
       },
       "verdict": "deliberate",
       "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen. Its payload is the same self-describing session object `list` emits (see session.list; #3631 added status_name/liveness_name/tabs[].kind_name), and the ambiguity-widening `warnings` member of the --json form rides beside it."
@@ -828,15 +828,15 @@
       "title": "Permanently destroy a session",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:146 (D) -> app/handle_actions.go:149"
+        "pointer": "keys/keys.go:259 (D) -> app/handle_actions.go:166"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:281 killSession"
+        "pointer": "web/src/api.ts:485 killSession"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:703 sessionsKillCmd"
+        "pointer": "api/sessions_lifecycle.go:20 sessionsKillCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -846,7 +846,7 @@
       "title": "Resume a session blocked at a usage-limit wall",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:169 (c) -> app/handle_actions.go:482 handleLimitRetry -> app/session_control.go:197"
+        "pointer": "keys/keys.go:262 (c) -> app/handle_actions.go:495 handleLimitRetry -> app/session_control.go:197"
       },
       "web": {
         "status": "yes",
@@ -888,11 +888,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:179 fetchSnapshot"
+        "pointer": "web/src/api.ts:305 fetchSnapshot"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:221 sessionsListCmd"
+        "pointer": "api/sessions.go:234 sessionsListCmd"
       },
       "verdict": "parity",
       "notes": "Every surface renders the same daemon Snapshot. The CLI half is the SCRIPTING shape of it, so #3631 made that payload self-describing: `status`, `liveness` and `tabs[].kind` keep their integer types (external scripters already decode them as numbers, and retyping a public field is not a bug fix) and each gained an always-present string twin — `status_name`, `liveness_name`, `tabs[].kind_name` — derived at encode time from the SAME vocabulary tables the `--status` filter and `tab_kinds[].kind` already used (session/state_names.go). The TUI and web are unaffected by construction: they render state as glyphs and rows from the typed struct, never from these words, so this is a wire-shape property of one shared payload rather than a capability a surface can lack."
@@ -929,7 +929,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:640 sessionsPreviewCmd"
+        "pointer": "api/sessions.go:582 sessionsPreviewCmd"
       },
       "verdict": "parity",
       "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
@@ -979,7 +979,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts:205-223 streams any tab via tab_id"
+        "pointer": "web/src/stream_endpoint.ts:45-46 streams any tab via tab_id"
       },
       "cli": {
         "status": "yes",
@@ -993,7 +993,7 @@
       "title": "Restore an archived, Lost, or Dead session",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:148 (r) -> app/session_control.go:172"
+        "pointer": "keys/keys.go:261 (r) -> app/session_control.go:237"
       },
       "web": {
         "status": "yes",
@@ -1001,7 +1001,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:823 sessionsRestoreCmd"
+        "pointer": "api/sessions_lifecycle.go:185 sessionsRestoreCmd"
       },
       "verdict": "parity",
       "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door. The retained TUI and web actions send RestoreSession's stable id so a confirmation/background command cannot retarget a same-title replacement; the one-shot CLI deliberately keeps its repo-scoped title contract. RestoreSession also recovers Lost/Dead rows, giving every surface the same recovery off-ramp."
@@ -1015,11 +1015,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts:225 onData + :233 attachCustomKeyEventHandler"
+        "pointer": "web/src/terminal.ts:673 onData + :691 attachCustomKeyEventHandler"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:346 sendPromptCmd"
+        "pointer": "api/sessions_sendprompt.go:103 sessionsSendPromptCmd"
       },
       "verdict": "parity",
       "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport. In the agent tab, the web maps bare Shift+Enter to LF/Ctrl+J for a multiline composer while plain Enter remains the submitting CR; shell/process tabs retain xterm's native Enter handling."
@@ -1037,7 +1037,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:594-596 --all/--all-repos/--include-root"
+        "pointer": "api/api.go:678-680 --all/--all-repos/--include-root"
       },
       "verdict": "deliberate",
       "notes": "A fan-out scripting verb with no interactive analogue: broadcasting to every live session is a batch operation, and both UIs are single-selection by construction."
@@ -1047,15 +1047,15 @@
       "title": "Close a tab",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:157 (w) -> app/handle_actions.go:869"
+        "pointer": "keys/keys.go:282 (w) -> app/handle_tabs.go:186"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:368 closeTab"
+        "pointer": "web/src/api.ts:844 closeTab"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:129 tab-delete"
+        "pointer": "api/sessions_tabs.go:208 tab-delete"
       },
       "verdict": "parity",
       "notes": "The agent tab (index 0) is refused on every surface."
@@ -1069,7 +1069,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:339 createTab (shell)"
+        "pointer": "web/src/api.ts:793 createTab (shell)"
       },
       "cli": {
         "status": "yes",
@@ -1087,11 +1087,11 @@
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/api.ts:339,355 sets shell/kind but never command/name"
+        "pointer": "web/src/api.ts:793,816 sets shell/kind but never command/name"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:112 sends Command, Name, Kind, URL, Port"
+        "pointer": "api/sessions_tabs.go:190 sends Command, Name, Kind, URL, Port"
       },
       "verdict": "unclear",
       "notes": "#2077 added the no-input kind choice (Terminal / VS Code) to `t`. The TUI still cannot name a tab or supply a process command; those input-bearing options remain CLI/API surface. Distinct from session.tab.create.web, which is a deliberate omission."
@@ -1101,15 +1101,15 @@
       "title": "Spawn a bare $SHELL tab with no command",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_action_target.go:111 Shell:true"
+        "pointer": "app/session_action_target.go:142-146 Shell:true"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:563 shell:true"
+        "pointer": "web/src/api.ts:797 shell:true"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:148 normalizes --kind shell to Shell:true"
+        "pointer": "api/sessions_tabs.go:185-195 normalizes --kind shell to Shell:true"
       },
       "verdict": "parity",
       "notes": "Closed by #2619: `shell` is the canonical explicit kind, and the CLI normalizes `--kind shell` to the same Shell:true request the TUI/web send. That reaches Manager.CreateTab's single AddShellTab path, so it is a real bare $SHELL tab (TabKindShell), not the different `--command $SHELL` process-tab workaround. `Terminal` remains the presentation-only UI label, consistent with the tab identifier rule."
@@ -1123,7 +1123,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:355 createVSCodeTab"
+        "pointer": "web/src/api.ts:816 createVSCodeTab"
       },
       "cli": {
         "status": "yes",
@@ -1141,14 +1141,14 @@
       },
       "web": {
         "status": "no",
-        "pointer": "web/src/ui.ts:41-43 NewTabKind deliberately excludes 'web'"
+        "pointer": "web/src/ui.ts:78-81 NewTabKind deliberately excludes 'web'"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions_tabs.go:27-29 --kind web --url/--port"
       },
       "verdict": "deliberate",
-      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:41-43, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
+      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:78-81, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
     },
     {
       "id": "session.tab.rename",
@@ -1163,7 +1163,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:192 tab-rename (+ tabs rename)"
+        "pointer": "api/sessions_tabs.go:273 tab-rename (+ tabs rename)"
       },
       "verdict": "parity",
       "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). TUI half CLOSED: `R` opens a prompt seeded with the current name of the tab the user is looking at — the focused pane's effective binding, else the tree's active tab, the same target `w` closes — and submits daemon.Manager.RenameTab over the same /v1/RenameTab route the web calls. The request carries stable ids (session ID + TabID) captured at prompt-open, matching the #2358 rule every retained TUI action follows; a pre-#1738 id-less tab is protected by the captured roster generation, the same rule delete consent applies. The daemon's own guards hold on every surface: only kinds that DISPLAY their name are renameable (session.TabKindRenameable — web, process, VS Code), so the agent tab and shell tabs refuse before the prompt opens with the same reason the RPC would give. The resolved (sanitized, collision-suffixed) name is reflected on the local projection and reported in the status bar."
@@ -1177,11 +1177,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:472 ReorderTab"
+        "pointer": "web/src/api.ts:911 ReorderTab"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:264 tab-reorder (+ tabs reorder)"
+        "pointer": "api/sessions_tabs.go:348 tab-reorder (+ tabs reorder)"
       },
       "verdict": "parity",
       "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation). Like t/w it is offered only on live locally-managed rosters: off-box backends skip ReconcileTabsFromData (app/sync.go), and the daemon freezes archived rosters for restore)."
@@ -1217,7 +1217,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:911 sessionsWhoamiCmd"
+        "pointer": "api/sessions.go:785 sessionsWhoamiCmd"
       },
       "verdict": "deliberate",
       "notes": "Only meaningful to an agent running INSIDE a session's shell. Neither UI runs inside a session."
@@ -1227,15 +1227,15 @@
       "title": "Add a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:370 (n inside the tasks overlay)"
+        "pointer": "ui/task_pane.go:511 (n inside the tasks overlay)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts:286-319 -> api.ts:409 addTask"
+        "pointer": "web/src/tasks.ts:1068 addTaskModal -> web/src/api.ts:1108 addTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:121 tasksAddCmd"
+        "pointer": "api/tasks.go:133 tasksAddCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -1245,7 +1245,7 @@
       "title": "Edit an existing task's name/prompt/trigger/target/program",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:362 (enter) -> ui/task_pane_edit.go form"
+        "pointer": "ui/task_pane.go:505 (enter) -> ui/task_pane_edit.go form"
       },
       "web": {
         "status": "yes",
@@ -1253,7 +1253,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:270 tasksUpdateCmd (7 fields)"
+        "pointer": "api/tasks.go:408 tasksUpdateCmd (7 fields)"
       },
       "verdict": "parity",
       "notes": "Closed by #1935: the Edit action opens the add-task form seeded from the task and submits the changed fields to UpdateTask. project_path is now in the web TS TaskUpdate (web/src/types.ts) and sent by the edit call site, so every field the create form collects is editable."
@@ -1281,7 +1281,7 @@
       "title": "Change which project a task belongs to",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane_edit.go:135 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:91)"
+        "pointer": "ui/task_pane_edit.go:153 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:238)"
       },
       "web": {
         "status": "yes",
@@ -1289,7 +1289,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> routedUpdateTask (local socket, or the targeted daemon's UpdateTask when --daemon-url names one, #3730)"
+        "pointer": "api/api.go:787 --project-path -> api/tasks.go:578 patch.ProjectPath = strPtr(taskUpdateProjectPathFlag) -> routedUpdateTask (local socket, or the targeted daemon's UpdateTask when --daemon-url names one, #3730)"
       },
       "verdict": "parity",
       "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
@@ -1307,7 +1307,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:216 tasksGetCmd"
+        "pointer": "api/tasks.go:304 tasksGetCmd"
       },
       "verdict": "deliberate",
       "notes": "Scripting read-verb; both UIs render the task list continuously."
@@ -1335,15 +1335,15 @@
       "title": "List tasks",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:159 (m) -> app/handle_overlay.go:221"
+        "pointer": "keys/keys.go:302 (m) -> app/handle_overlay.go:292"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:391 listTasks"
+        "pointer": "web/src/api.ts:1090 listTasks"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:75 tasksListCmd"
+        "pointer": "api/tasks.go:80 tasksListCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -1389,15 +1389,15 @@
       "title": "Remove a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:359 (D)"
+        "pointer": "ui/task_pane.go:503 (D)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:436 removeTask"
+        "pointer": "web/src/api.ts:1151 removeTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:196 tasksRemoveCmd"
+        "pointer": "api/tasks.go:263 tasksRemoveCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -1415,7 +1415,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:368 tasksRestartCmd"
+        "pointer": "api/tasks.go:365 tasksRestartCmd"
       },
       "verdict": "deliberate",
       "notes": "This is an operator workflow after editing an external script file, which neither UI owns. Both task UIs already expose the enabled toggle; its daemon update is synchronous and therefore remains a safe manual cycle. The dedicated one-command restart belongs in the scripting CLI."
@@ -1425,15 +1425,15 @@
       "title": "Enable / disable a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:356 (x)"
+        "pointer": "ui/task_pane.go:501 (x)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/index.ts:854-865 toggleTask"
+        "pointer": "web/src/index.ts:2315 toggleTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:649 --enabled"
+        "pointer": "api/api.go:788 --enabled"
       },
       "verdict": "parity",
       "notes": ""
@@ -1443,15 +1443,15 @@
       "title": "Trigger a task now",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:367-369 (r)"
+        "pointer": "ui/task_pane.go:509 (r)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:429 triggerTask"
+        "pointer": "web/src/api.ts:1142 triggerTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:237 tasksRunCmd"
+        "pointer": "api/tasks.go:330 tasksRunCmd"
       },
       "verdict": "parity",
       "notes": "All three refuse watch-backed tasks; the web additionally hides the button (web/src/tasks.ts:92-94)."
@@ -1461,11 +1461,11 @@
       "title": "Move around the TUI (cursor, focus, sections, scroll, search, help, quit)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:136-176 (up/down/collapse/expand/focus/sections/scroll/search/help/quit)"
+        "pointer": "keys/keys.go:249-325 (up/down/collapse/expand/focus/sections/scroll/search/help/quit)"
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/nav.ts:109-200 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
+        "pointer": "web/src/nav.ts:108-126 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
       },
       "cli": {
         "status": "n/a",
@@ -1479,7 +1479,7 @@
       "title": "Open / split / hide / focus workspace panes",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:163-167 (s, S, x, left/right)"
+        "pointer": "keys/keys.go:307-311 (s, S, x, left/right)"
       },
       "web": {
         "status": "yes",
@@ -1516,7 +1516,7 @@
       "title": "Edit a repo's post-worktree hooks",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:171 (e) -> app/handle_overlay.go:291"
+        "pointer": "keys/keys.go:313 (e) -> app/handle_overlay.go:385"
       },
       "web": {
         "status": "no",
