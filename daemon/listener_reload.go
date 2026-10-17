@@ -99,12 +99,23 @@ type webListeners struct {
 	// gets no tracker.
 	webTracker *connTracker
 
+	// webFreeze is the control listener's postureFreeze — kind-scoped for the
+	// same reason as webTracker: every generation's gate consults this one
+	// freeze, so a refusal covers generations already draining from an earlier
+	// rebind, not just the handle bound right now (#5137 review). postureSeq
+	// issues each control generation its order: the freeze pins every seq up
+	// to the latest issued, and a listener bound after the refusal reads live
+	// because its seq clears the pin's `through`. The preview listener keeps
+	// no freeze — its posture is fixed and no refusal retires it.
+	webFreeze  postureFreeze
+	postureSeq uint64
+
 	// postureBeforeSwap is the config the daemon's sockets were serving under
 	// when the current ApplyConfig began — captured at retireWebBeforePostureSwap
 	// while the old live config is still published. A refusal-driven retire
-	// freezes the listener's gate onto it so the drain can never evaluate the
+	// pins the kind's gate onto it so the drain can never evaluate the
 	// refused config being published (#5137); outside an apply it is nil and
-	// the freeze falls back to the live read, which in that context IS the
+	// the pin falls back to the live read, which in that context IS the
 	// still-unswapped config.
 	postureBeforeSwap *config.Config
 }
@@ -264,7 +275,12 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	if addr == "" {
 		addr = wl.webConfigAddr
 	}
-	wl.webHandle.freezePosture(wl.postureBeforeSwap)
+	// Pin the whole kind BEFORE retiring: the socket was serving under the
+	// still-live pre-swap config, and after it publishes the refused config
+	// must not gate drain-window requests on ANY generation still draining —
+	// this retired socket's or an earlier rebind's (#5137 review). through is
+	// the latest issued seq, covering every control generation in existence.
+	wl.webFreeze.pin(wl.postureBeforeSwap, wl.postureSeq)
 	wl.webHandle.retire()
 	// Same severing as refuseWebLocked: this retire exists because the socket's
 	// incoming posture is one it must not serve, and a hijacked stream opened
@@ -423,11 +439,14 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 // rollback re-bind alike.
 func (wl *webListeners) webBind(bindAddr string) (*tcpListenerHandle, tcpListenerInfo, error) {
 	cfg := wl.manager.Config()
+	wl.postureSeq++
 	return startTCPListenerWithListen(wl.webMux, bindAddr, cfg, webListenerPolicy(cfg), withWebShell, nil,
 		&livePosture{
 			snapshot:         wl.manager.Config,
 			policyFromConfig: true,
 			sandboxTokens:    &wl.manager.sandboxTokens,
+			freeze:           &wl.webFreeze,
+			seq:              wl.postureSeq,
 		}, wl.webTracker, wl.listenTCP)
 }
 
@@ -567,20 +586,24 @@ func (wl *webListeners) announceWebListenerLocked(addr string, info tcpListenerI
 // and FailedListenerKeys would have a save surface claim exactly that.
 // Caller holds wl.mu.
 func (wl *webListeners) refuseWebLocked(addr, refusal string) {
+	// Pin the kind BEFORE retiring: retire's drain keeps running in-flight
+	// handlers, and an already-accepted conn can dispatch a request that
+	// reaches the gate after the refused config has published — under the
+	// live read it would evaluate tokenless on a socket that was just
+	// refused (#5137 review). The pin is kind-scoped and unconditional on a
+	// bound handle: generations an earlier opt-out or rebind already retired
+	// can still be draining with webHandle==nil, and they are exactly the
+	// sockets this exists to cover. `through` is the latest issued seq —
+	// every control generation in existence. postureBeforeSwap is the config
+	// the kind was serving; nil outside an apply, where the live read is
+	// still the pre-change config anyway.
+	prev := wl.postureBeforeSwap
+	if prev == nil {
+		prev = wl.manager.Config()
+	}
+	wl.postureBeforeSwap = nil
+	wl.webFreeze.pin(prev, wl.postureSeq)
 	if wl.webHandle != nil {
-		// Freeze BEFORE retiring: retire's drain keeps running in-flight
-		// handlers, and an already-accepted conn can dispatch a request that
-		// reaches the gate after the refused config has published — under the
-		// live read it would evaluate tokenless on a socket that was just
-		// refused (#5137 review). postureBeforeSwap is the config the socket
-		// was serving; nil outside an apply, where the live read is still the
-		// pre-change config anyway.
-		prev := wl.postureBeforeSwap
-		if prev == nil {
-			prev = wl.manager.Config()
-		}
-		wl.postureBeforeSwap = nil
-		wl.webHandle.freezePosture(prev)
 		// Retire, not close — the posture flip can arrive ON this listener (a
 		// remote config write over the TCP route), so a synchronous close severs
 		// the reply carrying it, exactly like the opt-out above (#3722).

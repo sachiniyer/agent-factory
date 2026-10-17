@@ -179,12 +179,18 @@ type livePosture struct {
 	// snapshot returns the current global config. It is read EXACTLY ONCE per
 	// request (withLivePosture) and the whole posture derives from that one read.
 	snapshot func() *config.Config
-	// frozen, once set, replaces the live snapshot: a listener retired BECAUSE
-	// its incoming posture is refused keeps gating drain-window requests under
-	// the config it was serving, so the just-published refused config can never
-	// admit a request that slipped past the gate before the retire (#5137).
-	mu     sync.Mutex
-	frozen *config.Config
+	// freeze is this listener KIND's refusal freeze, shared by every generation:
+	// a refusal can land while an OLDER generation is still draining after a
+	// normal rebind, so per-generation state cannot cover the hole — the freeze
+	// must reach every socket the kind is still serving (#5137). Nil for
+	// postures no refusal can retire (the preview origin, test stand-ins).
+	freeze *postureFreeze
+	// seq is this generation's issuance order within its kind. A freeze covers
+	// exactly the generations issued before it (seq <= freeze.through), so a
+	// listener bound AFTER a refusal reads live: it was admitted under a newer
+	// config the posture allowed, while an earlier generation keeps gating on
+	// the config it was serving when the refusal landed.
+	seq uint64
 	// policyFromConfig derives the gate's token/loopback posture from the snapshot
 	// (require_token / require_loopback_token) — the control-plane web listener. The
 	// preview listener leaves it false: its gate posture is the fixed strict zero
@@ -219,28 +225,56 @@ type livePosture struct {
 	previewWarmingUp func() bool
 }
 
-// current returns the config this listener evaluates requests under — the live
-// snapshot until freeze latches it.
-func (l *livePosture) current() *config.Config {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.frozen != nil {
-		return l.frozen
-	}
-	return l.snapshot()
+// postureFreeze pins the serving posture of ONE listener kind across all its
+// generations (#5137). Retire's drain deliberately lets in-flight handlers
+// finish, and a keep-alive conn can dispatch a request that reaches the gate
+// AFTER the refusing config has published — without the pin that request reads
+// tokenDisabled and reaches the control API unauthenticated on a socket that
+// was just refused. Generations are the point: a normal rebind leaves the old
+// listener draining, and a refusal arriving while that drain runs must cover
+// it, not just the handle bound right now.
+type postureFreeze struct {
+	mu sync.Mutex
+	// cfg is the config the covered generations were serving at the refusal —
+	// what their drain-window requests keep evaluating.
+	cfg *config.Config
+	// through is the last generation the freeze covers. A listener bound after
+	// the refusal has a higher seq and reads live: it was admitted under a
+	// newer config the posture allowed. Every pin re-arms both halves, so a
+	// second refusal freezes the generations added since the first against the
+	// config they actually served.
+	through uint64
 }
 
-// freeze pins the serving posture to cfg for the rest of this listener's life.
-// Retire's drain deliberately lets in-flight handlers finish, and a keep-alive
-// conn can dispatch a request that reaches the gate AFTER the refusing config
-// has published — without the pin that request reads tokenDisabled and reaches
-// the control API unauthenticated on a socket that was just refused (#5137
-// review). Only refusal-driven retire calls it: a posture change the operator
-// was allowed to write keeps the ordinary live-read semantics.
-func (l *livePosture) freeze(cfg *config.Config) {
-	l.mu.Lock()
-	l.frozen = cfg
-	l.mu.Unlock()
+// pin freezes every generation with seq <= through onto cfg. Called only by
+// refusal-driven retires: a posture change the operator was allowed to write
+// keeps the ordinary live-read semantics. Two inputs are no-ops: cfg==nil (a
+// refusal without a serving config has nothing to preserve) and a cfg that is
+// ITSELF refused — a refused posture was never legitimately served, so pinning
+// it would hand draining sockets the very gate the freeze exists to keep out;
+// the generations an earlier refusal pinned keep their own serving config.
+func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
+	if cfg == nil || config.ListenerBindRefusal(cfg) != "" {
+		return
+	}
+	f.mu.Lock()
+	f.cfg, f.through = cfg, through
+	f.mu.Unlock()
+}
+
+// current returns the config this listener evaluates requests under — the live
+// snapshot unless this generation is inside a refusal freeze.
+func (l *livePosture) current() *config.Config {
+	if f := l.freeze; f != nil {
+		f.mu.Lock()
+		if f.cfg != nil && l.seq <= f.through {
+			cfg := f.cfg
+			f.mu.Unlock()
+			return cfg
+		}
+		f.mu.Unlock()
+	}
+	return l.snapshot()
 }
 
 // connTracker tracks the HIJACKED connections — WebSocket upgrades — of one
@@ -504,7 +538,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 			}
 		}
 	}
-	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String(), live: live}
+	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String()}
 	go func() {
 		defer close(done)
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -596,10 +630,6 @@ type tcpListenerHandle struct {
 	// for a reason that had nothing to do with the code under test.
 	retired    atomic.Bool
 	retireOnce sync.Once
-	// live is the listener's live-posture source, kept so a refusal-driven
-	// retire can freeze it onto the config the socket was serving before the
-	// drain starts (#5137); nil for static-posture listeners (the agent-server).
-	live *livePosture
 }
 
 // close tears the listener down immediately: every accepted connection is cut,
@@ -619,17 +649,6 @@ func (h *tcpListenerHandle) close() error {
 		_ = h.ln.Close()
 	}
 	return err
-}
-
-// freezePosture pins this listener's live-posture read to cfg — call BEFORE
-// retire when the retire is driven by a refused posture, so the drain keeps
-// gating requests under the config the socket was admitted with rather than
-// the refused config whose publication is what retired it (#5137). A no-op on
-// static-posture listeners (live is nil) and on a nil cfg.
-func (h *tcpListenerHandle) freezePosture(cfg *config.Config) {
-	if h.live != nil && cfg != nil {
-		h.live.freeze(cfg)
-	}
 }
 
 // retire stops accepting now and drains what is already in flight off the

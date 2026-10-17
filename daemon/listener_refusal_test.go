@@ -444,12 +444,6 @@ func TestRefusalFreezesRetiredListenerOnServedPosture(t *testing.T) {
 	cfg.RequireToken = true
 	m, wl, _ := boundWebListeners(t, cfg)
 
-	wl.mu.Lock()
-	h := wl.webHandle
-	wl.mu.Unlock()
-	require.NotNil(t, h)
-	require.NotNil(t, h.live, "the control listener must carry a live posture")
-
 	// The ApplyConfig sequence, at the two points where it touches the
 	// listener: the pre-swap refusal retire, then the publish of the refused
 	// (tokenless, no opt-in) config.
@@ -459,11 +453,82 @@ func TestRefusalFreezesRetiredListenerOnServedPosture(t *testing.T) {
 	m.live.Store(&next)
 
 	require.False(t, m.Config().RequireToken, "the refused tokenless config is now live")
-	require.NotNil(t, h.live.frozen,
+	wl.webFreeze.mu.Lock()
+	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	wl.webFreeze.mu.Unlock()
+	require.NotNil(t, frozen,
 		"a refusal retire must pin the gate to the config the socket was serving")
-	require.True(t, h.live.current().RequireToken,
+	require.True(t, frozen.RequireToken,
 		"drain-window requests must evaluate the posture they were admitted under")
-	require.False(t, h.live.current().AllowUnauthenticatedNetwork)
+	require.False(t, frozen.AllowUnauthenticatedNetwork)
+	require.Equal(t, wl.postureSeq, through,
+		"the pin must cover every control generation issued so far, not just the bound handle")
+}
+
+// TestRefusalFreezesEveryDrainingGeneration is the cross-generation half of the
+// drain window (#5137 review): a refusal can land while an OLDER listener
+// generation is still draining after a normal rebind — a freeze scoped to the
+// bound handle would leave that earlier socket's keep-alive requests gating on
+// the just-published refused config. The pin covers every generation the kind
+// ever issued; a listener bound after the refusal reads live.
+func TestRefusalFreezesEveryDrainingGeneration(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	// A normal rebind issues generation 2 and retires generation 1, which can
+	// still be draining when the refusal below lands.
+	rebind := *cfg
+	rebind.ListenAddr = "127.0.0.1:0"
+	failed, err := wl.reconcile(&rebind)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Equal(t, uint64(2), wl.postureSeq, "the rebind must issue a second generation")
+
+	// The refusal apply: pre-swap retire, then publish the refused config.
+	next := *cfg
+	next.ListenAddr = "0.0.0.0:0"
+	next.RequireToken = false
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	wl.webFreeze.mu.Lock()
+	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	wl.webFreeze.mu.Unlock()
+	require.NotNil(t, frozen, "the refusal must pin the kind's shared freeze")
+	require.True(t, frozen.RequireToken,
+		"draining generations gate on the config they were serving, never the refused one")
+	require.Equal(t, uint64(2), through,
+		"the pin covers the retired generation AND the one bound at the refusal")
+
+	// The retired generation's posture consults the freeze; a post-refusal
+	// generation has a seq beyond `through` and reads live.
+	draining := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
+	require.True(t, draining.current().RequireToken,
+		"the earlier generation keeps the posture it was admitted under")
+	nextGen := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: through + 1}
+	require.False(t, nextGen.current().RequireToken,
+		"a listener bound after the refusal was admitted under the newer config and reads live")
+}
+
+// TestPostureFreezeNeverPinsARefusedConfig pins the guard on the freeze value:
+// a refused posture was never legitimately served, so re-pinning drains onto
+// it would hand them the very gate the freeze keeps out — an earlier pin must
+// survive a later refused config arriving at the same code path.
+func TestPostureFreezeNeverPinsARefusedConfig(t *testing.T) {
+	served := config.DefaultConfig()
+	served.RequireToken = true
+	refused := *served
+	refused.ListenAddr = "0.0.0.0:0"
+	refused.RequireToken = false
+	require.NotEmpty(t, config.ListenerBindRefusal(&refused))
+
+	var f postureFreeze
+	f.pin(served, 3)
+	f.pin(&refused, 5)
+	require.Same(t, served, f.cfg, "a refused config must never replace a serving pin")
+	require.Equal(t, uint64(3), f.through, "the rejected pin must not advance the covered generations")
 }
 
 // TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side
@@ -477,11 +542,6 @@ func TestNonRefusalRetireLeavesPostureLive(t *testing.T) {
 	cfg.AllowUnauthenticatedNetwork = true
 	_, wl, _ := boundWebListeners(t, cfg)
 
-	wl.mu.Lock()
-	h := wl.webHandle
-	wl.mu.Unlock()
-	require.NotNil(t, h)
-
 	next := *cfg
 	next.ListenAddr = ""
 	next.RequireToken = true
@@ -489,6 +549,9 @@ func TestNonRefusalRetireLeavesPostureLive(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, failed)
 
-	require.Nil(t, h.live.frozen,
+	wl.webFreeze.mu.Lock()
+	frozen := wl.webFreeze.cfg
+	wl.webFreeze.mu.Unlock()
+	require.Nil(t, frozen,
 		"a non-refusal retire must keep the live-posture read, not latch the old config")
 }
