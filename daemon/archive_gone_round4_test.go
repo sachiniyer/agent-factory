@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -221,10 +223,7 @@ func TestRefreshWorktreeMissing_CededWriteIsRetried(t *testing.T) {
 	_, changed = inst.RefreshWorktreeMissing()
 	require.True(t, changed)
 	require.NoError(t, inst.Transition(session.BeginArchive()))
-	key := stableSessionKey(repoID, inst)
-	if !manager.persistWorktreeMissing(repoID, inst) {
-		manager.markWorktreeMissingUndurable(key)
-	}
+	require.False(t, manager.persistWorktreeMissing(repoID, inst))
 	rec := recordFor(t, repoID, "ceded")
 	require.NotNil(t, rec)
 	assert.False(t, rec.Worktree.Missing, "a write that cedes to an op must not land")
@@ -250,4 +249,62 @@ func TestArchiveClaimName_MissingRowDoesNotClaimItsLivePathBasename(t *testing.T
 	data.Worktree.Missing = false
 	assert.True(t, archiveRecordClaimsTitle(data, "repo-foo"),
 		"control: an unflagged archived row still claims its recorded directory")
+}
+
+// A probe that started before a kill can finish after it. The kill removes the
+// durable row, deletes the map entry and forgets the runtime state, so the
+// poll's late write must announce nothing — a session.updated after the kill
+// resurrects the session in every event-driven client — and queue nothing, or
+// the retry entry the forget just cleared outlives the session (#5102).
+func TestPersistWorktreeMissing_KilledMidWritePublishesAndQueuesNothing(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	survivor, _ := registerGoneWorktree(t, manager, repoID, repoPath, "survivor")
+	killed, _ := registerGoneWorktree(t, manager, repoID, repoPath, "killed")
+	for _, inst := range []*session.Instance{survivor, killed} {
+		_, changed := inst.RefreshWorktreeMissing()
+		require.True(t, changed, "premise: the probe flags the deleted worktree")
+	}
+	_, events := manager.events.subscribe()
+
+	// Control: a tracked row's transition is published, so silence below is the
+	// kill gate rather than a hub that never delivers.
+	require.True(t, manager.persistWorktreeMissing(repoID, survivor))
+	select {
+	case ev := <-events:
+		require.Equal(t, agentproto.EventSessionUpdated, ev.Type)
+	case <-time.After(5 * time.Second):
+		t.Fatal("control: a tracked row's flag transition must be published")
+	}
+
+	// The kill lands inside the write: after the poll took its snapshot, before
+	// the storage update — the order KillSession uses (record, then map + forget).
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title != "killed" {
+			return nil
+		}
+		storage, err := session.NewStorage(config.LoadState(), repoID)
+		require.NoError(t, err)
+		deleted, err := storage.DeleteInstanceByStableID("killed", killed.ID)
+		require.NoError(t, err)
+		require.True(t, deleted)
+		manager.mu.Lock()
+		delete(manager.instances, daemonInstanceKey(repoID, "killed"))
+		manager.forgetSessionRuntimeStateLocked(repoID, killed)
+		manager.mu.Unlock()
+		return nil
+	}
+	assert.False(t, manager.persistWorktreeMissing(repoID, killed))
+
+	select {
+	case ev := <-events:
+		t.Fatalf("a killed row's late flag write must publish nothing, got %s", ev.Type)
+	default:
+	}
+	manager.mu.Lock()
+	_, queued := manager.worktreeMissingUndurable[stableSessionKey(repoID, killed)]
+	manager.mu.Unlock()
+	assert.False(t, queued, "a killed row must not be queued for a retry nothing will ever take")
+	assert.Nil(t, recordFor(t, repoID, "killed"), "the late write must not recreate the killed row")
 }

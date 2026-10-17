@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 func requireWorktreeOnBranch(t *testing.T, path, branch string) {
@@ -143,4 +144,49 @@ func TestRestoreArchived_FailedRebuildLeavesTheArchivedRow(t *testing.T) {
 	require.NotNil(t, rec)
 	assert.Equal(t, session.Archived, rec.Status)
 	assert.Equal(t, wtPath, rec.Worktree.WorktreePath)
+}
+
+// A daemon that dies after the rebuild and before the restore's first persist
+// leaves git registering the branch at the restore destination while the
+// durable row is still archived, flagged, at the old absent path. The retry must
+// recognize its own rebuild — the destination is recomputed identically — and
+// adopt it, not refuse it as a move outside af (#5102). The marker file proves
+// the checkout was adopted in place rather than rebuilt a second time.
+func TestRestoreArchived_ResumesItsOwnRebuildAfterACrash(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, wtPath := registerGoneWorktree(t, manager, repoID, repoPath, "rebuilt")
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "rebuilt", RepoID: repoID})
+	require.NoError(t, err)
+	branch := inst.GetBranch()
+
+	// The crashed restore's footprint: its rebuild's prune and checkout landed,
+	// nothing after them did.
+	dest, err := sessiongit.RestoreWorktreePath(repoPath, "rebuilt", branch)
+	require.NoError(t, err)
+	out, gitErr := exec.Command("git", "-C", repoPath, "worktree", "prune").CombinedOutput()
+	require.NoError(t, gitErr, string(out))
+	out, gitErr = exec.Command("git", "-C", repoPath, "worktree", "add", dest, branch).CombinedOutput()
+	require.NoError(t, gitErr, string(out))
+	marker := filepath.Join(dest, "rebuilt-before-crash.txt")
+	require.NoError(t, os.WriteFile(marker, []byte("kept"), 0o644))
+	rec := recordFor(t, repoID, "rebuilt")
+	require.NotNil(t, rec)
+	require.Equal(t, wtPath, rec.Worktree.WorktreePath, "premise: the durable row still names the old absent path")
+	require.True(t, rec.Worktree.Missing)
+
+	restoredPath, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "rebuilt", RepoID: repoID})
+	require.NoError(t, err, "af's own rebuild must resume, not be refused as a move")
+
+	assert.Equal(t, dest, restoredPath)
+	assert.Equal(t, dest, inst.GetWorktreePath())
+	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness())
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	requireWorktreeOnBranch(t, dest, branch)
+	assert.FileExists(t, marker, "the existing checkout is adopted in place, not rebuilt")
+	missing, _ := inst.WorktreeMissing()
+	assert.False(t, missing)
+	rec = recordFor(t, repoID, "rebuilt")
+	require.NotNil(t, rec)
+	assert.Equal(t, dest, rec.Worktree.WorktreePath)
+	assert.False(t, rec.Worktree.Missing)
 }

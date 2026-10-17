@@ -682,6 +682,19 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
 				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
 			}
+			// The repoint is af recording a deletion it just proved, so it stamps
+			// the flag itself rather than leaving it to a poll that may never run
+			// first. The directory can vanish between polls; unstamped, the row
+			// would name a fresh path nothing has ever held, and the probe at that
+			// path answers about whatever appears there next — a later directory
+			// at dest would read Present, the sticky flag would never set, and a
+			// restore would move an unrelated directory in as the session's
+			// worktree. The reason names dest, the path the record now points at,
+			// so the fence follows the pointer; a row that was already flagged has
+			// its reason re-aimed for the same reason (#5102).
+			i.worktreeMissing = true
+			i.worktreeMissingReason = WorktreeMissingRepointedReason(dest)
+			i.touchLocked()
 			return nil
 		}
 	}

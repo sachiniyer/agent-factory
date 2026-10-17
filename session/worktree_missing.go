@@ -114,6 +114,9 @@ var worktreeMissingReasonForms = [...]worktreeMissingReasonForm{
 	{prefix: "tracked worktree path ", suffix: " does not exist (deleted outside af)"},
 	// Stamped by the archive route that found the worktree already gone.
 	{prefix: "worktree was already absent at ", suffix: " when archived (deleted outside af)"},
+	// Stamped by an archived-name reuse that repointed a deleted archive's record
+	// at its renamed title's path; the path is that new destination.
+	{prefix: "archived worktree was already deleted outside af when the session was renamed; nothing has been placed at ", suffix: " yet"},
 }
 
 // WorktreeMissingDeletedReason is the reason recorded when the tracked worktree
@@ -127,6 +130,12 @@ func WorktreeMissingDeletedReason(path string) string {
 // worktree it found already deleted at path.
 func WorktreeMissingArchivedReason(path string) string {
 	return worktreeMissingReasonForms[1].render(path)
+}
+
+// WorktreeMissingRepointedReason is the reason a rename stamps on an archived
+// row whose deleted worktree it repointed to the renamed title's path, dest.
+func WorktreeMissingRepointedReason(dest string) string {
+	return worktreeMissingReasonForms[2].render(dest)
 }
 
 // RewriteWorktreeMissingReasonPath rebuilds an af-authored MissingReason with

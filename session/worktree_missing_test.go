@@ -159,6 +159,26 @@ func TestRenameArchived_GoneWorktreeRepointsWithoutMove(t *testing.T) {
 	_, statErr := os.Lstat(dest)
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "no move was attempted, so nothing exists at the new path")
 	runRenameGit(t, repoRoot, "show-ref", "--verify", "refs/heads/af/old-title-renamed")
+
+	// The row was never flagged — the directory vanished between polls — so the
+	// repoint itself must record the deletion, naming the path the record now
+	// points at. Otherwise a directory appearing at dest later reads Present, the
+	// sticky flag never sets, and restore adopts it as the session's worktree.
+	missing, reason := inst.WorktreeMissing()
+	assert.True(t, missing, "an absent-path repoint must stamp the missing flag")
+	assert.Equal(t, WorktreeMissingRepointedReason(dest), reason)
+	data := inst.ToInstanceData()
+	assert.True(t, data.Worktree.Missing, "the persisted row must carry the flag")
+	assert.Equal(t, dest, data.Worktree.WorktreePath)
+	assert.Contains(t, data.Worktree.MissingReason, dest, "the reason must name the repointed path, not the deleted one")
+	assert.NotContains(t, data.Worktree.MissingReason, wtPath+" ")
+
+	// And the stamped flag is what fences a directory that appears at the new
+	// destination: a further rename refuses it rather than moving it.
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	err = inst.RenameArchived("old-title-renamed-2", dest+"-2", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded as deleted outside af")
 }
 
 // The respawn path is where af re-materializes a deleted worktree, so it is where

@@ -46,6 +46,25 @@ func (i *Instance) AdoptLandedArchiveMove(dest string) error {
 	return gw.AdoptLandedWorktreeMove(dest)
 }
 
+// AdoptRebuiltArchivedWorktree re-aims a restoring archived row's record at
+// dest, where an earlier restore of this same row rebuilt its worktree from the
+// branch before the daemon could persist the result (#5102). It is the restore
+// counterpart of AdoptLandedArchiveMove and takes the same proof
+// (git.AdoptLandedWorktreeMove): git registers dest on this session's branch,
+// dest's linked-worktree pointer binds back into this repo, and — under
+// relocationMu, re-checked after the proof — no relocation is outstanding, the
+// recorded path is still conclusively absent, and dest is the same directory
+// that was proven. The caller holds the OpRestoring fence.
+func (i *Instance) AdoptRebuiltArchivedWorktree(dest string) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
+	}
+	return gw.AdoptLandedWorktreeMove(dest)
+}
+
 // LiveBranchCheckout reports where git has this session's branch checked out
 // at a path that exists right now. live is false when git registers the branch
 // nowhere, or only at a path that no longer exists — the stale, prunable entry

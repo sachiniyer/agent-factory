@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -21,21 +22,32 @@ import (
 // is checked before anything is written:
 //
 //   - The origin repo must be present: the branch lives there.
-//   - git must not have the branch checked out at a live path. A user's own
-//     `git worktree move` of the archive leaves exactly this footprint, and so
-//     does an earlier restore whose move landed before the daemon could record
-//     it; either way the session's bytes are intact somewhere, and rebuilding
-//     a second checkout would fail on the branch anyway.
+//   - git must not have the branch checked out at a live path other than the
+//     one this restore would rebuild at. A user's own `git worktree move` of
+//     the archive leaves exactly this footprint, and so does an earlier
+//     restore whose move landed before the daemon could record it; either way
+//     the session's bytes are intact somewhere, and rebuilding a second
+//     checkout would fail on the branch anyway.
 //
 // Then the record is re-aimed at the same destination the moving route would
 // pick and the worktree is re-created there from the branch. A failure leaves
 // the row archived with its branch, and its state is persisted before
 // returning. On success the caller's shared tail commits and re-spawns.
 //
-// A crash between the rebuild and that commit leaves disk naming the old,
-// absent path while git registers the branch at the rebuilt one; the retry then
-// lands on the live-checkout refusal above, which names both paths. That loses
-// nothing, but it is a refusal rather than a resume.
+// The one live checkout that is not refused is this route's own. A daemon that
+// dies after the rebuild and before the caller's first persist leaves disk
+// naming the old, absent path while git registers the branch at the rebuilt
+// destination — and that destination is a pure function of the repo, title and
+// branch (RestoreWorktreePath), so the retry computes the same one. Refusing it
+// as a move made af's own rebuild unrestorable without git surgery. So when git
+// has the branch at that computed destination, the retry adopts it with the
+// proof archive uses for its own landed move (AdoptRebuiltArchivedWorktree):
+// git's registration on this branch plus the directory's back-binding, the
+// recorded path re-proved absent and the directory's identity pinned under the
+// relocation lock. Whether af rebuilt it or the user moved the archive to that
+// exact path, what is proven is the session's own checkout. The basename gate
+// below is only a cheap pre-filter on git's spelling of the path; the proof
+// resolves both spellings itself.
 func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *session.Instance) error {
 	source := instance.GetWorktreePath()
 	repoPath := instance.GetRepoPath()
@@ -50,21 +62,34 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 		}
 		return fmt.Errorf("cannot restore session %q: cannot establish origin repo state for %s: %w", title, repoPath, err)
 	}
+	beforeRestoreWorktreePath()
+	dest, err := sessiongit.RestoreWorktreePath(repoPath, title, instance.GetBranch())
+	if err != nil {
+		return fmt.Errorf("cannot determine restore location for %q: %w", title, err)
+	}
 	moved, live, err := instance.LiveBranchCheckout()
 	if err != nil {
 		return fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w",
 			title, source, err)
 	}
+	if live && filepath.Base(filepath.Clean(moved)) == filepath.Base(filepath.Clean(dest)) {
+		if err := instance.AdoptRebuiltArchivedWorktree(dest); err != nil {
+			wrapped := fmt.Errorf(
+				"cannot restore session %q: its archived worktree %s is gone, and git has its branch checked out at %s, where restore rebuilds it, but af could not prove that checkout is this session's own (inspect %s; if it is the session's work, retry, otherwise remove it with 'git worktree remove' and retry to rebuild it from the branch): %w",
+				title, source, moved, moved, err)
+			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+				return errors.Join(wrapped, fmt.Errorf("could not persist the archived row: %w", perr))
+			}
+			return wrapped
+		}
+		m.info().Printf("restore of session %q: archived worktree %s was gone; adopted the rebuild of branch %s an earlier restore left at %s", title, source, instance.GetBranch(), dest)
+		return nil
+	}
 	if live {
 		return fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, but git has its branch checked out at %s (moved outside af, or placed by an earlier restore that was cut off before it could record it) — move it back to %s and retry, or remove it with 'git worktree remove' and retry to rebuild it from the branch",
 			title, source, moved, source)
-	}
-	beforeRestoreWorktreePath()
-	dest, err := sessiongit.RestoreWorktreePath(repoPath, title, instance.GetBranch())
-	if err != nil {
-		return fmt.Errorf("cannot determine restore location for %q: %w", title, err)
 	}
 	if err := instance.RebuildAbsentArchivedWorktree(dest); err != nil {
 		wrapped := fmt.Errorf(

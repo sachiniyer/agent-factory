@@ -52,6 +52,15 @@ func (m *Manager) refreshWorktreesMissing(targets []worktreeProbeTarget) {
 	wg.Wait()
 }
 
+// Manager.worktreeMissingUndurable holds rows (by stableSessionKey) whose
+// in-memory worktree-missing flag transition has not reached disk yet because
+// the write ceded to an in-flight operation or failed. The poll retries them;
+// the flag itself is sticky, so the probe alone would never report the
+// transition again. Entries are added only for a row the manager still tracks
+// (settleWorktreeMissingWrite) and removed with the row
+// (forgetSessionRuntimeStateLocked). The field's doc lives here because
+// manager.go sits at its file-length limit.
+
 // refreshWorktreeMissing folds one presence probe of the tracked worktree into
 // the row's worktree-missing flag and, on a transition only, persists and
 // publishes it so every listing surface picks it up (#5102). Steady state costs
@@ -69,9 +78,7 @@ func (m *Manager) refreshWorktreeMissing(repoID string, instance *session.Instan
 	if changed && missing {
 		m.warn().Printf("session %q: tracked worktree %s is gone (deleted outside af); flagging it — %s; if a directory reappears at that path, inspect it before acting, since af cannot verify it is the session's", instance.Title, instance.GetWorktreePath(), worktreeMissingRemedy(instance))
 	}
-	if !m.persistWorktreeMissing(repoID, instance) {
-		m.markWorktreeMissingUndurable(key)
-	}
+	m.persistWorktreeMissing(repoID, instance)
 }
 
 // worktreeMissingRemedy names the resolution that actually exists for a row
@@ -106,11 +113,25 @@ func worktreeMissingRemedy(instance *session.Instance) string {
 // may have rewritten the row to an intermediate state its own executor will
 // settle, and persistInstanceData strips the op axis, so writing that snapshot
 // would let a crash reload the intermediate payload as settled. Such a write is
-// ceded: it returns false, the flag stays in memory, and a later pass retries.
-// A failed write also returns false, so the transition is retried rather than
-// left to the next unrelated checkpoint.
+// ceded: the flag stays in memory and the transition is queued for a later
+// pass. A failed write is queued the same way, rather than left to the next
+// unrelated checkpoint. It reports whether the write landed.
+//
+// The probe ran on a snapshot of the instance, outside every lock, so the
+// session may have been killed while it ran: a bounded lstat on a stalled
+// mount outlives a KillSession easily. The kill deletes the map entry and
+// forgets the session's runtime state in one m.mu critical section, and then
+// publishes its own removal. So whether the row is still tracked is decided
+// under m.mu, and the publish and the retry queue happen in that SAME critical
+// section: either they land before the kill's delete, and its removal event
+// follows them, or they see the row gone and do nothing. Checked any earlier,
+// a kill landing between the check and the publish would resurrect the
+// session in every event-driven client, and the retry entry
+// forgetSessionRuntimeStateLocked just cleared would be re-added with nothing
+// left to ever take it (#5102).
 func (m *Manager) persistWorktreeMissing(repoID string, instance *session.Instance) bool {
 	if instance.GetInFlightOp() != session.OpNone {
+		m.settleWorktreeMissingWrite(repoID, instance, nil, false)
 		return false
 	}
 	repoStartLock := m.startLockForRepo(repoID)
@@ -118,12 +139,15 @@ func (m *Manager) persistWorktreeMissing(repoID string, instance *session.Instan
 	defer repoStartLock.Unlock()
 	data := instance.ToInstanceData()
 	if data.InFlightOp != session.OpNone {
+		m.settleWorktreeMissingWrite(repoID, instance, nil, false)
 		return false
 	}
 	err := persistInstanceData(repoID, data)
 	// Memory has changed either way; clients converge on it, as with every
 	// other poll publish.
-	m.publishEvent(agentproto.EventSessionUpdated, data)
+	if !m.settleWorktreeMissingWrite(repoID, instance, &data, err == nil) {
+		return false
+	}
 	if err != nil {
 		m.warn().Printf("failed to persist worktree-missing state for %q (will retry): %v", instance.Title, err)
 		return false
@@ -131,13 +155,43 @@ func (m *Manager) persistWorktreeMissing(repoID string, instance *session.Instan
 	return true
 }
 
-func (m *Manager) markWorktreeMissingUndurable(key string) {
+// settleWorktreeMissingWrite is persistWorktreeMissing's tail, under m.mu: if
+// instance is still the tracked row it publishes data (when there is a write to
+// announce) and queues a retry for a write that did not land. It reports
+// whether the row was still tracked; a killed row gets neither.
+func (m *Manager) settleWorktreeMissingWrite(repoID string, instance *session.Instance, data *session.InstanceData, durable bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.worktreeMissingUndurable == nil {
-		m.worktreeMissingUndurable = make(map[string]struct{})
+	if !m.tracksInstanceLocked(repoID, instance) {
+		return false
 	}
-	m.worktreeMissingUndurable[key] = struct{}{}
+	if data != nil {
+		m.publishEvent(agentproto.EventSessionUpdated, *data)
+	}
+	if !durable {
+		if m.worktreeMissingUndurable == nil {
+			m.worktreeMissingUndurable = make(map[string]struct{})
+		}
+		m.worktreeMissingUndurable[stableSessionKey(repoID, instance)] = struct{}{}
+	}
+	return true
+}
+
+// tracksInstanceLocked reports whether instance is still a row the manager
+// holds for repoID. Identity, not title: a kill followed by a create under the
+// same title installs a different instance at the same key. The keyed lookup
+// covers the common case; the scan covers a row re-keyed by an archived-name
+// rename since the snapshot was taken. Caller holds m.mu.
+func (m *Manager) tracksInstanceLocked(repoID string, instance *session.Instance) bool {
+	if m.instances[daemonInstanceKey(repoID, instance.Title)] == instance {
+		return true
+	}
+	for _, current := range m.instances {
+		if current == instance {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) takeWorktreeMissingUndurable(key string) bool {
