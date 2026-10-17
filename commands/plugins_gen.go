@@ -81,6 +81,8 @@ var pluginReleaseDigests = []string{
 	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
 	"3a9901060da8792f1540a636f7bc853acda06dcd0f54fa60abf03fbf1b9515ec", // 3.17 — retry-limit --delivered: the mark-delivered exit for ambiguous handoff delivery (#4429)
 	"77fa36ac207b2370db0c505c9503930610bed63e52af1d4601b7ac1d6405418f", // 3.18 — task verbs accept <id-or-name>; name resolution and ambiguity rules (#4676)
+	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.19 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
+	"33aaa7909d7a50596df368baf299d6934c392b311851b45745979a8a1e2e5cec", // 3.20 — Codex preflight capture: run af version to completion and take the first line via parameter expansion, so a real (non-zero) af version failure is reported as broken instead of masked by || true
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -341,22 +343,46 @@ func codexHooks() map[string]any {
 // against corruption rather than a compromised publisher or channel.
 // Fetch-and-execute from inside an agent session remains the wrong shape at any
 // convenience — see #2172 and #2174. Detect and instruct.
+//
+// The hook has three branches, so it reports in every state: af missing → print
+// the install command; af healthy → print its version; af on PATH but failing
+// to exec (corrupt/wrong-architecture binary, missing shebang interpreter, or a
+// wrapper that emits a line then exits non-zero) → print the reinstall command
+// and exit non-zero. set -e is intentionally absent: the version capture runs
+// under pipefail, and a present-but-unexecutable af makes it exit non-zero. With
+// set -e the assignment would abort the script before the report echo, and the
+// 2>/dev/null on the capture would also swallow bash's own exec-failure
+// diagnostic — leaving the hook with no stdout, no stderr, and only an opaque
+// non-zero exit, which is not a report. The capture sits inside an elif
+// condition, so a failing capture just falls through to the else branch instead.
+// The whole `af version` output is captured into a variable first, then the
+// first line is selected with a parameter expansion rather than piping into
+// `head -n 1`: `af version` then runs to completion (no `head` to send it
+// SIGPIPE under pipefail), so its real exit status decides the branch, and a
+// wrapper that prints a version-looking line then exits non-zero is reported as
+// broken instead of masked as healthy by a `|| true`.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
 		"# " + pluginGenBanner + "\n" +
 		"#\n" +
 		"# Report whether the af CLI is on PATH. Read-only on purpose: this hook never\n" +
 		"# downloads or installs anything (see docs/agent-plugins.md).\n" +
-		"set -euo pipefail\n" +
+		"set -uo pipefail\n" +
 		"\n" +
-		"if command -v af >/dev/null 2>&1; then\n" +
-		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
-		"\t# hook only wants the version itself.\n" +
-		"\tversion=$(af version 2>/dev/null | head -n 1)\n" +
-		"\techo \"${version:-af (version unknown)} is available.\"\n" +
-		"else\n" +
+		"if ! command -v af >/dev/null 2>&1; then\n" +
 		"\techo \"af is not installed. Install it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
+		"elif af_out=$(af version 2>/dev/null) && [ -n \"$af_out\" ]; then\n" +
+		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
+		"\t# hook only wants the version itself. Capture the whole output first so a\n" +
+		"\t# real `af version` failure (non-zero exit, even after printing a line) is\n" +
+		"\t# detected instead of masked, then keep only the first line.\n" +
+		"\tversion=${af_out%%$'\\n'*}\n" +
+		"\techo \"${version} is available.\"\n" +
+		"else\n" +
+		"\techo \"af is on PATH but failed to execute. Reinstall it with:\"\n" +
+		"\techo \"  " + session.AfInstallCommand + "\"\n" +
+		"\texit 1\n" +
 		"fi\n"
 }
 
