@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -60,7 +62,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 		report.Pass(sectionRemote, "remote hooks", "not configured for this repo")
 		return
 	}
-	checkCoderStatus(hooks, report)
+	checkCoderStatus(hooks, report, ctx.opts.coderProbeTimeout, ctx.opts.coderProbeWaitDelay)
 
 	configHint := "in [remote_hooks]"
 	if repoRoot != "" {
@@ -107,7 +109,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	// doctor deliberately does not run it.
 }
 
-func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
+func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDelay time.Duration) {
 	mentionsCoder := remoteHooksMentionCoder(hooks)
 	coderPath, lookErr := exec.LookPath("coder")
 	if lookErr != nil {
@@ -124,10 +126,42 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, coderPath, "whoami")
-	cmd.WaitDelay = 500 * time.Millisecond
+	cmd.WaitDelay = waitDelay
+	// Run coder in its own process group so the deadline can tear down the
+	// whole process tree rather than orphaning a descendant that still holds
+	// the capture pipe — the same pattern used by execBinaryVersion in
+	// skew.go.  Without this, a coder wrapper that spawns a helper and hangs
+	// would leave the helper running after Cancel kills only the wrapper PID.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Record whether the context's cancellation actually killed the process,
+	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
+	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
+	// making ctx.Err() == DeadlineExceeded even when the process self-terminated
+	// before the context fired. ctxKilled is set only when Kill returns nil,
+	// which on Unix is true for both a live process and a zombie (an already-
+	// exited process not yet reaped by Wait). The classification below gives a
+	// real exit code (ExitCode >= 0) precedence over ctxKilled, and for signal
+	// deaths (ExitCode < 0) checks the actual signal: only a SIGKILL death (the
+	// signal the context's Cancel sends) is a genuine context-killed timeout; a
+	// signal death from a different signal (SIGTERM, OOM, crash) is reported as a
+	// failure with its output. When the process has already been reaped by Wait
+	// before Cancel fires, Kill returns os.ErrProcessDone and ctxKilled stays
+	// false, so a pre-deadline self-exit is correctly reported as a failure.
+	var ctxKilled atomic.Bool
+	cmd.Cancel = func() error {
+		err := cmd.Process.Kill()
+		if err == nil {
+			ctxKilled.Store(true)
+		}
+		// Kill the entire process group to clean up any descendant processes
+		// the wrapper may have spawned (e.g. a helper that holds the capture
+		// pipe). Setpgid ensures the group id matches the process id.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return err
+	}
 	out, err := cmd.CombinedOutput()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// coder exited zero and answered; only a descendant held the capture
@@ -136,8 +170,31 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 	}
 	if err != nil {
 		detail := "coder whoami failed"
-		if ctx.Err() == context.DeadlineExceeded {
-			detail = "coder whoami timed out"
+		// Give a real (non-signal) exit code precedence over ctxKilled: a
+		// process that exits nonzero just before the deadline can still be
+		// reaped with Kill() returning nil (the signal was accepted by the
+		// already-exited process), setting ctxKilled even though the context
+		// did not cause the exit. Reporting it as a timeout would discard
+		// useful diagnostics such as a 401. For a signal death (ExitCode < 0),
+		// check the actual signal: the context's Cancel sends SIGKILL, so only
+		// a SIGKILL death is consistent with the context having killed the
+		// process. A signal death from a different signal (SIGTERM, OOM, crash)
+		// that races the deadline can also set ctxKilled (Kill returns nil for a
+		// zombie), but the ExitError retains the original signal — report it as
+		// a failure with any captured output rather than a timeout. An external
+		// SIGKILL (OOM killer, kill -9) that races the deadline while the process
+		// is still a live or zombie can still set ctxKilled (Kill returns nil for
+		// both), and the ExitError reports SIGKILL, so killedByContextSignal
+		// classifies it as a timeout. This narrow race — the process dies just
+		// before the context fires, before Wait reaps it — is the same extremely
+		// rare case accepted as not worth a pre-kill probe (see #2733).
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
+			if ctxKilled.Load() && killedByContextSignal(exitErr) {
+				detail = "coder whoami timed out"
+			} else if line := firstNonEmptyLine(string(out)); line != "" {
+				detail += ": " + line
+			}
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
 		}
@@ -149,6 +206,27 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 		who = "authenticated"
 	}
 	report.Pass(sectionRemote, "coder", who)
+}
+
+// killedByContextSignal reports whether exitErr represents a process killed by
+// the signal the context's Cancel sends (os.Process.Kill → SIGKILL on Unix). A
+// non-context signal death (SIGTERM, OOM, crash) that races the deadline can set
+// ctxKilled via a successful Kill on the zombie, but the ExitError retains the
+// original signal. Only a SIGKILL death is consistent with the context having
+// killed the process. When exitErr is nil (a pure context error with no
+// ExitError), there is no signal to check and the timeout is genuine.
+//
+// This uses syscall.WaitStatus which is portable across Linux and macOS, so no
+// platform-specific code is needed.
+func killedByContextSignal(exitErr *exec.ExitError) bool {
+	if exitErr == nil {
+		return true
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		return true
+	}
+	return ws.Signaled() && ws.Signal() == syscall.SIGKILL
 }
 
 func remoteHooksMentionCoder(hooks *config.RemoteHooks) bool {
