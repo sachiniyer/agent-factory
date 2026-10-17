@@ -107,7 +107,7 @@ const watchOrphanKillWait = time.Second
 const watchOrphanPoll = 25 * time.Millisecond
 
 // watchOrphanFollowupPasses bounds the full rescans after a pass that signaled
-// something; see sweepOrphanedWatchCommands.
+// something or lost a candidate to another group; see sweepOrphanedWatchCommands.
 const watchOrphanFollowupPasses = 3
 
 // Test seams, mirroring the package's existing injection style: a test can
@@ -290,12 +290,14 @@ func (s *watcherSupervisor) sweepOrphanedWatchCommands() {
 	if !ok {
 		return
 	}
-	// A signaled orphan can detach a marked child into a NEW process group —
-	// setsid from a SIGTERM handler, or a script daemonizing its work — after
-	// the snapshot that found it. No per-group rescan can see that group, and
-	// the sweep runs once, so each pass that signaled anything is followed by
-	// another full scan. The bound keeps a process that refuses to die (or a
-	// script that detaches forever) from holding startup hostage.
+	// A marked orphan can land in a process group this pass never signaled:
+	// a signaled one detaches a child with setsid from its SIGTERM handler, or
+	// a candidate moves groups between the snapshot that found it and the
+	// membership check that licenses its signal. No per-group rescan can see
+	// the new group, and the sweep runs once, so each pass that signaled
+	// anything — or found a candidate it could no longer signal — is followed
+	// by another full scan. The bound keeps a process that refuses to die (or a
+	// script that keeps moving) from holding startup hostage.
 	for pass := 0; pass <= watchOrphanFollowupPasses; pass++ {
 		groups := s.findOrphanedWatchGroups(scope)
 		if len(groups) == 0 {
@@ -538,22 +540,27 @@ func watchOrphanCommMatches(comm, base string) bool {
 
 // stopOrphanedWatchGroups SIGTERMs every group in one batch, waits for all of
 // them against one shared deadline (s.stopGrace), and SIGKILLs the ones whose
-// marked members are still alive at that deadline. It reports whether it sent
-// any SIGTERM, which is what makes a follow-up scan worth running.
+// marked members are still alive at that deadline, again as one batch against
+// one shared deadline. It reports whether a follow-up scan is worth running:
+// it sent a SIGTERM, or a candidate's members had left its group before the
+// signal, so they may be orphans in a group this pass never saw.
 func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, groups []*watchOrphanGroup) bool {
 	var pending []*watchOrphanGroup
-	signaled := false
+	rescan := false
 	for _, g := range groups {
 		// Re-verify right before signaling: the snapshot is evidence about
 		// the past, and a group none of whose marked members is still in it
-		// no longer licenses a signal to whatever holds that pgid now.
+		// no longer licenses a signal to whatever holds that pgid now. A
+		// member that moved is still an orphan, though, so the next full scan
+		// looks for it where it went.
 		if !g.anyMemberInGroup() {
+			rescan = true
 			continue
 		}
 		err := watchOrphanKillGroup(g.pgid, syscall.SIGTERM)
 		switch {
 		case err == nil:
-			signaled = true
+			rescan = true
 			pending = append(pending, g)
 		case errors.Is(err, syscall.ESRCH):
 			log.InfoLog.Printf("orphaned watch command from a previous daemon generation already exited: %s", g.describe())
@@ -571,6 +578,7 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, grou
 	}
 	pending = s.pruneStoppedWatchGroups(pending)
 
+	var killed []*watchOrphanGroup
 	for _, g := range pending {
 		if !g.anyMemberInGroup() && !s.rescanOrphanGroup(scope, g) {
 			// No marked member is still in the group and a fresh scan proves
@@ -585,10 +593,17 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, grou
 			log.WarningLog.Printf("cannot stop orphaned watch command %s: SIGKILL: %v", g.describe(), err)
 			continue
 		}
-		killDeadline := time.Now().Add(watchOrphanKillWait)
-		for g.anyMemberAlive() && time.Now().Before(killDeadline) {
-			watchOrphanSleep(watchOrphanPoll)
-		}
+		killed = append(killed, g)
+	}
+
+	// One shared wait for the whole batch, like the SIGTERM phase: a member
+	// stuck in uninterruptible I/O outlives SIGKILL, and waiting for each such
+	// group in turn would add watchOrphanKillWait to startup per group, per pass.
+	killDeadline := time.Now().Add(watchOrphanKillWait)
+	for anyWatchOrphanMemberAlive(killed) && time.Now().Before(killDeadline) {
+		watchOrphanSleep(watchOrphanPoll)
+	}
+	for _, g := range killed {
 		if g.anyMemberAlive() {
 			log.WarningLog.Printf("orphaned watch command %s survived SIGKILL for %s", g.describe(), watchOrphanKillWait)
 			continue
@@ -596,7 +611,28 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, grou
 		log.InfoLog.Printf("reaped orphaned watch command from a previous daemon generation with SIGKILL "+
 			"after it ignored SIGTERM for %s: %s", s.stopGrace, g.describe())
 	}
-	return signaled
+	return rescan
+}
+
+func anyWatchOrphanMemberAlive(groups []*watchOrphanGroup) bool {
+	for _, g := range groups {
+		if g.anyMemberAlive() {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepOrphansOnceLocked runs the orphan sweep the first time any path is
+// about to spawn a watch command in this supervisor (#5329). Both spawn paths
+// call it — reconcile, and restart, which an explicit RestartTask can reach
+// before any reconcile has run (the startup window before armTaskAutomation,
+// or an upgrade candidate parked in handoff-pending). The caller holds s.mu,
+// which serializes the sweep against every other spawn.
+func (s *watcherSupervisor) sweepOrphansOnceLocked() {
+	if s.reapOrphans {
+		s.orphanSweepOnce.Do(s.sweepOrphanedWatchCommands)
+	}
 }
 
 // pruneStoppedWatchGroups drops every group that has fully exited, logging the

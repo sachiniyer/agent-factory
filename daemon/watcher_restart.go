@@ -28,6 +28,9 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 	if s.stopped {
 		return fmt.Errorf("watch task supervisor is shutting down")
 	}
+	// An explicit restart can be this supervisor's first spawn, so it must
+	// not start a replacement beside a previous generation's orphan (#5329).
+	s.sweepOrphansOnceLocked()
 	if current := s.watchers[t.ID]; current != nil {
 		delete(s.watchers, t.ID)
 		if dropped := current.stop(); dropped > t.DroppedEvents {

@@ -213,7 +213,11 @@ func (s *watcherSupervisor) persistWatchChildRecord(record watchChildRecord) err
 	}
 	kept := make([]watchChildRecord, 0, len(existing)+1)
 	for _, r := range existing {
-		if r.valid() && r.PID != pid && r.BootID == bootID && r.PIDNamespace == pidNamespace && watchRecordStillLive(r) {
+		// The same child is the same (pid, start stamp), never the pid alone:
+		// a delayed persist for an exited child must not evict the live record
+		// of a newer child that reused its pid (#5329).
+		sameChild := r.PID == pid && r.StartID == record.StartID
+		if r.valid() && !sameChild && r.BootID == bootID && r.PIDNamespace == pidNamespace && watchRecordStillLive(r) {
 			kept = append(kept, r)
 		}
 	}

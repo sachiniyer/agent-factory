@@ -124,13 +124,10 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 		return fmt.Errorf("watch task supervisor is shutting down")
 	}
 	// Reap the previous generation's orphaned watch commands before this
-	// reconcile can spawn a replacement next to one (#5329). Every watcher
-	// spawn funnels through here — including a scoped reconcile in the startup
-	// probation window that runs before armTaskAutomation — and holding s.mu
-	// serializes the sweep against every other reconcile.
-	if s.reapOrphans {
-		s.orphanSweepOnce.Do(s.sweepOrphanedWatchCommands)
-	}
+	// reconcile can spawn a replacement next to one (#5329) — including a
+	// scoped reconcile in the startup probation window that runs before
+	// armTaskAutomation. restart, the other spawn path, does the same.
+	s.sweepOrphansOnceLocked()
 
 	var stale []*taskWatcher
 	for id, w := range s.watchers {
