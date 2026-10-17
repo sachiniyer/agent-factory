@@ -97,10 +97,98 @@ type redactor struct {
 	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
 	// in that path context, so an equal structural value elsewhere stays useful.
 	worktreePathTitles map[worktreePathTitle]struct{}
+	// worktreeTitleSiblingNeedles is the lookup set of every complete sibling
+	// needle (repoPath + "-" + segment) the worktree-title machinery registered,
+	// mirroring worktreePathTitles so isWorktreeTitleSiblingNeedle is a single
+	// map lookup rather than an O(pairs) scan. appendLogOnlyPathBlankSpans and
+	// appendBareNameLogOnlyPathBlankSpans each call that membership test once per
+	// registered path, so the linear scan made the two near-the-cap fallback
+	// registries (4096 path blanks × 4096 title pairs) a ~16M comparison
+	// cross-product on every redact. The set is populated alongside the map in
+	// noteWorktreeTitle and noteFallbackWorktreeTitle, so it never holds a needle
+	// the per-needle loops do not also iterate (#4938 review).
+	worktreeTitleSiblingNeedles map[string]struct{}
+	// worktreePathTitlesFallback counts only the pairs the FALLBACK entry point
+	// (noteFallbackWorktreeTitle) added to worktreePathTitles. The shared map
+	// also holds uncapped typed-record pairs (noteWorktreeTitle, called by
+	// noteSession); counting those typed pairs toward the fallback cap meant a
+	// valid large archive that already filled the map with typed titles
+	// saturated on a later repository's first rejected record — one new
+	// fallback pair flipped the sibling scrubber to blanking every absolute
+	// path even though the fallback registry itself never approached the
+	// fallback cap. The cap belongs to the fallback entry point; this counter
+	// excludes the typed entries that share the map (#4938 review).
+	worktreePathTitlesFallback int
 	// worktreeSubdirectoryTitles are the standalone title-derived leaves used
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
 	worktreeSubdirectoryTitles map[string]struct{}
+	// logOnlyPathBlanks are absolute repo paths gathered from the generic
+	// fallback path (noteUnknownJSONRecord), where the untyped value must not be
+	// trusted as a registered path root (#4115) but still must not survive the
+	// separately-collected daemon log tail (#3588). Each is blanked to the marker
+	// in log and diagnostic text only — noteRepoRoot is never called on it, no
+	// token is granted, and it is never consulted by the generic/config arm —
+	// so the untyped value gets no structural role anywhere in the bundle while
+	// the log section still does not ship the private directory name verbatim.
+	logOnlyPathBlanks map[string]struct{}
+	// logOnlyPathBareNames holds single-segment relative spellings (no path
+	// separator after cleaning) that the generic fallback registered for
+	// log-scope blanking. Slash-bearing spellings live in logOnlyPathBlanks,
+	// but a single-segment relative name such as "ConfidentialClient" — the
+	// bare value of a rejected record's repo_path, or the parent_path derived
+	// from worktree_path="ConfidentialClient/wt" — carries no '/', so the
+	// saturated scan (which anchors on '/') cannot reach it once the
+	// slash-bearing path cap saturates. Keeping bare names in their own set
+	// lets a bounded per-needle pass reach them regardless of saturation
+	// (#4938 review). The set is capped at maxLogOnlyPathBlanks; past it,
+	// registration is a no-op and logOnlyPathBareNamesSaturated switches the
+	// matcher to a fail-closed whole-scalar blank for bare names (#4938
+	// review).
+	logOnlyPathBareNames map[string]struct{}
+	// logOnlyPathBareNamesSaturated records that noteLogOnlyPathRedaction
+	// reached maxLogOnlyPathBlanks distinct single-segment relative spellings
+	// and is now a no-op for further bare names. Dropping a past-the-cap bare
+	// name would be fail-open: the slash-bearing saturated scan anchors on
+	// '/' and cannot reach a bare name, and the bare-name per-needle scan has
+	// no entry for the dropped name, so a daemon-log tail line for an omitted
+	// record such as repo_path="ConfidentialClient4097" would ship the private
+	// name verbatim. appendBareNameLogOnlyPathBlankSpans therefore switches
+	// to blanking the whole decoded single %q scalar when it carries no '/'
+	// (the shape of a past-the-cap bare name) once this is set, mirroring the
+	// slash-bearing cap's fail-closed blank of every absolute path. The
+	// over-blank — a non-path scalar such as a branch name or classification
+	// blanking whole in the degenerate archive that saturates the bare-name
+	// set (more than 4096 distinct single-segment relative spellings, an
+	// implausible count for any realistic rejected-record stream) — is the
+	// privacy side of the same fail-closed trade the slash-bearing saturated
+	// scan already makes for every '/'-bearing token (#4938 review).
+	logOnlyPathBareNamesSaturated bool
+	// logOnlyPathBlanksSaturated records that noteLogOnlyPathRedaction reached
+	// maxLogOnlyPathBlanks and is now a no-op for further call. Dropping
+	// registration past the cap would be fail-open — a daemon-log tail line for
+	// an omitted record would ship its private path verbatim, and the
+	// fallback JSON redaction protects a separate section — so the scan
+	// switches to a single-pass, fail-closed blank of every absolute path
+	// (appendSaturatedLogOnlyPathBlankSpans) once this is set (#4938 review).
+	logOnlyPathBlanksSaturated bool
+	// worktreePathTitlesSaturated records that noteFallbackWorktreeTitle reached
+	// maxWorktreePathTitles and is now a no-op for further fallback pairs.
+	// Dropping a past-the-cap pair would be fail-open: a daemon-log tail line
+	// for the omitted record carries the sibling spelling "<repo_path>-<title>",
+	// the bare-path blank rejects the repo_path because it is immediately
+	// followed by '-', and the sibling-prefix loop has no registered pair to
+	// match (knownRootTextBoundary accepts that dash only once the title pass
+	// has already replaced the suffix with -[redacted], which cannot happen for
+	// a pair the cap dropped) — so the scan switches to the same single-pass,
+	// fail-closed blank of every path once this is set. The cap counts only
+	// the fallback pairs added (worktreePathTitlesFallback); the typed entry
+	// point (noteWorktreeTitle, called by noteSession) is uncapped and never
+	// sets this, so a valid large archive that already filled the shared map
+	// with typed titles keeps its per-title layout and a later repository's
+	// first rejected record does not flip the scrubber to blanking every path
+	// (#4938 review).
+	worktreePathTitlesSaturated bool
 	// engine is this run's share of the shared normalization stage
 	// (internal/redactx): the transform registry plus this redactor's match
 	// policy. Built lazily because tests construct redactor literals directly.

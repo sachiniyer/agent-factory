@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -36,9 +37,29 @@ func (r *redactor) noteUnknownJSON(v any) {
 	r.noteUnknownJSONRecord(v)
 }
 
+// logOnlyPathBlankJSONKeys are the path-bearing keys whose string values the
+// generic fallback registers for log-scope blanking. The typed path collapses
+// every one of these to a root token (noteRepoRoot for repo_path,
+// noteWorktreeRoot for worktree_path) or, failing a registered root, to the
+// marker via collapsePathField; on the untyped fallback no root can be trusted
+// (#4115), so the same values are blanked in the daemon log tail instead.
+//
+// repo_path is gathered separately (it additionally bounds the worktree-title
+// needle prefix via noteWorktreeTitle). alternate_path is included so a
+// rejected record whose alternate is NOT the typed "<repo_path>-<title>"
+// sibling shape — or a malformed record that carries no usable title — still
+// has the verbatim value blanked from the daemon log: worktreeRecoveryLocation
+// interpolates the alternate into recover_error verbatim, and only the sibling
+// shape is reached by the worktree-title needle. When alternate_path IS the
+// registered sibling shape the bare blank in appendLogOnlyPathBlankSpans defers
+// to that pass, preserving the typed path's "[token]-[redacted]" / fallback
+// "[redacted]-[redacted]" layout instead of folding it to one marker.
+var logOnlyPathBlankJSONKeys = map[string]bool{"worktree_path": true, "path": true, "alternate_path": true}
+
 func (r *redactor) noteUnknownJSONRecord(v any) {
 	titles := make(map[string]struct{})
 	repoPaths := make(map[string]struct{})
+	pathBlanks := make(map[string]struct{})
 	var walk func(any)
 	walk = func(value any) {
 		switch t := value.(type) {
@@ -56,6 +77,22 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 					r.noteTmuxName(s)
 				case key == "repo_path":
 					repoPaths[s] = struct{}{}
+					pathBlanks[s] = struct{}{}
+				case key == "worktree_path":
+					pathBlanks[s] = struct{}{}
+					// The missing-worktree emitter also logs parent_path as
+					// filepath.Dir of the worktree path (DiagnoseMissingWorktree),
+					// so the same daemon-log record carries the private directory
+					// one level up verbatim. Register that parent spelling for
+					// log-scope blanking too. "/" (or a one-level path whose Dir is
+					// itself) would blank a separator or rewrite the whole value, so
+					// skip the trivial parent; the full worktree_path is already
+					// registered above for the complete-value case.
+					if parent := filepath.Dir(s); parent != "/" && parent != s {
+						pathBlanks[parent] = struct{}{}
+					}
+				case logOnlyPathBlankJSONKeys[key]:
+					pathBlanks[s] = struct{}{}
 				}
 			}
 		case []any:
@@ -68,10 +105,36 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 	// repo_path is already a sensitive fallback key and is dropped below. Use
 	// it only to reproduce the worktree layer's repo-dependent title bound; do
 	// not register an untyped value as a path root or give it a structural role.
+	// Blank the verbatim path values in the daemon log tail so the
+	// separately-collected log section does not ship them bare (#3588's
+	// cross-section parity guarantee, which the typed path upholds via
+	// noteRepoRoot/noteWorktreeRoot and #4115 left unaddressed on the
+	// fallback). The blank is log-scope-only: no noteRepoRoot, no token, and
+	// no consultation by the generic/config arm, so the untyped value has no
+	// structural role anywhere else in the bundle.
+	for path := range pathBlanks {
+		r.noteLogOnlyPathRedaction(path)
+	}
 	for title := range titles {
 		r.noteWorktreeSubdirectoryTitle(title)
 		for repoPath := range repoPaths {
-			r.noteWorktreeTitle(repoPath, title)
+			// Stop pairing once the fallback title registry is saturated. The
+			// rejected-record walker is shape-agnostic, so one record can nest
+			// many title and repo_path string keys and this cross-product calls
+			// noteFallbackWorktreeTitle once per combination. The cap bounds
+			// the registered pairs, but each later combination still entered
+			// the function to discover it adds nothing. noteFallbackWorktreeTitle
+			// early-returns once saturated, and this break stops the
+			// cross-product itself, so a hand-edited record with thousands of
+			// distinct titles and paths cannot make the fallback a ~quadratic
+			// cross-product while generating a bug report. The capped pairs
+			// switch the sibling-shape redaction to the fail-closed saturated
+			// scan, so the dropped combinations are not left unredacted
+			// (#4938 review).
+			if r.worktreePathTitlesSaturated {
+				break
+			}
+			r.noteFallbackWorktreeTitle(repoPath, title)
 		}
 	}
 }
