@@ -472,6 +472,40 @@ func DetectAgentFromCommand(command string) string {
 	return agent
 }
 
+// agentTokenIsEnvOptionCommandArg reports whether the agent token at agentIdx
+// is an argument to a GNU env command whose option parsing was terminated by a
+// bare `-` or `--` — equivalently, the command env execs is itself
+// option-looking. In that shape GNU env runs the option-looking token and the
+// agent-shaped word after it is only its argument, so the detected agent token
+// is not the running agent. The walk mirrors findAgentToken's: it follows
+// nested env wrappers, and only an env command that strictly precedes
+// agentIdx (so the agent is past it, not the command itself) and is
+// option-looking qualifies. Non-env wrapper prefixes such as `ionice` are not
+// env wrappers, so they are unaffected and still scan per #742.
+func agentTokenIsEnvOptionCommandArg(tokens []string, agentIdx int) bool {
+	for i := 0; i < agentIdx && i < len(tokens); {
+		tok := tokens[i]
+		if _, _, assignment := shellAssignment(tok); assignment {
+			i++
+			continue
+		}
+		if strings.EqualFold(baseCommand(tok), "env") {
+			invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+			if err != nil || invocation.CommandIndex < 0 {
+				return false
+			}
+			commandIdx := i + 1 + invocation.CommandIndex
+			if commandIdx < agentIdx && strings.HasPrefix(tokens[commandIdx], "-") {
+				return true
+			}
+			i = commandIdx
+			continue
+		}
+		i++
+	}
+	return false
+}
+
 // DetectAgentExecutable returns the canonical agent name that the executable
 // token of command will actually run, or "" when the executable is not a
 // recognized agent. Unlike DetectAgentFromCommand it stops at the first
@@ -521,6 +555,19 @@ func findAgentToken(tokens []string) (int, string) {
 // findAgentTokenStrict is findAgentToken with the parser failure preserved for
 // callers that must explain why a command cannot be modeled. Detection-only
 // callers deliberately collapse that failure to "no agent" and fail closed.
+//
+// One shape is excluded from the scan: a GNU env wrapper whose option parsing
+// was terminated by a bare `-` or `--` names an option-looking token as its
+// command (`env - -u claude`, `env -- -C /x claude`). GNU env then execs that
+// option-looking token and passes everything after it only as its argument,
+// so a later agent-shaped word is not the running agent. Bare `-` ending
+// option parsing is the #5036 fix; without this guard every consumer of the
+// shared scan — resumeProgram's --continue injection, the conversation
+// selectors, and CommandEnvironmentFromCommand's receipt-routing Agent —
+// would attach to a non-agent command, the regression Codex flagged on #5052.
+// The guard mirrors the scan's walk so an env command that names a supported
+// agent (`env - claude`) still counts, and only an agent strictly past an
+// option-looking env command is rejected.
 func findAgentTokenStrict(tokens []string) (int, string, error) {
 	for i := 0; i < len(tokens); {
 		tok := tokens[i]
@@ -542,6 +589,9 @@ func findAgentTokenStrict(tokens []string) (int, string, error) {
 		base := strings.ToLower(filepath.Base(tok))
 		for _, supported := range SupportedPrograms {
 			if base == supported {
+				if agentTokenIsEnvOptionCommandArg(tokens, i) {
+					break
+				}
 				return i, supported, nil
 			}
 		}
