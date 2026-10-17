@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -324,4 +325,234 @@ func TestSwapSameTitleTabCursorSurvivesReplacementResort(t *testing.T) {
 	require.True(t, sel.IsTab, "the cursor must stay on its replacement tab row")
 	assert.Equal(t, "a", recreated.GetTabs()[sel.TabIndex].Name)
 	assert.Equal(t, "a", recreated.GetTabs()[h.store.ActiveTab()].Name)
+}
+
+// addSwapTabs equips inst with an agent tab (slot 0) plus the named shell tabs,
+// giving each a "<prefix>-<name>" stable id — the same shape the swap tests above
+// build inline. (paneTabKeys re-keys the agent slot by name regardless of its id,
+// so the agent's id here is mutably-addressing only.)
+func addSwapTabs(t *testing.T, inst *session.Instance, prefix string, names ...string) {
+	t.Helper()
+	for i, name := range names {
+		kind := session.TabKindShell
+		if i == 0 {
+			kind = session.TabKindAgent
+		}
+		inst.AddTabForTest(name, kind)
+		inst.GetTabs()[i].ID = prefix + "-" + name
+	}
+}
+
+// TestSwapSameTitle_TabGoneWithOpenPane is the pane-open half of the #5298
+// swap-path window: an open pane sits on the very tab the cursor rests on, and
+// the daemon kills+recreates the session under the same title with a roster that
+// DROPPED that tab (came back [agent, b] with "a" gone). reconcilePanesForTabs
+// closes the pane and the swap's relayout re-reads the sidebar; on master that
+// commits the re-sorted stale flat index via pushSelection, clobbers the active
+// tab remapActiveTabForTabs just resolved and rewrites lastCursor* so the tail
+// re-pin's replaced-session (by-name) lookup never runs — landing the workspace
+// on the agent tab instead of the sibling. The pre-pin (SelectInstance ahead of
+// the relayout) makes the sidebar sync a cursor move on intact lastCursor*
+// evidence, so the active tab lands on the sibling "b" that took the vacated
+// slot and the cursor lands on the replacement's instance row — the same landing
+// the no-pane control (TestSwapSameTitleTabCursorSurvivesReplacementResort's
+// shape) produces.
+func TestSwapSameTitle_TabGoneWithOpenPane(t *testing.T) {
+	h := newTestHome(t)
+	base := time.Now().Add(-4 * time.Hour)
+
+	first := instanceWithFakeBackend(t, "first")
+	first.ID = "first-id"
+	first.CreatedAt = base
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	stale.CreatedAt = base.Add(time.Hour)
+	last := instanceWithFakeBackend(t, "last")
+	last.ID = "last-id"
+	last.CreatedAt = base.Add(2 * time.Hour)
+	addSwapTabs(t, stale, "stale", "agent", "a", "b")
+	h.store.AddInstance(first)
+	h.store.AddInstance(stale)
+	h.store.AddInstance(last)
+	h.sidebar.SelectInstance(stale)
+	h.sidebar.SelectTabRow(stale.Title, 1)
+	require.Equal(t, "a", stale.GetTabs()[h.store.ActiveTab()].Name)
+	resizeHome(h, 200, 40)
+	openTestPane(t, h, stale, 1) // an open pane on the viewed "a" tab
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	// The replacement drops the viewed "a" tab and re-sorts after "last".
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = base.Add(3 * time.Hour)
+	addSwapTabs(t, recreated, "fresh", "agent", "b")
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{
+		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+	}))
+
+	// The pane on the gone tab closed — proves the mid-swap relayout path ran.
+	require.Equal(t, 0, h.store.NumOpenPanes(),
+		"the pane on the dropped tab closed, so the swap's pane reconcile fired the sidebar-reading relayout")
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance(),
+		"the snapshot's final assertion re-pins the replacement after it moves")
+	assert.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name,
+		"the active tab lands on the sibling 'b' that took the vacated slot, not the drifted stale slot (agent)")
+	sel := h.sidebar.GetSelection()
+	assert.False(t, sel.IsTab,
+		"the cursor lands on the replacement's instance row — the viewed tab's name is gone from the roster, so the name re-pin finds no equivalent tab")
+}
+
+// TestSwapSameTitle_TabReorderedWithOpenPane is the second pane-open repro: the
+// replacement KEEPS the viewed tab but moves it ([agent, b, a], "a" 1→2, fresh
+// ids) and re-sorts after "last". The pane re-binds and the swap's relayout
+// re-reads the sidebar; on master pushSelection commits the re-sorted stale flat
+// index, overwrites the active tab remap resolved, and rewrites lastCursor* to
+// the replacement's id — so the tail re-pin's replacedSession branch reads FALSE
+// and the by-name equivalent-tab lookup is skipped, landing both the cursor and
+// active tab on slot 0 ("agent"). The pre-pin runs moveCursorToInstance on the
+// corpse's intact evidence first, so both follow "a" by name to slot 2.
+func TestSwapSameTitle_TabReorderedWithOpenPane(t *testing.T) {
+	h := newTestHome(t)
+	base := time.Now().Add(-4 * time.Hour)
+
+	first := instanceWithFakeBackend(t, "first")
+	first.ID = "first-id"
+	first.CreatedAt = base
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	stale.CreatedAt = base.Add(time.Hour)
+	last := instanceWithFakeBackend(t, "last")
+	last.ID = "last-id"
+	last.CreatedAt = base.Add(2 * time.Hour)
+	addSwapTabs(t, stale, "stale", "agent", "a", "b")
+	h.store.AddInstance(first)
+	h.store.AddInstance(stale)
+	h.store.AddInstance(last)
+	h.sidebar.SelectInstance(stale)
+	h.sidebar.SelectTabRow(stale.Title, 1)
+	require.Equal(t, "a", stale.GetTabs()[h.store.ActiveTab()].Name)
+	resizeHome(h, 200, 40)
+	openTestPane(t, h, stale, 1) // an open pane on the viewed "a" tab
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	// The replacement keeps "a" but moves it to slot 2, and re-sorts after "last".
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = base.Add(3 * time.Hour)
+	addSwapTabs(t, recreated, "fresh", "agent", "b", "a")
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{
+		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+	}))
+
+	// The pane re-bound to the equivalent "a" tab at its new slot — proves the
+	// mid-swap relayout path ran (the pane reconcile re-binds, not closes).
+	require.Equal(t, 1, h.store.NumOpenPanes(), "the pane followed its tab by name and stayed open")
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance())
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the cursor follows the equivalent tab 'a' by name to slot 2")
+	assert.Equal(t, 2, sel.TabIndex)
+	assert.Equal(t, "a", recreated.GetTabs()[sel.TabIndex].Name)
+	assert.Equal(t, 2, h.store.ActiveTab(),
+		"the active tab follows the equivalent tab 'a' by name to slot 2, not the drifted slot 0 (agent)")
+	assert.Equal(t, "a", recreated.GetTabs()[h.store.ActiveTab()].Name)
+}
+
+// TestSwapSameTitle_TabReorderedNoResortWithOpenPane is the no-re-sort variant of
+// the pane-open repro: a single dup session whose replacement reorders the viewed
+// tab ([agent, b, a], "a" 1→2, fresh ids) without moving the projection row. The
+// tab reorder alone drifts the cursor's flat SUBTREE index (b now occupies a's
+// old slot); on master the pane re-bind's relayout commits "b" via pushSelection
+// and clobbers the name re-pin exactly as the re-sort case does. The pre-pin
+// closes this window too — the drift source is irrelevant once the sidebar-reading
+// relayout runs ahead of the re-pin.
+func TestSwapSameTitle_TabReorderedNoResortWithOpenPane(t *testing.T) {
+	h := newTestHome(t)
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	addSwapTabs(t, stale, "stale", "agent", "a", "b")
+	h.store.AddInstance(stale)
+	h.sidebar.SetSelectedInstance(0)
+	h.sidebar.SelectTabRow(stale.Title, 1)
+	require.Equal(t, "a", stale.GetTabs()[h.store.ActiveTab()].Name)
+	resizeHome(h, 200, 40)
+	openTestPane(t, h, stale, 1) // an open pane on the viewed "a" tab
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	// A single row does not re-sort-drift; the tab reorder ([a,b]→[b,a]) drifts
+	// the cursor's subtree index on its own. Hold the CreatedAt fixed to isolate
+	// that drift source from the cross-row re-sort the sibling tests exercise.
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = stale.CreatedAt
+	addSwapTabs(t, recreated, "fresh", "agent", "b", "a")
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{recreated.ToInstanceData()}))
+
+	require.Equal(t, 1, h.store.NumOpenPanes(), "the pane followed its tab by name and stayed open")
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance())
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the cursor follows the equivalent tab 'a' by name to slot 2")
+	assert.Equal(t, 2, sel.TabIndex)
+	assert.Equal(t, "a", recreated.GetTabs()[sel.TabIndex].Name)
+	assert.Equal(t, 2, h.store.ActiveTab(),
+		"the active tab follows the equivalent tab 'a' by name to slot 2, not the drifted slot 1 (b)")
+	assert.Equal(t, "a", recreated.GetTabs()[h.store.ActiveTab()].Name)
+}
+
+// TestSwapSameTitle_HeaderCursorNotYankedByPrePin guards the production caveat:
+// the swap's pre-pin (SelectInstance) is gated on the cursor actually resting on
+// the swapped session's row. When the cursor rests on a section header, the swap
+// must NOT yank it onto the swapped row — matching ReplaceInstance's deliberate
+// non-asserting silent re-point. An open pane on a reordered tab still fires the
+// mid-swap relayout, but the header cursor stays put (pushSelection early-returns
+// on a header, and the gate keeps the pre-pin from asserting over it).
+func TestSwapSameTitle_HeaderCursorNotYankedByPrePin(t *testing.T) {
+	h := newTestHome(t)
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	addSwapTabs(t, stale, "stale", "agent", "a", "b")
+	other := instanceWithFakeBackend(t, "other")
+	other.ID = "other-id"
+	h.store.AddInstance(stale)
+	h.store.AddInstance(other)
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 200, 40)
+
+	// An open pane on dup's "a" tab so the swap's pane reconcile fires the
+	// sidebar-reading relayout mid-swap.
+	openTestPane(t, h, stale, 1)
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	// Park the cursor on the Instances header the way a user does (a click), so
+	// the cursor-derived selection goes nil while the store's display binding
+	// stays sticky — the state the pre-pin's gate must NOT yank.
+	clickZone(t, h, zones.TreeHeader)
+	require.True(t, h.sidebar.GetSelection().IsHeader, "precondition: the cursor rests on the header")
+	require.Nil(t, h.sidebar.GetSelectedInstance(), "precondition: a header cursor resolves to no instance")
+
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = stale.CreatedAt
+	addSwapTabs(t, recreated, "fresh", "agent", "b", "a")
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{recreated.ToInstanceData(), other.ToInstanceData()}))
+
+	postSel := h.sidebar.GetSelection()
+	assert.True(t, postSel.IsHeader,
+		"a header cursor must not be yanked onto the swapped row: the pre-pin is gated to the cursor resting on that session's row")
 }
