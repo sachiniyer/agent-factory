@@ -707,8 +707,23 @@ func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) er
 		resolvedAt = time.Now()
 		resolved, _ = t.confirmedGeneration()
 	}
-	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	// The refresh heals a PRE-EXISTING live session whose boundary environment
+	// predates or lost its account scope — the restore path's legitimate use
+	// (pinned by TestAccountScopedShellTabInheritsSelectedCredentials). It must
+	// NOT run when confirmedFresh: Start's new-session queue already wrote the
+	// -e session-env entries and default-command atomically in the same call, so
+	// re-deriving them here is pure redundancy whose only effect is a dozen extra
+	// bounded tmux commands — and a single transient failure there makes Start
+	// call t.Close() and destroy the freshly created, healthy pane. It must not
+	// run when the probe went unanswered either: a wedged has-session already
+	// spent a full tmuxCommandTimeout, and the refresh's first set-environment
+	// would pay the same deadline for the same non-answer — twelve times over —
+	// violating the one-bounded-has-session discipline the generation probe
+	// above and ReattachOnly's doc both promise (Codex on #4473).
+	if !confirmedFresh && answered {
+		if err := t.refreshRestoredAccountEnvironment(); err != nil {
+			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+		}
 	}
 	// Teardown attribution follows the GENERATION, not the monitor slot: a
 	// resolved id matching the outgoing monitor's generation shares its mark
