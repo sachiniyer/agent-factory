@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // forceNewSessionEnvMarkers pins the `-e` support probe for the duration of
@@ -107,4 +111,162 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s -e AF_TESTGUARD_RUN=test-run-1 %s",
 			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
+}
+
+// isolateNewSessionEnvProbe ensures the cached `-e` support probe starts
+// unprobed and stays free of any test override, so a shim on PATH is the only
+// thing that can answer `tmux -V`. The cache is process-global, so without this
+// a prior test's successful probe (or a leftover override) would short-circuit
+// the shim.
+func isolateNewSessionEnvProbe(t *testing.T) {
+	t.Helper()
+	prevOverride := newSessionEnvSupportedOverride
+	newSessionEnvSupportedOverride = nil
+	resetNewSessionEnvProbeCache()
+	t.Cleanup(func() {
+		newSessionEnvSupportedOverride = prevOverride
+		resetNewSessionEnvProbeCache()
+	})
+}
+
+// TestNewSessionEnvProbeFailureDoesNotDowngradeAndIsRetried is the envmarker
+// counterpart of TestNoStartProbeFailureDoesNotDowngradeAndIsRetried: a
+// transient `tmux -V` failure must NOT be cached. The first call reports false
+// (the probe could not answer), but the second call re-probes and recovers,
+// rather than latching false for the process lifetime as the old sync.Once did.
+// The latch permanently blinded cleanup, adoption, orphan reaping, and doctor
+// to every session created after a single hiccup.
+func TestNewSessionEnvProbeFailureDoesNotDowngradeAndIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    exit 75
+fi
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	isolateNewSessionEnvProbe(t)
+
+	var warnings logtest.Buffer
+	oldWarningOut, oldWarningFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
+	log.WarningLog.SetOutput(&warnings)
+	log.WarningLog.SetFlags(0)
+	t.Cleanup(func() {
+		log.WarningLog.SetOutput(oldWarningOut)
+		log.WarningLog.SetFlags(oldWarningFlags)
+	})
+
+	if got := tmuxSupportsNewSessionEnv(); got != false {
+		t.Fatalf("first tmuxSupportsNewSessionEnv() = %v, want false (probe failed)", got)
+	}
+	for _, want := range []string{"tmux -V probe failed", "exit status 75"} {
+		if !strings.Contains(warnings.String(), want) {
+			t.Errorf("failed-probe warning %q does not contain %q", warnings.String(), want)
+		}
+	}
+
+	if got := tmuxSupportsNewSessionEnv(); got != true {
+		t.Fatalf("second tmuxSupportsNewSessionEnv() = %v, want true (probe retried and succeeded)", got)
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "2" {
+		t.Fatalf("tmux -V probe attempts = %q, want failure plus one retry", got)
+	}
+}
+
+// TestNewSessionEnvProbeCachesSupportedVerdict verifies that a successful probe
+// is cached: the shim is invoked exactly once across two calls, and the second
+// call returns the cached supported verdict without re-probing.
+func TestNewSessionEnvProbeCachesSupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+printf '%s\n' "$((attempt + 1))" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	isolateNewSessionEnvProbe(t)
+
+	for i := 0; i < 2; i++ {
+		if got := tmuxSupportsNewSessionEnv(); got != true {
+			t.Fatalf("call %d: tmuxSupportsNewSessionEnv() = %v, want true", i+1, got)
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached supported verdict", got)
+	}
+}
+
+// TestNewSessionEnvProbeCachesUnsupportedVerdict verifies that a successful
+// probe of an old tmux is cached as false: the shim is invoked exactly once
+// across two calls, and the second call returns the cached false without
+// re-probing. A false from an unparseable or too-old version is a deterministic
+// answer, not a transient failure, so it must be cached just like a true.
+func TestNewSessionEnvProbeCachesUnsupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    printf '%s\n' 'tmux 3.1c'
+else
+    printf '%s\n' 'tmux 3.4'
+fi
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	isolateNewSessionEnvProbe(t)
+
+	for i := 0; i < 2; i++ {
+		if got := tmuxSupportsNewSessionEnv(); got != false {
+			t.Fatalf("call %d: tmuxSupportsNewSessionEnv() = %v, want false (cached unsupported)", i+1, got)
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached unsupported verdict", got)
+	}
 }
