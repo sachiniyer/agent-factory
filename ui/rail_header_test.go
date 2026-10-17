@@ -75,17 +75,18 @@ func railHeaderCases() []railHeaderCase {
 				a.SetRect(layout.Rect{W: w, H: 4})
 				return strings.TrimRight(strings.Split(stripANSI(a.View()), "\n")[0], " ")
 			},
-			// #5153: the count changes spelling as rungs shed — "(2)", then the
-			// compact "2 (2 on)", then the bare primary "2" — and the noun is
-			// whole-or-omitted rather than ellipsized, so present-at-all and
-			// complete are the same width.
-			noun:          "Automations",
-			counts:        []string{"(2)", "2 (2 on)", " 2 "},
+			// #5153 (review): the section speaks the compact counts vocabulary
+			// at EVERY width — "2 (2 on)" beside the noun, then alone, then the
+			// bare primary "2" — so widening can never remove a count the
+			// narrower form had. The noun is whole-or-omitted rather than
+			// ellipsized, so present-at-all and complete are the same width.
+			noun:          "Automations:",
+			counts:        []string{"2 (2 on)", " 2 "},
 			hint:          railHelpKey(keys.KeyTaskList) + " manage",
-			minInfoWidth:  15,
-			minHintWidth:  15,
-			minNounWidth:  27,
-			fullNounWidth: 27,
+			minInfoWidth:  13,
+			minHintWidth:  13,
+			minNounWidth:  33,
+			fullNounWidth: 33,
 		},
 		{
 			name: "projects",

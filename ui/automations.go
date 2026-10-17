@@ -531,7 +531,11 @@ type detailField struct {
 func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	var fields []detailField
 	push := func(text string, style lipgloss.Style, prio int) {
-		fields = append(fields, detailField{style.Render(text), layout.Cells(text), prio})
+		// Budget with the clamp's own measure (CellsUpperBound): a field priced
+		// by Cells can still be tightened by the rectangle contract — a
+		// width-ambiguous emoji accepted as "whole" would render clipped by
+		// ClampToRect, quietly re-breaking the no-mid-token rule.
+		fields = append(fields, detailField{style.Render(text), layout.CellsUpperBound(text), prio})
 	}
 	// An overdue task leads with the problem, ahead of its own configuration
 	// (#3623) — and ahead of every other field in the shed order too, for the
@@ -573,7 +577,7 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	for _, i := range order {
 		cost := fields[i].width
 		if keptW > 0 {
-			cost += layout.Cells(railHintSeparator)
+			cost += layout.CellsUpperBound(railHintSeparator)
 		}
 		if keptW+cost > avail {
 			continue
@@ -639,17 +643,13 @@ func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style)
 	)
 }
 
-// fullHeaderFits reports whether the section's full header — noun, counts, and
-// the sticky manage affordance — fits the rail whole.
-func (a *AutomationsPane) fullHeaderFits(header railHeader) bool {
-	return layout.Cells(header.text())+layout.Cells(a.manageHint()) <= a.rect.W
-}
-
-// compactRailHeader is the 1-line summary's header AND the full mode's narrow
-// fallback (#5153): the compact counts vocabulary carries both numbers in
-// fewer cells than the noun needs. The noun is whole-or-omitted in both uses —
-// below " Automations: …"'s fit the ladder jumps straight to the counts rather
-// than ellipsizing the noun into "Autom…".
+// compactRailHeader is the section's ONE header vocabulary (#5153): the
+// 1-line summary's line and every full-mode width both speak it, because "n (m
+// on)" carries strictly more than the old full form's bare "(n)" — restoring
+// the noun on a bare count used to remove the enabled and warning numbers at
+// the threshold. The noun is whole-or-omitted in both uses — below
+// " Automations: …"'s fit the ladder jumps straight to the counts rather than
+// ellipsizing the noun into "Autom…".
 func (a *AutomationsPane) compactRailHeader() railHeader {
 	tasks := a.proj.GetTasks()
 	header := railHeader{
@@ -724,17 +724,13 @@ func (a *AutomationsPane) String() string {
 	if a.focused {
 		nameStyle = automationsTitleStyle
 	}
-	// The noun renders whole or not at all (#5153): when the full header cannot
-	// fit, the section speaks the compact summary's counts vocabulary ("2 (1
-	// on)") rather than ellipsizing "Automations" into "Autom…" — a header that
-	// reads as broken instead of abbreviated.
-	header := railHeader{
-		noun:   "Automations",
-		counts: fmt.Sprintf("(%d)", len(tasks)),
-	}
-	if !a.fullHeaderFits(header) {
-		header = a.compactRailHeader()
-	}
+	// The header speaks the compact summary's counts vocabulary at every width
+	// (#5153 review): "n (m on)" — and "[!] n" when a task needs attention — is
+	// strictly more information than the bare "(n)" the old full form carried,
+	// so restoring the noun at its threshold used to REMOVE the enabled and
+	// warning counts. With one vocabulary the ladder stays monotonic, and the
+	// whole-or-omitted noun still sheds rather than ellipsizing into "Autom…".
+	header := a.compactRailHeader()
 	title := a.titleLine(header, nameStyle)
 	lines := []string{title}
 
@@ -758,13 +754,16 @@ func (a *AutomationsPane) String() string {
 	// scrolls into view instead of moving invisibly. The focused selection
 	// expands to a 2-line row (title + detail), so reserve a line for the
 	// detail when scrolling the selection to the bottom keeps it fully visible
-	// rather than clipping its detail off the fold.
+	// rather than clipping its detail off the fold. The reservation holds only
+	// when the row actually has detail to reveal — a task whose every field is
+	// omitted still renders one line, and reserving a phantom second would
+	// scroll a visible row away for nothing.
 	visible := contentH - 1
 	if visible < 0 {
 		visible = 0
 	}
 	effVisible := visible
-	if a.focused && effVisible > 1 {
+	if a.focused && effVisible > 1 && a.selected < len(tasks) && a.detailRow(tasks[a.selected]) != "" {
 		effVisible--
 	}
 	if a.offset > a.selected {
@@ -773,7 +772,11 @@ func (a *AutomationsPane) String() string {
 	if effVisible > 0 && a.selected >= a.offset+effVisible {
 		a.offset = a.selected - effVisible + 1
 	}
-	if max := len(tasks) - visible; a.offset > max {
+	// The bottom-clamp must use the window that was actually reserved: a larger
+	// bound here undoes the reservation — the selection's row renders at the
+	// fold and its detail falls off below it, which is what the reservation
+	// exists to prevent.
+	if max := len(tasks) - effVisible; a.offset > max {
 		a.offset = max
 	}
 	if a.offset < 0 {

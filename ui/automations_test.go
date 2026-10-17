@@ -388,23 +388,23 @@ func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
 
 // The ladder itself: what is shed, and in what order. The manage affordance is
 // the last thing cut — the shipped contract TestAutomationsTitleWidthAware pins
-// — and the noun is whole-or-omitted (#5153): below the full header's fit the
-// section falls to the compact counts vocabulary rather than an ellipsized
-// noun, and below THAT to the bare count.
+// — and the noun is whole-or-omitted (#5153): the section speaks the compact
+// counts vocabulary at every width, so the noun's arrival adds words rather
+// than swapping the counts the narrower form had.
 func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 	for _, tc := range []struct {
 		w    int
 		want string
 	}{
-		{40, " Automations (2) · m manage · e hooks"}, // everything
-		{37, " Automations (2) · m manage · e hooks"}, // exactly
-		{36, " Automations (2) · m manage"},           // hooks drops first
-		{27, " Automations (2) · m manage"},           // exactly
-		{26, " 2 (2 on) · m manage"},                  // then the noun goes whole, compact counts
-		{22, " 2 (2 on) · m manage"},                  // the 22-col rail minimum (#1090)
-		{20, " 2 (2 on) · m manage"},                  // exactly
-		{19, " 2 · m manage"},                         // then the secondary count goes
-		{15, " 2 · m manage"},                         // the bare count and the affordance are the floor
+		{43, " Automations: 2 (2 on) · m manage · e hooks"}, // everything
+		{36, " Automations: 2 (2 on) · m manage"},           // hooks drops first
+		{33, " Automations: 2 (2 on) · m manage"},           // noun's fit, exactly
+		{32, " 2 (2 on) · m manage"},                        // then the noun goes whole, counts keep both numbers
+		{26, " 2 (2 on) · m manage"},                        // the #5153 fallback keeps the SAME counts vocabulary
+		{22, " 2 (2 on) · m manage"},                        // the 22-col rail minimum (#1090)
+		{20, " 2 (2 on) · m manage"},                        // exactly
+		{19, " 2 · m manage"},                               // then the secondary count goes
+		{15, " 2 · m manage"},                               // the bare count and the affordance are the floor
 	} {
 		require.Equalf(t, tc.want, railHeaderLine(t, nSimpleTasks(2), tc.w),
 			"rail width %d", tc.w)
@@ -440,9 +440,9 @@ func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
 		detail := strings.TrimSpace(lines[2])
 
 		require.NotContainsf(t, out, "…", "width %d: a field is cut mid-token:\n%s", w, out)
-		if w >= 27 {
-			require.Containsf(t, header, "Automations (1)",
-				"width %d: the full header fits, so it shows: %q", w, header)
+		if w >= 33 {
+			require.Containsf(t, header, "Automations: 1 (1 on)",
+				"width %d: the noun fits beside the full counts, so it shows: %q", w, header)
 		} else {
 			require.Containsf(t, header, "1 (1 on)",
 				"width %d: the narrow header keeps both counts whole: %q", w, header)
@@ -506,6 +506,79 @@ func TestAutomationsDetailIndentIsFixed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAutomationsDetailBudgetsByUpperBound is the #5153 review finding: the
+// field budget is priced in CellsUpperBound — the same measure the rectangle
+// contract clamps with — because a trigger/watch command is user data, and
+// Cells under-reports a chained ZWJ family (2 where tmux can advance 4).
+// Accepting such a field on the optimistic count let ClampToRect tighten it
+// afterwards, cutting the family mid-sequence — the exact mid-token clip the
+// whole-or-omit contract exists to remove.
+func TestAutomationsDetailBudgetsByUpperBound(t *testing.T) {
+	trigger := strings.Repeat("👨‍👩‍👧‍👦", 4)
+	optimistic, bound := layout.Cells(trigger), layout.CellsUpperBound(trigger)
+	require.Less(t, optimistic, bound, "the fixture must be a case where the two measures diverge")
+
+	build := func(w int) *AutomationsPane {
+		a := newTestAutomations([]task.Task{{
+			ID: "emoji", Name: "emoji-trigger", CronExpr: trigger, Enabled: false,
+		}})
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		return a
+	}
+	// avail = w - itemPrefixWidth: one cell short of the bound admits the
+	// optimistic count but not the honest one, so the field must be omitted —
+	// not admitted and then clipped.
+	tight := build(itemPrefixWidth + bound - 1)
+	out := stripANSI(tight.View())
+	require.NotContains(t, out, trigger,
+		"a field whose upper-bound width does not fit must be omitted, never clipped mid-token")
+	wide := build(itemPrefixWidth + bound)
+	require.Contains(t, stripANSI(wide.View()), trigger,
+		"the same field renders whole the moment its bound fits")
+}
+
+// TestAutomationsScrollReservesDetailOnlyWhenItRenders is the #5153 review
+// finding: the scroll window reserves the expanded row's second line only when
+// the detail has fields to show, and the bottom-clamp uses the reserved window
+// so the reservation cannot be undone at the fold. A disabled task whose sole
+// trigger is wider than the field budget has no detail — reserving for it
+// scrolled a fully-visible row away for nothing.
+func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
+	// "0 3 * * *" prices 9 cells: inside a 15-cell rail it fits the W−6
+	// budget exactly, at 14 nothing does and the expanded row stays one line.
+	tasks := make([]task.Task, 8)
+	for i := range tasks {
+		tasks[i] = task.Task{ID: fmt.Sprintf("t%d", i), Name: fmt.Sprintf("task-%d", i),
+			CronExpr: "0 3 * * *"}
+	}
+	bottom := func(w int) *AutomationsPane {
+		a := newTestAutomations(tasks)
+		a.SetRect(layout.Rect{W: w, H: 8})
+		a.Focus()
+		for i := 0; i < len(tasks)-1; i++ {
+			a.ScrollDown()
+		}
+		return a
+	}
+
+	// Detail renders: the window reserves its line, so one fewer title row
+	// shows and the selected task's detail is on-screen at the fold.
+	withDetail := stripANSI(bottom(15).View())
+	require.Contains(t, withDetail, "0 3 * * *",
+		"the selected row's detail must be visible, not pushed below the fold")
+	require.NotContains(t, withDetail, "task-2",
+		"the reserved detail line takes a real row's place")
+	require.Contains(t, withDetail, "task-7")
+
+	// Detail empty: no line is reserved, so the same scroll position keeps the
+	// extra title row a phantom reservation would have scrolled away.
+	noDetail := stripANSI(bottom(14).View())
+	require.NotContains(t, noDetail, "0 3 * * *")
+	require.Contains(t, noDetail, "task-2",
+		"with no detail to reveal the window must not sacrifice a visible row")
 }
 
 // The compact one-liner (#2.6, <80 cols) rides the same ladder and keeps its own
