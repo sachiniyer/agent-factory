@@ -163,10 +163,12 @@ const requireTokenFixHint = "af config set network.require_token true"
 // a listener that does not ask for one (#2999).
 //
 // This is the load-bearing refusal, so the reasoning is here rather than at the
-// call site. network.require_token defaults to FALSE, and #2168 Phase 0 reversed #2090's
-// refusal to bind a tokenless network listener — af now binds it and warns once.
-// So the moment an operator points network.listen_addr somewhere a sandbox can reach, the
-// whole control plane answers every caller with no credential at all.
+// call site. network.require_token defaults to FALSE. #2168 Phase 0 reversed #2090's
+// refusal to bind a tokenless network listener, and #5137 reinstated the refusal
+// scoped to the TCP listener — but only as the DEFAULT: network.allow_unauthenticated_network
+// opts back in, so a tokenless network listener can still exist. So the moment an
+// operator points network.listen_addr somewhere a sandbox can reach under that
+// opt-in, the whole control plane answers every caller with no credential at all.
 //
 // Injecting a token into that would be worse than doing nothing: it manufactures
 // the appearance of a boundary that nothing enforces, and the next reader — human

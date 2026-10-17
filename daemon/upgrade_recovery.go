@@ -352,7 +352,15 @@ func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	if want.listeners.HTTPUnixBound && !h.Listeners.HTTPUnixBound {
 		return fmt.Errorf("%s daemon has not bound the HTTP control listener", want.role)
 	}
-	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound {
+	// A policy-refused TCP listener satisfies the bound expectation (#5137):
+	// the responder DELIBERATELY declined the socket, which is a healthy
+	// outcome — otherwise an upgrade of an exposed daemon could never adopt a
+	// release that refuses the posture, because the candidate's refusal would
+	// fail identity here and roll back to the old exposed daemon. Only
+	// refusal-aware daemons report the reason, so an older responder that
+	// genuinely failed to bind still misses both fields and still fails.
+	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound &&
+		h.Listeners.TCPRefusalReason == "" {
 		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)
 	}
 	return nil

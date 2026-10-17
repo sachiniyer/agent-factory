@@ -73,10 +73,13 @@ type tokenGatePolicy struct {
 //   - tokenDisabled from require_token=false, THE DEFAULT — drop the token for ALL
 //     peers, so the daemon-served web UI opens with no login. Paired with the
 //     loopback-only default listen_addr, nothing off-host can reach it. A tokenless
-//     gate CAN front a network listener: #2090 refused to bind that combination,
-//     and #2168 Phase 0 reversed the refusal by owner decision, so startHTTPServer
-//     binds it and warns once instead. Nothing below authenticates such a peer —
-//     that is the configuration doing exactly what it says.
+//     gate CAN front a network listener, but only when the operator opted in:
+//     #5137 makes that combination a refused bind by default (the daemon starts
+//     and the unix sockets still work; the TCP listener stays unbound), and
+//     allow_unauthenticated_network=true is the explicit release — which is when
+//     this policy actually gets to run tokenless on the network. Nothing below
+//     authenticates such a peer — that is the configuration doing exactly what
+//     it says.
 //   - loopbackExempt lets same-machine peers skip the token, BUT only when the
 //     listener is LOOPBACK-BOUND. On a network bind the exemption is withheld
 //     regardless of require_loopback_token: a same-host reverse proxy connects
@@ -176,6 +179,18 @@ type livePosture struct {
 	// snapshot returns the current global config. It is read EXACTLY ONCE per
 	// request (withLivePosture) and the whole posture derives from that one read.
 	snapshot func() *config.Config
+	// freeze is this listener KIND's refusal freeze, shared by every generation:
+	// a refusal can land while an OLDER generation is still draining after a
+	// normal rebind, so per-generation state cannot cover the hole — the freeze
+	// must reach every socket the kind is still serving (#5137). Nil for
+	// postures no refusal can retire (the preview origin, test stand-ins).
+	freeze *postureFreeze
+	// seq is this generation's issuance order within its kind. A freeze covers
+	// exactly the generations issued before it (seq <= freeze.through), so a
+	// listener bound AFTER a refusal reads live: it was admitted under a newer
+	// config the posture allowed, while an earlier generation keeps gating on
+	// the config it was serving when the refusal landed.
+	seq uint64
 	// policyFromConfig derives the gate's token/loopback posture from the snapshot
 	// (require_token / require_loopback_token) — the control-plane web listener. The
 	// preview listener leaves it false: its gate posture is the fixed strict zero
@@ -210,6 +225,174 @@ type livePosture struct {
 	previewWarmingUp func() bool
 }
 
+// postureFreeze pins the serving posture of ONE listener kind across all its
+// generations (#5137). Retire's drain deliberately lets in-flight handlers
+// finish, and a keep-alive conn can dispatch a request that reaches the gate
+// AFTER the refusing config has published — without the pin that request reads
+// tokenDisabled and reaches the control API unauthenticated on a socket that
+// was just refused. Generations are the point: a normal rebind leaves the old
+// listener draining, and a refusal arriving while that drain runs must cover
+// it, not just the handle bound right now.
+type postureFreeze struct {
+	mu sync.Mutex
+	// cfg is the config the covered generations were serving at the refusal —
+	// what their drain-window requests keep evaluating.
+	cfg *config.Config
+	// through is the last generation the freeze covers. A listener bound after
+	// the refusal has a higher seq and reads live: it was admitted under a
+	// newer config the posture allowed. Every pin re-arms both halves, so a
+	// second refusal freezes the generations added since the first against the
+	// config they actually served.
+	through uint64
+}
+
+// pin freezes every generation with seq <= through onto cfg. Called only by
+// refusal-driven retires: a posture change the operator was allowed to write
+// keeps the ordinary live-read semantics. Two inputs are no-ops: cfg==nil (a
+// refusal without a serving config has nothing to preserve) and a cfg that is
+// ITSELF refused — a refused posture was never legitimately served, so pinning
+// it would hand draining sockets the very gate the freeze exists to keep out;
+// the generations an earlier refusal pinned keep their own serving config.
+func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
+	if cfg == nil || config.ListenerBindRefusal(cfg) != "" {
+		return
+	}
+	f.mu.Lock()
+	f.cfg, f.through = cfg, through
+	f.mu.Unlock()
+}
+
+// current returns the config this listener evaluates requests under — the live
+// snapshot unless this generation is inside a refusal freeze.
+func (l *livePosture) current() *config.Config {
+	if f := l.freeze; f != nil {
+		f.mu.Lock()
+		if f.cfg != nil && l.seq <= f.through {
+			cfg := f.cfg
+			f.mu.Unlock()
+			return cfg
+		}
+		f.mu.Unlock()
+	}
+	return l.snapshot()
+}
+
+// connTracker tracks the HIJACKED connections — WebSocket upgrades — of one
+// listener KIND across its generations (#5137). http.Server forgets a conn the
+// moment it is hijacked, so neither Shutdown's drain nor Close reaches it; a
+// stream opened on listener generation A survives A's retirement and outlives
+// the handle that owned it. The tracker therefore lives on the listener owner
+// (webListeners), not the handle: a later POLICY retire — a refusal — must be
+// able to name every hijacked conn the kind is still serving, not only the ones
+// the current generation admitted.
+//
+// Membership is two-way: ConnState adds a conn when it hijacks, and the wrapped
+// conn removes itself on Close (net/http never reports a state for a hijacked
+// conn again — without the self-removal every finished stream would stay
+// strongly referenced for the daemon's life). Severing is a generation
+// WATERMARK, not a shared latch: sever() retires every generation allocated so
+// far, so a conn whose handler hijacks LATE — its upgrade passed the old gate
+// before the retire, and http.Server reports StateHijacked only after — dies
+// on arrival even if a new generation has since bound. A boolean latch cannot
+// express that: the new generation's begin() would lift the severing that the
+// late-arriving retired-generation conn still needs to hit.
+type connTracker struct {
+	mu             sync.Mutex
+	nextGen        uint64
+	severedThrough uint64
+	conns          map[net.Conn]struct{}
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{conns: make(map[net.Conn]struct{})}
+}
+
+// begin allocates the generation a freshly bound listener belongs to; its ID is
+// closed over by that server's ConnState. Generations are monotonic, and
+// sever() retires every ID ≤ severedThrough — so a generation created before
+// the sever is dead no matter when its stragglers hijack, while the next bind's
+// generation numbers above the watermark and is unaffected by it.
+func (t *connTracker) begin() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.nextGen++
+	return t.nextGen
+}
+
+// track records a conn the server just handed to a hijacking handler, or closes
+// it on the spot when its generation is dead. The close runs outside mu so
+// trackedConn.Close's self-removal cannot re-enter the lock.
+func (t *connTracker) track(gen uint64, c net.Conn) {
+	t.mu.Lock()
+	dead := gen <= t.severedThrough
+	if !dead {
+		t.conns[c] = struct{}{}
+	}
+	t.mu.Unlock()
+	if dead {
+		_ = c.Close()
+	}
+}
+
+// untrack drops a conn — called by trackedConn.Close, so a finished stream
+// releases its slot rather than growing the set for the daemon's life.
+func (t *connTracker) untrack(c net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
+}
+
+// sever force-closes every tracked conn now and marks every generation that has
+// ever begun as dead — a late hijack from a retired listener's still-running
+// handler is then refused on arrival even after a new generation binds.
+// retire() drains in-flight NORMAL requests — the refusal's own reply still
+// reaches its client — while a hijacked stream has no reply left to give: it
+// only lives to keep serving a posture the socket must stop serving. Closes
+// run outside mu for the same re-entrancy reason as track.
+func (t *connTracker) sever() {
+	t.mu.Lock()
+	t.severedThrough = t.nextGen
+	conns := make([]net.Conn, 0, len(t.conns))
+	for c := range t.conns {
+		conns = append(conns, c)
+	}
+	clear(t.conns)
+	t.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// trackedListener wraps the raw listener so every accepted conn is a trackedConn
+// — the one reliable hook for "this conn is gone" that exists for hijacked conns.
+type trackedListener struct {
+	net.Listener
+	tracker *connTracker
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &trackedConn{Conn: c, tracker: l.tracker}, nil
+}
+
+// trackedConn removes itself from the tracker on Close — the ONLY teardown event
+// a hijacked conn still reports, since http.Server's ConnState is silent for it
+// after StateHijacked.
+type trackedConn struct {
+	net.Conn
+	untrackOnce sync.Once
+	tracker     *connTracker
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.untrackOnce.Do(func() { c.tracker.untrack(c) })
+	return err
+}
+
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
 // wrapped in a token-enforcing gate + the CORS allow-list. It returns the
 // listener's teardown handle (tcpListenerHandle: close now, or retire and drain)
@@ -231,14 +414,18 @@ type livePosture struct {
 // token rotate` takes effect for new connections without a daemon restart. An
 // override supplies its own already-minted credential and is compared as-is.
 func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (*tcpListenerHandle, tcpListenerInfo, error) {
-	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, net.Listen)
+	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, nil, net.Listen)
 }
 
 // startTCPListenerWithListen is startTCPListener with the socket constructor
 // supplied by the restartable-listener owner. Production uses net.Listen; the
 // seam lets lifecycle tests fail the listener underneath http.Server without
 // conflating that path with tearing the server down through the returned handle.
-func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
+// hijacked, when non-nil, is the listener KIND's connTracker (see above): the
+// listener is wrapped so conns self-unregister, and ConnState reports each
+// hijack into it. Nil means no hijack tracking — the preview and agent-server
+// listeners have no policy retire that would ever need one.
+func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, hijacked *connTracker, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
 	var expectedForRequest func(*http.Request) (string, error)
@@ -282,7 +469,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	if live != nil {
 		boundLoopback := config.IsLoopbackListenAddr(listener.Addr().String())
 		handler = withLivePosture(mux, func() requestPosture {
-			c := live.snapshot()
+			c := live.current()
 			g := &authGate{
 				expectedToken:           expectedToken,
 				expectedTokenForRequest: expectedForRequest,
@@ -336,6 +523,21 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	done := make(chan struct{})
+	if hijacked != nil {
+		// http.Server stops tracking a connection the moment it is hijacked,
+		// which is what makes a policy retire incomplete without sever: the
+		// tracker must be able to name the conns Shutdown and Close cannot.
+		// The generation is allocated BEFORE Serve accepts — this listener's
+		// conns tag it at hijack time so a sever that predates a straggler's
+		// upgrade still reaches it.
+		gen := hijacked.begin()
+		listener = &trackedListener{Listener: listener, tracker: hijacked}
+		srv.ConnState = func(c net.Conn, st http.ConnState) {
+			if st == http.StateHijacked {
+				hijacked.track(gen, c)
+			}
+		}
+	}
 	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String()}
 	go func() {
 		defer close(done)

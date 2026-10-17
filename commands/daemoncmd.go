@@ -53,10 +53,13 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with network.require_token = false anyone who can reach the
-address drives your agents, so set network.require_token = true unless you trust the
-network. That listener speaks plain HTTP either way, so put it behind a reverse
+--token flags. A routable listener with the token off is REFUSED: with
+network.require_token = false anyone who can reach the address drives your agents,
+so af declines to bind it unless you opt in with
+network.allow_unauthenticated_network = true. Set network.require_token = true
+instead unless you trust the network (turn it on BEFORE moving the address — the
+write guard refuses the tokenless-network posture). That listener speaks plain
+HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
@@ -142,15 +145,18 @@ type daemonStatusInfo struct {
 	ConfigMatches     string                   `json:"config_matches_running_daemon,omitempty"`
 	ConfigDetail      string                   `json:"config_detail,omitempty"`
 	BinaryStale       bool                     `json:"binary_stale"`
-	// ExposureWarning is non-empty when the config on disk serves the control API
-	// unauthenticated on a network address (#2090) — an ALLOWED posture since
-	// #2168 Phase 0, so this reports it rather than predicting a failure.
+	// ExposureWarning is non-empty when the config on disk describes the #2090
+	// exposure shape — a non-loopback listen_addr with the token off. Since
+	// #5137 the text it carries is the REFUSAL reason (ListenerBindRefusal)
+	// unless network.allow_unauthenticated_network opted in, in which case it is
+	// the serving-exposure notice (ListenerExposureNotice).
 	//
 	// It replaces cannot_start_reason, which named a dead end that no longer
-	// exists: the daemon starts and serves in this configuration now, so a field
-	// meaning "it cannot start" could only ever have been wrong. omitempty keeps
-	// the JSON byte-identical for every consumer whose posture is safe, which is
-	// every consumer on the default config.
+	// exists: the daemon starts under either posture now — what is refused is
+	// the TCP listener, not the process — so a field meaning "it cannot start"
+	// could only ever have been wrong. omitempty keeps the JSON byte-identical
+	// for every consumer whose posture is safe, which is every consumer on the
+	// default config.
 	ExposureWarning string `json:"exposure_warning,omitempty"`
 }
 
@@ -210,7 +216,7 @@ func collectDaemonStatus() daemonStatusInfo {
 	var current *config.Config
 	if load, err := config.LoadConfigReadOnly(); err == nil {
 		current = load.Config
-		info.ExposureWarning = config.ListenerExposureNotice(current)
+		info.ExposureWarning = listenerStatusWarning(current)
 	}
 	if info.Running {
 		supervised := daemon.AnswerNo()
@@ -234,6 +240,19 @@ func collectDaemonStatus() daemonStatusInfo {
 	return info
 }
 
+// listenerStatusWarning composes the exposure/refusal line for `af daemon
+// status` from the config on disk: the #5137 refusal reason when the posture
+// would be refused, else the #2090 exposure notice when the operator opted in.
+// What a RUNNING daemon serves under its last-applied config — including a
+// socket still bound under a now-refused file — is reported by the live
+// listener rows; reconciling the two against each other is follow-up (#5185).
+func listenerStatusWarning(current *config.Config) string {
+	if refusal := config.ListenerBindRefusal(current); refusal != "" {
+		return refusal
+	}
+	return config.ListenerExposureNotice(current)
+}
+
 // printDaemonStatusHuman renders the snapshot as a short human report mirroring
 // the wording `af doctor` uses for the daemon check.
 func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
@@ -241,9 +260,9 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// The on-demand promise is unconditional again: since #2168 Phase 0 there
-		// is no config the daemon refuses to start under, so there is no posture
-		// that makes this line a lie.
+		// The on-demand promise is unconditional: since #2168 Phase 0 there is no
+		// config the daemon refuses to START under — #5137 kept that, scoping its
+		// refusal to the TCP listener alone, so this line is never a lie.
 		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
 	}
 	if info.Phase != "" {
@@ -269,6 +288,13 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			fmt.Fprintln(w, "  tcp listener:   disabled")
 		case info.Listeners.TCPBound:
 			fmt.Fprintf(w, "  tcp listener:   %s (bound)\n", info.Listeners.TCPBoundAddr)
+		case info.Listeners.TCPRefusalReason != "":
+			// Configured, unbound, and refused is a DECISION (#5137), not a bind
+			// failure — "(not bound)" would send the operator debugging a port
+			// that was never attempted, so the reason is printed with the three
+			// fixes it carries.
+			fmt.Fprintf(w, "  tcp listener:   %s (refused)\n", info.Listeners.TCPListenAddr)
+			fmt.Fprintf(w, "    refused:      %s\n", info.Listeners.TCPRefusalReason)
 		default:
 			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
 		}
