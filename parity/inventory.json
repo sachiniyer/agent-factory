@@ -124,8 +124,8 @@
         "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
+      "issue": "#4803",
+      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation. The #2216 epic has closed; the UI half is tracked live as #4803, with implementation in flight as PR #4806."
     },
     {
       "id": "config.read",
@@ -179,8 +179,8 @@
         "pointer": "commands/configcmd.go config get/list --repo (with deprecated --project alias)"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
+      "issue": "#5289",
+      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. The #2216 epic has closed; TUI/web exposure is in flight as PR #4947, which is also the write half's (#5157) sequencing dependency."
     },
     {
       "id": "appearance.select",
@@ -581,8 +581,8 @@
         "pointer": "commands/quotacmd.go:29"
       },
       "verdict": "real-gap",
-      "issue": "#2983",
-      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+      "issue": "#4361",
+      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. #2983 has closed; the UI half is tracked live as #4361, with implementations in flight as PRs #4900 and #4409."
     },
     {
       "id": "session.account-login",
@@ -691,8 +691,8 @@
         "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
       },
       "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/dev/surface-parity.md 'reachable != user-settable'."
+      "issue": "#5290",
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity', and the proof is in flight as PR #5107. See docs/dev/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.inplace",
@@ -765,8 +765,8 @@
         "pointer": "api/api.go:589 --backend hook"
       },
       "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968)."
+      "issue": "#5291",
+      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968); the proof is in flight as PR #5107."
     },
     {
       "id": "session.create.opt.title",
@@ -1508,8 +1508,8 @@
         "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
       },
       "verdict": "real-gap",
-      "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract."
+      "issue": "#5292",
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract. #2358 has closed; the residual retained-boundary holes (send-prompt --all and the TUI stream paths) are in flight as PR #4760."
     },
     {
       "id": "worktree.hooks.edit",

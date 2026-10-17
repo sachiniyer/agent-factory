@@ -150,12 +150,25 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	if err := s.rc.call("/v1/agent/snapshot", struct{}{}, &resp); err != nil {
 		return Observation{}, err
 	}
+	// A pre-field sandbox reports no capture bit — and its own snapshot path
+	// swallows a failed capture-pane into the same all-false shape an idle
+	// pane produces, so the wire cannot tell the two apart. Resolve the
+	// absence from the frame's own positive evidence: an updated/prompt/
+	// baseline flag or non-empty content provably read the pane, while an
+	// all-false legacy frame stays unconfirmed rather than counting as
+	// observed silence (#5221 review). A server new enough to send the field
+	// is authoritative — including its honest no.
+	captured := resp.Updated || resp.HasPrompt || resp.Baseline || resp.Content != ""
+	if resp.Captured != nil {
+		captured = *resp.Captured
+	}
 	return Observation{
 		Updated:     resp.Updated,
 		Baseline:    resp.Baseline,
 		HasPrompt:   resp.HasPrompt,
 		Content:     resp.Content,
 		ModelChange: cloneAgentModelChange(resp.ModelChange),
+		Captured:    captured,
 	}, nil
 }
 
@@ -785,6 +798,11 @@ type agentSnapshotResp struct {
 	HasPrompt   bool              `json:"has_prompt"`
 	Content     string            `json:"content"`
 	ModelChange *AgentModelChange `json:"model_change,omitempty"`
+	// Captured is a pointer so "server predates the field" stays
+	// distinguishable from "server reports its capture failed" (#5221
+	// review): nil resolves to the legacy contract — an all-false frame is
+	// unconfirmed, positive evidence marks the capture real.
+	Captured *bool `json:"captured,omitempty"`
 }
 
 type agentPreviewReq struct {

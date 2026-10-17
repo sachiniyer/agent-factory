@@ -342,7 +342,7 @@ that was quietly reachable (#2521).
 
 ### Making docker the default backend for a repo
 
-To run a repo's sessions in containers by default, set `backend = "docker"` in
+To run a repo's sessions in containers by default, set `"backend": "docker"` in
 its `.agent-factory/config.json`. This is an operator decision, not a default af
 ships — the steps below must be done in order, because the flip does **not**
 degrade gracefully on an unprepared box:

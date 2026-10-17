@@ -398,7 +398,7 @@ func TestWhoamiSession_DiskFallback(t *testing.T) {
 
 // --- Remote-target error surfacing (#1679, #1681) ------------------------------
 //
-// These lock in the contract from docs/remote-tcp-auth.md: when targeting a
+// These lock in the contract from docs/remote-http-auth.md: when targeting a
 // remote daemon, a snapshot error (bad token → 401, or unreachable daemon →
 // network error) is surfaced verbatim rather than being masked by a
 // same-machine disk scan (there is no local disk on the other end). The disk is
