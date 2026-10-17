@@ -560,7 +560,7 @@ default_program = "codex"
 post_worktree_commands = ["npm install"]
 
 [program_overrides]
-codex = "/usr/local/bin/codex --profile work"
+codex = "codex --profile work"
 
 [remote_hooks]
 launch_cmd = "./infra/launch.sh"
