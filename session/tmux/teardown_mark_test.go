@@ -32,9 +32,13 @@ const (
 // teardownMarkTmux is a hermetic tmux: every verb answers from these fields and
 // nothing execs.
 type teardownMarkTmux struct {
-	alive       atomic.Bool // has-session answers "exists"
-	killFails   atomic.Bool // kill-session answers a failure instead of removing the session
-	captureOK   atomic.Bool // capture-pane succeeds
+	alive     atomic.Bool // has-session answers "exists"
+	killFails atomic.Bool // kill-session answers a failure instead of removing the session
+	captureOK atomic.Bool // capture-pane succeeds
+	// captureErr, when set, is capture-pane's failure verbatim. A plain
+	// (non-*exec.ExitError) error models an exec-level fault — tmux itself
+	// never ran — which must never demote under teardown attribution.
+	captureErr  atomic.Value
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
 	// captureWedged stalls capture-pane past the shortened deadline — the
 	// monitor's error path sees ErrTmuxTimeout, not a pane answer.
@@ -117,7 +121,15 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		if m.captureOK.Load() {
 			return []byte("pane content"), nil
 		}
-		return nil, errors.New("exit status 1")
+		if v := m.captureErr.Load(); v != nil {
+			return nil, v.(error)
+		}
+		// A genuine *exec.ExitError: tmux ran and answered that the pane is
+		// missing — the shape af's own teardown produces mid-teardown.
+		// Anything that is not an ExitError means tmux itself never ran and
+		// must keep ERROR under teardown attribution (#5327 review).
+		_, err := exec.Command("sh", "-c", "exit 1").Output()
+		return nil, err
 	case strings.Contains(args, "list-panes"):
 		m.listPanesCalls.Add(1)
 		return nil, nil
@@ -664,6 +676,50 @@ func TestUnansweredLivenessProbeDuringTeardownStaysError(t *testing.T) {
 			require.NotContains(t, infos.String(), "during af-initiated teardown",
 				"an unanswered liveness probe must not demote under teardown attribution")
 			require.False(t, session.monitor.dead, "an unanswered probe proves nothing about the session's fate")
+		})
+	}
+}
+
+// TestUnrunnableCaptureDuringTeardownStaysError pins the demotion's fourth
+// edge (Codex on #5327, third finding): the mid-teardown INFO exists only
+// for a failure tmux ITSELF answered — a nonzero exit from a capture-pane
+// that ran. A capture-pane that could not run at all (a fork/exec-class
+// fault) is infrastructure af's teardown request cannot explain, and the
+// fallback probe's affirmative "still alive" does not excuse it — the probe
+// answers whether the SESSION lives, not why the capture failed. It must
+// stay at ERROR.
+func TestUnrunnableCaptureDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mark   bool
+		expect func() bool
+	}{
+		{name: "marked by close()", mark: true},
+		{name: "predicate attribution", expect: func() bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+			// capture-pane never runs (a fork/exec-level fault), while the
+			// gone-probe still affirmatively answers alive — the exact
+			// combination that used to reach the demotion branch.
+			m.captureOK.Store(false)
+			m.captureErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, int32(1), m.captureCalls.Load())
+			require.Contains(t, errs.String(), "capture-pane could not run in status monitor",
+				"an exec-level capture failure is infrastructure, not expected teardown noise")
+			require.Contains(t, errs.String(), "resource temporarily unavailable",
+				"the capture command's own failure must survive to the log")
+			require.NotContains(t, infos.String(), "during af-initiated teardown",
+				"only tmux's own failure answer may demote under teardown attribution")
+			require.False(t, session.monitor.dead)
 		})
 	}
 }
