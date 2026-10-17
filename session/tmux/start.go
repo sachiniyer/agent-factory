@@ -655,7 +655,10 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		// callers before the program rewrite happens.) The live-session
 		// reattach branch below is unaffected: a live pane is not re-launched
 		// into anything.
-		if _, err := os.Stat(workDir); err != nil {
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
 			return RestoreReattached, fmt.Errorf(
 				"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
 				ErrSpawnDirMissing, t.sanitizedName, workDir, err)
