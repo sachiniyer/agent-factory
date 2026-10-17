@@ -494,6 +494,17 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		// name→non-agent binary: no injection at all (#1116, #1131).
 		{name: "claude key resolved to bash (#1131)", resolved: "bash", want: ""},
 		{name: "claude key resolved to unknown tool (#1116)", resolved: "/usr/bin/some-other-tool --foo", want: ""},
+
+		// Trailing `--` and shell control operators in the resolved command:
+		// injectSystemPrompt still appends at the END (the fix is a config-load
+		// WARNING via config.warnLaunchFlagMismap, not an injection-site rewrite),
+		// so these rows pin the current append-at-end behavior. A trailing `--`
+		// demotes the appended --plugin-dir to a positional, and a pipe routes it
+		// to the wrong command — both are warned about at config load. These rows
+		// document that the injection seam itself is unchanged and must be
+		// deliberately updated if a position-aware splice ever replaces it.
+		{name: "claude trailing terminator still appends at end", resolved: "claude --", want: "--plugin-dir"},
+		{name: "claude pipe still appends at end", resolved: "claude | tee /tmp/log", want: "--plugin-dir"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

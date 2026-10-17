@@ -614,6 +614,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
 	shellValues.addList("post_worktree_commands", cfg.PostWorktreeCommands)
 	shellValues.warnExecSeparator(prettyPath)
+	shellValues.warnLaunchFlagMismap(prettyPath)
 
 	return &cfg, data, nil
 }
