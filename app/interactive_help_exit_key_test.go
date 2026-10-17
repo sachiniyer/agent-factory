@@ -10,23 +10,19 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 )
 
-// TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive is #2413.
+// TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive is #2413,
+// re-pinned under #4722's contract.
 //
-// The first-run interactive help is dismissed by ANY key, and the dismiss key is
-// then replayed into the pane so it is not swallowed (#1576). The overlay's last
-// line reads "Press ctrl+] to navigate." — so ctrl+] is the key the
-// screen puts in front of the user, and pressing it is the most natural thing to
-// do while reading.
+// The first-run interactive help is dismissed by ANY key. Its last line reads
+// "Press ctrl+] to navigate." — so ctrl+] is the key the screen puts in front
+// of the user, and pressing it is the most natural thing to do while reading.
 //
-// Replaying it ran it through handleInteractiveKey, where ctrl+] is the one
-// host-reserved key: it exits interactive mode. So a first-time user who
-// dismissed the help with the key the help named landed back in nav mode
-// instantly, having never typed a character — interactive mode looked simply
-// broken, on the one run where the user is least equipped to tell a bug from
-// their own mistake.
-//
-// The existing coverage (TestFirstRunInteractiveHelpForwardsDismissKey) dismisses
-// with `q`, which forwards harmlessly, so nothing caught this.
+// The dismiss key must be consumed by the overlay, never forwarded into the
+// pane (#4722: a key spent on a UI transition is not pane input). Forwarding it
+// ran it through handleInteractiveKey, where ctrl+] is the one host-reserved
+// key — so a first-time user who dismissed the help with the key the help named
+// landed back in nav mode instantly, having never typed a character. It also
+// typed every other dismiss key into the pane (#4722's leak).
 func TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
@@ -41,8 +37,8 @@ func TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive(t *testing.
 
 	assert.True(t, h.interactive,
 		"dismissing the first-run help with ctrl+] — the key the overlay itself names — must "+
-			"leave the user IN interactive mode. Replaying it through handleInteractiveKey "+
-			"exits immediately, so the mode never starts (#2413).")
+			"leave the user IN interactive mode. The dismiss key is consumed by the overlay "+
+			"(#4722); forwarding it would run the mode straight back out (#2413).")
 
 	require.Len(t, *fakes, 1, "the pane's attachment must still be bound")
 	assert.Empty(t, (*fakes)[0].keys,
@@ -58,27 +54,27 @@ func TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive(t *testing.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
 	assert.False(t, h.interactive,
 		"ctrl+] pressed inside interactive mode must still return to navigation — the fix "+
-			"suppresses the REPLAY, never the key itself")
+			"suppresses the transition key, never the key itself")
 	assert.Equal(t, []string{"z"}, (*fakes)[0].keys,
 		"the exit ctrl+] must not be forwarded to the pane either")
 }
 
-// TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys guards the
-// behavior #1576 added and #2413 must not cost: every dismiss key that is NOT
-// the host-reserved exit key still reaches the pane, so the keystroke the user
-// typed is not silently eaten.
-func TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys(t *testing.T) {
+// TestFirstRunInteractiveHelpConsumesDismissKeys pins the #4722 contract on the
+// first-run help path: whatever key dismisses the overlay — a printable rune,
+// Enter, or a control key — is consumed by the dismissal and must NOT be typed
+// into the pane it just entered. Replaying it would submit a half-typed input
+// line (Enter) or paste a stray character into an agent's composer.
+func TestFirstRunInteractiveHelpConsumesDismissKeys(t *testing.T) {
 	cases := []struct {
 		name string
 		msg  tea.KeyMsg
-		want string
 	}{
-		{"letter", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q"},
-		{"enter", tea.KeyMsg{Type: tea.KeyEnter}, "enter"},
-		// ctrl+c is deliberately pane input inside interactive mode (it interrupts
-		// the agent, not af) — TestInteractiveForwardsAllKeysIncludingTab pins
-		// that, and the #2413 guard must not widen to it.
-		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}, "ctrl+c"},
+		{"letter", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+		// ctrl+c is pane input once interactive mode is live — but the keypress
+		// that dismisses the overlay is spent on the dismissal, so it must not
+		// reach the pane as an interrupt either.
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
 	}
 
 	for _, c := range cases {
@@ -95,8 +91,9 @@ func TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys(t *testing.T) {
 
 			require.True(t, h.interactive, "dismissing first-run help enters interactive mode")
 			require.Len(t, *fakes, 1)
-			assert.Equal(t, []string{c.want}, (*fakes)[0].keys,
-				"the key that dismisses the first-run interactive help must reach the pane (#1576)")
+			assert.Empty(t, (*fakes)[0].keys,
+				"the key that dismisses the first-run interactive help must be consumed, "+
+					"never forwarded into the pane (#4722)")
 		})
 	}
 }

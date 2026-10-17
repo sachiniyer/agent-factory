@@ -26,32 +26,23 @@ import (
 // to its dismiss callback, which runs as a tea.Cmd — off the event loop,
 // where model state must not be touched (#716 capture discipline: the pane
 // is captured at Enter-press time, then re-validated on arrival).
+//
+// The message carries NO keystroke. A key consumed as the nav→interactive
+// mode switch (a focused pane's Enter, or the first-run help's dismiss key)
+// is spent by the transition and must never reach the pane's PTY — forwarding
+// it submits whatever sits on the input line (#4722). The pane sees its first
+// byte only when the user types after the mode is live.
 type enterInteractiveMsg struct {
-	pane      *store.OpenPane
-	replayKey tea.KeyMsg
-	replay    bool
+	pane *store.OpenPane
 }
 
 // requestInteractive routes Enter-on-a-live-eligible-pane through the
 // first-time interactive help screen (seen-bitmask, like the attach help)
-// into activation. A non-nil replayKey is the keystroke that triggered the
-// entry (an already-focused pane's Enter): it is forwarded into the pane on
-// activation so the transition key is not swallowed (#1576) — the same
-// contract the first-run help path already honors by replaying its dismiss
-// key. The tree/nav select path and the mouse click pass nil: a navigation
-// Enter opens the pane without also typing into the agent, and a click has no
-// keystroke to forward. When the first-run help IS shown, the dismiss key
-// replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
-// entry key that only surfaced the overlay is never double-forwarded.
-func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
+// into activation.
+func (m *home) requestInteractive(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	return m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
 		return func() tea.Msg {
-			msg := enterInteractiveMsg{pane: p}
-			if replayKey != nil {
-				msg.replay = true
-				msg.replayKey = *replayKey
-			}
-			return msg
+			return enterInteractiveMsg{pane: p}
 		}
 	})
 }
@@ -117,12 +108,6 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 // isInteractiveExitKey reports whether msg is keys.KeyExitInteractive (Ctrl-]),
 // the ONE host-reserved key inside interactive mode. Everything else forwards to
 // the agent/shell.
-//
-// It is the single definition of that key for the app package, because two
-// places need to agree on it and they are not adjacent: handleInteractiveKey
-// acts on it, and the enterInteractiveMsg replay must refuse to feed it back in
-// (#2413). A second literal tea.KeyCtrlCloseBracket comparison drifting from
-// this one is exactly how that bug came back.
 func isInteractiveExitKey(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyCtrlCloseBracket
 }
