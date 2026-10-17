@@ -235,3 +235,19 @@ func TestRefreshWorktreeMissing_CededWriteIsRetried(t *testing.T) {
 	require.NotNil(t, rec)
 	assert.True(t, rec.Worktree.Missing, "the ceded transition is retried and lands")
 }
+
+// A row archived through the no-move deletion route keeps its vanished LIVE
+// path. That basename is not an archive directory, so it must not be claimed —
+// an unrelated session named after it would be refused forever — while the
+// title-derived claim stays (#5102).
+func TestArchiveClaimName_MissingRowDoesNotClaimItsLivePathBasename(t *testing.T) {
+	data := session.InstanceData{Title: "feature", Liveness: session.LiveArchived}
+	data.Worktree.WorktreePath = filepath.Join("/parent", "repo-foo")
+	data.Worktree.Missing = true
+	assert.False(t, archiveRecordClaimsTitle(data, "repo-foo"))
+	assert.True(t, archiveRecordClaimsTitle(data, "feature"))
+
+	data.Worktree.Missing = false
+	assert.True(t, archiveRecordClaimsTitle(data, "repo-foo"),
+		"control: an unflagged archived row still claims its recorded directory")
+}

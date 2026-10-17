@@ -558,9 +558,19 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 	gw := i.gitWorktree
 	account := i.Account
 	tabs := append([]*Tab(nil), i.Tabs...)
+	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
 
-	if agentTmux == nil || gw == nil {
+	// A row flagged worktree-missing (#5102) has no directory for a sibling to
+	// re-spawn into — the same reason Start passes the agent an empty workDir.
+	// Handing the recorded path to the respawn machinery below would fail, and
+	// on an account-scoped row that failure refuses, finishLaunchTabFailure kills
+	// the agent pane that just reattached, and the load drops the row: a daemon
+	// restart would end the live conversation and take the archive that is the
+	// row's remedy with it. Siblings stay recorded but unreattached instead; they
+	// were shells cwd'd into the deleted tree. The account-scope refusals are not
+	// weakened — they are simply never reached without a worktree.
+	if agentTmux == nil || gw == nil || worktreeMissing {
 		return nil
 	}
 	worktreePath := gw.GetWorktreePath()

@@ -297,3 +297,81 @@ func TestFromInstanceData_FlaggedRowWithoutTmuxLoadsInert(t *testing.T) {
 		assert.NotContains(t, c, "new-session", "load must not re-spawn the agent")
 	}
 }
+
+// A flagged row whose agent is still alive must keep it across a daemon
+// restart even when an account-scoped sibling tab did not survive (#5102).
+// Sibling restore would respawn into the deleted path, the account-scoped
+// refusal would kill the reattached agent, and the load would drop the row.
+func TestFromInstanceData_FlaggedRowKeepsLiveAgentDespiteAccountScopedSibling(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+
+	const agentName = "af_flagged_live"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var commands []string
+	inner := nameKeyedExec(map[string]bool{agentName: true}) // the sibling is gone
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, c.String())
+			return inner.Run(c)
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			commands = append(commands, c.String())
+			return inner.Output(c)
+		},
+	}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/flagged-live"
+	gitOut(t, repoRoot, "branch", branch)
+	worktreePath := filepath.Join(t.TempDir(), "deleted-worktree")
+	branchCreatedByUs := true
+
+	restored, err := FromInstanceData(InstanceData{
+		Title:    "flagged-live",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  "codex",
+		Account:  "work",
+		Status:   Ready,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "flagged-live",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+			Missing:           true,
+			MissingReason:     WorktreeMissingDeletedReason(worktreePath),
+		},
+	})
+	require.NoError(t, err, "a flagged row with a live agent must load")
+	require.NotNil(t, restored)
+	assert.True(t, restored.Started())
+	restored.mu.RLock()
+	agentTmux := restored.tmuxLocked()
+	restored.mu.RUnlock()
+	require.NotNil(t, agentTmux, "the reattached agent's tmux handle must be kept")
+	assert.Equal(t, agentName, agentTmux.SanitizedName())
+	for _, c := range commands {
+		assert.NotContains(t, c, "new-session", "no tab may be re-spawned into the deleted worktree")
+		assert.False(t, strings.Contains(c, "kill-session") && strings.Contains(c, agentName) && !strings.Contains(c, shellName),
+			"the live agent must not be killed: %s", c)
+	}
+	_, statErr := os.Lstat(worktreePath)
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}

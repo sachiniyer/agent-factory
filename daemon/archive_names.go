@@ -80,8 +80,18 @@ func archiveRecordClaimNames(data session.InstanceData) [2]string {
 
 // archiveClaimName preserves the directory owned by an archived row even when
 // title reuse has renamed the row without moving its worktree.
+//
+// A row flagged worktree-missing owns no directory at its recorded path
+// (#5102). The no-move deletion route archives it with its vanished LIVE path
+// still recorded, so that basename — a sibling-mode "repo-foo", say — is not an
+// archive directory at all, and claiming it would refuse an unrelated session
+// titled "repo-foo" forever. A flagged row whose archive directory was deleted
+// later has nothing there either, and its restore rebuilds at a fresh
+// title-derived location rather than reusing that name. Its title-derived claim
+// (archiveRecordClaimNames' second slot) is kept, and a directory that does
+// exist under the name is still refused by the directory snapshot itself.
 func archiveClaimName(data session.InstanceData) string {
-	if session.RecordedLiveness(data) == session.LiveArchived && data.Worktree.WorktreePath != "" {
+	if session.RecordedLiveness(data) == session.LiveArchived && data.Worktree.WorktreePath != "" && !data.Worktree.Missing {
 		return filepath.Base(data.Worktree.WorktreePath)
 	}
 	return sanitizeArchiveTitle(data.Title)
