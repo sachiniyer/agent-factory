@@ -30,17 +30,18 @@ const instancesFixtureDir = "testdata/instances"
 // interesting.
 var instancesFastPathFires = map[string]bool{
 	// Already at v1: the whole point of the fast path.
-	"v1-envelope-indented.json":                true,
-	"v1-envelope-compact.json":                 true,
-	"v1-instances-empty.json":                  true,
-	"v1-instances-null.json":                   true,
-	"v1-instances-missing.json":                true,
-	"v1-instances-not-array.json":              true,
-	"v1-version-key-last.json":                 true,
-	"v1-nested-schema-version-key.json":        true,
-	"v1-braces-inside-strings.json":            true,
-	"v1-whitespace-around-members.json":        true,
-	"trap-duplicate-version-current-last.json": true,
+	"v1-envelope-indented.json":                 true,
+	"v1-envelope-compact.json":                  true,
+	"v1-instances-empty.json":                   true,
+	"v1-instances-null.json":                    true,
+	"v1-instances-missing.json":                 true,
+	"v1-instances-not-array.json":               true,
+	"v1-version-key-last.json":                  true,
+	"v1-nested-schema-version-key.json":         true,
+	"v1-braces-inside-strings.json":             true,
+	"v1-whitespace-around-members.json":         true,
+	"trap-duplicate-version-current-last.json":  true,
+	"trap-duplicate-version-type-mismatch.json": true,
 
 	// Traps. Each of these decodes to something a cheaper probe would get
 	// wrong, and each would skip a migration the store actually needs.
