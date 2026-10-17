@@ -600,9 +600,14 @@ func TestDaemonProcessHome_TildeExpandsAgainstDaemonHOME(t *testing.T) {
 		"the tilde must expand against the DAEMON's HOME")
 }
 
-// A relative AGENT_FACTORY_HOME (which config.GetConfigDir accepts as-is) means
-// whatever the DAEMON's cwd makes it mean. Resolving against doctor's cwd makes
-// the same daemon classify differently depending on where doctor was invoked.
+// A relative AGENT_FACTORY_HOME carried by a RUNNING daemon means whatever the
+// DAEMON's cwd makes it mean. config.ConfigDirFor now refuses a relative home for
+// a process about to start under af, so a daemon started by THIS build never
+// carries one — but doctor diagnoses daemons an OLDER build (or any process) may
+// have started before the refusal, so daemonProcessHome must still resolve a
+// relative home in the daemon's own frame. Resolving it against doctor's cwd
+// would make the same daemon classify differently depending on where doctor was
+// invoked.
 func TestDaemonProcessHome_RelativeResolvesAgainstDaemonCwd(t *testing.T) {
 	daemonCwd := t.TempDir()
 	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
