@@ -945,3 +945,81 @@ func TestDeadPaneMarkerSurvivors_FindsSetsidHelperNotStranger(t *testing.T) {
 	_, leaderPresent := snap[leaderPID]
 	require.False(t, leaderPresent, "the dead leader must be absent from the snapshot")
 }
+
+// The daemon setsids out of the pane session that autostarted it, so it is
+// invisible to SessionMembers — but it inherits that pane's AF_SESSION/AF_HOME,
+// and so do the helpers it forks (watch tasks copy os.Environ). A marker scan
+// that ignored the daemon would reap the shared daemon and its jobs when the
+// originating pane is closed, undoing the setsid that was supposed to let the
+// daemon outlive one pane's teardown. deadPaneMarkerSurvivors must exclude the
+// daemon-named subtree the PID file points at.
+//
+// The daemon is faked by argv (its cmdline reads "af ... --daemon"); the watch
+// task is a sleep it forks that inherits the pane markers. Neither is in this
+// process's self chain, so without the daemon-subtree exclusion both would be
+// returned as survivors.
+func TestDeadPaneMarkerSurvivors_ExcludesDaemonSubtree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-marker-daemon", "")
+
+	// A faked af daemon: argv[0] is "af" and "--daemon" is present, so
+	// isAgentFactoryDaemonArgv classifies it. Its backgrounded sleep inherits
+	// the pane markers a watch task would.
+	daemonCmd := exec.Command("/bin/sh", "-c", "sleep 300 & wait", "--daemon")
+	daemonCmd.Args[0] = "af"
+	daemonCmd.Env = append(os.Environ(),
+		EnvMarkerSession+"="+name,
+		EnvMarkerHome+"="+home,
+	)
+	require.NoError(t, daemonCmd.Start())
+	t.Cleanup(func() {
+		_ = daemonCmd.Process.Kill()
+		_, _ = daemonCmd.Process.Wait()
+	})
+	daemonPID := daemonCmd.Process.Pid
+
+	// The watch task is the daemon's backgrounded child; it inherits the
+	// markers and must be excluded as a descendant of the daemon, not adopted
+	// as a pane survivor.
+	var watchPID int
+	require.Eventually(t, func() bool {
+		snap, err := proctree.Snapshot()
+		if err != nil {
+			return false
+		}
+		for _, p := range snap {
+			if p.PPID == daemonPID {
+				watchPID = p.PID
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond, "the daemon's watch task did not appear as its child")
+
+	// The PID file the marker scan reads through afHomeDir/daemonPIDFilePath.
+	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"),
+		[]byte(strconv.Itoa(daemonPID)), 0o600))
+
+	require.True(t, isAgentFactoryDaemonArgv(proctree.Argv(daemonPID)),
+		"the fake daemon must classify as an af daemon by argv")
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	_, daemonInSnap := snap[daemonPID]
+	_, watchInSnap := snap[watchPID]
+	require.True(t, daemonInSnap, "snap must still see the daemon")
+	require.True(t, watchInSnap, "snap must still see the watch task")
+
+	survivors, err := deadPaneMarkerSurvivors(snap, name)
+	require.NoError(t, err)
+	for _, s := range survivors {
+		if s.PID == daemonPID {
+			t.Fatalf("the af daemon itself was reaped as a dead pane survivor (pid %d)", daemonPID)
+		}
+		if s.PID == watchPID {
+			t.Fatalf("the daemon's watch task was reaped as a dead pane survivor (pid %d)", watchPID)
+		}
+	}
+	require.Empty(t, survivors, "the daemon subtree (daemon + watch task) must be excluded from a dead pane's survivors")
+}
