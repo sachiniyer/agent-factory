@@ -8,9 +8,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,8 +46,8 @@ func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 
 	out := a.View()
 	require.Contains(t, out, "Automations")
-	assert.Contains(t, out, "[✓]  nightly-sweep", "an enabled task shows its glyph and title")
-	assert.Contains(t, out, "[✗]  ci-watch", "a disabled task shows its glyph and title")
+	assert.Contains(t, out, "[✓] nightly-sweep", "an enabled task shows its glyph and title")
+	assert.Contains(t, out, "[✗] ci-watch", "a disabled task shows its glyph and title")
 	assert.NotContains(t, out, "0 3 * * *", "the collapsed row hides the cron trigger")
 	assert.NotContains(t, out, "next Jul 02 03:00", "the collapsed row hides the next-run detail")
 	assert.NotContains(t, out, "watch: tail -f ci.log", "the collapsed row hides the watch command")
@@ -83,7 +85,7 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "▾[✓]  nightly-sweep", "the focused row is marked expanded")
+	assert.Contains(t, out, "▾  [✓] nightly-sweep", "the focused row is marked expanded")
 	assert.Contains(t, out, "0 3 * * *", "the expanded row reveals its cron trigger")
 	// "from cron:" because this fixture is a plain disk read with no arming
 	// observation on it, so the time is what the expression implies rather than
@@ -96,7 +98,7 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 
 	a.ScrollDown()
 	out = a.View()
-	assert.Contains(t, out, "▾[✗]  ci-watch", "expansion follows the cursor")
+	assert.Contains(t, out, "▾  [✗] ci-watch", "expansion follows the cursor")
 	assert.Contains(t, out, "watch: tail -f ci.log", "the newly expanded row reveals its command")
 	assert.NotContains(t, out, "0 3 * * *", "the previously expanded row re-collapses")
 }
@@ -178,11 +180,11 @@ func TestAutomationsFocusShowsCursorNotManager(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 100, H: 3}, "focused section")
-	assert.Contains(t, out, "▾[✓]", "the cursor marks (and expands) the selected row")
+	assert.Contains(t, out, "▾  [✓]", "the cursor marks (and expands) the selected row")
 	assert.NotContains(t, out, "Tasks", "the manager must not render in-rail")
 
 	a.ScrollDown()
-	assert.Contains(t, a.View(), "▾[✗]", "the cursor follows ScrollDown")
+	assert.Contains(t, a.View(), "▾  [✗]", "the cursor follows ScrollDown")
 	assert.Equal(t, 1, a.SelectedTaskIndex())
 
 	a.Blur()
@@ -299,7 +301,7 @@ func TestAutomationsCursorScrollsIntoView(t *testing.T) {
 	}
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 40, H: 3}, "scrolled section")
-	assert.Contains(t, out, "▾[✓]  task-f", "the cursor's row scrolled into view")
+	assert.Contains(t, out, "▾  [✓] task-f", "the cursor's row scrolled into view")
 }
 
 // TestAutomationsStripExactRectWithOverflow: more tasks than rows must
@@ -416,8 +418,8 @@ func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 // the header and the expanded row's detail show each field whole or omit it
 // entirely — a timestamp is never cut to "Oct…" and the noun never becomes
 // "Autom…". The issue's 80x24 example is the w=22 endpoint: the field budget
-// is rail minus the fixed 6-cell indent, so only the trigger fits and the
-// last run surfaces from w=23 up.
+// is rail minus the fixed 7-cell indent, so only the trigger fits and the
+// last run surfaces from w=24 up.
 func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
 	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
@@ -462,9 +464,9 @@ func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
 		}
 	}
 
-	// The reported frame itself: at the 22-col rail the field budget is 16
+	// The reported frame itself: at the 22-col rail the field budget is 15
 	// cells (rail minus the fixed indent), so the detail is the trigger — the
-	// only field that fits; the last run appears from width 23 up.
+	// only field that fits; the last run appears from width 24 up.
 	pane.SetRect(layout.Rect{W: 22, H: 4})
 	lines := strings.Split(stripANSI(pane.View()), "\n")
 	require.Equal(t, " 1 (1 on) · m manage", strings.TrimRight(lines[0], " "))
@@ -547,8 +549,8 @@ func TestAutomationsDetailBudgetsByUpperBound(t *testing.T) {
 // trigger is wider than the field budget has no detail — reserving for it
 // scrolled a fully-visible row away for nothing.
 func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
-	// "0 3 * * *" prices 9 cells: inside a 15-cell rail it fits the W−6
-	// budget exactly, at 14 nothing does and the expanded row stays one line.
+	// "0 3 * * *" prices 9 cells: inside a 16-cell rail it fits the W−7
+	// budget exactly, at 15 nothing does and the expanded row stays one line.
 	tasks := make([]task.Task, 8)
 	for i := range tasks {
 		tasks[i] = task.Task{ID: fmt.Sprintf("t%d", i), Name: fmt.Sprintf("task-%d", i),
@@ -566,7 +568,7 @@ func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
 
 	// Detail renders: the window reserves its line, so one fewer title row
 	// shows and the selected task's detail is on-screen at the fold.
-	withDetail := stripANSI(bottom(15).View())
+	withDetail := stripANSI(bottom(16).View())
 	require.Contains(t, withDetail, "0 3 * * *",
 		"the selected row's detail must be visible, not pushed below the fold")
 	require.NotContains(t, withDetail, "task-2",
@@ -575,7 +577,7 @@ func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
 
 	// Detail empty: no line is reserved, so the same scroll position keeps the
 	// extra title row a phantom reservation would have scrolled away.
-	noDetail := stripANSI(bottom(14).View())
+	noDetail := stripANSI(bottom(15).View())
 	require.NotContains(t, noDetail, "0 3 * * *")
 	require.Contains(t, noDetail, "task-2",
 		"with no detail to reveal the window must not sacrifice a visible row")
@@ -590,6 +592,62 @@ func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
 	line := strings.TrimRight(stripANSI(a.View()), " ")
 	require.Contains(t, line, "2 (2 on)", "the compact summary must keep both numbers")
 	require.NotContains(t, line, "…·", "and must not ellipsize into the separator")
+}
+
+// TestRailRowsLeaveTheMarkerCellBlank is #5350: the rail's selection marker
+// occupies the same slot on every row kind — the marker, then a blank cell
+// before any row content. An automation row dropped the gap and fused the ▾ to
+// its checkbox ("▾[✓]"), reading as one glyph, while session rows render
+// "▾  name". The pin is cell-accurate for both row kinds.
+func TestRailRowsLeaveTheMarkerCellBlank(t *testing.T) {
+	// The session row: an expandable instance rendered expanded, so its title
+	// line carries the ▾ tree arrow.
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "session-row", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	r := tree.NewInstanceRenderer()
+	r.SetWidth(24)
+	sessionLine := ""
+	for _, line := range strings.Split(stripANSI(r.Render(inst, 1, true, false, true)), "\n") {
+		if strings.Contains(line, "▾") {
+			sessionLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, sessionLine, "an expanded session row must carry its ▾ arrow")
+	assertMarkerCellBlank(t, "session", sessionLine)
+
+	// The automation row, at every rail width the grid can produce (22-36).
+	// The extra cell the marker gap costs must come out of the title budget,
+	// not out of a field — nothing else may newly truncate.
+	for w := 22; w <= 36; w++ {
+		a := newTestAutomations(stripTasks())
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		out := stripANSI(a.View())
+		autoLine := ""
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "▾") {
+				autoLine = line
+				break
+			}
+		}
+		require.NotEmptyf(t, autoLine, "width %d: the focused row must carry its ▾ marker", w)
+		assertMarkerCellBlank(t, fmt.Sprintf("automation w=%d", w), autoLine)
+		require.NotContainsf(t, out, "…", "width %d: a row or field is newly cut mid-token:\n%s", w, out)
+	}
+}
+
+// assertMarkerCellBlank pins the marker slot: the cell immediately after the
+// ▾ is blank, so the marker can never fuse to the row content it introduces.
+func assertMarkerCellBlank(t *testing.T, kind, line string) {
+	t.Helper()
+	i := strings.Index(line, "▾")
+	require.GreaterOrEqualf(t, i, 0, "%s row carries no ▾ marker: %q", kind, line)
+	require.Lessf(t, i+len("▾"), len(line), "%s row ends at its marker: %q", kind, line)
+	require.Equalf(t, " ", line[i+len("▾"):i+len("▾")+1],
+		"%s row fuses the marker to the row content: %q", kind, line)
 }
 
 // TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount answers the Codex
