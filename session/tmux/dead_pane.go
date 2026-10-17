@@ -3,6 +3,7 @@ package tmux
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -274,7 +275,20 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 				sanitizedName, row.pid, marker)
 			return nil, false, nil
 		}
-		return nil, true, nil
+		// The root is still alive, so the caller captures its PPID tree and
+		// original SID below (asLive). A helper that already daemonized with
+		// setsid plus a double-fork is reparented outside that tree and holds a
+		// different SID, so neither the tree nor the SID scan recovers it; the
+		// marker scan catches it the same way it does on the reaped path. The
+		// root and its in-tree descendants already carry the pane's markers and
+		// are deduplicated by the caller, so combining here only adds the
+		// escapee. An unresolvable home dir is a capture error the existing
+		// refusal gates handle, on this path too.
+		markerSurvivors, markerErr := deadPaneMarkerSurvivors(snap, sanitizedName)
+		if markerErr != nil {
+			return nil, false, markerErr
+		}
+		return markerSurvivors, true, nil
 	}
 	members := proctree.SessionMembers(snap, row.pid)
 	// SessionMembers matches only processes whose SID equals the dead root's
@@ -409,21 +423,43 @@ func deadPaneMarkerSurvivors(snap map[int]proctree.Process, sanitizedName string
 // excluded. Returns an empty set when no live af daemon is named.
 func deadPaneDaemonSubtree(snap map[int]proctree.Process, ownHome string) map[int]bool {
 	excluded := make(map[int]bool)
-	raw, err := os.ReadFile(filepath.Join(ownHome, "daemon.pid"))
-	if err != nil {
-		return excluded
-	}
-	daemonPID, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil || daemonPID <= 0 {
-		return excluded
-	}
-	if !isAgentFactoryDaemonArgv(proctree.Argv(daemonPID)) {
+	daemonPID, ok := readDaemonPIDFileNoFollow(filepath.Join(ownHome, "daemon.pid"))
+	if !ok || !isAgentFactoryDaemonArgv(proctree.Argv(daemonPID)) {
 		return excluded
 	}
 	for _, p := range proctree.TreeOf(snap, daemonPID) {
 		excluded[p.PID] = true
 	}
 	return excluded
+}
+
+// readDaemonPIDFileNoFollow reads this home's daemon.pid through a descriptor
+// opened O_NOFOLLOW|O_NONBLOCK and validated by fstat, mirroring the daemon
+// package's readManagedFileNoFollow (daemon.process): the marker scan runs
+// synchronously from CaptureSessionProcessTrees before kill-session, so a
+// FIFO, device, or symlink swapped in for the PID file must not hold the
+// capture there the way it would block a plain os.ReadFile. A missing,
+// malformed, oversized, or non-regular entry reports no daemon rather than an
+// error, so an unreadable PID file leaves the scan unchanged.
+func readDaemonPIDFileNoFollow(path string) (int, bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64 {
+		return 0, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil || int64(len(data)) > 64 {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 // isAgentFactoryDaemonArgv reports whether argv identifies an agent-factory

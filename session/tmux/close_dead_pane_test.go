@@ -973,16 +973,20 @@ func TestDeadPaneMarkerSurvivors_ExcludesDaemonSubtree(t *testing.T) {
 		EnvMarkerHome+"="+home,
 	)
 	require.NoError(t, daemonCmd.Start())
+	// The watch task is the daemon's backgrounded child; it inherits the
+	// markers and must be excluded as a descendant of the daemon, not adopted
+	// as a pane survivor. The cleanup reaps it too, since killing the daemon
+	// shell with SIGKILL cannot clean up a child it forked with setsid-less
+	// reparenting in flight.
+	var watchPID int
 	t.Cleanup(func() {
+		if watchPID != 0 {
+			_ = syscall.Kill(watchPID, syscall.SIGKILL)
+		}
 		_ = daemonCmd.Process.Kill()
 		_, _ = daemonCmd.Process.Wait()
 	})
 	daemonPID := daemonCmd.Process.Pid
-
-	// The watch task is the daemon's backgrounded child; it inherits the
-	// markers and must be excluded as a descendant of the daemon, not adopted
-	// as a pane survivor.
-	var watchPID int
 	require.Eventually(t, func() bool {
 		snap, err := proctree.Snapshot()
 		if err != nil {
