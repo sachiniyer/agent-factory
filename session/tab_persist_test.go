@@ -102,6 +102,14 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 			if strings.Contains(cmd.String(), "list-panes") {
 				return nil, nil
 			}
+			// These mock sessions predate generation stamping, so show-environment
+			// answers "unset" for AF_SESSION_GEN — the shape a pre-generation tmux
+			// session answers SessionGenerationMarker with. Without this the
+			// marker scan's generation read fails closed on a mock that returns
+			// nothing for the variable.
+			if strings.Contains(cmd.String(), "show-environment") {
+				return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
+			}
 			return []byte("content"), nil
 		},
 	}

@@ -142,6 +142,13 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 			}
 		}
 		return []byte(strings.Join(names, "\n")), nil
+	case strings.Contains(joined, "show-environment"):
+		// These mock sessions predate generation stamping, so show-environment
+		// answers "unset" for AF_SESSION_GEN — the shape a pre-generation tmux
+		// session answers SessionGenerationMarker with. Without this the
+		// marker scan's generation read fails closed on a mock that returns
+		// nothing for the variable.
+		return []byte("-" + tmux.EnvMarkerGeneration + "\n"), nil
 	case name == "":
 		return nil, nil
 	case !m.alive[name]:
