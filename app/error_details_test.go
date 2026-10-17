@@ -78,6 +78,25 @@ func TestErrorDetailsDoesNotResurrectARetractedNotice(t *testing.T) {
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
 	assert.Equal(t, stateDefault, h.state, "a retracted notice is gone, not merely off screen")
 	assert.Nil(t, h.textOverlay)
+	assert.Equal(t, "No recent error", h.errBox.FullError(),
+		"a retracted notice reads as empty to E, same as a fresh state")
+}
+
+// TestErrorDetailsHintsWhenNoNoticeIsRetained is #5351. `E` with nothing
+// retained used to swallow the keypress whole — no overlay (correct), but also
+// no acknowledgment, so "the key fired but there was nothing to show" looked
+// identical to "the key did nothing". The key now raises a transient status
+// hint on the same bar the details would have hung from.
+func TestErrorDetailsHintsWhenNoNoticeIsRetained(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	_, cmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+	require.NotNil(t, cmd, "the hint rides the usual clear-after-delay command")
+	assert.Equal(t, stateDefault, h.state, "no overlay opens for an empty notice")
+	assert.Nil(t, h.textOverlay)
+	assert.Equal(t, "No recent error", h.errBox.FullError(),
+		"the status line acknowledges the keypress")
 }
 
 // The overlay's title must match what it is showing. af hiding a pane and

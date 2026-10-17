@@ -69,11 +69,13 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 // showErrorDetails opens the last notice in full. It reads the RETAINED notice,
 // not the one currently painted: the bar drops a notice after 3 seconds, and
 // binding `E` to what is still on screen made the key silently dead in exactly
-// the case it exists for — a message the bar had to clip (#2618).
+// the case it exists for — a message the bar had to clip (#2618). With nothing
+// retained it still answers the key — a transient hint on the same bar — so the
+// user can tell "nothing to show" apart from "the key did nothing" (#5351).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
-		return m, nil
+		return m, m.showTransientMessage("No recent error")
 	}
 	// af hiding a pane and saying how to get it back is designed behavior. Filing
 	// it under "Last error" would report af working as intended as a fault, which
