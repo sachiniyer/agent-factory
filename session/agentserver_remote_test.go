@@ -2,10 +2,14 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/apiproto"
 )
 
 // TestAgentServerFactory_SelectsRuntime is the per-runtime factory proof (#1592
@@ -192,6 +196,53 @@ func TestRemoteAgentServerCarriesPromptDeliveryStatus(t *testing.T) {
 			}
 			if status != tc.wanted {
 				t.Fatalf("status = %q, want %q", status, tc.wanted)
+			}
+		})
+	}
+}
+
+// TestRemoteAgentCallWithin_ResourceExhaustedCode pins the #5295 wire
+// contract: a failure envelope carrying ErrorCodeResourceExhausted
+// reconstructs ErrRemoteResourceExhausted inside the client-side error chain,
+// so the lost-restore classifier's errors.Is still sees the kernel-resource
+// class the errno itself could not carry across HTTP. A failure without the
+// code stays sentinel-free.
+func TestRemoteAgentCallWithin_ResourceExhaustedCode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		code      string
+		wantIdent bool
+	}{
+		{name: "resource_exhausted reconstructs sentinel", code: apiproto.ErrorCodeResourceExhausted, wantIdent: true},
+		{name: "plain failure stays sentinel-free", code: "", wantIdent: false},
+		{name: "unrelated code stays sentinel-free", code: "some_other_code", wantIdent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				errObj := map[string]any{"message": "archive failed: disk full"}
+				if tc.code != "" {
+					errObj["code"] = tc.code
+				}
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  nil,
+					"error": errObj,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			c, err := newRemoteAgentClient(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("newRemoteAgentClient: %v", err)
+			}
+			err = c.callWithin("/v1/agent/archive", map[string]any{}, nil, time.Second)
+			if err == nil {
+				t.Fatal("callWithin: want error, got nil")
+			}
+			if got := errors.Is(err, apiproto.ErrRemoteResourceExhausted); got != tc.wantIdent {
+				t.Fatalf("errors.Is(err, ErrRemoteResourceExhausted) = %v, want %v (err: %v)", got, tc.wantIdent, err)
 			}
 		})
 	}

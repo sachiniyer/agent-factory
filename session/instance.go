@@ -71,6 +71,10 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// lostRestoreWait is the durable non-terminal counterpart: the loop's last
+	// failure was environmental, so an automatic retry is still armed behind a
+	// capped backoff instead of the terminal budget being spent (#5295).
+	lostRestoreWait LostRestoreWait
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT

@@ -9,6 +9,7 @@ package apiproto
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -47,6 +48,20 @@ type EnvelopeError struct {
 // still surface the failure, but must not retry the mutation as though it never
 // happened.
 const ErrorCodeMutationCommitted = "mutation_committed"
+
+// ErrorCodeResourceExhausted says the server verified a kernel resource limit
+// — a full filesystem, quota, fd table, memory or PID ceiling — behind the
+// failure. The errno itself cannot cross the wire as an error identity, so
+// the code carries the class; a client that reconstructs
+// ErrRemoteResourceExhausted lets errors.Is-based policy see it (#5295 review).
+const ErrorCodeResourceExhausted = "resource_exhausted"
+
+// ErrRemoteResourceExhausted is the client-side sentinel joined into an error
+// decoded from a failure envelope carrying ErrorCodeResourceExhausted. The
+// server only emits that code after verifying a resource errno in the real
+// failure chain, so errors.Is(err, ErrRemoteResourceExhausted) on the client
+// means exactly what the verified errno meant on the server (#5295 review).
+var ErrRemoteResourceExhausted = errors.New("remote reported kernel resource exhaustion")
 
 // Success wraps a payload as a successful Envelope (Error nil).
 func Success(data any) Envelope {

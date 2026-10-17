@@ -54,10 +54,58 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			if recovery.AlternatePath != "" {
 				location += " and " + recovery.AlternatePath
 			}
-			return fmt.Errorf(
-				"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
-				i.Title, recovery.State, location,
-			)
+			// A durable record says an interrupted relocation left this
+			// worktree's directory identity unestablished. Single-candidate
+			// records (claim_stale or stalled with no alternate) provably owe
+			// no repair: the claim they preserve was either record-free or
+			// resolved to the recorded primary, and a move start writes its
+			// own move_unknown record before any bytes relocate — so identity
+			// confirmation is the only thing left to establish. Resolve
+			// those here through the bounded claim machinery rather than
+			// stranding the session until some unrelated archive/restore
+			// claims the record (#5295). Two-candidate records (a timed-out
+			// move) can additionally owe `git worktree repair` and submodule
+			// gitdir repair — that repair belongs to the relocation-capable
+			// consumers, not a respawn, so they keep the refusal below.
+			resolvable := recovery.AlternatePath == "" &&
+				(recovery.State == git.RelocationRecoveryClaimStale ||
+					recovery.State == git.RelocationRecoveryStalled)
+			if !resolvable {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
+			// Every probe inside is deadline-bounded, so a still-stalled
+			// filesystem fails without wedging this goroutine, and a record
+			// that cannot be established keeps its durable evidence and
+			// still refuses.
+			claim, claimErr := i.ClaimWorktreeRelocationForRetry()
+			if claimErr != nil {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s: %w",
+					i.Title, recovery.State, location, claimErr,
+				)
+			}
+			if err := i.SettleWorktreeRelocationClaim(claim); err != nil {
+				return fmt.Errorf(
+					"recover: session %q resolved worktree recovery at %s but could not settle its identity: %w",
+					i.Title, claim.Path, err,
+				)
+			}
+			// Re-snapshot: a concurrent operation may have installed a fresh
+			// record the next retry must resolve.
+			workDir, recovery, unresolved = gw.RelocationSnapshot()
+			if unresolved {
+				location = workDir
+				if recovery.AlternatePath != "" {
+					location += " and " + recovery.AlternatePath
+				}
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
 		}
 	}
 	if workDir == "" {
@@ -106,10 +154,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				// The fresh-rebuild fallback below is an EXACT-RESUME command, which
 				// is the one thing this path must not launch. Refuse instead: the
 				// swap's caller stops the replacement and retries the whole boundary.
+				// rebuildErr stays wrapped: its errno is what lets the restore
+				// loop tell a still-full disk from a session defect (#5295 review).
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %w)", err, rebuildErr),
 				}
 			}
 			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
@@ -117,7 +167,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild requires a recorded conversation id for the resolved agent)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild requires a recorded conversation id for the resolved agent)",
 						err, rebuildErr),
 				}
 			}
@@ -125,7 +175,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild from recorded base failed: %v)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild from recorded base failed: %w)",
 						err, rebuildErr, freshErr),
 				}
 			}
