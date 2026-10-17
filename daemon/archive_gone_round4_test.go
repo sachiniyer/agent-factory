@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -260,6 +261,14 @@ func TestPersistWorktreeMissing_KilledMidWritePublishesAndQueuesNothing(t *testi
 	manager, repoID, repoPath := newStatusTestManager(t)
 	survivor, _ := registerGoneWorktree(t, manager, repoID, repoPath, "survivor")
 	killed, _ := registerGoneWorktree(t, manager, repoID, repoPath, "killed")
+	// seedDiskInstance rewrites the whole instances file per call, so the second
+	// registration dropped "survivor"'s row; reseed both, ID-less like it does.
+	seeded, err := json.Marshal([]session.InstanceData{
+		{Title: "survivor", Path: repoPath, Status: session.Running},
+		{Title: "killed", Path: repoPath, Status: session.Running},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
 	for _, inst := range []*session.Instance{survivor, killed} {
 		_, changed := inst.RefreshWorktreeMissing()
 		require.True(t, changed, "premise: the probe flags the deleted worktree")

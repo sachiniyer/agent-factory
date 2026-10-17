@@ -155,9 +155,13 @@ func TestRestoreArchived_FailedRebuildLeavesTheArchivedRow(t *testing.T) {
 func TestRestoreArchived_ResumesItsOwnRebuildAfterACrash(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, wtPath := registerGoneWorktree(t, manager, repoID, repoPath, "rebuilt")
+	// registerArchivable wires the worktree without Start, which is what sets
+	// i.Branch; a real archived row carries it, and RestoreWorktreePath reads it.
+	inst.SetBranchForTest("af/" + sanitizeArchiveTitle("rebuilt"))
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "rebuilt", RepoID: repoID})
 	require.NoError(t, err)
 	branch := inst.GetBranch()
+	require.Equal(t, "af/rebuilt", branch, "premise: the archived row carries its branch")
 
 	// The crashed restore's footprint: its rebuild's prune and checkout landed,
 	// nothing after them did.
