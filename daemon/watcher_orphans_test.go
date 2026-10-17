@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -92,7 +93,15 @@ func TestSweepReapsMarkedOrphan(t *testing.T) {
 // survives the grace and is then killed with the whole group.
 func TestSweepEscalatesToSIGKILL(t *testing.T) {
 	s, home := newOrphanSweepSupervisor(t)
-	p, _ := spawnWatchOrphan(t, `trap "" TERM; while :; do sleep 60; done`, watchOrphanEnv(home, "previous-generation"))
+	// The orphan writes ready only after its trap is installed: reparenting
+	// alone does not mean it has run `trap`, and a SIGTERM that lands first
+	// kills it before the grace — a race a loaded box hits (#5329).
+	ready := filepath.Join(t.TempDir(), "ready")
+	p, _ := spawnWatchOrphan(t, `trap "" TERM; : >`+ready+`; while :; do sleep 60; done`, watchOrphanEnv(home, "previous-generation"))
+	waitUntil(t, 5*time.Second, "orphan to install its TERM trap", func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	})
 
 	start := time.Now()
 	s.sweepOrphanedWatchCommands()
