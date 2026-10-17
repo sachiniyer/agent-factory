@@ -232,11 +232,19 @@ func TestFromInstanceData_SandboxBackends(t *testing.T) {
 				Branch:      "root/s",
 				BackendType: typ,
 				Liveness:    LiveRunning,
+				// An environmental wait persisted while the session was live
+				// must NOT survive the inert load: lostSessionWantsRestore's
+				// Started gate can never reach this row, so keeping the record
+				// would report "waiting on the environment" in every client
+				// while nothing retries (#5295 review).
+				LostRestoreWait: &LostRestoreWait{Attempts: 3, Error: "enospc"},
 			})
 			require.NoError(t, err)
 			assert.Equal(t, typ, inst.GetBackend().Type())
 			assert.Equal(t, LiveLost, inst.GetLiveness())
 			assert.False(t, inst.Started(), "a reloaded sandbox session must not be started (loop skips it)")
+			assert.Nil(t, inst.LostRestoreWaitSnapshot(),
+				"an unreachable row drops the armed-retry record on load")
 		})
 	}
 }

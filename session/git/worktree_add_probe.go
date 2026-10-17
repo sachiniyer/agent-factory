@@ -8,21 +8,59 @@ import (
 	"strings"
 )
 
+// writeSpaceProbeSize bounds the probe write below. A single byte is not
+// enough evidence: a filesystem that can still accept stray bytes but not a
+// real worktree write — nearly full, or one whose block accounting git hit
+// first — would pass the probe while every retry keeps failing, and the
+// failure classifies structural until the budget gives up on an environmental
+// outage (#5295 review). The worktree metadata writes this probe stands in
+// for (gitdir registration, HEAD, config, index) sit in the tens-to-hundreds
+// of KB; a real checkout is unbounded, so no fixed size can reproduce git's
+// exact demand. One MiB covers the metadata class while staying noise-level
+// transient allocation on any disk that is not already exhausted.
+const writeSpaceProbeSize = 1 << 20
+
 // writeSpaceProbe is the production probe (and the test seam): create a file
-// in dir and WRITE a byte to it. The write is the point — on a tmpfs filled
-// past its size limit a zero-length create still succeeds because dentries
-// and inodes live outside the data budget, so only a real data write sees
-// ENOSPC. The file is removed before returning either way.
+// in dir and WRITE a representative payload to it, then Sync before close so
+// the bytes must reach the filesystem's accounting. The write is the point —
+// on a tmpfs filled past its size limit a zero-length create still succeeds
+// because dentries and inodes live outside the data budget, so only a real
+// data write sees ENOSPC. The Sync is the second half — on a
+// delayed-allocation filesystem (ext4, xfs) an unsynced write can land in the
+// page cache and report success while the filesystem is already out of
+// blocks, so a write that only looked cheap could pass while git's real write
+// got the ENOSPC the classifier never saw. The file is removed before
+// returning either way.
 var writeSpaceProbe = func(dir string) error {
 	f, err := os.CreateTemp(dir, ".af-add-probe-*")
 	if err != nil {
 		return err
 	}
-	_, werr := f.Write([]byte{0})
+	var werr error
+	buf := make([]byte, 64<<10)
+	for written := 0; written < writeSpaceProbeSize; {
+		chunk := buf
+		if writeSpaceProbeSize-written < len(chunk) {
+			chunk = chunk[:writeSpaceProbeSize-written]
+		}
+		n, wErr := f.Write(chunk)
+		written += n
+		if wErr != nil {
+			werr = wErr
+			break
+		}
+	}
+	var serr error
+	if werr == nil {
+		serr = f.Sync()
+	}
 	cerr := f.Close()
 	_ = os.Remove(f.Name())
 	if werr != nil {
 		return werr
+	}
+	if serr != nil {
+		return serr
 	}
 	return cerr
 }

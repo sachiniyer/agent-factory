@@ -363,6 +363,7 @@ work. The vocabulary is closed:
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
 | `restore-gave-up` | The process is gone and automatic Lost-session recovery exhausted its attempt budget. See `lost_restore_failure` below. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |
@@ -375,6 +376,18 @@ session remains Lost, and the daemon does not automatically retry it again. An
 explicit restore remains available; a successful runtime replacement clears the
 field. Because it is stored on the session record, daemon restarts and the TUI,
 web, and HTTP clients retain the same last error.
+
+**`lost_restore_wait`** (object, omitted unless automatic recovery is waiting on
+the environment) — the non-terminal counterpart of `lost_restore_failure`:
+`{ "attempts": 3, "error": "..." }`. `attempts` counts consecutive environmental
+failures in the current episode and `error` is the last observed environmental
+error, sanitized the same way. The session remains Lost and the daemon keeps
+retrying on a capped backoff — these attempts do NOT draw down the budget
+`lost_restore_failure` reports against. A successful restore, a runtime
+replacement, or a structural failure clears the field, and a row that reloads
+inert — one no automatic retry can ever reach, such as a sandbox session after
+a daemon restart — drops it on load rather than report an armed retry that does
+not exist.
 
 **`last_pane_churn_at`** (RFC 3339 timestamp, omitted when no churn is on
 record) — when the daemon last observed the session's pane **render different

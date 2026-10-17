@@ -112,7 +112,9 @@ type InstanceData struct {
 	// LostRestoreWait persists that automatic recovery is waiting on the
 	// environment — the last failure was a resource limit external to the
 	// session — across daemon restarts until a restore attempt succeeds, a
-	// structural failure retires the wait, or a replacement lands (#5295).
+	// structural failure retires the wait, or a replacement lands (#5295). A
+	// row that reloads INERT drops it on load instead: no automatic retry can
+	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
