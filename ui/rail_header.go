@@ -37,6 +37,12 @@ func railActionHint(name keys.KeyName, desc string) string {
 type railHeader struct {
 	noun   string // "Automations" / "Projects" — or "Automations:" in a compact summary
 	counts string // "(2)", or "2 (1 on)" in a compact summary
+	// whole forbids the shrunk rung: the noun renders complete or not at all.
+	// #5153's contract for the Automations rail — "Autom…" reads as broken
+	// rather than abbreviated, and the compact counts vocabulary already says
+	// everything the ellipsized noun was crowding out. Projects keeps the
+	// shrinking rung.
+	whole bool
 	// primary is counts reduced to the one number that must survive, and it is a
 	// rung of its own before the affordance is touched. A compact summary can
 	// carry two numbers ("100 (100 on)" is 12 cells), which at the 22-column rail
@@ -62,12 +68,13 @@ func (h railHeader) primaryOnly() string {
 }
 
 // shrunk ellipsizes the NOUN inside w cells while keeping the counts whole, or
-// returns "" when there is no room for a noun worth rendering.
+// returns "" when there is no room for a noun worth rendering — or when the
+// section's contract is whole-or-omitted (#5153).
 func (h railHeader) shrunk(w int) string {
 	room := w - layout.Cells(h.countsOnly()) - 1 // 1 for the leading pad
 	// Below three cells a "noun" is an ellipsis and a letter or two; drop it and
 	// let countsOnly have the width instead.
-	if room < 3 {
+	if h.whole || room < 3 {
 		return ""
 	}
 	return " " + fitLine(h.noun, room) + " " + h.counts
