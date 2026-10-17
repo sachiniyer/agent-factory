@@ -376,15 +376,19 @@ func (a *AutomationsPane) runFragments(tsk task.Task) []runFragment {
 	return parts
 }
 
-// itemPrefixWidth is the fixed lead of a collapsed row — marker (1) + the
-// enabled glyph "[✓]" (3) + a 2-cell gap — that the title starts after and the
-// expanded detail line indents to, so a row's detail aligns under its title.
-const itemPrefixWidth = 6
+// itemPrefixWidth is the fixed lead of a collapsed row — the selection marker
+// (1) + its 2-cell slot gap + the enabled glyph "[✓]" (3) + a 1-cell gap —
+// that the title starts after and the expanded detail line indents to, so a
+// row's detail aligns under its title.
+const itemPrefixWidth = 7
 
 // titleRow renders one collapsed automation row: the enabled/disabled glyph and
 // the task title in the instance-title color — and nothing else (#1126: no
 // always-on trailing cron/next/last text). The focused, expanded row is marked
-// "▾" and its title bolded; every other row leads with a blank marker.
+// "▾" and its title bolded; every other row leads with a blank marker. The
+// marker occupies the same slot session rows give theirs — two blank cells
+// before the row content (#5350) — so the ▾ never reads as fused to the
+// checkbox.
 func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	glyph, glyphStyle := "[✓]", automationsEnabledStyle
 	if !tsk.Enabled {
@@ -419,11 +423,14 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	if name == "" {
 		name = "(unnamed)"
 	}
-	gap := "  "
+	// Both gaps carry the selection background when the row is expanded so the
+	// highlighted band stays continuous from the marker to the title.
+	markerGap, titleGap := "  ", " "
 	if expanded {
-		gap = nameStyle.Render(gap)
+		markerGap = nameStyle.Render(markerGap)
+		titleGap = nameStyle.Render(titleGap)
 	}
-	return fitLine(marker+glyphStyle.Render(glyph)+gap+nameStyle.Render(name), a.rect.W)
+	return fitLine(marker+markerGap+glyphStyle.Render(glyph)+titleGap+nameStyle.Render(name), a.rect.W)
 }
 
 // needsAttention reports whether the row carries a warning: the task has stopped
