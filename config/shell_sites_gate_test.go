@@ -186,6 +186,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
 		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
 	}},
+	"session/git/worktree_prune_guard.go:WorktreeDirtyFiles": {{
+		class: notAShell,
+		note: "`git -c core.fsmonitor= status …` — git's per-invocation config override, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136)",
+	}},
 }
 
 func TestShellSites_EveryShellSiteIsClassified(t *testing.T) {
