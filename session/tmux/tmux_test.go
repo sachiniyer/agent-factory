@@ -438,6 +438,7 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 	t.Helper()
 	var captureCalls atomic.Int32
 	var hasSessionCalls atomic.Int32
+	captureExitErr := exitErrorWithStderr(t, 1, "")
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -454,7 +455,11 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 			if strings.Contains(cmd.String(), "capture-pane") {
 				captureCalls.Add(1)
 				if !captureOK.Load() {
-					return nil, fmt.Errorf("exit status 1")
+					// A genuine *exec.ExitError: tmux ran and answered
+					// failure — the transient shape these tests pin.
+					// A non-ExitError would mean capture-pane never ran,
+					// which now classifies as infrastructure (#5327).
+					return nil, captureExitErr
 				}
 				return []byte("pane content"), nil
 			}

@@ -32,10 +32,17 @@ const (
 // teardownMarkTmux is a hermetic tmux: every verb answers from these fields and
 // nothing execs.
 type teardownMarkTmux struct {
-	alive       atomic.Bool // has-session answers "exists"
-	killFails   atomic.Bool // kill-session answers a failure instead of removing the session
-	captureOK   atomic.Bool // capture-pane succeeds
+	alive     atomic.Bool // has-session answers "exists"
+	killFails atomic.Bool // kill-session answers a failure instead of removing the session
+	captureOK atomic.Bool // capture-pane succeeds
+	// captureErr, when set, is capture-pane's failure verbatim. A plain
+	// (non-*exec.ExitError) error models an exec-level fault — tmux itself
+	// never ran — which must never demote under teardown attribution.
+	captureErr  atomic.Value
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
+	// captureWedged stalls capture-pane past the shortened deadline — the
+	// monitor's error path sees ErrTmuxTimeout, not a pane answer.
+	captureWedged atomic.Bool
 	// nameGen, when set, is what display-message answers for the NAME target:
 	// "$id pid created" — the session generation currently behind the name.
 	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
@@ -107,10 +114,22 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "capture-pane"):
 		m.captureCalls.Add(1)
+		if m.captureWedged.Load() {
+			time.Sleep(markTestWedge)
+			return nil, errors.New("wedged tmux server never answered capture-pane")
+		}
 		if m.captureOK.Load() {
 			return []byte("pane content"), nil
 		}
-		return nil, errors.New("exit status 1")
+		if v := m.captureErr.Load(); v != nil {
+			return nil, v.(error)
+		}
+		// A genuine *exec.ExitError: tmux ran and answered that the pane is
+		// missing — the shape af's own teardown produces mid-teardown.
+		// Anything that is not an ExitError means tmux itself never ran and
+		// must keep ERROR under teardown attribution (#5327 review).
+		_, err := exec.Command("sh", "-c", "exit 1").Output()
+		return nil, err
 	case strings.Contains(args, "list-panes"):
 		m.listPanesCalls.Add(1)
 		return nil, nil
@@ -480,6 +499,227 @@ func TestExpectingTeardownPredicateDemotesVanishToInfo(t *testing.T) {
 			session.HasUpdatedExpectingTeardown(tc.expect)
 			require.Equal(t, tc.wantInfo, strings.Contains(infos.String(), "going silent"))
 			require.Equal(t, tc.wantError, strings.Contains(errs.String(), "going silent"))
+		})
+	}
+}
+
+// TestTeardownWindowCaptureFailureFollowsAttribution covers the issue's second
+// line (#5317): a step earlier in the same teardown, the pane is already dead
+// while the session object is still listed, so capture-pane answers a failure
+// the gone-probe cannot confirm. Inside an af-requested teardown that failure
+// is the same expected noise as the gone-observation and logs at INFO from the
+// same two attribution sources — the generation's teardown mark and the
+// caller's predicate. The last two rows are the control: with nothing af-side
+// describing a teardown, the identical failure stays at ERROR.
+func TestTeardownWindowCaptureFailureFollowsAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mark      bool
+		expect    func() bool
+		wantInfo  bool
+		wantError bool
+	}{
+		{name: "this object's close() marked the generation", mark: true, wantInfo: true},
+		{name: "instance state records a teardown", expect: func() bool { return true }, wantInfo: true},
+		{name: "no teardown recorded", expect: func() bool { return false }, wantError: true},
+		{name: "nil predicate keeps the mark-only contract", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+			// The session still answers has-session but the pane is gone —
+			// capturePaneContentTarget's gone-probe reports
+			// alive-or-unknown, so the poll lands on the generic branch.
+			m.alive.Store(true)
+			m.captureOK.Store(false)
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, tc.wantInfo, strings.Contains(infos.String(), "during af-initiated teardown"),
+				"a capture failure inside an af-requested teardown is expected noise")
+			require.Equal(t, tc.wantError, strings.Contains(errs.String(), "error capturing pane content in status monitor"),
+				"nothing af-side describes a teardown, so the failure stays at ERROR")
+		})
+	}
+}
+
+// TestWedgedCaptureDuringTeardownStaysError pins the boundary of the demotion:
+// a tripped capture deadline is a wedged server, which af's teardown request
+// does not explain, so it keeps ERROR even with the mark set (#5317).
+func TestWedgedCaptureDuringTeardownStaysError(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	session, m := newMarkedTeardownSession(t)
+	marked, answered := session.markTeardownInitiated()
+	require.True(t, answered)
+	require.NotNil(t, marked)
+	m.captureWedged.Store(true)
+
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.True(t, strings.Contains(errs.String(), "error capturing pane content in status monitor"),
+		"a wedged server is a fault the teardown request cannot explain")
+	require.False(t, strings.Contains(infos.String(), "during af-initiated teardown"))
+}
+
+// TestProbeFailureDuringTeardownStaysError pins the demotion's other edge
+// (Codex on #5327): the INFO case exists for failures OF capture-pane inside
+// an af-requested teardown. An UNANSWERED identity probe ends the poll before
+// capture-pane ever runs — an exec-level fault like fork/exec exhaustion is
+// infrastructure af's teardown request cannot explain, so it must log at
+// ERROR under either attribution source, described as the probe failure it
+// is rather than as a capture failure.
+func TestProbeFailureDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mark   bool
+		expect func() bool
+	}{
+		{name: "this object's close() marked the generation", mark: true},
+		{name: "instance state records a teardown", expect: func() bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+			session, m := boundSession(t, gen)
+			if tc.mark {
+				// The name still resolves to the bound generation, so the
+				// mark's resolution lets close()'s mark land.
+				m.nameGen.Store("$5 111 222")
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+
+			// The identity probe fails at exec level — the poll ends on it
+			// and capture-pane is never attempted.
+			m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+			m.idErrOn.Store(true)
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Zero(t, m.captureCalls.Load(), "an unanswered probe ends the poll before capture-pane runs")
+			require.Contains(t, errs.String(), "identity probe failed in status monitor",
+				"a probe failure is not a capture failure and teardown attribution cannot quiet it")
+			require.NotContains(t, errs.String(), "capturing pane content")
+			require.NotContains(t, infos.String(), "during af-initiated teardown")
+			require.False(t, session.monitor.dead, "an unanswered probe proves nothing about the generation's fate")
+		})
+	}
+}
+
+// TestUnansweredLivenessProbeDuringTeardownStaysError pins the demotion's
+// third edge (Codex on #5327, second finding): the mid-teardown INFO exists
+// only for a capture-pane failure the gone-probe affirmatively answered
+// "still alive" for. When that fallback probe cannot answer — an exec-level
+// fault on the identity probe, or a wedged has-session — the surviving error
+// is the bare capture failure, which used to demote anyway: an infrastructure
+// fault laundered into expected teardown noise. It must stay at ERROR, and
+// the log must name the unanswered probe rather than reporting a plain
+// capture failure.
+func TestUnansweredLivenessProbeDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bind   bool // bound monitor (identity gone-probe) vs unbound (has-session)
+		mark   bool
+		expect func() bool
+	}{
+		{name: "bound generation, marked by close()", bind: true, mark: true},
+		{name: "bound generation, predicate attribution", bind: true, expect: func() bool { return true }},
+		{name: "unbound monitor, marked by close()", mark: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortTmuxTimeout(t, markTestTimeout)
+			var session *TmuxSession
+			var m *teardownMarkTmux
+			if tc.bind {
+				session, m = boundSession(t, &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"})
+				// The upfront identity probe is not due this poll, so the
+				// poll reaches capture-pane and the failure's own
+				// gone-probe is the one that cannot answer.
+				session.monitor.lastGenerationProbe = time.Now()
+				m.nameGen.Store("$5 111 222") // the name still resolves to the bound generation
+			} else {
+				session, m = newMarkedTeardownSession(t)
+			}
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+
+			// capture-pane fails promptly (not a wedge), then the
+			// fallback liveness probe cannot answer: the identity probe
+			// returns an exec-level failure for a bound monitor, and
+			// has-session stalls past the deadline for an unbound one.
+			m.captureOK.Store(false)
+			if tc.bind {
+				m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+				m.idErrOn.Store(true)
+			} else {
+				m.probeWedged.Store(true)
+			}
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, int32(1), m.captureCalls.Load(),
+				"the failure came through capture-pane, distinguishing it from an upfront probe failure")
+			require.Contains(t, errs.String(), "liveness probe unanswered in status monitor",
+				"the probe's non-answer is infrastructure the teardown request cannot explain")
+			require.NotContains(t, errs.String(), "going silent", "no affirmative absence answer → not a gone classification")
+			require.NotContains(t, infos.String(), "during af-initiated teardown",
+				"an unanswered liveness probe must not demote under teardown attribution")
+			require.False(t, session.monitor.dead, "an unanswered probe proves nothing about the session's fate")
+		})
+	}
+}
+
+// TestUnrunnableCaptureDuringTeardownStaysError pins the demotion's fourth
+// edge (Codex on #5327, third finding): the mid-teardown INFO exists only
+// for a failure tmux ITSELF answered — a nonzero exit from a capture-pane
+// that ran. A capture-pane that could not run at all (a fork/exec-class
+// fault) is infrastructure af's teardown request cannot explain, and the
+// fallback probe's affirmative "still alive" does not excuse it — the probe
+// answers whether the SESSION lives, not why the capture failed. It must
+// stay at ERROR.
+func TestUnrunnableCaptureDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mark   bool
+		expect func() bool
+	}{
+		{name: "marked by close()", mark: true},
+		{name: "predicate attribution", expect: func() bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+			// capture-pane never runs (a fork/exec-level fault), while the
+			// gone-probe still affirmatively answers alive — the exact
+			// combination that used to reach the demotion branch.
+			m.captureOK.Store(false)
+			m.captureErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, int32(1), m.captureCalls.Load())
+			require.Contains(t, errs.String(), "capture-pane could not run in status monitor",
+				"an exec-level capture failure is infrastructure, not expected teardown noise")
+			require.Contains(t, errs.String(), "resource temporarily unavailable",
+				"the capture command's own failure must survive to the log")
+			require.NotContains(t, infos.String(), "during af-initiated teardown",
+				"only tmux's own failure answer may demote under teardown attribution")
+			require.False(t, session.monitor.dead)
 		})
 	}
 }
