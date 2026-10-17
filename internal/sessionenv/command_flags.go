@@ -441,6 +441,29 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 	return value.String(), true
 }
 
+// literalShellWordPrefix returns the literal portion of word up to (but not
+// including) the first non-literal shell part. literalShellWord discards the
+// accumulated literal the moment it meets a ParamExp/CmdSubst/&c. and reports
+// only that the word is non-literal; a caller that has already learned the
+// word is non-literal often still needs the literal prefix it carries. The
+// archetypal case is an attached option whose value is a shell expansion —
+// e.g. the `-ECODEX_HOME=` Lit prefix of the word `-ECODEX_HOME=$V`, whose
+// ParamExp tail defeats literalShellWord but whose NAME is fully readable
+// here. When the whole word is literal this returns the same value as
+// literalShellWord.
+func literalShellWordPrefix(word *syntax.Word) string {
+	if word == nil {
+		return ""
+	}
+	var value strings.Builder
+	for _, part := range word.Parts {
+		if !appendLiteralShellPart(&value, part) {
+			return value.String()
+		}
+	}
+	return value.String()
+}
+
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
 	switch part := part.(type) {
 	case *syntax.Lit:
