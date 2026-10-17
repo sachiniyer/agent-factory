@@ -58,7 +58,7 @@ func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 		{"account-scoped sibling", sibling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, environ, imports, err := tc.session.launchEnvironment()
+			_, environ, imports, _, _, err := tc.session.prepareLaunchEnvironment()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +95,7 @@ func TestAccountLaunchEnvironmentStillHonorsExplicitBrowserPassthrough(t *testin
 		t.Fatal(err)
 	}
 
-	_, environ, _, err := agent.launchEnvironment()
+	_, environ, _, _, _, err := agent.prepareLaunchEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}
