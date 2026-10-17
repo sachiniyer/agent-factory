@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -77,14 +78,19 @@ func (m *Manager) refreshWorktreeMissing(repoID string, instance *session.Instan
 // whose tracked worktree vanished, which depends on who owns the checkout and
 // where the row is in its lifecycle (#5102). An external worktree (--here, the
 // root session, a legacy adopted checkout) is the user's own working tree:
-// archive refuses to relocate it and rebuild refuses to recreate it, so the
-// only remedy is the user putting their checkout back. An archived row already
+// archive refuses to relocate it and rebuild refuses to recreate it. Putting
+// the checkout back does not resume the row either — the flag is sticky, and
+// every path that clears it is one af cannot take for an external worktree. So
+// the remedy is ending the row and creating a fresh one. Naming kill is safe
+// here, unlike for an af-owned row: kill's cleanup returns before touching an
+// external worktree, so neither the path (absent or reappeared) nor the branch
+// is removed. An archived row already
 // is archived; restoring it rebuilds the worktree from the kept branch. A live
 // af-owned worktree resolves by archive, which keeps the branch.
 func worktreeMissingRemedy(instance *session.Instance) string {
 	switch {
 	case instance.IsExternalWorktree():
-		return "it is your own checkout, not one af created, so af cannot archive or rebuild it; put the checkout back at that path to resume the session"
+		return fmt.Sprintf("it is your own checkout, not one af created, so af cannot archive, rebuild or re-adopt it; end this session with 'af sessions kill %q' (it removes nothing for a checkout af did not create — neither the path nor the branch) and, once the checkout is back, start a new one in it with 'af sessions create --here'", instance.Title)
 	case instance.GetLiveness() == session.LiveArchived:
 		return "restore it to rebuild the worktree from its kept branch"
 	default:
