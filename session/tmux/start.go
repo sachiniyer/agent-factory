@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -40,6 +41,25 @@ func (t *TmuxSession) Start(workDir string) error {
 		// expected (Codex on #4473).
 		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
+	}
+	// Refuse to spawn into a directory that is not there: `new-session -c`
+	// silently falls back to the tmux server's current directory when the path
+	// is missing, so without this check a respawn of a deleted worktree lands
+	// the agent in an unrelated checkout or the daemon's $HOME (#5172). This is
+	// the one seam every af spawn — create, restore, respawn, tab — passes
+	// through. The name is already proved absent above and nothing has run
+	// new-session, so a refusal here can leave no pane behind.
+	if workDir != "" {
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			// Not just "missing": an unreadable or un-stat-able directory is
+			// equally unverifiable, and either verdict refuses the spawn.
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			t.proveNoPaneIfDeterminatelyAbsent()
+			return fmt.Errorf("%w: %w: session %q cannot start in %s: %v",
+				ErrSessionNotStarted, ErrSpawnDirMissing, t.sanitizedName, workDir, err)
+		}
 	}
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
@@ -653,6 +673,23 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+		}
+		// The respawn launches new-session -c <workDir>; a worktree deleted
+		// since the session persisted means tmux silently falls back to the
+		// server's cwd instead of failing (#5172). Refuse up front, naming the
+		// path, so the caller routes the session to the lost/rebuild loop
+		// rather than launching an agent into an unrelated directory. (Start
+		// itself refuses too — this check keeps the refusal typed for restore
+		// callers before the program rewrite happens.) The live-session
+		// reattach branch below is unaffected: a live pane is not re-launched
+		// into anything.
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			return RestoreReattached, fmt.Errorf(
+				"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
+				ErrSpawnDirMissing, t.sanitizedName, workDir, err)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
