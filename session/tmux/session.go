@@ -321,6 +321,18 @@ var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 // launch still never ran, which is a launch failure, not a finished flow.
 var ErrSessionNameTaken = errors.New("tmux session already exists")
 
+// ErrSpawnDirMissing marks a refused spawn: the working directory Start was
+// given does not exist (or is not a directory) when tmux is asked to launch
+// into it. Without the refusal, `tmux new-session -c <missing>` silently falls
+// back to the server's current directory and the pane lands in an unrelated
+// checkout or the daemon's $HOME (#5172). Every af spawn passes through
+// Start, so this seam is the invariant's single enforcer: a session never
+// launches into a directory af did not verify exists. The stat-to-chdir race
+// that remains — the directory removed or swapped between this stat and the
+// server's own resolution of -c — is a deliberate follow-up (#5172 slice 2),
+// tracked rather than silently accepted.
+var ErrSpawnDirMissing = errors.New("spawn start directory missing")
+
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
 // session environment or default command could not be upgraded in place.
 var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment refresh failed")

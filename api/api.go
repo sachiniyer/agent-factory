@@ -32,7 +32,7 @@ import (
 // error it returns:
 //   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
-//     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
+//     same-machine disk read (docs/remote-http-auth.md, #1592 Phase 3 PR4).
 //   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the

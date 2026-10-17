@@ -85,7 +85,7 @@ func deadInstanceData(t *testing.T, status Status, agentName, shellName string) 
 		},
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"), // non-empty: enables re-spawn
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")), // non-empty: enables re-spawn
 			SessionName:  "dead-respawn",
 			BranchName:   "dead-branch",
 		},

@@ -27,7 +27,10 @@ func TestPlaceOverlayCombinedFgBgFade(t *testing.T) {
 		t.Fatalf("Setup error: expected combined FG+BG sequence, got: %q", bg)
 	}
 
-	result := PlaceOverlay(0, 0, "XX", bg, false)
+	// The styled row must be one the modal does not touch — #5297 blanked the
+	// margins beside a modal, so a background sharing its row has no faded
+	// cells left to observe.
+	result := PlaceOverlay(0, 1, "XX", bg+"\nplain", false)
 
 	if !strings.Contains(result, testBackdropBG()) {
 		t.Fatalf("expected background to be resolved to the surface role, got: %q", result)
@@ -103,7 +106,7 @@ func TestFadeSGR(t *testing.T) {
 // end-to-end through PlaceOverlay to confirm both colors survive there too.
 func TestFadeSGRTrueColorCombinedThroughOverlay(t *testing.T) {
 	input := "\x1b[38;2;10;20;30;48;2;200;210;220mhi\x1b[0m"
-	result := PlaceOverlay(0, 0, "XX", input, false)
+	result := PlaceOverlay(0, 1, "XX", input+"\nplain", false)
 
 	if !strings.Contains(result, testBackdropFG()) {
 		t.Fatalf("truecolor combined: faded foreground missing, got: %q", result)

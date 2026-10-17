@@ -614,8 +614,40 @@ scenario)
         PLAYTEST_NAME="af-driver-scenario-$(_uniq)"; teardown=yes
     fi
     ensure_playtest_up
+    # Scenarios that run a master control leg consume provenance inputs
+    # (AF_BRANCH_SHA / AF_MASTER_SHA / AF_MASTER_TAR). Inside the sandbox the
+    # mounted /src may be a linked worktree whose .git file points at a
+    # host-only gitdir, so the script cannot rev-parse or archive there —
+    # produce the inputs here whenever the script declares them.
+    exec_env=()
+    if grep -qE 'AF_(BRANCH|MASTER)_SHA|AF_MASTER_TAR' "$REPO_ROOT/$scenario_rel"; then
+        branch_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+        # A bugfix scenario may pin its control to a known-buggy revision with
+        # a literal AF_CONTROL_SHA=<40hex> line — once the fix merges, archiving
+        # the moving origin/master would build a fixed control that can never
+        # reproduce the bug, and the master leg would fail forever after.
+        master_sha="$(grep -oE 'AF_CONTROL_SHA=[0-9a-f]{40}' "$REPO_ROOT/$scenario_rel" \
+            | head -1 | cut -d= -f2 || true)"
+        [ -n "$master_sha" ] || master_sha="$(git -C "$REPO_ROOT" rev-parse origin/master 2>/dev/null \
+            || git -C "$REPO_ROOT" rev-parse master 2>/dev/null || true)"
+        [ -n "$branch_sha" ] && exec_env+=(-e "AF_BRANCH_SHA=$branch_sha")
+        if [ -n "$master_sha" ]; then
+            master_tar="$(mktemp "${TMPDIR:-/tmp}/af-master.XXXXXX.tar")"
+            # mktemp makes the tar 0600 and docker cp preserves the host uid
+            # numerically, so on a host whose user is not uid 1000 the tar lands
+            # unreadable by the container's dev user (1000) — "Permission
+            # denied" inside the scenario. It is a public-source archive; open
+            # the mode before the copy.
+            chmod 0644 "$master_tar"
+            if git -C "$REPO_ROOT" archive --format=tar "$master_sha" > "$master_tar"; then
+                "$ENGINE" cp "$master_tar" "$PLAYTEST_NAME:/tmp/af-master-src.tar" >/dev/null
+                exec_env+=(-e "AF_MASTER_SHA=$master_sha" -e "AF_MASTER_TAR=/tmp/af-master-src.tar")
+            fi
+            rm -f "$master_tar"
+        fi
+    fi
     rc=0
-    "$ENGINE" exec "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
+    "$ENGINE" exec "${exec_env[@]}" "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
     if [ "$teardown" = yes ]; then
         "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
     fi

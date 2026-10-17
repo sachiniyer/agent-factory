@@ -292,6 +292,17 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 // HasUpdatedWithBaselineExpectingTeardown is HasUpdatedWithBaseline plus the
 // af-initiated-teardown predicate described at HasUpdatedExpectingTeardown.
 func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() bool) (updated bool, hasPrompt bool, content string, baseline bool) {
+	updated, hasPrompt, content, baseline, _ = t.HasUpdatedObserved(expectGone)
+	return updated, hasPrompt, content, baseline
+}
+
+// HasUpdatedObserved is HasUpdatedWithBaselineExpectingTeardown plus a
+// capture-success bit: the pane-evidence contract distinguishes "the pane
+// answered and was unchanged/empty" from "no pane was captured at all" — a
+// wedged server, a dead monitor, and a failed capture-pane all reach the same
+// all-false return the narrower wrappers emit, and observation-streak
+// bookkeeping must not count any of them as observed silence (#5221 review).
+func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, hasPrompt bool, content string, baseline bool, captured bool) {
 	// A nil monitor means Restore never ran for this session: a persisted Dead
 	// instance is loaded with started=true but LocalBackend.Start returns before
 	// Restore (which is the only place monitor is initialized) so the corpse is
@@ -337,7 +348,7 @@ func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() 
 	}
 	t.monitorMu.Unlock()
 	if !alive {
-		return false, false, "", false
+		return false, false, "", false, false
 	}
 
 	captureStartedAt := time.Now()
@@ -409,10 +420,10 @@ func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() 
 			} else {
 				log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 			}
-			return false, false, "", false
+			return false, false, "", false, false
 		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
-		return false, false, "", false
+		return false, false, "", false, false
 	}
 
 	// A capture that BEGAN after the asking close() returned and still
@@ -459,7 +470,7 @@ func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() 
 		mon.baselinePending = false
 	}
 	t.monitorMu.Unlock()
-	return changed, hasPrompt, content, baseline
+	return changed, hasPrompt, content, baseline, true
 }
 
 // CapturePaneContent captures the content of the tmux pane. When the capture

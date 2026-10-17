@@ -331,7 +331,15 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	instance.ClearAgentModelChange()
 	instance.ClearIdleEvidence()
 	instance.ClearLostRestoreFailure()
-	m.clearRemoteLoss(stableSessionKey(repoID, instance))
+	key := stableSessionKey(repoID, instance)
+	m.clearRemoteLoss(key)
+	// A replaced runtime is a fresh pane: the task-run turn watcher's prev
+	// frame belongs to the dead one (#5221 review). The run's own boundary
+	// survives ClearIdleEvidence — it is a fact about the run, not the pane —
+	// so the replacement still boots behind the gate and must prove its turn.
+	m.pausedMu.Lock()
+	delete(m.taskRunTurnWatches, key)
+	m.pausedMu.Unlock()
 }
 
 // sweepRemoteLossStates drops debounce entries that no longer describe anything

@@ -110,6 +110,51 @@ func TestRemoteAgentServerSnapshotCarriesModelChange(t *testing.T) {
 	}
 }
 
+// A pre-field server omits `captured` AND swallows capture-pane failures into
+// the same all-false shape an idle pane produces — so a missing field resolves
+// from the frame's own positive evidence, not a blanket true (#5221 review).
+func TestRemoteAgentServerSnapshotResolvesLegacyCaptured(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name     string
+		resp     agentSnapshotResp
+		captured bool
+	}{
+		{name: "legacy all-false is unconfirmed", captured: false},
+		{name: "legacy updated proves the capture", resp: agentSnapshotResp{Updated: true}, captured: true},
+		{name: "legacy prompt proves the capture", resp: agentSnapshotResp{HasPrompt: true}, captured: true},
+		{name: "legacy baseline proves the capture", resp: agentSnapshotResp{Baseline: true}, captured: true},
+		{name: "legacy content proves the capture", resp: agentSnapshotResp{Content: "idle pane"}, captured: true},
+		{name: "new field honest no", resp: agentSnapshotResp{Updated: true, Captured: &no}, captured: false},
+		{name: "new field explicit yes on empty pane", resp: agentSnapshotResp{Captured: &yes}, captured: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  tc.resp,
+					"error": nil,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("NewRemoteAgentServer: %v", err)
+			}
+			obs, err := as.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+			if obs.Captured != tc.captured {
+				t.Fatalf("Captured = %v, want %v", obs.Captured, tc.captured)
+			}
+		})
+	}
+}
+
 func TestRemoteAgentServerCarriesPromptDeliveryStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

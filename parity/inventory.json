@@ -124,8 +124,8 @@
         "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
+      "issue": "#4803",
+      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation. The #2216 epic has closed; the UI half is tracked live as #4803, with implementation in flight as PR #4806."
     },
     {
       "id": "config.read",
@@ -161,7 +161,7 @@
         "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
       },
       "verdict": "deliberate",
-      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place — their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling — so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
     },
     {
       "id": "config.read-project",
@@ -179,8 +179,8 @@
         "pointer": "commands/configcmd.go config get/list --repo (with deprecated --project alias)"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
+      "issue": "#5289",
+      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. The #2216 epic has closed; TUI/web exposure is in flight as PR #4947, which is also the write half's (#5157) sequencing dependency."
     },
     {
       "id": "appearance.select",
@@ -451,7 +451,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio↔TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes — running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "project.add",
@@ -581,8 +581,8 @@
         "pointer": "commands/quotacmd.go:29"
       },
       "verdict": "real-gap",
-      "issue": "#2983",
-      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+      "issue": "#4361",
+      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. #2983 has closed; the UI half is tracked live as #4361, with implementations in flight as PRs #4900 and #4409."
     },
     {
       "id": "session.account-login",
@@ -619,7 +619,7 @@
       },
       "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key — a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file — which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key \u2014 a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file \u2014 which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
     },
     {
       "id": "session.archive",
@@ -691,8 +691,8 @@
         "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
       },
       "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/dev/surface-parity.md 'reachable != user-settable'."
+      "issue": "#5290",
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity', and the proof is in flight as PR #5107. See docs/dev/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.inplace",
@@ -765,8 +765,8 @@
         "pointer": "api/api.go:589 --backend hook"
       },
       "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968)."
+      "issue": "#5291",
+      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968); the proof is in flight as PR #5107."
     },
     {
       "id": "session.create.opt.title",
@@ -987,24 +987,6 @@
       },
       "verdict": "parity",
       "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
-    },
-    {
-      "id": "session.prune",
-      "title": "Reclaim disk from old archived sessions (manual, opt-in)",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_prune.go sessionsPruneCmd -> daemon/control_client.go PruneSessions -> controlServer.PruneSessions (daemon/prune.go)"
-      },
-      "verdict": "deliberate",
-      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. Slice 1 ships the dry run only: a strictly read-only listing of reclaimable archives — the deletion+tombstone apply lands in the follow-up filed from #5142's review. The daemon route POST /v1/PruneSessions is public so the same read-only RPC is reachable for remote daemons and external tooling."
     },
     {
       "id": "session.restore",
@@ -1335,11 +1317,11 @@
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
         "status": "yes",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue · missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
       },
       "cli": {
         "status": "yes",
@@ -1347,8 +1329,7 @@
       },
       "verdict": "parity",
       "issue": "#3626",
-      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight — the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see — so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."
-    },
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
     {
       "id": "task.list",
       "title": "List tasks",
@@ -1527,8 +1508,8 @@
         "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
       },
       "verdict": "real-gap",
-      "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable — and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract."
+      "issue": "#5292",
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract. #2358 has closed; the residual retained-boundary holes (send-prompt --all and the TUI stream paths) are in flight as PR #4760."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1600,7 +1581,6 @@
       "af sessions kill": "session.kill",
       "af sessions list": "session.list",
       "af sessions preview": "session.preview",
-      "af sessions prune": "session.prune",
       "af sessions restore": "session.restore",
       "af sessions retry-limit": "session.limit-retry",
       "af sessions send-prompt": "session.send-prompt",
@@ -1649,7 +1629,6 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
-      "POST /v1/PruneSessions": "session.prune",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RebindProject": "project.rebind",
@@ -1883,9 +1862,6 @@
       "af sessions preview --tab": "session.preview-tab",
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
-      "af sessions prune --all": "session.prune",
-      "af sessions prune --help": "meta.discovery",
-      "af sessions prune --older-than": "session.prune",
       "af sessions restore --force-reap": "session.restore",
       "af sessions restore --help": "meta.discovery",
       "af sessions retry-limit --delivered": "session.handoff-delivery-confirm",
@@ -2392,8 +2368,7 @@
             "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
-      },
-      "PruneSessionsRequest": {}
+      }
     },
     "web_rpcs": {
       "ListAccounts": {
