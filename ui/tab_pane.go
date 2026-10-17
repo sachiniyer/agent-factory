@@ -715,9 +715,31 @@ func (p *TabPane) String() string {
 	}
 	rect := layout.Rect{W: p.width, H: p.height}
 
-	// In scroll/copy mode always use the viewport.
+	// In scroll/copy mode always use the viewport. Render with an unbounded
+	// content width so the raw (possibly wider) scrollback rows survive the
+	// viewport's own MaxWidth truncation — view.View() clips wide rows with an
+	// empty tail (no marker), so a naive fitLine(view.View()) pass would only
+	// see lines already trimmed to p.width and add nothing. Then apply the same
+	// per-line fitLine ellipsis pass the normal-mode branch uses (#4175) so a
+	// cut that drops real content gets a visible … like every other surface.
+	// The width/style are restored before returning so scroll geometry (which
+	// depends on Width/Height, not Style) is untouched. Trailing pad spaces are
+	// trimmed first: viewport pads short rows to the widest visible row with
+	// spaces, and without trimming those fitLine's raw measure would mark a
+	// blank tail as lost content and append a spurious ….
 	if p.scroll.Active() {
-		return layout.ClampToRect(p.viewport.View(), rect)
+		savedW := p.viewport.Width
+		savedStyle := p.viewport.Style
+		p.viewport.Width = 0
+		p.viewport.Style = savedStyle.UnsetMaxWidth()
+		view := p.viewport.View()
+		p.viewport.Width = savedW
+		p.viewport.Style = savedStyle
+		viewLines := strings.Split(view, "\n")
+		for i := range viewLines {
+			viewLines[i] = fitLine(strings.TrimRight(viewLines[i], " "), p.width)
+		}
+		return layout.ClampToRect(strings.Join(viewLines, "\n"), rect)
 	}
 
 	if p.content.fallback {
