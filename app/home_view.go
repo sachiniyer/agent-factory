@@ -56,6 +56,17 @@ func (m *home) setTransientFailure(err error) uint64 {
 	return m.transientNoticeID
 }
 
+// setTransientHint paints an ephemeral acknowledgment that must not become a
+// retrievable notice. Same bar, same generation token, same delayed clear —
+// but it never lands in the retained slot `E` reads, so answering "the store
+// is empty" does not fill it (#5351 review: a second `E` after the hint faded
+// used to open "Last notice" on the hint's own text).
+func (m *home) setTransientHint(err error) uint64 {
+	m.transientNoticeID++
+	m.errBox.SetHint(err)
+	return m.transientNoticeID
+}
+
 func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -75,7 +86,10 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
-		return m, m.showTransientMessage("No recent error")
+		// A hint, not a notice: acknowledging an empty store must leave it
+		// empty, or a second `E` after the fade would reopen the hint itself.
+		return m, m.clearTransientMessageAfterDelay(
+			m.setTransientHint(errors.New("No recent error")))
 	}
 	// af hiding a pane and saying how to get it back is designed behavior. Filing
 	// it under "Last error" would report af working as intended as a fault, which

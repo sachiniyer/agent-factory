@@ -97,6 +97,36 @@ func TestErrorDetailsHintsWhenNoNoticeIsRetained(t *testing.T) {
 	assert.Nil(t, h.textOverlay)
 	assert.Equal(t, "No recent error", h.errBox.FullError(),
 		"the status line acknowledges the keypress")
+	text, _ := h.errBox.RetainedNotice()
+	assert.Empty(t, text, "answering an empty store must not fill it")
+}
+
+// TestErrorDetailsHintLeavesTheStoreEmpty is the #5356 review defect. The hint
+// used to ride SetNotice, which retains — so after the bar's 3-second fade a
+// second `E` found "No recent error" in the retained slot and opened a
+// "Last notice" overlay quoting it. Pressing `E` on an empty store, letting
+// the hint expire, and pressing `E` again must re-hint, never open an overlay.
+func TestErrorDetailsHintLeavesTheStoreEmpty(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	pressE := func() tea.Cmd {
+		_, cmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+		return cmd
+	}
+
+	pressE()
+	require.Equal(t, "No recent error", h.errBox.FullError())
+	// The same expiry the 3-second hideErrMsg timer delivers.
+	h.Update(hideErrMsg{noticeID: h.transientNoticeID})
+	require.Empty(t, h.errBox.FullError(), "the hint faded like any notice")
+
+	cmd := pressE()
+	require.NotNil(t, cmd, "the empty answer rides the timer again")
+	assert.Equal(t, stateDefault, h.state, "an overlay must not open")
+	assert.Nil(t, h.textOverlay)
+	assert.Equal(t, "No recent error", h.errBox.FullError(), "the second press re-hints")
+	text, _ := h.errBox.RetainedNotice()
+	assert.Empty(t, text, "repeated E never creates a retained notice")
 }
 
 // The overlay's title must match what it is showing. af hiding a pane and
