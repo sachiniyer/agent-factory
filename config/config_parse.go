@@ -331,6 +331,18 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	if err != nil {
 		return nil, err
 	}
+	// A shift+<rune> override Bubble Tea can never emit (Key has no Shift
+	// field, so Shift+A is emitted as "A", never "shift+a") was, before this
+	// change, a silently dead binding. Apply the "warn now, reject later"
+	// policy (#4599): warn for each one on load and drop it, so a config that
+	// already contains one upgrades without refusing to start over a binding
+	// that was already inert — including in the daemon's config reads
+	// (control_server.go, taskrun.go), which go through this same LoadConfig.
+	// The hard error for an existing dead binding stays a separate, later
+	// change. keys.ValidateOverrides below still hard-errors every other
+	// defect, and `af config set keys` (which calls keys.ValidateOverrides
+	// directly) still rejects writing a NEW dead binding.
+	overrides = discardDeadShiftRuneOverrides(config.Keys, overrides, prettyConfigPath)
 	if err := keys.ValidateOverrides(overrides); err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
 	}

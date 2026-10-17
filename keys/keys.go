@@ -495,6 +495,22 @@ func RebindableActions() []string {
 	return names
 }
 
+// IsRebindableAction reports whether name is one of the [keys] table's
+// rebindable action names (the same set RebindableActions returns), as a
+// membership check for the config loader. discardDeadShiftRuneOverrides must
+// tell a real action from a typo before dropping the action's dead bindings:
+// an unknown action whose every binding is a dead shift+<rune> spec has to
+// stay visible so keys.ValidateOverrides can still reject it, instead of being
+// silently hidden behind the dead-key warning.
+func IsRebindableAction(name string) bool {
+	for _, sp := range specs {
+		if sp.configKey == name {
+			return true
+		}
+	}
+	return false
+}
+
 // keyClaim is one action's claim on a key string while buildMaps resolves the
 // effective binding table: the action, whether a [keys] override placed it
 // there, and whether it dispatches (contextual claims participate in conflict
@@ -793,6 +809,15 @@ func normalizeKeySpec(s string) (string, bool) {
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
 				return "", false
 			}
+			// Bubble Tea's Key has no Shift field: for rune input (KeyRunes) it
+			// writes the rune verbatim, so Shift+A is emitted as "A", never
+			// "shift+a". Only dedicated KeyShift*/KeyCtrlShift* named KeyTypes
+			// spell "shift+", and those are already gated by the named-key guard
+			// above. Reject shift on a plain rune so the binding is not installed
+			// under a spelling Bubble Tea cannot emit (#4040).
+			if shift && !namedKeys[rest] {
+				return "", false
+			}
 			var b strings.Builder
 			if alt {
 				b.WriteString("alt+")
@@ -808,6 +833,67 @@ func normalizeKeySpec(s string) (string, bool) {
 		}
 		if rest == "" {
 			return "", false
+		}
+	}
+}
+
+// IsDeadShiftRuneSpec reports whether s is a shift+-bearing plain-rune key spec
+// that normalizeKeySpec rejects because Bubble Tea can never emit it: the Key
+// struct has no Shift field, so for rune input (KeyRunes) it writes the rune
+// verbatim — Shift+A is emitted as "A", never "shift+a" — and only the
+// dedicated KeyShift*/KeyCtrlShift* named KeyTypes spell "shift+". The load
+// path warns and skips these (#4599, "warn now, reject later") so a config
+// that already contains one upgrades without refusing to start over a binding
+// that was already inert; the write path (`af config set keys`, via
+// ValidateOverrides) still rejects a NEW one. The predicate mirrors
+// normalizeKeySpec's guard order so it returns true only for the exact case
+// the shift guard catches, not for the unrelated rejections around it (an
+// unsupported named-key combo like shift+space, a malformed spec like "qq", or
+// a reachable spec like "ctrl+a" or "shift+up").
+func IsDeadShiftRuneSpec(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
+	}
+	rest := s
+	var ctrl, alt, shift bool
+	for {
+		switch {
+		case strings.HasPrefix(rest, "ctrl+"):
+			if ctrl {
+				return false
+			}
+			ctrl = true
+			rest = rest[len("ctrl+"):]
+		case strings.HasPrefix(rest, "alt+"):
+			if alt {
+				return false
+			}
+			alt = true
+			rest = rest[len("alt+"):]
+		case strings.HasPrefix(rest, "shift+"):
+			if shift {
+				return false
+			}
+			shift = true
+			rest = rest[len("shift+"):]
+		default:
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return false
+			}
+			if rest == "space" {
+				if ctrl {
+					rest = "@"
+				} else {
+					rest = " "
+				}
+			}
+			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
+				return false
+			}
+			return shift && !namedKeys[rest]
+		}
+		if rest == "" {
+			return false
 		}
 	}
 }
