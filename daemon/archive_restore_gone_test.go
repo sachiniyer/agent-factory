@@ -194,3 +194,33 @@ func TestRestoreArchived_ResumesItsOwnRebuildAfterACrash(t *testing.T) {
 	assert.Equal(t, dest, rec.Worktree.WorktreePath)
 	assert.False(t, rec.Worktree.Missing)
 }
+
+// Only the exact preferred placement is recognized as af's own rebuild. A
+// checkout at a suffixed sibling (<preferred>-2) is not tied to this row by
+// anything, so restore refuses it like any other live path rather than guess.
+func TestRestoreArchived_SuffixedCheckoutIsNotAdopted(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, wtPath := registerGoneWorktree(t, manager, repoID, repoPath, "suffixed")
+	inst.SetBranchForTest("af/" + sanitizeArchiveTitle("suffixed"))
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "suffixed", RepoID: repoID})
+	require.NoError(t, err)
+	branch := inst.GetBranch()
+	require.Equal(t, "af/suffixed", branch)
+
+	preferred, err := sessiongit.RestoreWorktreeBasePath(repoPath, "suffixed", branch)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(preferred, 0o755))
+	sibling := preferred + "-2"
+	out, gitErr := exec.Command("git", "-C", repoPath, "worktree", "prune").CombinedOutput()
+	require.NoError(t, gitErr, string(out))
+	out, gitErr = exec.Command("git", "-C", repoPath, "worktree", "add", sibling, branch).CombinedOutput()
+	require.NoError(t, gitErr, string(out))
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "suffixed", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "moved outside af")
+	assert.Equal(t, session.LiveArchived, inst.GetLiveness())
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	assert.Equal(t, wtPath, inst.GetWorktreePath(), "nothing is adopted")
+	requireWorktreeOnBranch(t, sibling, branch)
+}

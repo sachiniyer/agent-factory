@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -37,17 +36,27 @@ import (
 // The one live checkout that is not refused is this route's own. A daemon that
 // dies after the rebuild and before the caller's first persist leaves disk
 // naming the old, absent path while git registers the branch at the rebuilt
-// destination — and that destination is a pure function of the repo, title and
-// branch (RestoreWorktreePath), so the retry computes the same one. Refusing it
-// as a move made af's own rebuild unrestorable without git surgery. So when git
-// has the branch at that computed destination, the retry adopts it with the
+// destination. Refusing that as a move made af's own rebuild unrestorable
+// without git surgery. The recognition keys on the PREFERRED placement
+// (RestoreWorktreeBasePath), not on RestoreWorktreePath's answer: the latter
+// steps past an occupied path, and on the retry the occupant is the crashed
+// rebuild itself, so it would name <preferred>-2 and never match. The
+// preferred path is a pure function of the repo, title and branch, so the
+// retry derives exactly what the crashed restore did whenever that restore
+// found it free. When git has the branch there, the retry adopts it with the
 // proof archive uses for its own landed move (AdoptRebuiltArchivedWorktree):
 // git's registration on this branch plus the directory's back-binding, the
 // recorded path re-proved absent and the directory's identity pinned under the
 // relocation lock. Whether af rebuilt it or the user moved the archive to that
-// exact path, what is proven is the session's own checkout. The basename gate
-// below is only a cheap pre-filter on git's spelling of the path; the proof
-// resolves both spellings itself.
+// exact path, what is proven is the session's own checkout.
+//
+// Only the exact preferred path adopts. A checkout at <preferred>-N could be a
+// restore that crashed while the preferred path was occupied, but nothing ties
+// the suffix to this row rather than to the user, so it refuses like any other
+// live path. The comparison resolves symlinks (git reports resolved paths; the
+// configured placement may go through one, as macOS's temp dir does) with the
+// bounded normalization the worktree listing uses, and a normalization that
+// cannot answer refuses rather than guessing.
 func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *session.Instance) error {
 	source := instance.GetWorktreePath()
 	repoPath := instance.GetRepoPath()
@@ -63,6 +72,10 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 		return fmt.Errorf("cannot restore session %q: cannot establish origin repo state for %s: %w", title, repoPath, err)
 	}
 	beforeRestoreWorktreePath()
+	preferred, err := sessiongit.RestoreWorktreeBasePath(repoPath, title, instance.GetBranch())
+	if err != nil {
+		return fmt.Errorf("cannot determine restore location for %q: %w", title, err)
+	}
 	dest, err := sessiongit.RestoreWorktreePath(repoPath, title, instance.GetBranch())
 	if err != nil {
 		return fmt.Errorf("cannot determine restore location for %q: %w", title, err)
@@ -73,20 +86,16 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 			"cannot restore session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w",
 			title, source, err)
 	}
-	if live && filepath.Base(filepath.Clean(moved)) == filepath.Base(filepath.Clean(dest)) {
-		if err := instance.AdoptRebuiltArchivedWorktree(dest); err != nil {
-			wrapped := fmt.Errorf(
-				"cannot restore session %q: its archived worktree %s is gone, and git has its branch checked out at %s, where restore rebuilds it, but af could not prove that checkout is this session's own (inspect %s; if it is the session's work, retry, otherwise remove it with 'git worktree remove' and retry to rebuild it from the branch): %w",
-				title, source, moved, moved, err)
-			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-				return errors.Join(wrapped, fmt.Errorf("could not persist the archived row: %w", perr))
-			}
-			return wrapped
-		}
-		m.info().Printf("restore of session %q: archived worktree %s was gone; adopted the rebuild of branch %s an earlier restore left at %s", title, source, instance.GetBranch(), dest)
-		return nil
-	}
 	if live {
+		ownRebuild, err := sessiongit.SameWorktreePath(moved, preferred)
+		if err != nil {
+			return fmt.Errorf(
+				"cannot restore session %q: its archived worktree %s is gone, and git has its branch checked out at %s, but af could not compare that path with its restore location %s, so it cannot tell its own earlier rebuild from a move: %w",
+				title, source, moved, preferred, err)
+		}
+		if ownRebuild {
+			return m.adoptRebuiltArchivedWorktree(repoID, title, instance, source, moved, preferred)
+		}
 		return fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, but git has its branch checked out at %s (moved outside af, or placed by an earlier restore that was cut off before it could record it) — move it back to %s and retry, or remove it with 'git worktree remove' and retry to rebuild it from the branch",
 			title, source, moved, source)
@@ -101,5 +110,24 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 		return wrapped
 	}
 	m.info().Printf("restore of session %q: archived worktree %s was gone; rebuilt it from branch %s at %s", title, source, instance.GetBranch(), dest)
+	return nil
+}
+
+// adoptRebuiltArchivedWorktree re-aims the restoring row at preferred, where git
+// has its branch checked out, once the adoption proof holds; see
+// rebuildAbsentArchivedWorktree. The record takes af's own spelling of the
+// path, the one the crashed rebuild would have recorded; moved is git's, used
+// only to name the checkout in the refusal.
+func (m *Manager) adoptRebuiltArchivedWorktree(repoID, title string, instance *session.Instance, source, moved, preferred string) error {
+	if err := instance.AdoptRebuiltArchivedWorktree(preferred); err != nil {
+		wrapped := fmt.Errorf(
+			"cannot restore session %q: its archived worktree %s is gone, and git has its branch checked out at %s, where restore rebuilds it, but af could not prove that checkout is this session's own (inspect %s; if it is the session's work, retry, otherwise remove it with 'git worktree remove' and retry to rebuild it from the branch): %w",
+			title, source, moved, moved, err)
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return errors.Join(wrapped, fmt.Errorf("could not persist the archived row: %w", perr))
+		}
+		return wrapped
+	}
+	m.info().Printf("restore of session %q: archived worktree %s was gone; adopted the rebuild of branch %s an earlier restore left at %s", title, source, instance.GetBranch(), preferred)
 	return nil
 }
