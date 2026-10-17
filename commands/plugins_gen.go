@@ -85,6 +85,7 @@ var pluginReleaseDigests = []string{
 	"514bf82ab28f806a7b0756dbc915cedc8a994291ad0cb958e97df93b53b3f54b", // 3.20 — prune reclaims only af-owned worktrees; provider transcripts are never touched (#5136)
 	"acae86681aa0448958ad9e9cd4a6c7ffe06e59c5e6331aad52d6606e125daa3a", // 3.21 — prune ships its strictly read-only dry run first; no --apply yet (#5136)
 	"8d6e2863cbfc360a858b43c07376b0c7fa82dd6ecb9dc917dec21c39d505ff96", // 3.22 — prune's dry-run claim narrows to "af writes nothing" (#5136)
+	"787978c996f9632b42e5bfd4dfc78a2adabcbd0b81c77f122e83154ec38edea1", // 3.23 — shared scope rule names both cross-project opt-ins (#5136)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

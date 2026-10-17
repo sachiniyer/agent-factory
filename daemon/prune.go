@@ -377,6 +377,19 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		if err := sessiongit.VerifyWorktreeRegistrationPredates(wtPath, session.ArchiveTimeFor(data)); err != nil {
 			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
 		}
+		// `git worktree list` porcelain reports the worktree's branch
+		// ATTRIBUTE, not that the ref resolves — `update-ref -d` leaves the
+		// registration and the dirty probe clean while erasing the recovery
+		// handle the candidate advertises (#5136 Codex round 12). The
+		// probe's error is UNKNOWN, not absent (#3243): refuse rather than
+		// guess either way.
+		branch := pruneBranchFor(data)
+		switch exists, berr := boundedLocalBranchExists(repoPath, branch); {
+		case berr != nil:
+			return fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
+		case !exists:
+			return fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
+		}
 	case errors.Is(probeErr, sessiongit.ErrRepoGone):
 		return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
 	default:

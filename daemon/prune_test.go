@@ -435,6 +435,24 @@ func TestPruneSessions_RefusesMissingWorktreeWithDeletedBranch(t *testing.T) {
 	assert.Contains(t, resp.Skipped[0].Reason, "recovery branch")
 }
 
+// TestPruneSessions_RefusesPresentWorktreeWithDeletedBranchRef: `update-ref
+// -d` leaves the worktree registration's branch attribute in place and the
+// dirty probe clean while erasing the recovery handle the candidate
+// advertises — the row must refuse, not list a kept branch that does not
+// resolve (#5136 Codex round 12).
+func TestPruneSessions_RefusesPresentWorktreeWithDeletedBranchRef(t *testing.T) {
+	manager, repoID, repoPath, _, archivedPath := seedPrunableArchive(t, "gone-ref-row")
+	require.DirExists(t, archivedPath, "the tree stays present — only the ref is erased")
+	out, err := exec.Command("git", "-C", repoPath, "update-ref", "-d", "refs/heads/af/gone-ref-row").CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "recovery branch")
+}
+
 // TestPruneSessions_ReportsUnmaterializedNonArchivedGhost: a persisted live
 // row the daemon could not materialize — broken recovery metadata, a corrupt
 // half-written record — is still an in-scope record. The skipped accounting
