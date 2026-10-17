@@ -137,6 +137,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
 	if err := w.configureGit(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
