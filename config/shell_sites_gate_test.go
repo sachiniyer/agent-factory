@@ -129,11 +129,17 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	}},
 
 	// ---- operator-authored, but not from a config file ----
-	"daemon/watcher.go:(*taskWatcher).runOnce": {{
+	"daemon/watcher_lifeline.go:(*watcherSupervisor).startWithLifeline": {{
 		class: operatorOther,
 		note: "a watch task's command, from the task store rather than a config file, so no config load ever " +
 			"sees it. Out of #3566's scope on purpose — the fix is a warning where the value is ADMITTED, " +
-			"which for a task is task creation, not config load.",
+			"which for a task is task creation, not config load. This is the lifeline spawn (#5329): the " +
+			"lifeline execs `<shell> -c <watch_cmd>` from these argv elements unchanged.",
+	}},
+	"daemon/watcher_lifeline.go:(*watcherSupervisor).startWatchProcess": {{
+		class: operatorOther,
+		note: "the same watch task command as startWithLifeline, on the direct-spawn path used when no " +
+			"lifeline binary is available or it does not speak the protocol (#5329).",
 	}},
 
 	// ---- af-authored scripts ----
