@@ -64,7 +64,12 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"echo A=$x … x", func(n int) string { return "echo" + strings.Repeat(" A=$x", n) + " x" }, false},
 		{"echo env -v env -v … x", func(n int) string { return "echo" + strings.Repeat(" env -v", n) + " x" }, false},
 		{"strace -E x … x", func(n int) string { return "strace" + strings.Repeat(" -E x", n) + " x" }, false},
-		{"nohup … nohup x", func(n int) string { return strings.Repeat("nohup ", n) + "x" }, false},
+		// nohup now scans its child tail like its ionice/taskset siblings
+		// (#4708 parity fix), so a deep `nohup … nohup x` chain holds more
+		// than shadowedChildJudgementLimit verdict words and fails closed
+		// past the budget instead of staying admitted — the same property
+		// taskset's sibling family below pins.
+		{"nohup … nohup x", func(n int) string { return strings.Repeat("nohup ", n) + "x" }, true},
 		// #4968: option runs whose operands start nested wrapper layers, and
 		// xargs's env operand-region scan.
 		{"nice -n nice -n … x", func(n int) string { return "nice -n" + strings.Repeat(" nice -n", n) + " x" }, false},

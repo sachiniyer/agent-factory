@@ -398,7 +398,7 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		}
 	case isAccountCommandName(words[0], "nohup"):
 		var unsafe bool
-		words, unsafe = unwrapNohup(words[1:])
+		words, unsafe = unwrapNohup(words[1:], names, memo)
 		if unsafe {
 			return nil, false, true
 		}
