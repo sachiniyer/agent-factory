@@ -18031,6 +18031,8 @@ var store = new Store({
 var token = null;
 var connectionGeneration = 0;
 var pendingRestoreResync = false;
+var pendingReconnectTasksRefresh = false;
+var pendingReconnectResync = false;
 var stream = null;
 var optimisticSessions = new OptimisticSessions();
 var pendingRestores = new PendingRestores(
@@ -18205,6 +18207,14 @@ async function connect(candidate) {
   startStream(candidate);
   if (pendingRestoreResync) {
     pendingRestoreResync = false;
+    requestResync();
+  }
+  if (pendingReconnectTasksRefresh) {
+    pendingReconnectTasksRefresh = false;
+    refreshTasks();
+  }
+  if (pendingReconnectResync) {
+    pendingReconnectResync = false;
     requestResync();
   }
 }
@@ -19321,10 +19331,17 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
-      refreshTasks();
+      if (stale && (token === null || store.get().connecting)) {
+        pendingReconnectTasksRefresh = true;
+      } else {
+        refreshTasks();
+      }
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }
@@ -19333,7 +19350,11 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  const requestGeneration = connectionGeneration;
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -19341,11 +19362,22 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
+      if (stale) {
+        if (token === null || store.get().connecting) {
+          pendingReconnectResync = true;
+        } else {
+          requestResync();
+        }
+        return;
+      }
       surfaceMutationError(e, "confirmed");
       return;
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }
