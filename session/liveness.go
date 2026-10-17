@@ -192,9 +192,32 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 // (handleRestore shows an "already being restored" notice rather than
 // dispatching), closing the asymmetry where Restore was guarded and Kill fell
 // through to the daemon's misleading refusal.
-func canKillFor(id string, op InFlightOp) bool {
+//
+// A row with a pending account swap (pendingAccountSwap) is excluded for a
+// reason the in-flight op alone does NOT show, and is the durable twin of the
+// OpRespawning exclusion above: pre-restart a pending swap carries
+// op == OpRespawning and is already hidden, but a daemon restart scrubs
+// InFlightOp to OpNone (session/storage.go ForStorage) while the
+// pendingAccountSwap marker survives in the persisted record. That marker is
+// the durable recovery obligation for an undelivered account swap: it carries
+// the Mission brief (manual swap) or the "account switched" notice (automatic
+// swap) plus the AccountAgent, Program, and ConversationID fields that exist
+// only inside pendingAccountSwap on that row. The daemon kill path has no
+// compensating guard (KillSession never consults pendingAccountSwap), so a kill
+// proceeds to deleteSessionRecord and destroys the swap obligation with no
+// warning — killLossAssessment checks only git-level losses. Hiding Kill here
+// mirrors every other mutating surface that already fences pendingAccountSwap:
+// lifecycleActionFor (Archive/Restore), tabSpawnBlockedLocked (tab spawn),
+// ValidateRuntimeAction, and the tkBeginArchive transition guard. Kill is the
+// sole lifecycle surface that advertised the destructive verb, and once the
+// swap's delivery completes ClearPendingAccountSwap retires the marker and
+// Kill naturally re-appears. This follows the established canKillFor-from-visibility
+// convention (see 7fc1d336, which excluded OpRestoring on the same principle);
+// the tkBeginKill: allowedFrom-always transition-layer policy is a separate axis
+// and does not change.
+func canKillFor(id string, op InFlightOp, pendingAccountSwap bool) bool {
 	return id != "" && op != OpCreating && op != OpReplacing && op != OpRespawning &&
-		op != OpRestoring && !opIsTeardown(op)
+		op != OpRestoring && !opIsTeardown(op) && !pendingAccountSwap
 }
 
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus
@@ -212,7 +235,7 @@ func (i *Instance) LifecycleAction() LifecycleAction {
 func (i *Instance) CanKill() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return canKillFor(i.ID, i.inFlightOp)
+	return canKillFor(i.ID, i.inFlightOp, i.pendingAccountSwap != nil)
 }
 
 // composeStatus derives the legacy Status enum from the two-axis model. An
