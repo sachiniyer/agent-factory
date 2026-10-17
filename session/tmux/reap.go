@@ -138,6 +138,16 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 			procs = append(procs, p)
 		}
 	}
+	// deadPaneGenerations is the tearing-down session's own AF_SESSION_GEN,
+	// read once and lazily on the first dead pane so a session with no dead
+	// panes pays nothing. deadPaneMarkerSurvivors scopes its marker scan to
+	// this generation so a teardown of one incarnation cannot adopt a process
+	// a same-named successor already spun up (#5345). A read failure is a
+	// capture error, never an empty result: the scan cannot prove absence
+	// without it.
+	deadPaneGenerationsReady := false
+	var deadPaneGenerations orphanGenerationSet
+	var deadPaneGenerationsErr error
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
@@ -155,7 +165,28 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or
 			// reused by another process. See deadPaneProcesses.
-			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row)
+			//
+			// The marker scan deadPaneProcesses runs needs the session's own
+			// AF_SESSION_GEN to keep a teardown of one incarnation from adopting
+			// a process a same-named successor already spun up (#5345): the
+			// session name and home are reused across incarnations, but each
+			// launch carries a fresh generation, so a teardown that scopes only
+			// AF_SESSION+AF_HOME reaps the heal's new pane. The session is still
+			// listed (this list-panes just answered), so it answers its own
+			// generation via SessionGenerationMarker; a read that fails there is
+			// a capture error, never an empty result — the marker scan cannot
+			// prove absence without it. The read is lazy: a session with no dead
+			// panes pays nothing.
+			if !deadPaneGenerationsReady {
+				deadPaneGenerationsReady = true
+				deadPaneGenerations, deadPaneGenerationsErr =
+					deadPaneGenerationSet(cmdExec, sanitizedName)
+			}
+			if deadPaneGenerationsErr != nil {
+				captureErrs = append(captureErrs, deadPaneGenerationsErr)
+				continue
+			}
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, deadPaneGenerations)
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
@@ -432,6 +463,32 @@ func (g orphanGenerationSet) contains(environ []string) bool {
 
 func (g orphanGenerationSet) empty() bool {
 	return !g.legacy && len(g.values) == 0
+}
+
+// deadPaneGenerationSet reads the AF_SESSION_GEN the live tmux session carries
+// and returns the single-entry orphanGenerationSet deadPaneMarkerSurvivors scopes
+// its marker scan by. A tmux session name is reused across incarnations (the same
+// project and title give the same af_<hash>_<title>), and each launch carries a
+// fresh generation; a teardown of one incarnation must not reap a process a
+// same-named successor already spun up (#5345). The session is still listed when
+// this runs — the capture list-panes just answered — so it answers its own
+// generation through SessionGenerationMarker. A session that carries no
+// AF_SESSION_GEN (pre-generation or tmux < 3.2) reports legacy, so a process with
+// no generation marker is still adopted as the sweep's own. A read that fails is a
+// capture error, never an empty result: the marker scan cannot prove absence
+// without the generation, and treating a generation read failure as "no
+// generation" would let the scan reap a fresh successor's pane under the legacy
+// fallback.
+func deadPaneGenerationSet(cmdExec cmd.Executor, sanitizedName string) (orphanGenerationSet, error) {
+	generation, present, err := SessionGenerationMarker(cmdExec, sanitizedName)
+	if err != nil {
+		return orphanGenerationSet{}, fmt.Errorf("cannot read %s generation for dead pane marker scan of session %s: %w",
+			EnvMarkerGeneration, sanitizedName, err)
+	}
+	if !present {
+		return orphanGenerationSet{legacy: true}, nil
+	}
+	return orphanGenerationSet{values: map[string]bool{generation: true}}, nil
 }
 
 // refreshOrphanCandidates closes the capture-to-marker TOCTOU window. A pane

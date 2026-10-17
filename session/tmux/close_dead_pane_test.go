@@ -320,6 +320,14 @@ func deadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, 
 			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
+			// A dead pane has no AF_SESSION_GEN in this fixture (the mock
+			// session predates generation stamping), so show-environment answers
+			// "unset" — the same shape a pre-generation tmux session answers
+			// SessionGenerationMarker with. Without this the marker scan's
+			// generation read fails closed on a mock that returns nothing.
+			if strings.Contains(s, "show-environment") {
+				return []byte("-" + EnvMarkerGeneration + "\n"), nil
+			}
 			return nil, nil
 		},
 	}
@@ -356,6 +364,9 @@ func laggingDeathsExec(t *testing.T, panePID, stamp string, state paneState, sta
 				}
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 			}
+			if strings.Contains(s, "show-environment") {
+				return []byte("-" + EnvMarkerGeneration + "\n"), nil
+			}
 			return nil, nil
 		},
 	}
@@ -391,6 +402,9 @@ func uncollectedDeathsExec(t *testing.T, panePID, stamp string, state paneState,
 					expand = after
 				}
 				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
+			}
+			if strings.Contains(s, "show-environment") {
+				return []byte("-" + EnvMarkerGeneration + "\n"), nil
 			}
 			return nil, nil
 		},
@@ -935,7 +949,7 @@ func TestDeadPaneMarkerSurvivors_FindsSetsidHelperNotStranger(t *testing.T) {
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 
-	survivors, err := deadPaneMarkerSurvivors(snap, name)
+	survivors, err := deadPaneMarkerSurvivors(snap, name, orphanGenerationSet{legacy: true})
 	require.NoError(t, err)
 	require.Len(t, survivors, 1, "only the setsid'd helper carrying this session's markers should be found")
 	require.Contains(t, []int{survivors[0].PID}, child.PID)
@@ -1015,7 +1029,7 @@ func TestDeadPaneMarkerSurvivors_ExcludesDaemonSubtree(t *testing.T) {
 	require.True(t, daemonInSnap, "snap must still see the daemon")
 	require.True(t, watchInSnap, "snap must still see the watch task")
 
-	survivors, err := deadPaneMarkerSurvivors(snap, name)
+	survivors, err := deadPaneMarkerSurvivors(snap, name, orphanGenerationSet{legacy: true})
 	require.NoError(t, err)
 	for _, s := range survivors {
 		if s.PID == daemonPID {
@@ -1026,4 +1040,91 @@ func TestDeadPaneMarkerSurvivors_ExcludesDaemonSubtree(t *testing.T) {
 		}
 	}
 	require.Empty(t, survivors, "the daemon subtree (daemon + watch task) must be excluded from a dead pane's survivors")
+}
+
+// A tmux session name is reused across incarnations (the same project and title
+// give the same af_<hash>_<title>), and each launch carries a fresh
+// AF_SESSION_GEN. deadPaneMarkerSurvivors must scope its marker scan to the
+// tearing-down session's generation so a teardown of one incarnation does not
+// adopt a process a same-named successor already spun up — the heal reaps a dead
+// root and recreates under the same title, and the new pane carries the same
+// AF_SESSION/AF_HOME but a different AF_SESSION_GEN. Without the generation
+// scope the new pane matches the scan and is reaped, and the restarted daemon's
+// reattach finds the recorded (pid, start-time) identity gone, retiring the
+// runtime program and breaking TestEnsureRootAgentsRecreatedRootRecordsRuntimeProgram
+// (#5345). The scan also matches a setsid'd helper from this incarnation's own
+// pane, so the escapee it was built to catch is still reaped.
+func TestDeadPaneMarkerSurvivors_ScopesByGeneration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-marker-generation", "")
+
+	// The tearing-down incarnation's helper: a setsid'd child carrying this
+	// session's markers and the OLD generation the scan is scoped to. This is
+	// the setsid() escapee the reaper was built to catch, and the generation
+	// scope must still find it.
+	oldHelper := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=old-generation",
+	})
+
+	// A same-named successor a fresh incarnation spun up under the same title
+	// and home: it carries the same AF_SESSION/AF_HOME but a different
+	// AF_SESSION_GEN. The scan must NOT adopt it — reaping it would delete the
+	// worktree under the new pane and retire the runtime program the restart's
+	// reattach relies on (#5345).
+	newIncarnation := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=new-generation",
+	})
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+
+	survivors, err := deadPaneMarkerSurvivors(snap, name, orphanGenerationSet{
+		values: map[string]bool{"old-generation": true},
+	})
+	require.NoError(t, err)
+	require.Len(t, survivors, 1, "only the setsid'd helper carrying the tearing-down session's own generation should be found")
+	require.Equal(t, oldHelper.PID, survivors[0].PID,
+		"the helper from the tearing-down incarnation must be reaped")
+	require.True(t, proctree.AliveSame(newIncarnation),
+		"a same-named successor's pane must not be reaped through the old incarnation's teardown")
+}
+
+// The generation scope must not fall back to "no generation" when the session
+// carries one: a teardown scoped to a generation that the tearing-down session
+// does not carry is a capture error, never an empty result. A process with no
+// AF_SESSION_GEN is adopted only when the session itself carried none (the
+// legacy case); a session that carries one must not adopt a marker-less process,
+// because a fresh incarnation's pane inherits the fresh generation and a
+// marker-less process is not the escapee the scan was built to catch.
+func TestDeadPaneMarkerSurvivors_RejectsGenerationlessWhenSessionHasGeneration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-marker-generationless", "")
+
+	// A helper carrying the session's markers but no AF_SESSION_GEN. The
+	// tearing-down session carried a generation, so a marker-less process is not
+	// the escapee the scan is built to catch — it is a fresh incarnation whose
+	// launch did not inherit the marker, or a process from a different era. The
+	// scan must not adopt it.
+	markerless := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+	})
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+
+	survivors, err := deadPaneMarkerSurvivors(snap, name, orphanGenerationSet{
+		values: map[string]bool{"has-a-generation": true},
+	})
+	require.NoError(t, err)
+	require.Empty(t, survivors,
+		"a marker-less process must not be adopted when the session carries a generation")
+	require.True(t, proctree.AliveSame(markerless),
+		"a marker-less process must not be reaped when the session carries a generation")
 }
