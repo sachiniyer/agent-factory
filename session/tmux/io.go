@@ -436,6 +436,13 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 		case probeUnanswered:
 			log.ErrorLog.Printf("tmux session %s: identity probe failed in status monitor: %v", t.sanitizedName, err)
+		case errors.Is(err, errLivenessProbeUnanswered):
+			// The capture failed and its own gone-probe could not answer,
+			// so "the pane died under a session still being removed" is
+			// not the evidence on hand — the infrastructure failure is.
+			// Only a capture failure with an AFFIRMATIVE liveness answer
+			// may demote (Codex on #5327, second finding).
+			log.ErrorLog.Printf("tmux session %s: liveness probe unanswered in status monitor: %v", t.sanitizedName, err)
 		case initiated && !errors.Is(err, ErrTmuxTimeout):
 			// The same attribution covers the failure a step earlier in
 			// the teardown: a pane can die under a session object tmux
@@ -574,28 +581,52 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 		if bctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.captureTargetAliveOrUnknown(gen) {
+		alive, known, probeErr := t.captureTargetLiveness(gen)
+		switch {
+		case !known:
+			// The capture failed and the probe that could call the pane
+			// expectedly dead never answered — an exec-level fault or a
+			// wedge that af's teardown request cannot explain. The bare
+			// capture error alone would read as demotable; carry the
+			// probe's non-answer so the poll keeps the failure at ERROR
+			// (Codex on #5327, second finding).
+			return "", fmt.Errorf("error capturing pane content: %v; %w: %w",
+				err, errLivenessProbeUnanswered, probeErr)
+		case !alive:
 			return "", t.sessionGoneError("capture-pane", err)
+		default:
+			return "", fmt.Errorf("error capturing pane content: %v", err)
 		}
-		return "", fmt.Errorf("error capturing pane content: %v", err)
 	}
 	return string(output), nil
 }
 
-// captureTargetAliveOrUnknown is the gone-probe for a possibly id-bound
-// capture: a bound generation needs the identity answer for THAT generation,
-// not the reused name, or a replacement's liveness — whether it took the name
-// or reissued the id on a new server — would mask the polled generation's
-// death. Same conservative timeout lie as ExistsOrUnknown.
-func (t *TmuxSession) captureTargetAliveOrUnknown(gen *tmuxGeneration) bool {
+// errLivenessProbeUnanswered marks a capture-pane failure whose gone-probe
+// could not answer: unlike a capture failure tmux answered "still alive" for
+// — the mid-teardown shape af's own teardown request explains — this is an
+// infrastructure failure that must keep ERROR under any teardown attribution
+// (#5327 review).
+var errLivenessProbeUnanswered = errors.New("liveness probe did not answer")
+
+// captureTargetLiveness is the gone-probe for a possibly id-bound capture:
+// a bound generation needs the identity answer for THAT generation, not the
+// reused name, or a replacement's liveness — whether it took the name or
+// reissued the id on a new server — would mask the polled generation's
+// death. Unlike the bool it replaces, it does not launder "unknown" into
+// "alive": known reports whether the probe answered, and probeErr carries
+// its failure — the affirmative-vs-unanswerable distinction the status
+// monitor's teardown demotion needs (#5327 review).
+func (t *TmuxSession) captureTargetLiveness(gen *tmuxGeneration) (alive, known bool, probeErr error) {
 	if gen == nil || gen.sessionID == "" {
-		return t.ExistsOrUnknown()
+		existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+		if !answered {
+			// probeSession only reports !known on a tripped deadline.
+			return true, false, fmt.Errorf("%w: has-session for %s after %s",
+				ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
+		}
+		return existsOrUnknown, true, nil
 	}
-	same, known, _ := t.generationMatches(gen)
-	if !known {
-		return true
-	}
-	return same
+	return t.generationMatches(gen)
 }
 
 // confirmedGeneration resolves the concrete tmux session currently standing

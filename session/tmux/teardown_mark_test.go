@@ -600,3 +600,70 @@ func TestProbeFailureDuringTeardownStaysError(t *testing.T) {
 		})
 	}
 }
+
+// TestUnansweredLivenessProbeDuringTeardownStaysError pins the demotion's
+// third edge (Codex on #5327, second finding): the mid-teardown INFO exists
+// only for a capture-pane failure the gone-probe affirmatively answered
+// "still alive" for. When that fallback probe cannot answer — an exec-level
+// fault on the identity probe, or a wedged has-session — the surviving error
+// is the bare capture failure, which used to demote anyway: an infrastructure
+// fault laundered into expected teardown noise. It must stay at ERROR, and
+// the log must name the unanswered probe rather than reporting a plain
+// capture failure.
+func TestUnansweredLivenessProbeDuringTeardownStaysError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bind   bool // bound monitor (identity gone-probe) vs unbound (has-session)
+		mark   bool
+		expect func() bool
+	}{
+		{name: "bound generation, marked by close()", bind: true, mark: true},
+		{name: "bound generation, predicate attribution", bind: true, expect: func() bool { return true }},
+		{name: "unbound monitor, marked by close()", mark: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortTmuxTimeout(t, markTestTimeout)
+			var session *TmuxSession
+			var m *teardownMarkTmux
+			if tc.bind {
+				session, m = boundSession(t, &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"})
+				// The upfront identity probe is not due this poll, so the
+				// poll reaches capture-pane and the failure's own
+				// gone-probe is the one that cannot answer.
+				session.monitor.lastGenerationProbe = time.Now()
+				m.nameGen.Store("$5 111 222") // the name still resolves to the bound generation
+			} else {
+				session, m = newMarkedTeardownSession(t)
+			}
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+
+			// capture-pane fails promptly (not a wedge), then the
+			// fallback liveness probe cannot answer: the identity probe
+			// returns an exec-level failure for a bound monitor, and
+			// has-session stalls past the deadline for an unbound one.
+			m.captureOK.Store(false)
+			if tc.bind {
+				m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+				m.idErrOn.Store(true)
+			} else {
+				m.probeWedged.Store(true)
+			}
+
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, int32(1), m.captureCalls.Load(),
+				"the failure came through capture-pane, distinguishing it from an upfront probe failure")
+			require.Contains(t, errs.String(), "liveness probe unanswered in status monitor",
+				"the probe's non-answer is infrastructure the teardown request cannot explain")
+			require.NotContains(t, errs.String(), "going silent", "no affirmative absence answer → not a gone classification")
+			require.NotContains(t, infos.String(), "during af-initiated teardown",
+				"an unanswered liveness probe must not demote under teardown attribution")
+			require.False(t, session.monitor.dead, "an unanswered probe proves nothing about the session's fate")
+		})
+	}
+}
