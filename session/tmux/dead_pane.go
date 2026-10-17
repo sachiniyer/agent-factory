@@ -246,10 +246,15 @@ func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerd
 // means nothing of this pane can still be running. An error means the pane's
 // process set could not be established, and the capture reports it as such.
 //
-// generations is the tearing-down session's own AF_SESSION_GEN cohort, read once
-// per capture and scoped by deadPaneMarkerSurvivors so a same-named successor a
-// later incarnation spun up is not adopted as this pane's survivor (#5345).
-func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, generations orphanGenerationSet) (procs []proctree.Process, asLive bool, err error) {
+// markerSurvivors is the session-wide result of deadPaneMarkerSurvivors, computed
+// once per capture (see CaptureSessionProcessTrees) and shared across every dead
+// pane — the marker criteria and the snapshot it scans do not vary by pane. A nil
+// markerSurvivors means the scan could not run; the caller reports that failure
+// once per capture as incompleteness, and the SID members and verified live tree
+// the pre-existing logic established without the scan are still returned (the
+// partial capture a Close that discards captureErr still reaps), so the per-pane
+// error is only the pid-reuse determination, which drops the pane (#5345).
+func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row paneRow, markerSurvivors []proctree.Process) (procs []proctree.Process, asLive bool, err error) {
 	_, present := snap[row.pid]
 	switch {
 	case present && row.reaped:
@@ -266,8 +271,7 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 		// is among them.
 		log.InfoLog.Printf("tmux session %s: dead pane pid %d now names another process; not capturing it",
 			sanitizedName, row.pid)
-		survivors, markerErr := deadPaneMarkerSurvivors(snap, sanitizedName, generations)
-		return survivors, false, markerErr
+		return markerSurvivors, false, nil
 	case present:
 		// Not reaped, so tmux still holds the pid as its child: normally the
 		// root, still running after its terminal closed. tmux older than 3.3
@@ -284,8 +288,7 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 			// session's markers while the pid itself is foreign; the marker scan
 			// is the only path that recovers it, and it is scoped to this
 			// session's generation so it cannot adopt the reused pid's session.
-			survivors, markerErr := deadPaneMarkerSurvivors(snap, sanitizedName, generations)
-			return survivors, false, markerErr
+			return markerSurvivors, false, nil
 		}
 		// The root is still alive, so the caller captures its PPID tree and
 		// original SID below (asLive). A helper that already daemonized with
@@ -294,12 +297,9 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 		// marker scan catches it the same way it does on the reaped path. The
 		// root and its in-tree descendants already carry the pane's markers and
 		// are deduplicated by the caller, so combining here only adds the
-		// escapee. An unresolvable home dir is a capture error the existing
-		// refusal gates handle, on this path too.
-		markerSurvivors, markerErr := deadPaneMarkerSurvivors(snap, sanitizedName, generations)
-		if markerErr != nil {
-			return nil, false, markerErr
-		}
+		// escapee. When the marker scan could not run, asLive is still returned so
+		// the caller captures the verified tree and SID members; the escapee scan
+		// is the additional capture the caller reports as incompleteness.
 		return markerSurvivors, true, nil
 	}
 	members := proctree.SessionMembers(snap, row.pid)
@@ -310,19 +310,15 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 	// members exist. Finding SID members does not prove there are no additional
 	// marker-only survivors, so the marker scan runs unconditionally and its
 	// results are combined with the SID members on every survivor-returning path
-	// below.
-	//
-	// Every process spawned inside the pane inherits AF_SESSION and AF_HOME via
-	// the pane environment (set-environment in session_env.go), and
-	// /proc/<pid>/environ preserves them after reparenting and setsid, so a
-	// marker scan is the positive evidence the SID scan cannot provide. An empty
-	// scan means nothing else of the pane survives; a hit is a survivor the
-	// capture must include so the teardown reaps it rather than deleting the
-	// worktree underneath it.
-	markerSurvivors, markerErr := deadPaneMarkerSurvivors(snap, sanitizedName, generations)
-	if markerErr != nil {
-		return nil, false, markerErr
-	}
+	// below. Every process spawned inside the pane inherits AF_SESSION and AF_HOME
+	// via the pane environment, and /proc/<pid>/environ preserves them after
+	// reparenting and setsid, so a marker scan is the positive evidence the SID
+	// scan cannot provide. An empty scan means nothing else of the pane survives;
+	// a hit is a survivor the capture must include so the teardown reaps it
+	// rather than deleting the worktree underneath it. When the marker scan could
+	// not run, markerSurvivors is nil and the SID members below are still returned
+	// as the partial capture the pre-existing logic established; the escapee scan's
+	// incompleteness is reported by the caller, not a reason to drop the pane.
 	if len(members) == 0 || pidGone(row.pid) {
 		return append(members, markerSurvivors...), false, nil
 	}
@@ -377,11 +373,16 @@ func deadPaneProcesses(snap map[int]proctree.Process, sanitizedName string, row 
 // is never the operation the caller asked for — and so is the agent-factory
 // daemon's subtree, which setsids out of the pane session and inherits its
 // markers while being a shared process no single pane teardown may reap (see
-// deadPaneDaemonSubtree). A process owned by another user is excluded too: the
-// markers are environment strings anyone can copy, so under a privileged af
-// (notably root) a foreign user's process could carry them and be reaped without
-// this check, the same ownership gate markedOrphanProcesses already enforces for
-// the vanished-session sweep.
+// deadPaneDaemonSubtree). A shared tmux server is excluded the same way
+// (proctree.IsTmuxProcess): af starting a server from inside a pane inherits
+// that pane's AF_SESSION/AF_HOME/AF_SESSION_GEN, and on Linux the server is moved
+// into a separate systemd scope, so it is neither in this process's self chain
+// nor the daemon subtree. Without this exclusion the marker scan would admit the
+// server as a survivor and the teardown would signal it, terminating every
+// session on that server — the same exclusion the worktree reaper applies
+// (session/git/worktree_reap). A foreign-user-owned process is excluded too: the
+// markers are environment strings anyone can copy, the same ownership gate
+// markedOrphanProcesses already enforces for the vanished-session sweep.
 //
 // The teardown requester is NOT excluded here. It stays in the captured set so
 // reapSessionProcesses can spare it per-signal while its registration holds and
@@ -413,7 +414,8 @@ func deadPaneMarkerSurvivors(snap map[int]proctree.Process, sanitizedName string
 	daemonOwned := deadPaneDaemonSubtree(snap, cleanHome)
 	var survivors []proctree.Process
 	for _, process := range snap {
-		if selfChain[process.PID] || daemonOwned[process.PID] {
+		if selfChain[process.PID] || daemonOwned[process.PID] || proctree.IsTmuxProcess(process.PID) {
+			// The tmux server is the case that matters; see deadPaneMarkerSurvivors.
 			continue
 		}
 		environ, envErr := proctree.Environ(process.PID)

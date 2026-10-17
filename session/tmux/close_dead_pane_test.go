@@ -1128,3 +1128,141 @@ func TestDeadPaneMarkerSurvivors_RejectsGenerationlessWhenSessionHasGeneration(t
 	require.True(t, proctree.AliveSame(markerless),
 		"a marker-less process must not be reaped when the session carries a generation")
 }
+
+// A shared tmux server started from inside an AF pane inherits that pane's
+// AF_SESSION/AF_HOME/AF_SESSION_GEN (those names survive the filtered launch
+// environment), and on Linux it is moved into a separate systemd scope, so it is
+// neither in this process's self chain nor the daemon subtree. The marker scan
+// would otherwise adopt it as a survivor and the teardown would signal it,
+// terminating every session on that server. deadPaneMarkerSurvivors must exclude
+// verified tmux infrastructure the same way the worktree reaper does
+// (session/git/worktree_reap.go): a tmux process is shared, never a single pane's
+// to reap.
+//
+// The fixture is a tmux-named copy of sleep carrying the pane's markers — argv[0]
+// names tmux, so proctree.IsTmuxProcess identifies it. A setsid'd helper carrying
+// the same markers and no tmux argv is the escapee the scan is built to catch, so
+// it is still reaped and the shared tmux process is left alone.
+func TestDeadPaneMarkerSurvivors_ExcludesSharedTmuxProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	name := toTmuxName("dead-pane-marker-tmux", "")
+
+	// A tmux-named process carrying the pane's markers — a shared tmux server
+	// started from this pane would inherit them. argv[0] names tmux, so
+	// proctree.IsTmuxProcess identifies it and the scan must leave it alone.
+	sleepPath, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+	tmuxBody, err := os.ReadFile(sleepPath)
+	require.NoError(t, err)
+	fakeTmux := filepath.Join(t.TempDir(), "tmux")
+	require.NoError(t, os.WriteFile(fakeTmux, tmuxBody, 0o755))
+	tmuxCmd := exec.Command(fakeTmux, "300")
+	tmuxCmd.Env = append(os.Environ(),
+		EnvMarkerSession+"="+name,
+		EnvMarkerHome+"="+home,
+	)
+	require.NoError(t, tmuxCmd.Start())
+	t.Cleanup(func() {
+		_ = tmuxCmd.Process.Kill()
+		_, _ = tmuxCmd.Process.Wait()
+	})
+	require.Eventually(t, func() bool {
+		return proctree.IsTmuxProcess(tmuxCmd.Process.Pid)
+	}, 3*time.Second, 10*time.Millisecond, "the fixture must be readable as a tmux process")
+
+	// The setsid helper the scan is built to catch: it carries the same markers
+	// but is not a tmux process, so it is still reaped.
+	helper := startStranger(t, []string{
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+	})
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+
+	survivors, err := deadPaneMarkerSurvivors(snap, name, orphanGenerationSet{legacy: true})
+	require.NoError(t, err)
+	for _, s := range survivors {
+		if s.PID == tmuxCmd.Process.Pid {
+			t.Fatalf("the shared tmux process was reaped as a dead pane survivor (pid %d)", s.PID)
+		}
+	}
+	require.Len(t, survivors, 1, "only the setsid'd helper carrying this session's markers should be found")
+	require.Equal(t, helper.PID, survivors[0].PID,
+		"the setsid'd helper must still be reaped; only the tmux process is excluded")
+	require.True(t, proctree.AliveSame(helper),
+		"the setsid'd helper is the one survivor that should be reaped")
+	tmuxProc, err := proctree.Lookup(tmuxCmd.Process.Pid)
+	require.NoError(t, err)
+	require.True(t, proctree.AliveSame(tmuxProc),
+		"a shared tmux process carrying the pane's markers must not be reaped")
+}
+
+// The generation read (show-environment) can fail after list-panes and the
+// process snapshot have already succeeded — a transient tmux error, a timeout,
+// or a session that vanished between the two reads. Before the marker scan, the
+// dead pane's SID members were still captured by the pre-existing logic, and the
+// latency-oriented Close reaped them. The marker scan added a generation read
+// that gates the scan; when that read failed, the dead pane was dropped entirely,
+// so a background same-SID child the SID scan already knew about survived the
+// teardown solely because the generation lookup failed. The SID members must still
+// be captured as a partial result, and the generation failure must be reported as
+// incompleteness of the marker scan — not as a reason to drop the pane (#5345).
+//
+// The fixture is a dead leader whose same-SID child the pre-existing logic
+// captures through SessionMembers; the generation read is made to fail, so the
+// marker scan cannot run. CaptureSessionProcessTrees must still return the SID
+// member and a non-nil error (the generation read failure), not an empty result.
+func TestCaptureSessionProcessTrees_DeadPaneKeepsSIDMembersWhenGenerationReadFails(t *testing.T) {
+	// A same-SID background child the pre-existing logic already captured: the
+	// dead root started it in its kernel session, the root was reaped, and the
+	// child keeps the leader's pid as its SID. The SID scan finds it without the
+	// marker scan.
+	leaderPID, child := startDeadLeaderWithSessionChild(t)
+	name := toTmuxName("dead-pane-generation-fail", "")
+
+	// deadPaneExec answers list-panes and display-message as a held dead pane,
+	// but show-environment fails so deadPaneGenerationSet returns an error and
+	// the marker scan cannot run.
+	mock := generationFailingDeadPaneExec(t, "", strconv.Itoa(leaderPID)+":0:/dev/pts/0", freshPane(), "7", "", "1726000000")
+
+	procs, err := CaptureSessionProcessTrees(mock, name)
+	require.Error(t, err, "the generation read failure must be reported as incompleteness, not swallowed")
+	require.NotEmpty(t, procs, "the SID member the pre-existing logic captured must survive the generation read failure")
+	found := false
+	for _, p := range procs {
+		if p.PID == child.PID {
+			found = true
+		}
+	}
+	require.True(t, found, "the same-SID child must be captured even when the generation read fails")
+}
+
+// generationFailingDeadPaneExec is deadPaneExec whose show-environment answers
+// with a failure, so deadPaneGenerationSet returns an error and the marker scan
+// cannot run. list-panes and display-message answer as the held dead pane does.
+func generationFailingDeadPaneExec(t *testing.T, panePID, stamp string, state paneState, status, signal, deadTime string) cmd_test.MockCmdExec {
+	expand := deadPaneExpand(panePID, stamp, state, status, signal, deadTime)
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "kill-session") {
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			s := c.String()
+			if strings.Contains(s, "list-panes") || strings.Contains(s, "display-message") {
+				return []byte(expand.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
+			}
+			if strings.Contains(s, "show-environment") {
+				// A transient failure: tmux answered, but not with the marker.
+				// deadPaneGenerationSet treats this as a capture error, never an
+				// empty result, so the marker scan does not run.
+				return nil, fmt.Errorf("transient show-environment failure")
+			}
+			return nil, nil
+		},
+	}
+}

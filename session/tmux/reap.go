@@ -145,9 +145,23 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	// a same-named successor already spun up (#5345). A read failure is a
 	// capture error, never an empty result: the scan cannot prove absence
 	// without it.
+	//
+	// The marker scan itself is session-wide: the AF_SESSION/AF_HOME/
+	// AF_SESSION_GEN criteria and the process-table snapshot it scans do not
+	// vary by pane, so it is computed once per capture (lazily, alongside the
+	// generation read) and shared across every dead pane — a session with many
+	// held dead panes does not re-read every /proc/<pid>/environ for each one.
+	// When the scan could not run, the per-pane capture still returns the SID
+	// members and verified live tree the pre-existing logic established without
+	// it, and the failure is reported once here as incompleteness of the
+	// marker scan rather than dropping the pane — a Close that discards
+	// captureErr still reaps those known processes, while a destructive teardown
+	// that honors it still refuses on the missing escapee (#5345).
 	deadPaneGenerationsReady := false
 	var deadPaneGenerations orphanGenerationSet
 	var deadPaneGenerationsErr error
+	var deadPaneMarkerSurvivorsCache []proctree.Process
+	var deadPaneMarkerErr error
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
@@ -177,16 +191,39 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 			// a capture error, never an empty result — the marker scan cannot
 			// prove absence without it. The read is lazy: a session with no dead
 			// panes pays nothing.
+			//
+			// The marker scan is computed once per capture (above) and shared
+			// across every dead pane; when it could not run, the per-pane
+			// capture still returns the SID members and verified live tree the
+			// pre-existing logic established, and the failure is reported once
+			// here as incompleteness of the marker scan. A per-pane error from
+			// deadPaneProcesses is only the pid-reuse determination, which
+			// returns no partial capture and drops the pane.
 			if !deadPaneGenerationsReady {
 				deadPaneGenerationsReady = true
 				deadPaneGenerations, deadPaneGenerationsErr =
 					deadPaneGenerationSet(cmdExec, sanitizedName)
+				if deadPaneGenerationsErr == nil {
+					deadPaneMarkerSurvivorsCache, deadPaneMarkerErr =
+						deadPaneMarkerSurvivors(snap, sanitizedName, deadPaneGenerations)
+				}
+				// The generation read and the marker scan it gates are both
+				// session-wide — the same answer for every dead pane — so their
+				// failures are recorded once, not per pane. Recorded here and
+				// not in deadPaneProcesses because the per-pane capture's own
+				// errors are the pid-reuse determination, which is local to a
+				// pane; the marker scan's incompleteness is the same for every
+				// pane and is what makes the destructive path refuse while the
+				// latency path (Close) still reaps the SID members and live tree
+				// deadPaneProcesses returns without the marker scan (#5345).
+				if deadPaneGenerationsErr != nil {
+					captureErrs = append(captureErrs, deadPaneGenerationsErr)
+				}
+				if deadPaneMarkerErr != nil {
+					captureErrs = append(captureErrs, deadPaneMarkerErr)
+				}
 			}
-			if deadPaneGenerationsErr != nil {
-				captureErrs = append(captureErrs, deadPaneGenerationsErr)
-				continue
-			}
-			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, deadPaneGenerations)
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row, deadPaneMarkerSurvivorsCache)
 			if err != nil {
 				captureErrs = append(captureErrs, err)
 				continue
