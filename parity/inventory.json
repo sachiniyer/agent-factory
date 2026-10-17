@@ -99,7 +99,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/config.ts:446 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
+        "pointer": "web/src/config.ts:447 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
       },
       "cli": {
         "status": "no",
@@ -703,7 +703,7 @@
       },
       "web": {
         "status": "no",
-        "pointer": "web/src/api.ts:414-437 never sends in_place"
+        "pointer": "web/src/api.ts:414-438 never sends in_place"
       },
       "cli": {
         "status": "yes",
@@ -1227,7 +1227,7 @@
       "title": "Add a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:511 (n inside the tasks overlay)"
+        "pointer": "ui/task_pane.go:517-518 (n inside the tasks overlay)"
       },
       "web": {
         "status": "yes",
@@ -1245,7 +1245,7 @@
       "title": "Edit an existing task's name/prompt/trigger/target/program",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:505 (enter) -> ui/task_pane_edit.go form"
+        "pointer": "ui/task_pane.go:509-511 (enter) -> ui/task_pane_edit.go form"
       },
       "web": {
         "status": "yes",
@@ -1389,7 +1389,7 @@
       "title": "Remove a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:503 (D)"
+        "pointer": "ui/task_pane.go:506-507 (D)"
       },
       "web": {
         "status": "yes",
@@ -1425,7 +1425,7 @@
       "title": "Enable / disable a task",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:501 (x)"
+        "pointer": "ui/task_pane.go:503-504 (x)"
       },
       "web": {
         "status": "yes",
@@ -1443,7 +1443,7 @@
       "title": "Trigger a task now",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane.go:509 (r)"
+        "pointer": "ui/task_pane.go:514-515 (r)"
       },
       "web": {
         "status": "yes",
@@ -1465,7 +1465,7 @@
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/nav.ts:108-126 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
+        "pointer": "web/src/nav.ts:108-233 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
       },
       "cli": {
         "status": "n/a",
