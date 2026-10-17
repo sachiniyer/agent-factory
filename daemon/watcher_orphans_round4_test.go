@@ -78,7 +78,13 @@ func TestSweepRefusesSIGKILLOnceMemberLeftGroup(t *testing.T) {
 	)
 	sweepFakeTableWith(t, home, procs, func(s *watcherSupervisor) {
 		s.stopGrace = 0
+		// The helper's table also feeds its environ lookups, so it still runs;
+		// the member then stays in every snapshot, wherever its group is.
+		table := watchOrphanSnapshot
 		watchOrphanSnapshot = func() (map[int]proctree.Process, error) {
+			if _, err := table(); err != nil {
+				return nil, err
+			}
 			return map[int]proctree.Process{600: procs[0].proc}, nil
 		}
 		watchOrphanPGID = func(pid int) (int, error) {
