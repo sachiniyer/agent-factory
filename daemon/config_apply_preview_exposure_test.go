@@ -369,3 +369,47 @@ func TestApplyConfigPreviewPerKeyAlreadyExposedMoveCarriesPerWriteNotice(t *test
 			"apply-time transition gate suppresses it. Result.Warnings:\n%s",
 		strings.Join(resp.Result.Warnings, "\n"))
 }
+
+// TestSetConfigValueDefaultAccountCarriesPerWriteWarningOnChannel1 is the
+// `default_accounts` end-to-end RPC test that was missing: it drives
+// `default_accounts.claude = "missing"` (an unregistered account) through the
+// SetConfigValue RPC every save surface routes through, and pins the two-channel
+// contract for the case the web form regressed on (sub-case (a) in the report).
+//
+// `default_accounts` is EffectAppliedLive, so the apply succeeds and produces no
+// apply-time warning — channel 2 (resp.Warnings) is empty. The per-write
+// defaultAccountWriteWarning (config/configset.go:523-524) fires on channel 1
+// (resp.Result.Warnings). The CLI reads channel 1 unconditionally; the TUI falls
+// back to it when channel 2 is empty; the web form must read it too. This test
+// proves the warning is on the wire on channel 1 (so the web form's union read
+// picks it up) and that channel 2 is silent (so a channel-2-only read loses it —
+// the regression the web fix corrects).
+func TestSetConfigValueDefaultAccountCarriesPerWriteWarningOnChannel1(t *testing.T) {
+	m := applyConfigTestManager(t)
+	server := &controlServer{manager: m}
+
+	var resp SetConfigValueResponse
+	require.NoError(t, server.SetConfigValue(
+		SetConfigValueRequest{Key: "default_accounts.claude", Value: "missing"}, &resp))
+	require.Equal(t, "default_accounts.claude", resp.Result.Key)
+	require.Equal(t, "missing", resp.Result.Value)
+
+	// Channel 1 (per-write, resp.Result.Warnings): the unregistered-account
+	// advisory. This is the field the web form must read for the warning to
+	// reach the operator at save time.
+	require.NotEmpty(t, resp.Result.Warnings,
+		"a default_accounts write naming an unregistered account must warn on the per-write channel")
+	joined := strings.Join(resp.Result.Warnings, "\n")
+	require.Contains(t, joined, "no claude account named",
+		"channel 1 must carry the unregistered-account advisory")
+	require.Contains(t, joined, "af accounts add claude missing",
+		"channel 1 must name the registry command that makes the default real")
+
+	// Channel 2 (apply-time, resp.Warnings): SILENT. default_accounts is
+	// EffectAppliedLive and the apply produces no counterpart warning, so this
+	// is the case a channel-2-only surface (the web form pre-fix) loses.
+	require.Empty(t, resp.Warnings,
+		"a default_accounts write that applies cleanly must not produce an apply-time warning — "+
+			"channel 2 is silent and a channel-2-only surface loses the advisory. Warnings:\n%s",
+		strings.Join(resp.Warnings, "\n"))
+}
