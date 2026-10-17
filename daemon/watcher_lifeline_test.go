@@ -157,6 +157,7 @@ func TestLifelineFallsBackForBinaryWithoutProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	pidFile := filepath.Join(dir, "shell.pid")
+	warnings := captureWarnings(t)
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("skew1", "echo $$ > "+pidFile+"; sleep 300", dir)))
 	s.lifelineExe = oldAF
 	if err := s.Reload(); err != nil {
@@ -173,6 +174,19 @@ func TestLifelineFallsBackForBinaryWithoutProtocol(t *testing.T) {
 	}
 	if !s.lifelineUnsupported.Load() {
 		t.Fatal("supervisor did not latch the binary as not speaking the lifeline protocol")
+	}
+	// A silent fallback would quietly reopen #5329 on exactly this skew, so
+	// the warning must name the binary and say what the fallback costs.
+	got := warnings.String()
+	t.Logf("fallback warning: %s", strings.TrimSpace(got))
+	for _, want := range []string{oldAF, "does not speak the watch lifeline protocol",
+		"a watch child can outlive this daemon", "af daemon restart"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback warning %q does not contain %q", got, want)
+		}
+	}
+	if n := strings.Count(got, "does not speak the watch lifeline protocol"); n != 1 {
+		t.Fatalf("fallback warned %d times, want once per daemon", n)
 	}
 }
 

@@ -116,7 +116,7 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		_ = reapWatchGroupLeader(cmd)
 		_ = lifelineW.Close()
 		if !supported {
-			reason := fmt.Sprintf("no lifeline ack (%s)", describeWatchLifelineAck(line, ackErr, cmd))
+			reason := fmt.Sprintf("no ack: %s", describeWatchLifelineAck(line, ackErr, cmd))
 			s.lifelineUnusable(taskID, exe, reason)
 			return nil, nil, nil, false
 		}
@@ -131,9 +131,10 @@ func (s *watcherSupervisor) lifelineUnusable(taskID, exe, reason string) {
 	if s.lifelineUnsupported.Swap(true) {
 		return
 	}
-	log.WarningLog.Printf("watch task %s: %s does not run the watch lifeline: %s. Watch commands now start without it, "+
-		"so an unclean daemon death can leave them running beside their replacements (#5329). "+
-		"This usually means the af binary was replaced while this daemon was running; "+
+	log.WarningLog.Printf("watch task %s: %s does not speak the watch lifeline protocol (%s). "+
+		"Every watch command this daemon starts from now on runs without a lifeline, so a watch child can outlive "+
+		"this daemon if it dies uncleanly and hold its lock against the replacement (#5329). "+
+		"This usually means the af binary at that path was replaced while this daemon was running; "+
 		"restart the daemon (af daemon restart) so it runs the installed binary", taskID, exe, reason)
 }
 
