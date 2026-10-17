@@ -1,6 +1,8 @@
 package app
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -10,6 +12,15 @@ type recoveryNotice struct{ condition, detail, action string }
 
 func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd {
 	m.recovery = &recoveryNotice{condition, detail, action}
+	// The recovery overlay is a stateless modal — it never changes m.state — so
+	// the state-keyed clearStaleClickTrackerAfter gate in Update cannot see this
+	// excursion. Clear the tracker at the raise boundary instead, so a
+	// pre-recovery press cannot pair with a post-recovery press into a false
+	// double click (#1731, regressed by the recovery overlay added in 4af1c606).
+	// Neither dismissal path re-seeds (both early-return before trackClick), so a
+	// single clear here is sufficient.
+	m.lastClickZone = ""
+	m.lastClickAt = time.Time{}
 	return m.handleError(err)
 }
 
