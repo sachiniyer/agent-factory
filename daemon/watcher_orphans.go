@@ -106,6 +106,10 @@ const watchOrphanKillWait = time.Second
 // watchOrphanPoll is the cadence at which the sweep re-checks signaled groups.
 const watchOrphanPoll = 25 * time.Millisecond
 
+// watchOrphanFollowupPasses bounds the full rescans after a pass that signaled
+// something; see sweepOrphanedWatchCommands.
+const watchOrphanFollowupPasses = 3
+
 // Test seams, mirroring the package's existing injection style: a test can
 // substitute a fabricated process table (for paths such as a foreign uid that an
 // unprivileged test cannot stage for real) and observe signals without sending
@@ -253,6 +257,25 @@ func (g *watchOrphanGroup) anyMemberAlive() bool {
 	return false
 }
 
+// anyMemberInGroup is the license for a GROUP signal: at least one captured
+// marked member is still the same live process instance AND still in g.pgid.
+// Identity alone is not enough — a member that called setsid has left the
+// group while keeping its pid and start stamp, and once the leader is gone the
+// old numeric pgid can be reused by an unrelated group (#5329). Liveness after
+// a SIGKILL is a different question and stays with anyMemberAlive.
+func (g *watchOrphanGroup) anyMemberInGroup() bool {
+	for _, p := range g.members {
+		same, err := watchOrphanSameIdentity(p)
+		if err != nil || !same {
+			continue
+		}
+		if pgid, err := watchOrphanPGID(p.PID); err == nil && pgid == g.pgid {
+			return true
+		}
+	}
+	return false
+}
+
 // watchOrphanGroupAlive probes a whole group with signal 0 through the kill
 // seam, classified by the same rules as the editor supervisor's group probe.
 func watchOrphanGroupAlive(pgid int) (bool, error) {
@@ -267,11 +290,23 @@ func (s *watcherSupervisor) sweepOrphanedWatchCommands() {
 	if !ok {
 		return
 	}
-	groups := s.findOrphanedWatchGroups(scope)
-	if len(groups) == 0 {
-		return
+	// A signaled orphan can detach a marked child into a NEW process group —
+	// setsid from a SIGTERM handler, or a script daemonizing its work — after
+	// the snapshot that found it. No per-group rescan can see that group, and
+	// the sweep runs once, so each pass that signaled anything is followed by
+	// another full scan. The bound keeps a process that refuses to die (or a
+	// script that detaches forever) from holding startup hostage.
+	for pass := 0; pass <= watchOrphanFollowupPasses; pass++ {
+		groups := s.findOrphanedWatchGroups(scope)
+		if len(groups) == 0 {
+			return
+		}
+		if !s.stopOrphanedWatchGroups(scope, groups) {
+			return
+		}
 	}
-	s.stopOrphanedWatchGroups(scope, groups)
+	log.WarningLog.Printf("watch orphan sweep: marked groups were still appearing after %d follow-up scans; "+
+		"leaving the rest to the next daemon generation", watchOrphanFollowupPasses)
 }
 
 // watchOrphanScope is what every ownership check is judged against: this
@@ -503,19 +538,22 @@ func watchOrphanCommMatches(comm, base string) bool {
 
 // stopOrphanedWatchGroups SIGTERMs every group in one batch, waits for all of
 // them against one shared deadline (s.stopGrace), and SIGKILLs the ones whose
-// marked members are still alive at that deadline.
-func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, groups []*watchOrphanGroup) {
+// marked members are still alive at that deadline. It reports whether it sent
+// any SIGTERM, which is what makes a follow-up scan worth running.
+func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, groups []*watchOrphanGroup) bool {
 	var pending []*watchOrphanGroup
+	signaled := false
 	for _, g := range groups {
 		// Re-verify right before signaling: the snapshot is evidence about
-		// the past, and a group whose marked members are all gone no longer
-		// licenses a signal to whatever holds that pgid now.
-		if !g.anyMemberAlive() {
+		// the past, and a group none of whose marked members is still in it
+		// no longer licenses a signal to whatever holds that pgid now.
+		if !g.anyMemberInGroup() {
 			continue
 		}
 		err := watchOrphanKillGroup(g.pgid, syscall.SIGTERM)
 		switch {
 		case err == nil:
+			signaled = true
 			pending = append(pending, g)
 		case errors.Is(err, syscall.ESRCH):
 			log.InfoLog.Printf("orphaned watch command from a previous daemon generation already exited: %s", g.describe())
@@ -534,9 +572,9 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, grou
 	pending = s.pruneStoppedWatchGroups(pending)
 
 	for _, g := range pending {
-		if !g.anyMemberAlive() && !s.rescanOrphanGroup(scope, g) {
-			// The marked members are gone and a fresh scan proves no new
-			// one: whatever still holds the pgid is an unmarked escapee or a
+		if !g.anyMemberInGroup() && !s.rescanOrphanGroup(scope, g) {
+			// No marked member is still in the group and a fresh scan proves
+			// no new one: whatever holds the pgid is an unmarked escapee or a
 			// pgid already reused. Neither is provably ours, so the group gets
 			// no SIGKILL (fail closed).
 			log.WarningLog.Printf("orphaned watch command %s: group outlived its marked members; "+
@@ -558,6 +596,7 @@ func (s *watcherSupervisor) stopOrphanedWatchGroups(scope watchOrphanScope, grou
 		log.InfoLog.Printf("reaped orphaned watch command from a previous daemon generation with SIGKILL "+
 			"after it ignored SIGTERM for %s: %s", s.stopGrace, g.describe())
 	}
+	return signaled
 }
 
 // pruneStoppedWatchGroups drops every group that has fully exited, logging the

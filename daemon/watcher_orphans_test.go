@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,7 +297,9 @@ type fakeOrphanProc struct {
 
 // sweepFakeTable runs the sweep over a fabricated, same-uid process table and
 // returns the groups it SIGTERMed. Every process reports as alive until
-// signaled, and every signal-0 probe answers ESRCH so the wait ends at once.
+// signaled, and every signal-0 probe answers ESRCH so the wait ends at once;
+// consistently, a SIGTERMed group's members are gone from later snapshots, so
+// the sweep's follow-up scans see the table a real reap leaves behind.
 func sweepFakeTable(t *testing.T, home string, procs []fakeOrphanProc) []int {
 	t.Helper()
 	return sweepFakeTableWith(t, home, procs, nil)
@@ -314,11 +317,19 @@ func sweepFakeTableWith(t *testing.T, home string, procs []fakeOrphanProc, befor
 	restore := stubWatchOrphanSeams()
 	t.Cleanup(restore)
 	byPID := make(map[int]fakeOrphanProc)
+	var termed []int
 	watchOrphanSnapshot = func() (map[int]proctree.Process, error) {
 		snap := make(map[int]proctree.Process)
 		for _, p := range procs {
-			snap[p.proc.PID] = p.proc
 			byPID[p.proc.PID] = p
+		}
+		for _, p := range procs {
+			// The CURRENT pgid, through the seam, so a test that moves a
+			// process to another group sees it reaped there.
+			if pgid, err := watchOrphanPGID(p.proc.PID); err == nil && slices.Contains(termed, pgid) {
+				continue
+			}
+			snap[p.proc.PID] = p.proc
 		}
 		return snap, nil
 	}
@@ -341,7 +352,6 @@ func sweepFakeTableWith(t *testing.T, home string, procs []fakeOrphanProc, befor
 	watchOrphanSameIdentity = func(proctree.Process) (bool, error) { return true, nil }
 	watchOrphanExecutable = func() (string, error) { return "/usr/local/bin/af", nil }
 	watchOrphanSleep = func(time.Duration) {}
-	var termed []int
 	watchOrphanKillGroup = func(pgid int, sig syscall.Signal) error {
 		switch sig {
 		case syscall.SIGTERM:

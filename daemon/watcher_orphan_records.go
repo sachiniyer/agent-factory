@@ -104,44 +104,74 @@ func readWatchChildRecords(path string) ([]watchChildRecord, error) {
 // recordWatchChild persists the identity of a watch command just started as
 // pid (its own group leader, via Setpgid) for taskID.
 //
+// It is split in two so that it never stalls child supervision (#5329). The
+// identity is captured synchronously, from /proc rather than the AF home, and
+// while the caller still holds the child unreaped, so the pid cannot have been
+// recycled under it. The file read, rewrite and fsync then run on their own
+// goroutine: they touch the AF home's filesystem, and a stalled filesystem there
+// must not keep runOnce from installing the reader goroutines and the stop
+// watchdog that bound the child's life.
+//
 // A bookkeeping failure never stops a healthy watch command: on Linux the
 // environ channel still proves it, and on macOS the cost is only that this one
 // child cannot be reaped after an unclean daemon death — which the warning says.
 func (s *watcherSupervisor) recordWatchChild(taskID string, pid int) {
-	if err := s.writeWatchChildRecord(taskID, pid); err != nil {
-		log.WarningLog.Printf("watch task %s: cannot record watch command pid %d (%v); "+
-			"if this daemon dies uncleanly, a later daemon may be unable to reap it", taskID, pid, err)
+	record, err := s.captureWatchChildRecord(taskID, pid)
+	if err == nil && record.valid() {
+		go func() {
+			if err := s.persistWatchChildRecord(record); err != nil {
+				warnWatchChildRecord(taskID, pid, err)
+			}
+		}()
+		return
+	}
+	if err != nil {
+		warnWatchChildRecord(taskID, pid, err)
 	}
 }
 
-func (s *watcherSupervisor) writeWatchChildRecord(taskID string, pid int) error {
+func warnWatchChildRecord(taskID string, pid int, err error) {
+	log.WarningLog.Printf("watch task %s: cannot record watch command pid %d (%v); "+
+		"if this daemon dies uncleanly, a later daemon may be unable to reap it", taskID, pid, err)
+}
+
+// captureWatchChildRecord reads pid's identity. An already-exited child yields
+// a zero record and no error: there is nothing left to reap, so nothing to record.
+func (s *watcherSupervisor) captureWatchChildRecord(taskID string, pid int) (watchChildRecord, error) {
 	bootID, err := watchRecordBootID()
 	if err != nil {
-		return fmt.Errorf("kernel boot identity: %w", err)
+		return watchChildRecord{}, fmt.Errorf("kernel boot identity: %w", err)
 	}
 	pidNamespace, err := watchRecordPIDNamespace()
 	if err != nil {
-		return fmt.Errorf("PID namespace: %w", err)
+		return watchChildRecord{}, fmt.Errorf("PID namespace: %w", err)
 	}
 	process, err := watchRecordLookup(pid)
 	if err != nil {
 		if errors.Is(err, proctree.ErrProcessExited) {
-			// Already exited: there is nothing left to reap, so nothing to record.
-			return nil
+			return watchChildRecord{}, nil
 		}
-		return fmt.Errorf("process identity: %w", err)
+		return watchChildRecord{}, fmt.Errorf("process identity: %w", err)
 	}
 	record := watchChildRecord{
 		TaskID: taskID, PID: pid, PGID: pid, StartID: process.StartID,
 		BootID: bootID, PIDNamespace: pidNamespace, Generation: s.generation,
 	}
 	if !record.valid() {
-		return fmt.Errorf("incomplete process identity for pid %d", pid)
+		return watchChildRecord{}, fmt.Errorf("incomplete process identity for pid %d", pid)
 	}
+	return record, nil
+}
+
+// persistWatchChildRecord merges record into the home's record file, pruning
+// every entry that no longer names a live process instance — record included,
+// if its child exited before this ran.
+func (s *watcherSupervisor) persistWatchChildRecord(record watchChildRecord) error {
 	path, err := watchChildRecordPath()
 	if err != nil {
 		return err
 	}
+	pid, bootID, pidNamespace := record.PID, record.BootID, record.PIDNamespace
 
 	s.recordMu.Lock()
 	defer s.recordMu.Unlock()
@@ -158,7 +188,9 @@ func (s *watcherSupervisor) writeWatchChildRecord(taskID string, pid int) error 
 			kept = append(kept, r)
 		}
 	}
-	kept = append(kept, record)
+	if watchRecordStillLive(record) {
+		kept = append(kept, record)
+	}
 	raw, err := json.Marshal(kept)
 	if err != nil {
 		return err
