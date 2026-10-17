@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -84,15 +86,42 @@ func watchChildRecordPath() (string, error) {
 	return filepath.Join(home, watchChildRecordName), nil
 }
 
+// maxWatchChildRecordBytes bounds the record file read. One record is about
+// 250 bytes, so this holds thousands of live watch commands; anything larger
+// was not written by af.
+const maxWatchChildRecordBytes = 1 << 20
+
 // readWatchChildRecords loads the record file. A missing file is an empty set;
 // an unreadable or corrupt one is an error the caller reports and survives.
+//
+// Only a bounded regular file is read (#5329). The startup sweep reads it under
+// s.mu, so a FIFO or device planted at this path would otherwise block the
+// first reconcile — and every watcher reload and shutdown behind it — or stream
+// without end. The open is O_NOFOLLOW and O_NONBLOCK so neither a symlink to
+// such a file nor a FIFO with no writer can stall the open itself, and the type
+// is checked on the opened descriptor, not on a path that could be swapped.
 func readWatchChildRecords(path string) ([]watchChildRecord, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("watch child record file %s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxWatchChildRecordBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxWatchChildRecordBytes {
+		return nil, fmt.Errorf("watch child record file %s exceeds %d bytes", path, maxWatchChildRecordBytes)
 	}
 	var records []watchChildRecord
 	if err := json.Unmarshal(raw, &records); err != nil {

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -170,47 +169,45 @@ func TestSweepFollowsUpOnGroupCreatedDuringSweep(t *testing.T) {
 
 // TestWatchRecordWriteDoesNotBlockSupervision: the record write touches the AF
 // home's filesystem, and a stalled one must not keep the just-started child
-// from being supervised. The record file is a FIFO here, so the read inside the
-// record write blocks for as long as the test holds the write end open; Stop
-// must still SIGTERM the child and return.
+// from being supervised. The test holds recordMu, which the record write takes
+// before touching the file, so the write stalls for as long as the test wants;
+// Stop must still SIGTERM the child and return.
 func TestWatchRecordWriteDoesNotBlockSupervision(t *testing.T) {
 	s, home := newOrphanSweepSupervisor(t)
 	s.reapOrphans = true
 	if _, err := proctree.BootID(); err != nil {
 		t.Skipf("no boot identity on this platform: %v", err)
 	}
-	// The startup sweep reads the record file too; let it run while the file
-	// is still absent.
+	// The startup sweep runs first, with nothing held.
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	fifo := filepath.Join(home, "watch-children.json")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Skipf("mkfifo: %v", err)
-	}
-	s.loadTasks = staticTasks(watchTask("stall1", "sleep 300", t.TempDir()))
-	if err := s.Reload(); err != nil {
-		t.Fatal(err)
-	}
-
-	// A non-blocking open for writing succeeds only once the record write has
-	// the FIFO open for reading: proof the stall is in place before Stop runs.
-	// Holding the write end open (no data) keeps that read blocked.
-	var writer *os.File
-	waitUntil(t, 5*time.Second, "record write blocked on the stalled record file", func() bool {
-		f, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			if !errors.Is(err, syscall.ENXIO) {
-				t.Fatalf("open fifo for writing: %v", err)
-			}
-			return false
-		}
-		writer = f
-		return true
-	})
+	s.recordMu.Lock()
 	// Registered after newTestSupervisor's Cleanup(s.Stop), so it runs first and
 	// an unfixed tree's blocked watcher can drain instead of hanging the binary.
-	t.Cleanup(func() { _ = writer.Close() })
+	// It then waits for the released write to land, so it cannot race the
+	// removal of the temp home.
+	t.Cleanup(func() {
+		s.recordMu.Unlock()
+		record := filepath.Join(home, watchChildRecordName)
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(record); err == nil {
+				return
+			}
+		}
+	})
+
+	started := filepath.Join(t.TempDir(), "started")
+	s.loadTasks = staticTasks(watchTask("stall1", "touch "+started+"; exec sleep 300", t.TempDir()))
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	// The child runs only after cmd.Start, which the record write follows, so
+	// once it has touched the file the write is stalled on recordMu.
+	waitUntil(t, 5*time.Second, "watch command to start", func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	})
 
 	stopped := make(chan struct{})
 	go func() {
