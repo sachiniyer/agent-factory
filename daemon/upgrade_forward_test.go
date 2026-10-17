@@ -480,12 +480,15 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 }
 
 // RunUpgradeRecoveryActor arms the post-upgrade daemon ONLY on a positive commit
-// signal: OUR transaction whose journal is gone afterward. A nil return from a
-// stand-down (journal still present) must NOT trigger the hand-off — that
-// conflation would let a stale recovery job kill a live daemon from a different,
-// in-flight transaction (the P1-b failure). Both owner kinds hand off on commit:
-// the ad-hoc candidate is parked in probation and must be respawned too, not just
-// unit-owned homes.
+// signal: OUR transaction whose supervisor reached the PhaseCommitted terminal
+// phase. A nil return is NOT proof of commit: runRecoveryActorWith also returns
+// nil for a clean stand-down (journal still present, non-committed phase) and —
+// the bug this guards — for terminal rollback and abort, which BOTH remove the
+// journal via lease.Cleanup() and have their sentinels converted to nil. The old
+// "journal gone" predicate fired the hand-off after rollback and abort; gating
+// on phase == PhaseCommitted excludes them. Both owner kinds hand off on commit:
+// the ad-hoc candidate is parked in probation and must be respawned too, not
+// just unit-owned homes.
 func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 	systemdJob := upgradetxn.RecoveryJob{
 		Kind:     upgradetxn.RecoveryJobSystemd,
@@ -493,16 +496,27 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
 	}
 	for _, tc := range []struct {
-		name        string
-		ownerKind   upgradetxn.SupervisionKind
-		serviceName string
-		recoveryJob upgradetxn.RecoveryJob
-		committed   bool // whether the actor removed the journal (a real commit)
-		wantAdopt   bool
+		name          string
+		ownerKind     upgradetxn.SupervisionKind
+		serviceName   string
+		recoveryJob   upgradetxn.RecoveryJob
+		phase         upgradetxn.Phase // the terminal phase runRecoveryActorWith returns
+		removeJournal bool             // whether the actor removed the journal (a real commit/rollback/abort)
+		wantAdopt     bool
 	}{
-		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, true},
-		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, false},
-		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, true},
+		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, upgradetxn.PhaseCommitted, true, true},
+		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, upgradetxn.PhasePrepared, false, false},
+		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, upgradetxn.PhaseCommitted, true, true},
+		// The two non-commit terminal phases that ALSO remove the journal — the
+		// bug. Both call lease.Cleanup() and have runRecoveryActorWith convert
+		// their sentinel to nil, so the old "journal gone" predicate fired the
+		// hand-off here. Gating on phase == PhaseCommitted excludes both.
+		{"systemd owner, rolled back (journal removed)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, upgradetxn.PhaseRolledBack, true, false},
+		{"systemd owner, aborted (journal removed)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, upgradetxn.PhaseAborted, true, false},
+		// rollback_failed does NOT remove the journal (it retains it), and a
+		// newer/foreign transaction stands down before supervise (empty phase);
+		// both are excluded by the phase check regardless of the journal.
+		{"systemd owner, rollback failed (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, upgradetxn.PhaseRollbackFailed, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := stubForwardEnv(t)
@@ -522,12 +536,14 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 				t.Fatalf("Prepare: %v", err)
 			}
 
-			runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) error {
-				if tc.committed {
-					// Simulate the commit path's lease.Cleanup() removing the journal.
+			runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+				if tc.removeJournal {
+					// Simulate the terminal phase's lease.Cleanup() removing the
+					// journal — the same on-disk signal commit, rollback, and
+					// abort all produce.
 					_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
 				}
-				return nil
+				return nil, tc.phase
 			}
 			adopted := false
 			adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
@@ -540,5 +556,238 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 				t.Fatalf("hand-off: got adopted=%v want %v (%s)", adopted, tc.wantAdopt, tc.name)
 			}
 		})
+	}
+}
+
+// TestRunUpgradeRecoveryActor_DoesNotAdoptAfterRollback is the focused
+// regression guard for the bug: a successful rollback removes the journal
+// (PhaseRolledBack calls lease.Cleanup) and returns nil (runRecoveryActorWith
+// converts ErrUpgradeRolledBack to nil so the recovery job exits 0). The old
+// predicate treated "nil + journal gone" as proof of commit and fired the
+// post-commit hand-off, emitting "committed upgrade candidate" WARNINGs for a
+// candidate that does not exist. Gating on phase == PhaseCommitted instead of
+// "journal gone" must keep the hand-off silent after a rollback.
+func TestRunUpgradeRecoveryActor_DoesNotAdoptAfterRollback(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	systemdJob := upgradetxn.RecoveryJob{
+		Kind:     upgradetxn.RecoveryJobSystemd,
+		Name:     "agent-factory-upgrade-recovery-txn-1.service",
+		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: systemdJob,
+	}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// Simulate a successful rollback: PhaseRolledBack calls lease.Cleanup()
+	// (removing the journal), then returns ErrUpgradeRolledBack, which
+	// runRecoveryActorWith converts to nil (exit 0) alongside PhaseRolledBack.
+	runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		return nil, upgradetxn.PhaseRolledBack
+	}
+	adopted := false
+	adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
+
+	if err := RunUpgradeRecoveryActor(context.Background(),
+		upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+	if adopted {
+		t.Fatal("hand-off fired after a successful rollback; expected no adoption")
+	}
+}
+
+// TestRunUpgradeRecoveryActor_DoesNotAdoptAfterNewerTransactionTakesOver guards
+// the post-run active-journal check: the phase gate (ourTransaction &&
+// PhaseCommitted) rules out rollback and abort, but NOT a newer transaction that
+// races in after our commit. Our Cleanup() removes active.json, and
+// upgradetxn.Prepare is NOT serialized by the recovery lease (it accepts the
+// now-absent journal), so a second `af upgrade` can publish a new active.json
+// in the window between Cleanup and the hand-off. Without the re-load, this
+// old actor still holds PhaseCommitted in memory and would stop the daemon the
+// new transaction has just recorded as its previous daemon. The re-load finds the
+// newer transaction's journal (a different ID) and skips the hand-off.
+func TestRunUpgradeRecoveryActor_DoesNotAdoptAfterNewerTransactionTakesOver(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	systemdJob := upgradetxn.RecoveryJob{
+		Kind:     upgradetxn.RecoveryJobSystemd,
+		Name:     "agent-factory-upgrade-recovery-txn-1.service",
+		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: systemdJob,
+	}); err != nil {
+		t.Fatalf("Prepare txn-1: %v", err)
+	}
+
+	runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+		// Simulate this transaction's lease.Cleanup removing active.json...
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		// ...then a newer transaction's Prepare publishing a new active.json
+		// before this actor reaches the hand-off. Prepare is not serialized by
+		// the recovery lease, so it accepts the now-absent journal. A different
+		// executable keeps the staged-binary artifacts in separate directories
+		// so txn-2's Prepare does not see txn-1's as a blocking foreign artifact.
+		newerExe := filepath.Join(t.TempDir(), "af")
+		if err := os.WriteFile(newerExe, []byte("newer-previous-binary"), 0o755); err != nil {
+			t.Fatalf("write newer fake previous binary: %v", err)
+		}
+		if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+			ID: "txn-2", HomeDir: home, ExecutablePath: newerExe,
+			FromVersion: "1.0.200", ToVersion: "1.0.300", Candidate: []byte("newer-candidate"),
+			Daemon: upgradetxn.DaemonSnapshot{
+				WasRunning: true, BootID: "boot-2",
+				Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionAdHoc},
+			},
+			RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached},
+		}); err != nil {
+			t.Fatalf("Prepare txn-2: %v", err)
+		}
+		return nil, upgradetxn.PhaseCommitted
+	}
+	adopted := false
+	adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
+
+	if err := RunUpgradeRecoveryActor(context.Background(),
+		upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+	if adopted {
+		t.Fatal("hand-off fired after a newer transaction took over the active journal; expected no adoption")
+	}
+}
+
+// TestRunUpgradeRecoveryActor_HandoffSerializedAgainstPrepare guards that the
+// re-load + hand-off hold the preparation lock Prepare takes (install_lock.go:
+// WithInstallLock), closing the window the one-shot re-load left open. A re-load
+// alone cannot stop a second `af upgrade` from publishing a new active.json
+// between the check and adoptAfterUpgradeCommitFn: Load takes no preparation
+// lock, so a Prepare landing in that window records the committed candidate as
+// the new transaction's previous daemon and the replacement this actor starts
+// then exits at runDaemon's entrypoint gate (an in-progress upgrade), leaving the
+// home daemonless. Holding the lock across the hand-off serializes the Publish
+// after it. The test drives a real Prepare against a second executable while the
+// hand-off is mid-flight (the adopt stub blocks on a channel) and asserts the
+// Prepare is still blocked — proving the lock is held — then lets the hand-off
+// complete and asserts the Prepare publishes only after the lock is released.
+func TestRunUpgradeRecoveryActor_HandoffSerializedAgainstPrepare(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	systemdJob := upgradetxn.RecoveryJob{
+		Kind:     upgradetxn.RecoveryJobSystemd,
+		Name:     "agent-factory-upgrade-recovery-txn-1.service",
+		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: systemdJob,
+	}); err != nil {
+		t.Fatalf("Prepare txn-1: %v", err)
+	}
+
+	// Simulate this transaction's commit: PhaseCommitted and lease.Cleanup removing
+	// active.json, leaving no journal for the re-load to see.
+	runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		return nil, upgradetxn.PhaseCommitted
+	}
+
+	// Block the hand-off mid-flight so the test can race a real Prepare against the
+	// lock the hand-off holds. adoptStarted signals the hand-off is running (the
+	// preparation lock is held); adoptRelease lets it complete.
+	adoptStarted := make(chan struct{})
+	adoptRelease := make(chan struct{})
+	adopted := false
+	adoptAfterUpgradeCommitFn = func(string, string) error {
+		adopted = true
+		close(adoptStarted)
+		<-adoptRelease
+		return nil
+	}
+
+	actorErr := make(chan error, 1)
+	go func() {
+		actorErr <- RunUpgradeRecoveryActor(context.Background(),
+			upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"})
+	}()
+
+	// The hand-off is now running under the preparation lock.
+	<-adoptStarted
+
+	// A concurrent Prepare for a second transaction must block on that lock. A
+	// different executable keeps the staged-binary artifacts in separate
+	// directories so txn-2's Prepare does not see txn-1's as a blocking foreign
+	// artifact; the only contention is the home-wide prepare.lock.
+	newerExe := filepath.Join(t.TempDir(), "af-newer")
+	if err := os.WriteFile(newerExe, []byte("newer-previous-binary"), 0o755); err != nil {
+		t.Fatalf("write newer fake previous binary: %v", err)
+	}
+	prepareDone := make(chan error, 1)
+	go func() {
+		_, err := upgradetxn.Prepare(upgradetxn.Plan{
+			ID: "txn-2", HomeDir: home, ExecutablePath: newerExe,
+			FromVersion: "1.0.200", ToVersion: "1.0.300", Candidate: []byte("newer-candidate"),
+			Daemon: upgradetxn.DaemonSnapshot{
+				WasRunning: true, BootID: "boot-2",
+				Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionAdHoc},
+			},
+			RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached},
+		})
+		prepareDone <- err
+	}()
+
+	// The hand-off holds the lock, so the Prepare cannot have published yet.
+	select {
+	case err := <-prepareDone:
+		t.Fatalf("Prepare completed while the hand-off holds the preparation lock; the race is not serialized: %v", err)
+	case <-time.After(time.Second):
+		// Still blocked — the preparation lock is held for the duration of the hand-off.
+	}
+
+	// Let the hand-off finish. Releasing the lock lets the queued Prepare publish.
+	close(adoptRelease)
+	if err := <-actorErr; err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+	if !adopted {
+		t.Fatal("hand-off did not run; expected the committed candidate to be adopted")
+	}
+	select {
+	case err := <-prepareDone:
+		if err != nil {
+			t.Fatalf("Prepare txn-2 after the hand-off released the lock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Prepare txn-2 did not complete after the hand-off released the preparation lock")
 	}
 }
