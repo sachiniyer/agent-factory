@@ -233,6 +233,7 @@ func TestShellStartFailureIsAcked(t *testing.T) {
 	defer lw.Close()
 	cmd := exec.Command(exe, Argv(time.Second, "/nonexistent/af-test-shell", "-c", "true")...)
 	cmd.ExtraFiles = []*os.File{lr, aw}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +281,37 @@ func TestMissingDescriptorsRefuse(t *testing.T) {
 	defer f.Close()
 	if code := Run(Argv(time.Second, "sh", "-c", "true"), f, f); code != ExitUsage {
 		t.Fatalf("Run with a regular file for descriptors = %d, want %d", code, ExitUsage)
+	}
+}
+
+// TestRefusesOutsideItsOwnGroup: a lifeline started without Setpgid shares
+// its parent's group, and its group kill on the shell's exit would take the
+// parent with it. It must refuse, without an ack, before running anything —
+// and this test process, in the group it would have killed, must survive.
+func TestRefusesOutsideItsOwnGroup(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr, lw, _ := os.Pipe()
+	ar, aw, _ := os.Pipe()
+	defer lw.Close()
+	defer ar.Close()
+	marker := t.TempDir() + "/ran"
+	cmd := exec.Command(exe, Argv(time.Second, "sh", "-c", "touch "+marker)...)
+	cmd.ExtraFiles = []*os.File{lr, aw}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = lr.Close()
+	_ = aw.Close()
+	line, _ := io.ReadAll(ar)
+	_ = cmd.Wait()
+	if code := cmd.ProcessState.ExitCode(); code != ExitUsage || len(line) != 0 {
+		t.Fatalf("lifeline outside its own group: %v, ack %q; want exit %d and no ack", cmd.ProcessState, line, ExitUsage)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the shell ran though the lifeline refused")
 	}
 }
 

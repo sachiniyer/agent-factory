@@ -136,6 +136,15 @@ func Run(args []string, lifeline, ack *os.File) int {
 			"this is an internal invocation only the af daemon makes\n", Arg, LifelineFD, AckFD)
 		return ExitUsage
 	}
+	// Every signal below names this process's own group, which is only this
+	// run's when this process leads it — the daemon starts it with Setpgid.
+	// Started inside someone else's group, it would kill that group on the
+	// shell's exit, so it refuses, without an ack, before starting anything.
+	if pgid := syscall.Getpgrp(); pgid != os.Getpid() {
+		fmt.Fprintf(os.Stderr, "af %s: not the leader of its own process group (pgid %d, pid %d); "+
+			"this is an internal invocation only the af daemon makes\n", Arg, pgid, os.Getpid())
+		return ExitUsage
+	}
 	// Neither end is the shell's business, and a shell holding the ack write
 	// end open would only delay the daemon seeing it closed.
 	syscall.CloseOnExec(int(lifeline.Fd()))
