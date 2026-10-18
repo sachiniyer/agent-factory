@@ -179,6 +179,23 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// retires it.
 		if i.clearRuntimeProgramForUnverifiedReattach(ts) {
 			runtimeReplaced = true
+		} else {
+			// clearRuntimeProgramForUnverifiedReattach also returns false when the
+			// durable evidence is already empty — a prior unverified reattach
+			// retired the claim (or the persisted record predates the (pid,
+			// start-time) evidence AF now records). That is NOT a verified
+			// same-launch: with no recorded identity the surviving tmux name
+			// cannot prove it still names the launch, so a broker capture armed
+			// after the prior clear is bound to the current generation and a
+			// later replacement under the same name must invalidate it. Reset for
+			// every unverifiable reattach, not only the ones that retired durable
+			// state on this call (#5367 review).
+			i.mu.RLock()
+			emptyEvidence := i.runtimeProgram == "" && i.runtimePID == 0
+			i.mu.RUnlock()
+			if emptyEvidence {
+				runtimeReplaced = true
+			}
 		}
 	}
 	if err := b.setupTabs(i); err != nil {

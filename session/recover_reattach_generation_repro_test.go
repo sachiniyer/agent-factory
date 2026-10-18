@@ -215,3 +215,61 @@ func TestRecover_ReattachReplacementRetiresClaimAndResetsBroker(t *testing.T) {
 	assert.Equal(t, 2, channel.starts,
 		"the attached subscriber must resume on the replacement pane without a reconnect")
 }
+
+// TestRecover_ReattachWithClearedEvidenceStillResetsBroker guards the empty-evidence
+// arm of the gate the fix introduces. A prior unverified reattach (or a persisted
+// record that predates the (pid, start-time) evidence AF now records) leaves the
+// durable launch claim empty: clearRuntimeProgramForUnverifiedReattach has nothing
+// to retire and returns false, but the reattach is still unverifiable — the
+// surviving tmux name cannot prove it still names the launch. A broker capture
+// armed after the prior clear is bound to the current runtime generation, so a
+// later unverifiable reattach must still bump the generation and tear the capture
+// down. Before the fix this arm was skipped (the empty-evidence return value was
+// read as "verified same launch"), stranding subscribers on the predecessor pane's
+// silent read loop (#5367 review).
+func TestRecover_ReattachWithClearedEvidenceStillResetsBroker(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_reattach_cleared_evidence"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{agentName: true, shellName: true}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+	// No setRuntimeProgram/setRuntimeLaunch: the durable launch evidence is empty,
+	// exactly as a prior unverified reattach that already retired the claim leaves
+	// it. The surviving tmux name has no recorded (pid, start-time) to prove
+	// against, so this reattach is unverifiable.
+
+	channel := &fakeClientlessChannel{snapshot: []byte("old-pane")}
+	broker := newPTYBroker(channel)
+	sub, err := broker.subscribe(0)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = sub.Close()
+		broker.close()
+	})
+	server := restored.AgentServer().(*localAgentServer)
+	server.brokers = map[string]*ptyBroker{"agent": broker}
+	require.Equal(t, 1, channel.starts, "precondition: the subscriber armed a capture")
+
+	require.Zero(t, restored.agentRuntimeGeneration, "precondition: generation starts at 0")
+	require.Empty(t, restored.RuntimeProgram(),
+		"precondition: no durable launch claim is recorded (prior unverified reattach retired it)")
+
+	require.NoError(t, restored.Recover())
+	require.Zero(t, newSessions,
+		"the fixture must exercise name-only reattachment, not verified respawn")
+
+	assert.Equal(t, uint64(1), restored.agentRuntimeGeneration,
+		"an unverifiable reattach with no recorded identity must still bump the runtime "+
+			"generation so a capture armed after the prior clear is invalidated — the hook "+
+			"is gated on whether the reattach is provably the same launch, not on whether "+
+			"clearRuntimeProgramForUnverifiedReattach had durable state to retire")
+	assert.Equal(t, 1, channel.stops,
+		"an unverifiable reattach must tear down the broker capture bound to the "+
+			"predecessor pane so the next Subscribe streams the live pane")
+	assert.Equal(t, 2, channel.starts,
+		"the attached subscriber must resume on the reattached pane without a reconnect")
+}
