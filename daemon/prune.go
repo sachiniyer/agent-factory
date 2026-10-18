@@ -124,6 +124,12 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	return resp, nil
 }
 
+// prunePostProbeHook is a test seam: fired between the filesystem refusals
+// and the publish-time state recheck so a test can interleave a lifecycle
+// transition into the gap the recheck exists to close (#5136 Codex round 13).
+// Nil in production.
+var prunePostProbeHook func(*session.Instance)
+
 // pruneCandidates enumerates every in-scope session row — the live map plus
 // on-disk rows the daemon could not materialize — classifies each as
 // eligible/skipped, and measures what the eligible ones would reclaim.
@@ -207,6 +213,35 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 		// appearing prunable and refusing only after --apply.
 		if reason := pruneFilesystemRefusal(data); reason != "" {
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
+			continue
+		}
+		if prunePostProbeHook != nil {
+			prunePostProbeHook(row.instance)
+		}
+		// Revalidate AFTER the filesystem probes: a restore or kill can begin
+		// while they ran — the stale snapshot still classifies archived, and
+		// the missing-path arm treats a moved-away tree as a zero-byte
+		// candidate — so a session already live again would publish (#5136
+		// Codex round 13). Re-read the instance and re-run every quiet-state
+		// gate rather than trusting the earlier snapshot.
+		fresh := row.instance.ToInstanceData()
+		if reason := session.PruneSkipReason(fresh, cutoff); reason != "" {
+			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
+				Reason: "session state changed while being evaluated: " + reason})
+			continue
+		}
+		m.mu.Lock()
+		_, busy = m.killsInFlight[daemonInstanceKey(row.repoID, data.Title)]
+		captures = m.pendingConversationCaptures[row.instance]
+		m.mu.Unlock()
+		switch {
+		case busy || captures > 0:
+			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
+				Reason: "session state changed while being evaluated: an operation is already in progress"})
+			continue
+		case !row.instance.GetArchiveReport().Empty():
+			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
+				Reason: "session state changed while being evaluated: incomplete archive"})
 			continue
 		}
 		entry := PruneCandidate{

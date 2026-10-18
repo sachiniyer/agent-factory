@@ -50,6 +50,28 @@ func TestWorktreeDirtyFiles(t *testing.T) {
 	assert.Error(t, err, "a dead gitdir is an error, not a clean answer")
 }
 
+// TestWorktreeDirtyFiles_FailsClosedOnTraversalWarnings: an exit-0 status
+// can still leave its traversal INCOMPLETE — git prints `warning: could not
+// open directory` to stderr while porcelain stays clean. The probe must
+// treat that as unknown, never clean (#5136 Codex round 13).
+func TestWorktreeDirtyFiles_FailsClosedOnTraversalWarnings(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based unreadability is bypassed by root")
+	}
+	repo := newPruneGuardRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/guard", wt).Run())
+	blocked := filepath.Join(wt, "blocked")
+	require.NoError(t, os.Mkdir(blocked, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blocked, "only-copy.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Chmod(blocked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+
+	_, err := WorktreeDirtyFiles(wt)
+	require.Error(t, err, "an incompletely-traversed tree is unknown, never clean")
+	assert.Contains(t, err.Error(), "incomplete traversal")
+}
+
 // TestWorktreeDirtyFiles_CountsIgnored: a gitignored file is invisible to a
 // plain --porcelain status yet is still the only copy of itself — a
 // gitignored .env lives nowhere but the worktree, and the kept branch cannot

@@ -45,14 +45,30 @@ func WorktreeDirtyFiles(worktreePath string) (int, error) {
 	// without it a configured ignore swallows every change inside the
 	// submodule, including unrecoverable work the kept branch does not have
 	// (#5136 Codex round 7).
-	out, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks",
+	// combined=true folds stderr into the read: an exit-0 status can still
+	// print `warning: could not open directory` while leaving its traversal
+	// INCOMPLETE — a read this probe must not report as clean (#5136 Codex
+	// round 13). Every porcelain line carries the two-char XY field plus a
+	// space; anything else is a diagnostic, and it means the answer is
+	// unknown — fail closed, not "clean".
+	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
 		"-c", "core.fsmonitor=",
 		"status", "--porcelain", "--untracked-files=normal", "--ignored",
 		"--ignore-submodules=none")
 	if err != nil {
 		return 0, err
 	}
-	return countNonEmptyLines(string(out)), nil
+	dirty := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		if len(line) < 3 || line[2] != ' ' {
+			return 0, fmt.Errorf("git status reported an incomplete traversal of %s: %s", worktreePath, line)
+		}
+		dirty++
+	}
+	return dirty, nil
 }
 
 // VerifyRegisteredWorktreeOccupantBranch is VerifyRegisteredWorktreeOccupant

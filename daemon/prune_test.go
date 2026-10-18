@@ -453,6 +453,28 @@ func TestPruneSessions_RefusesPresentWorktreeWithDeletedBranchRef(t *testing.T) 
 	assert.Contains(t, resp.Skipped[0].Reason, "recovery branch")
 }
 
+// TestPruneSessions_RevalidatesStateBeforePublishing: a lifecycle flip that
+// lands between the filesystem probes and the candidate append — the exact
+// window the publish-time recheck exists to close — must keep the row out of
+// candidates (#5136 Codex round 13).
+func TestPruneSessions_RevalidatesStateBeforePublishing(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "mid-scan-row")
+	prunePostProbeHook = func(i *session.Instance) {
+		require.NoError(t, i.Transition(session.BeginKill()))
+	}
+	defer func() {
+		prunePostProbeHook = nil
+		inst.Transition(session.RevertKill()) //nolint:errcheck
+	}()
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "state changed while being evaluated")
+	assert.True(t, exists(archivedPath), "nothing may be touched under a held lifecycle op")
+}
+
 // TestPruneSessions_ReportsUnmaterializedNonArchivedGhost: a persisted live
 // row the daemon could not materialize — broken recovery metadata, a corrupt
 // half-written record — is still an in-scope record. The skipped accounting
