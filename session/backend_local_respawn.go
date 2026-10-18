@@ -142,6 +142,31 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 	}
 
+	// A rebuild gives the worktree a new identity, so any tmux session that
+	// survived under one of this instance's names is necessarily running a
+	// pane whose cwd is the deleted inode — it can never be inside the new
+	// checkout. Reattaching one would bind that stale process to the rebuilt
+	// worktree and mark the row Running while the agent keeps working in a
+	// void (#5370). Kill every surviving name so the restores below spawn
+	// fresh panes inside the new worktree; the agent keeps its conversation
+	// through the recorded resume path.
+	if rebuilt {
+		i.mu.RLock()
+		stale := make([]*tmux.TmuxSession, 0, len(i.Tabs))
+		for _, tab := range i.Tabs {
+			if tab.tmux != nil {
+				stale = append(stale, tab.tmux)
+			}
+		}
+		i.mu.RUnlock()
+		for _, staleSession := range stale {
+			if _, err := staleSession.Close(); err != nil {
+				return markRecoverRebuilt(rebuilt, fmt.Errorf(
+					"recover: could not stop the pane surviving in the deleted worktree: %w", err))
+			}
+		}
+	}
+
 	program, proof := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	setLaunchProgram(ts, program, proof)

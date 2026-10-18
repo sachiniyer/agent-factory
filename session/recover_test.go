@@ -570,3 +570,109 @@ func TestRecover_RefusesNonLostAndTombstoned(t *testing.T) {
 	tombstoned.MarkUserKilled()
 	require.Error(t, tombstoned.Recover(), "a tombstoned session must be refused")
 }
+
+// TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild is the #5370
+// regression: a deleted worktree whose agent tmux session SURVIVED used to
+// come back through rebuild → RestoreReattached → ConfirmLive — a Running row
+// bound to a pane whose cwd is the unlinked inode, divorced from the checkout
+// at the same path. After a rebuild, a surviving name can never be inside the
+// new worktree: Recover must kill it and re-spawn into the rebuilt checkout
+// (the recorded conversation travels through the resume path), never bind the
+// stale pane as Running.
+func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-survivor"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_survivor"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-survivor")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-survivor",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-survivor",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	// Both the agent and the shell tmux sessions are still live — the stale
+	// panes whose cwd is the deleted inode.
+	var newSessions int
+	var spawns, kills []string
+	inner := recordingExec(map[string]bool{agentName: true, shellName: true}, &newSessions, &spawns)
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				kills = append(kills, cmd.String())
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	_, statErr := os.Stat(worktreePath)
+	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
+
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	require.DirExists(t, worktreePath)
+
+	// Every surviving stale pane must have been killed BEFORE its name was
+	// re-spawned inside the rebuilt worktree — the agent's included.
+	assert.Contains(t, strings.Join(kills, "\n"), agentName,
+		"Recover must kill the surviving agent pane — it can never be inside the rebuilt worktree")
+	assert.Contains(t, strings.Join(kills, "\n"), shellName,
+		"Recover must kill every surviving stale pane, not only the agent's")
+	assert.Equal(t, 2, newSessions, "agent + shell must be freshly spawned inside the rebuilt worktree")
+
+	var agentSpawn string
+	for _, spawn := range spawns {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellName) {
+			agentSpawn = spawn
+			break
+		}
+	}
+	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
+	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
+		"the respawn must keep the recorded conversation via the resume path")
+}
