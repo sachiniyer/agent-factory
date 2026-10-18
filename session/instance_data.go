@@ -291,6 +291,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID

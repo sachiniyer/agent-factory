@@ -295,6 +295,14 @@ type InstanceData struct {
 	// — must persist too (#5370, #5371 review). Set at rebuild commit, cleared
 	// only after every bound name and cleanup handle is confirmed gone.
 	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
+	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
+	// fence. A current reader removes it before interpreting the row; the
+	// previous release ignores it and sees StartupStateUnknown, which keeps a
+	// row whose rebuild teardown is unconfirmed from being driven — an older
+	// reader would otherwise find the rebuilt worktree present, skip the
+	// rebuild path, reattach the pane bound to the deleted inode, and mark it
+	// Running (#5370 through the rollback door; #5371 review).
+	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -436,6 +444,7 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
@@ -530,6 +539,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
+	d = d.projectRebuildTeardownForPreviousRelease()
 	// Older binaries ignore ArchiveReport, but the previous release understands
 	// the inert/ownership fields and relocation recovery. Together they refuse
 	// restore and explicit kill instead of publishing an incomplete tree or
