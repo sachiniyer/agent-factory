@@ -151,12 +151,23 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 	// only upgradeRoot does not detect it and a recursive MkdirAll would follow
 	// the symlink and create the counter outside the AF home. afhome.RequirePresent
 	// preserves the home-present latch's refusal to re-create a removed home.
+	//
+	// A missing transactions parent is NOT a removed home: the upgrade root
+	// survives above, so the operator did not uninstall the AF home. The
+	// adversarial "only active.json survives" shape (a corrupt journal with no
+	// transaction directory — the bug report's primary persistent trigger)
+	// reaches this path, and Prepare's transactions root is the normal upgrade
+	// storage it is safe to recreate here. Only a removed upgrade root is a
+	// removed home (handled above), and a symlinked transactions root falls
+	// through to the non-ErrNotExist branch below and is rejected.
 	parent := filepath.Dir(dir)
 	if err := validateDirectoryNoSymlink(parent); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return errAFHomeRemoved
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("validate transactions root for recovery retry counter: %w", err)
 		}
-		return fmt.Errorf("validate transactions root for recovery retry counter: %w", err)
+		if err := ensureDurableDirectory(upgradeRoot(home), parent, transactionDirMode); err != nil {
+			return fmt.Errorf("create transactions root for recovery retry counter: %w", err)
+		}
 	}
 	if err := afhome.RequirePresent(dir); err != nil {
 		if errors.Is(err, afhome.ErrRemoved) {
