@@ -86,22 +86,38 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// the later error returns carry RecoverRebuiltWorkspaceError (#3236).
 	rebuilt := false
 	// A row flagged worktree-missing recorded that the directory af tracked at
-	// workDir is gone (#5102). If something exists there now, af did not put it
-	// there and cannot vouch for it — a mkdir, an unrelated checkout, a stranger
-	// moved in after the adopted worktree vanished. Starting the agent in it would
-	// hand its files to the agent; refuse instead. An absent workDir falls through
-	// to the rebuild below, which re-materializes the worktree from the branch and
-	// clears the flag once a fresh pane starts in it.
+	// workDir is gone (#5102). Something existing there now is unverified by
+	// default — a mkdir, an unrelated checkout, a stranger moved in after the
+	// adopted worktree vanished — and starting the agent in it would hand its
+	// files to the agent. It re-qualifies only on git's own proof that it is this
+	// session's checkout (ProveRecordedWorktree: registered on the session's
+	// branch, its back-binding pointing into this repo, identity pinned). That is
+	// what an earlier attempt of THIS respawn leaves behind when it rebuilt the
+	// worktree and then failed before its pane started (an environment refresh,
+	// a tmux start): without the proof, af's own rebuild would be refused on
+	// every later retry and the row stranded. It is also what the user putting
+	// the checkout back leaves. Anything else is refused. An absent workDir falls
+	// through to the rebuild below. Either way the flag clears only once a fresh
+	// pane starts in the directory.
 	i.mu.RLock()
 	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
+	provedPresent := false
 	if worktreeMissing {
 		if _, err := os.Lstat(workDir); err == nil {
-			return &WorktreeUnavailableError{
-				Title:        i.Title,
-				WorktreePath: workDir,
-				Err:          fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified; refusing to start the agent in it — inspect it, remove it or move it aside, then retry"),
+			if gw == nil {
+				return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+					Err: fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified")}
 			}
+			if proveErr := gw.ProveRecordedWorktree(); proveErr != nil {
+				return &WorktreeUnavailableError{
+					Title:        i.Title,
+					WorktreePath: workDir,
+					Err:          fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified — git does not prove it is the session's checkout (%v); refusing to start the agent in it — inspect it, remove it or move it aside, then retry", proveErr),
+				}
+			}
+			provedPresent = true
+			log.InfoLog.Printf("recover: session %q: the directory at %s is the session's own checkout of branch %s (git registration and back-binding); starting in it", i.Title, workDir, gw.GetBranchName())
 		} else if !os.IsNotExist(err) {
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
@@ -174,6 +190,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// rather than leave a replacement agent running with no siblings.
 	restoreResult := tmux.RestoreRespawned
 	var err error
+	if provedPresent {
+		// The proof ran before the environment refresh; the agent must start in
+		// the directory it proved, not one swapped in since. A failure has
+		// installed the git layer's fence, which every later attempt honors.
+		if err := gw.ReconfirmAdoptedWorktree(); err != nil {
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		}
+	}
 	if resume {
 		restoreResult, err = ts.RestoreWithResult(workDir)
 	} else {
@@ -192,7 +216,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// deliverable again (#5102). Both halves matter: a pathname reappearing
 		// on its own leaves an old pane cwd'd in the unlinked inode, and a rebuild
 		// followed by a reattach to that old pane does too.
-		if rebuilt {
+		if rebuilt || provedPresent {
 			i.ClearWorktreeMissing()
 		}
 	} else {

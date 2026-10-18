@@ -182,21 +182,26 @@ func TestRenameArchived_GoneWorktreeRepointsWithoutMove(t *testing.T) {
 }
 
 // The respawn path is where af re-materializes a deleted worktree, so it is where
-// the flag clears — but only when it actually rebuilt the path and started a fresh
-// pane there. A path that already exists on a flagged row (someone mkdir'd it, or
-// a stranger moved in) is unverified: respawn refuses to start the agent in it
-// and leaves the flag set (#5102).
+// the flag clears — but only when it rebuilt the path or git proves the
+// directory there is the session's own checkout, and a fresh pane started in
+// it. A directory git does not prove (someone mkdir'd it, a checkout of another
+// branch moved in) is unverified: respawn refuses to start the agent in it and
+// leaves the flag set. A registered checkout of the session's branch is what an
+// earlier attempt's rebuild leaves when it failed before its pane started, and
+// refusing it would strand the row forever (#5102).
 func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	for _, tc := range []struct {
 		name        string
-		precreate   bool
+		occupant    string
 		wantMissing bool
 	}{
-		{name: "rebuilt and respawned clears", precreate: false, wantMissing: false},
-		{name: "an existing path on a flagged row is refused and keeps it", precreate: true, wantMissing: true},
+		{name: "rebuilt and respawned clears", occupant: "", wantMissing: false},
+		{name: "an existing path on a flagged row is refused and keeps it", occupant: "mkdir", wantMissing: true},
+		{name: "a checkout of another branch is refused and keeps it", occupant: "other-branch", wantMissing: true},
+		{name: "an earlier rebuild of the session's branch is proven and clears", occupant: "own-checkout", wantMissing: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repoRoot := initTempGitRepo(t)
@@ -209,8 +214,13 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 			const agentName = "af_wt_missing_recover"
 			shellName := agentName + tmuxTabSeparator + shellTabName
 			worktreePath := filepath.Join(t.TempDir(), "worktree")
-			if tc.precreate {
+			switch tc.occupant {
+			case "mkdir":
 				require.NoError(t, os.Mkdir(worktreePath, 0o755))
+			case "other-branch":
+				gitOut(t, repoRoot, "worktree", "add", "-b", "someone-else", worktreePath)
+			case "own-checkout":
+				gitOut(t, repoRoot, "worktree", "add", worktreePath, branch)
 			}
 			instance := accountLostInstanceForRecover(
 				t, repoRoot, worktreePath, branch, agentName, shellName, nameKeyedExec(map[string]bool{}),
@@ -218,7 +228,7 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 			instance.SetWorktreeMissing("tracked worktree path " + worktreePath + " does not exist (deleted outside af)")
 
 			err := instance.Recover()
-			if tc.precreate {
+			if tc.wantMissing {
 				var unavailable *WorktreeUnavailableError
 				require.ErrorAs(t, err, &unavailable, "a flagged row must not respawn into an unverified directory")
 				assert.Contains(t, err.Error(), "unverified")
