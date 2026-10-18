@@ -32,33 +32,13 @@ const writeSpaceProbeSize = 1 << 20
 // got the ENOSPC the classifier never saw. The file is removed before
 // returning either way.
 var writeSpaceProbe = func(dir string) error {
-	f, err := os.CreateTemp(dir, ".af-add-probe-*")
+	f, err := openProbeFile(dir)
 	if err != nil {
 		return err
 	}
-	name := f.Name()
-	// Unlink IMMEDIATELY, while the fd is still open: on POSIX the descriptor
-	// stays valid and every write below lands on an inode whose name is
-	// already gone, so the probe file is invisible to `git status`/`git add
-	// -A` at every instant it exists — inside a tracked worktree included —
-	// and no cleanup gap can ever leave it stageable (#5295 review).
-	if rerr := os.Remove(name); rerr != nil {
-		// The name still exists — never write into a file whose name could
-		// not be dropped: a partially written .af-add-probe-* left in a
-		// tracked worktree is exactly what a later `git add -A` would stage
-		// as workspace content. Retry once after Close (the only state the
-		// unlink could depend on), then leave nothing stageable and report
-		// the unlink failure itself — its errno is still honest evidence.
-		cerr := f.Close()
-		_ = os.Remove(name)
-		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
-		if cerr != nil {
-			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
-		}
-		return err
-	}
-	// From here on the file has no name: nothing stageable exists no matter
-	// how the writes below end.
+	// From here on the file has no name — either it never had one (O_TMPFILE)
+	// or it was unlinked before this point. Nothing stageable can exist no
+	// matter how the writes below end.
 	var werr error
 	buf := make([]byte, 64<<10)
 	for written := 0; written < writeSpaceProbeSize; {
@@ -85,6 +65,41 @@ var writeSpaceProbe = func(dir string) error {
 		return serr
 	}
 	return cerr
+}
+
+// openProbeFile returns a write-capable probe file that can never be staged:
+// an O_TMPFILE anonymous inode where the platform offers one (Linux — tmpfs,
+// ext4, xfs, btrfs, overlayfs all support it), falling back to a named
+// tempfile that is unlinked BEFORE its first byte is written. On the named
+// path an unlink failure is fatal to the probe — never write into a file
+// whose name could not be dropped, because a surviving .af-add-probe-* inside
+// a tracked worktree is exactly what a later `git add -A` would stage as
+// workspace content; the leftover's path is surfaced in the error so an
+// operator can remove it by hand (#5295 review).
+func openProbeFile(dir string) (*os.File, error) {
+	if f, err := openAnonymousProbeFile(dir); err == nil {
+		return f, nil
+	}
+	f, err := os.CreateTemp(dir, ".af-add-probe-*")
+	if err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	if rerr := os.Remove(name); rerr != nil {
+		cerr := f.Close()
+		// Close releases the only state unlink could have depended on — try
+		// once more before reporting.
+		rerr2 := os.Remove(name)
+		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
+		if cerr != nil {
+			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
+		}
+		if rerr2 != nil {
+			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
+		}
+		return nil, err
+	}
+	return f, nil
 }
 
 // gitCommonDir resolves the repository's Git common directory — the place
