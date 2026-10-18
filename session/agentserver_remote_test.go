@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -243,6 +244,53 @@ func TestRemoteAgentCallWithin_ResourceExhaustedCode(t *testing.T) {
 			}
 			if got := errors.Is(err, apiproto.ErrRemoteResourceExhausted); got != tc.wantIdent {
 				t.Fatalf("errors.Is(err, ErrRemoteResourceExhausted) = %v, want %v (err: %v)", got, tc.wantIdent, err)
+			}
+		})
+	}
+}
+
+// TestRemoteAgentCallWithin_DeadlineExceededCode pins the other half of the
+// #5295 wire contract: the inner git push deadline inside a sandbox hits
+// writeHTTPError, which serializes it as ErrorCodeDeadlineExceeded — and the
+// client reconstructs context.DeadlineExceeded so the preserve call site's
+// bare-deadline arm can classify a stalled origin as the bounded
+// environmental stall it is. Other codes and no code stay deadline-free.
+func TestRemoteAgentCallWithin_DeadlineExceededCode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		code      string
+		wantIdent bool
+	}{
+		{name: "deadline_exceeded reconstructs context deadline", code: apiproto.ErrorCodeDeadlineExceeded, wantIdent: true},
+		{name: "resource code stays deadline-free", code: apiproto.ErrorCodeResourceExhausted, wantIdent: false},
+		{name: "plain failure stays deadline-free", code: "", wantIdent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				errObj := map[string]any{"message": "archive failed: git push: context deadline exceeded"}
+				if tc.code != "" {
+					errObj["code"] = tc.code
+				}
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  nil,
+					"error": errObj,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			c, err := newRemoteAgentClient(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("newRemoteAgentClient: %v", err)
+			}
+			err = c.callWithin("/v1/agent/archive", map[string]any{}, nil, time.Second)
+			if err == nil {
+				t.Fatal("callWithin: want error, got nil")
+			}
+			if got := errors.Is(err, context.DeadlineExceeded); got != tc.wantIdent {
+				t.Fatalf("errors.Is(err, context.DeadlineExceeded) = %v, want %v (err: %v)", got, tc.wantIdent, err)
 			}
 		})
 	}

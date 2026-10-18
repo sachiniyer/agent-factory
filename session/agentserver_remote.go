@@ -699,6 +699,14 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 			// "the push itself is broken" on exactly this (#5295 review).
 			err = fmt.Errorf("%s: %w", env.Error.Message, apiproto.ErrRemoteResourceExhausted)
 		}
+		if env.Error.Code == apiproto.ErrorCodeDeadlineExceeded {
+			// Same class, different deadline: the operation hit a bounded
+			// wait INSIDE the sandbox — the git push's own network deadline —
+			// which would otherwise arrive as an uncoded message string.
+			// Reconstructing context.DeadlineExceeded lets the preserve call
+			// site's bare-deadline arm see the stall (#5295 review).
+			err = fmt.Errorf("%s: %w", env.Error.Message, context.DeadlineExceeded)
+		}
 		return err
 	}
 	if resp != nil {

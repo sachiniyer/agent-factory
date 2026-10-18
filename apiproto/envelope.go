@@ -63,6 +63,17 @@ const ErrorCodeResourceExhausted = "resource_exhausted"
 // means exactly what the verified errno meant on the server (#5295 review).
 var ErrRemoteResourceExhausted = errors.New("remote reported kernel resource exhaustion")
 
+// ErrorCodeDeadlineExceeded says the operation died on a bounded wait INSIDE
+// the operation — for the archive RPC, the git push's own network deadline
+// within the sandbox — distinct from the transport's own timeout, which the
+// client already sees as context.DeadlineExceeded. A deadline's errors.Is
+// identity cannot cross the wire either, so the code carries that class: the
+// client reconstructs context.DeadlineExceeded and the preserve call site's
+// bounded-deadline arm reads a stalled origin as the environmental stall it
+// is, instead of charging it structural until the budget gives up (#5295
+// review).
+const ErrorCodeDeadlineExceeded = "deadline_exceeded"
+
 // Success wraps a payload as a successful Envelope (Error nil).
 func Success(data any) Envelope {
 	return Envelope{Data: data, Error: nil}

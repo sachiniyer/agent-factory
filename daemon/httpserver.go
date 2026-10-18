@@ -502,6 +502,17 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeResourceExhausted))
 		return
 	}
+	// A deadline inside the operation — the archive RPC's inner git push
+	// deadline, not this transport's — serializes just as lossy: the client
+	// receives an uncoded message string its bounded-deadline arm cannot
+	// re-see, so a stalled origin would charge the structural budget until
+	// give-up. The resource check above deliberately wins when both hold —
+	// a resource verdict is the stronger environmental signal (#5295 review).
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeDeadlineExceeded))
+		return
+	}
 	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))
 }
 
