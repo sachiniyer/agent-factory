@@ -442,3 +442,212 @@ func TestRecoveryRetryCounterRemovedWithTransactionDirectory(t *testing.T) {
 	_, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	require.False(t, ok, "removing the transaction directory must remove the counter; the budget resets with the transaction")
 }
+
+// TestActiveTransactionStillNamesInvocation pins the gate that stops a stale
+// launchd job from recreating a transaction directory the operator deleted or
+// replaced (a P2 finding from review): a gone active.json (ErrNoActiveTransaction,
+// the terminal-cleanup shape) and a superseding transaction (a different id) both
+// return false so the pre-record does not run, while a matching id and a corrupt
+// journal (the bug report's primary persistent trigger, a non-ErrNoActiveTransaction
+// Load failure) return true so the budget still bounds it.
+func TestActiveTransactionStillNamesInvocation(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+
+	// The active transaction still names this invocation.
+	require.True(t, activeTransactionStillNamesInvocation(invocation),
+		"a matching active transaction must name the invocation so the budget applies")
+
+	// A newer transaction superseded it.
+	other := invocation
+	other.TransactionID = invocation.TransactionID + "-superseded"
+	require.False(t, activeTransactionStillNamesInvocation(other),
+		"a superseding transaction must not name the stale invocation so the pre-record does not recreate the leaf")
+
+	// Terminal cleanup removed active.json: the budget must not recreate the
+	// transaction directory, and recoveryJobIsLaunchd's OS fallback cannot
+	// tell this case apart from a corrupt journal on its own.
+	require.NoError(t, os.Remove(activeJournalPath(invocation.HomeDir)))
+	require.False(t, activeTransactionStillNamesInvocation(invocation),
+		"a gone active.json must not name the invocation so the stale job stands down without recreating anything")
+
+	// A corrupt journal is a persistent trigger the budget must still bound.
+	require.NoError(t, os.WriteFile(activeJournalPath(invocation.HomeDir), []byte("{not-valid-json"), 0o600))
+	require.True(t, activeTransactionStillNamesInvocation(invocation),
+		"a corrupt journal (non-ErrNoActiveTransaction) must still name the invocation so the budget applies")
+}
+
+// TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction pins the P2
+// fix for the stale-final-restart shape: when the active journal names a
+// different transaction (a newer transaction replaced the one this stale job
+// was armed for), the pre-record must not recreate the replaced
+// transactions/<id> directory the actor's stale-job path does not clean up.
+// recoveryJobIsLaunchd loads the journal and returns true (the kind is still
+// launchd), so the budget path runs; activeTransactionStillNamesInvocation
+// gates the pre-record and stands the stale job down (exit 0) without writing a
+// counter or recreating the leaf. The gone-active.json shape (terminal cleanup
+// removed active.json) is the same gate on Darwin, where recoveryJobIsLaunchd
+// falls back to the OS; it is covered by TestActiveTransactionStillNamesInvocation
+// at the unit level because on Linux that fallback yields false and the budget
+// is a no-op there.
+func TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+
+	// The active journal names a different id than the stale job's invocation.
+	// The stale transaction directory does not exist (a newer transaction
+	// replaced it and terminal cleanup removed it). The pre-record must not
+	// recreate it, and the actor must not run.
+	stale := RecoveryInvocation{HomeDir: invocation.HomeDir, TransactionID: "stale-transaction-id"}
+	staleDir := transactionDir(invocation.HomeDir, "stale-transaction-id")
+	_, statErr := os.Stat(staleDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the stale transaction directory must not exist at the start")
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), stale, controller, time.Now, func() error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err, "a stale job naming a superseded transaction must stand down (exit 0)")
+	require.False(t, ran, "the actor must not run for a stale job naming a superseded transaction")
+	require.Empty(t, runtime.commands, "no launchctl disable is needed when no attempt was recorded")
+	_, counterExists := readRecoveryRetryCounter(invocation.HomeDir, "stale-transaction-id")
+	require.False(t, counterExists, "the pre-record must not write a counter for a superseded transaction")
+	_, statErr = os.Stat(staleDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the stale transaction directory must not be recreated by the pre-record")
+}
+
+// TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob pins the P2 fix for the
+// crash-on-the-final-attempt shape: if the third attempt pre-records the
+// exhausted marker but panics or is killed before the post-run stand-down runs
+// launchctl disable, the next launch's pre-check must disable the job. Exiting
+// 0 alone stops the immediate relaunch, but the job remains enabled and would
+// run again at every login or reboot without the disable.
+func TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+	start := time.Now()
+
+	// Pre-record the exhausting attempt (simulating a panic on the third
+	// attempt after the pre-record but before the post-run stand-down). The
+	// counter is exhausted on disk but the job was never disabled.
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start))
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Second)))
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(2*time.Second)))
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.True(t, counter.Exhausted)
+	require.Empty(t, runtime.commands, "the crash happened before the post-run stand-down, so the job is still enabled")
+
+	// The next launch enters the pre-check, which must disable the job rather
+	// than only returning nil.
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start.Add(3 * time.Second) }, func() error {
+			ran = true
+			return nil
+		})
+	require.NoError(t, err, "an exhausted budget must stand the actor down (exit 0)")
+	require.False(t, ran, "the pre-check must stand down without re-entering the supervisor")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+	}}, runtime.commands, "the pre-check must disable the job so a crash on the final attempt cannot leave it armed")
+}
+
+// TestBoundLaunchdRecoveryStandsDownWhenCounterUnwriteable pins the P1 fix for
+// the unwriteable-counter shape: when the counter cannot be persisted for a
+// reason that does not itself cap resource use (a read-only transaction
+// directory, lost write permission, a persistent filesystem I/O error), the
+// budget can never advance and launchd would relaunch every ThrottleInterval
+// forever. The actor must stand down (disable + exit 0) so the loop stops,
+// rather than returning the error and relaunching unboundedly.
+func TestBoundLaunchdRecoveryStandsDownWhenCounterUnwriteable(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+
+	// Block the counter write without breaking the journal load: a non-empty
+	// directory at the counter path makes the durable atomic rename fail
+	// (rename(2) refuses to replace a non-empty directory), so the counter
+	// cannot be persisted. The transaction directory is still a valid
+	// directory, so the journal still loads and recoveryJobIsLaunchd returns
+	// true (launchd); the budget path runs and the pre-record fails.
+	counterPath := recoveryRetryCounterPath(invocation.HomeDir, invocation.TransactionID)
+	require.NoError(t, os.MkdirAll(counterPath, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(counterPath, "blocker"), []byte("x"), 0o600))
+
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), invocation, controller, time.Now, func() error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err, "an unwriteable counter must not relaunch the actor unboundedly; it must stand down (exit 0)")
+	require.False(t, ran, "the actor must not run when the counter cannot be persisted; the job stands down instead")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+	}}, runtime.commands, "an unwriteable counter must disable the job so the loop stops")
+}
+
+// TestBoundLaunchdRecoveryStandsDownWhenCounterUnwriteableAndDisableFails guards
+// that an unwriteable counter still stands down (exit 0) even when launchctl
+// disable itself fails: exiting 0 alone stops the immediate relaunch
+// (KeepAlive.SuccessfulExit=false), and a disable failure must not keep the
+// loop alive.
+func TestBoundLaunchdRecoveryStandsDownWhenCounterUnwriteableAndDisableFails(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{
+		launchdUserID: 501,
+		commandErr:    errors.New("launchctl persistently broken"),
+	}
+	controller := runtime.controller()
+
+	counterPath := recoveryRetryCounterPath(invocation.HomeDir, invocation.TransactionID)
+	require.NoError(t, os.MkdirAll(counterPath, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(counterPath, "blocker"), []byte("x"), 0o600))
+
+	err := boundLaunchdRecovery(context.Background(), invocation, controller, time.Now, func() error {
+		return errors.New("actor must not run")
+	})
+	require.NoError(t, err, "an unwriteable counter must stand down (exit 0) even when the disable fails")
+	require.Len(t, runtime.commands, 1)
+	require.Equal(t, "disable", runtime.commands[0].args[0])
+}
+
+// TestEnsureRecoveryRetryCounterDirRejectsSymlinkedTransactionsParent pins the
+// P2 fix: when <home>/upgrade/transactions has been replaced by a symlink,
+// validating only upgradeRoot does not detect it, and a recursive MkdirAll
+// would follow the symlink and create the counter outside the AF home. The
+// counter dir creation must validate the transactions parent as a real
+// directory and create only the immediate leaf, the way the recovery-lock
+// recreation path does, so a symlinked transactions root is rejected.
+func TestEnsureRecoveryRetryCounterDirRejectsSymlinkedTransactionsParent(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	txnDir := transactionDir(invocation.HomeDir, invocation.TransactionID)
+	require.NoError(t, os.RemoveAll(txnDir))
+	transactionsRoot := filepath.Dir(txnDir)
+	require.NoError(t, os.RemoveAll(transactionsRoot))
+
+	// Replace <home>/upgrade/transactions with a symlink to a directory outside
+	// the AF home, so a recursive MkdirAll would create the counter there.
+	outsideHome := t.TempDir()
+	outsideTarget := filepath.Join(outsideHome, "evil-transactions")
+	require.NoError(t, os.MkdirAll(outsideTarget, 0o700))
+	require.NoError(t, os.Symlink(outsideTarget, transactionsRoot))
+
+	err := ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID)
+	require.Error(t, err, "a symlinked transactions root must be rejected")
+	require.ErrorContains(t, err, "transactions root")
+
+	// The counter must not be created outside the AF home.
+	_, statErr := os.Stat(filepath.Join(outsideTarget, invocation.TransactionID))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"a symlinked transactions root must not let the counter be created outside the AF home")
+
+	// The symlinked transactions root itself must be left intact (not removed
+	// or replaced); only the immediate leaf would have been created.
+	info, err := os.Lstat(transactionsRoot)
+	require.NoError(t, err)
+	require.True(t, info.Mode()&os.ModeSymlink != 0, "the symlinked transactions root must not be replaced")
+}

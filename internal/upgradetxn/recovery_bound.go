@@ -121,14 +121,17 @@ func clearRecoveryRetryCounter(home, txnID string) error {
 // fresh <home>/upgrade/transactions/<id> here would undo that removal and
 // orphan a config tree the operator deleted. In that case it returns
 // errAFHomeRemoved so boundLaunchdRecovery can stand the stale job down (exit
-// 0) without recreating anything. With the upgrade root present, the
-// create goes through afhome.MkdirAll — the guarded os.MkdirAll that
+// 0) without recreating anything. With the upgrade root present, the create
+// goes through afhome.RequirePresent — the guarded home-present latch that
 // TestNoBareMkdirAllUnderTheAFHome requires for any path at or inside the AF
 // home, which in an abandoned daemon refuses rather than re-creating it —
-// and only creates the transactions parent and the transaction leaf, so the
-// adversarial shape still works without recreating the home or upgrade
-// storage above it. The path is package-constructed under the canonical home
-// so ancestor symlinks are already resolved.
+// then createDurableDirectory, which validates the transactions parent as a
+// real directory and creates only the immediate transaction leaf (not the full
+// hierarchy) so a symlinked transactions root cannot redirect the counter
+// outside the home, and so the adversarial shape still works without
+// recreating the home or upgrade storage above it. The path is
+// package-constructed under the canonical home so ancestor symlinks are
+// already resolved.
 func ensureRecoveryRetryCounterDir(home, txnID string) error {
 	dir := transactionDir(home, txnID)
 	if err := validateDirectoryNoSymlink(dir); err == nil {
@@ -142,15 +145,26 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 		}
 		return fmt.Errorf("validate upgrade storage root: %w", err)
 	}
-	if err := afhome.MkdirAll(dir, transactionDirMode); err != nil {
-		// afhome.MkdirAll refuses when a process that armed the home-present
-		// latch observes the home gone; that is the same removed-home shape the
-		// upgrade-root check above stands down for, so collapse it to the same
-		// sentinel and let boundLaunchdRecovery stand the stale job down rather
-		// than recreate the home.
+	// Validate the transactions parent as a real directory and create only the
+	// immediate transaction leaf, mirroring ensureRecoveryLockDirectoryLocked:
+	// if <home>/upgrade/transactions has been replaced by a symlink, validating
+	// only upgradeRoot does not detect it and a recursive MkdirAll would follow
+	// the symlink and create the counter outside the AF home. afhome.RequirePresent
+	// preserves the home-present latch's refusal to re-create a removed home.
+	parent := filepath.Dir(dir)
+	if err := validateDirectoryNoSymlink(parent); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errAFHomeRemoved
+		}
+		return fmt.Errorf("validate transactions root for recovery retry counter: %w", err)
+	}
+	if err := afhome.RequirePresent(dir); err != nil {
 		if errors.Is(err, afhome.ErrRemoved) {
 			return errAFHomeRemoved
 		}
+		return fmt.Errorf("create recovery retry counter directory: %w", err)
+	}
+	if err := createDurableDirectory(parent, dir, transactionDirMode); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("create recovery retry counter directory: %w", err)
 	}
 	return nil
@@ -170,6 +184,27 @@ func recoveryJobIsLaunchd(invocation RecoveryInvocation) bool {
 		return txn.Journal().RecoveryJob.Kind == RecoveryJobLaunchd
 	}
 	return runtime.GOOS == "darwin"
+}
+
+// activeTransactionStillNamesInvocation reports whether the active journal still
+// names this invocation's transaction. The pre-record in boundLaunchdRecovery
+// must not run when it does not: a stale launchd job whose RunAtLoad/delayed
+// restart fires after terminal cleanup removed active.json, or after a newer
+// transaction replaced it, must not recreate the deleted/replaced transaction
+// directory the pre-record would otherwise leave as an orphan the actor's
+// ErrNoActiveTransaction/stale-job path does not clean up. recoveryJobIsLaunchd
+// falls back to the OS when the journal cannot load and cannot tell that case
+// apart from a corrupt journal (the bug report's primary persistent trigger,
+// which the budget must still bound), so this check gates only the pre-record:
+// a corrupt journal loads to a non-ErrNoActiveTransaction error and returns
+// true, a gone active.json returns ErrNoActiveTransaction and returns false,
+// and a superseding transaction returns a different id and returns false.
+func activeTransactionStillNamesInvocation(invocation RecoveryInvocation) bool {
+	txn, err := Load(invocation.HomeDir)
+	if err != nil {
+		return !errors.Is(err, ErrNoActiveTransaction)
+	}
+	return txn.Journal().ID == invocation.TransactionID
 }
 
 // launchdRecoveryBudgetExhausted is the pre-check the actor runs before
@@ -284,6 +319,15 @@ func boundLaunchdRecovery(
 ) error {
 	launchd := recoveryJobIsLaunchd(invocation)
 	if launchd && launchdRecoveryBudgetExhausted(invocation, now()) {
+		// The budget is already exhausted. A prior run pre-recorded the
+		// exhausting attempt but never reached the post-run stand-down (a
+		// panic, fatal error, or signal termination on the final attempt), so
+		// this invocation must disable the job: exiting 0 alone stops the
+		// immediate relaunch, but the job remains enabled and would run again
+		// at every login or reboot. The stand-down helper reads the exhausted
+		// counter, persists the marker defensively, and fires launchctl
+		// disable.
+		_ = standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller)
 		return nil
 	}
 	// Persist the attempt BEFORE running the recovery actor so a panic, fatal
@@ -293,6 +337,17 @@ func boundLaunchdRecovery(
 	// reconciles by clearing the counter below; a failing run checks the
 	// budget after the actor returns and stands down if it is exhausted.
 	if launchd {
+		// A stale launchd job whose active transaction is gone (terminal
+		// cleanup removed active.json) or superseded must not recreate the
+		// deleted/replaced transaction directory the pre-record would
+		// otherwise leave as an orphan: recoveryJobIsLaunchd falls back to the
+		// OS when the journal cannot load and cannot tell that case apart from
+		// a corrupt journal (which the budget must still bound), so check the
+		// active transaction explicitly. The actor returns nil for the gone or
+		// superseded case without recreating anything.
+		if !activeTransactionStillNamesInvocation(invocation) {
+			return nil
+		}
 		if err := recordLaunchdRecoveryAttempt(invocation, now()); err != nil {
 			if errors.Is(err, errAFHomeRemoved) {
 				// The AF home/storage was removed while a stale launchd job
@@ -301,7 +356,25 @@ func boundLaunchdRecovery(
 				// the removal stays stable.
 				return nil
 			}
-			return err
+			// The budget cannot be persisted, so it cannot bound a persistent
+			// failure: a read-only transaction directory, lost write
+			// permission, or a persistent filesystem I/O error means launchd
+			// would relaunch every ThrottleInterval without the on-disk
+			// counter ever advancing — the unbounded restart loop this change
+			// is intended to stop. Stand the job down (disable + exit 0) so the
+			// loop stops. A disable failure does not keep the loop alive:
+			// exiting 0 alone stops the immediate relaunch
+			// (KeepAlive.SuccessfulExit=false), and the next boot's RunAtLoad
+			// re-enters this path and stands down again.
+			log.WarningLog.Printf(
+				"upgrade recovery: could not persist the launchd retry counter for transaction %s (%v); disabling the recovery job and standing down to stop an unbounded relaunch loop the budget cannot bound without a durable counter",
+				invocation.TransactionID, err)
+			if disableErr := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); disableErr != nil {
+				log.WarningLog.Printf(
+					"upgrade recovery: could not disable the launchd recovery job for transaction %s after a failed counter write (%v); standing down (exit 0) anyway to stop the immediate relaunch loop",
+					invocation.TransactionID, disableErr)
+			}
+			return nil
 		}
 	}
 	err := run()
