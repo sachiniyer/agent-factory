@@ -181,6 +181,18 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 	return nil
 }
 
+// launchdFallbackOnCorruptJournal reports whether a journal that cannot load
+// implies a launchd relaunch loop on this OS. Darwin's recovery jobs are
+// launchd-managed, so a corrupt journal there must still be bounded; Linux's
+// are never launchd (validateDaemonRecoveryPair forbids it), so the budget is a
+// no-op there and systemd's own StartLimit* directives bound the same failure.
+// It is a package var so a test can force the Darwin fallback on a Linux CI
+// runner and cover the corrupt-journal budget path the macOS cell exercises
+// end-to-end via the built af binary (TestRecoveryExitLogsHintOnActorFailure):
+// without it, the fallback branch below is dead code on Linux and a regression
+// that only surfaces on macOS (the original CI failure this guards) escapes CI.
+var launchdFallbackOnCorruptJournal = func() bool { return runtime.GOOS == "darwin" }
+
 // recoveryJobIsLaunchd reports whether the active transaction's recovery job
 // is the launchd kind. The journal is the authority when it loads. When it
 // does not — the corrupt-journal failure mode that is one of the persistent
@@ -194,7 +206,7 @@ func recoveryJobIsLaunchd(invocation RecoveryInvocation) bool {
 	if txn, err := Load(invocation.HomeDir); err == nil {
 		return txn.Journal().RecoveryJob.Kind == RecoveryJobLaunchd
 	}
-	return runtime.GOOS == "darwin"
+	return launchdFallbackOnCorruptJournal()
 }
 
 // activeTransactionStillNamesInvocation reports whether the active journal still

@@ -651,3 +651,79 @@ func TestEnsureRecoveryRetryCounterDirRejectsSymlinkedTransactionsParent(t *test
 	require.NoError(t, err)
 	require.True(t, info.Mode()&os.ModeSymlink != 0, "the symlinked transactions root must not be replaced")
 }
+
+// TestBoundLaunchdRecoveryCorruptJournalPassesErrorThroughBelowBurstLimit pins
+// the property the macOS-only CI failure (TestRecoveryExitLogsHintOnActorFailure)
+// regressed: short of exhaustion, the bounded wrapper never changes a failing
+// recovery's exit status, on any OS. With a corrupt journal the budget path
+// runs only where the GOOS fallback yields launchd (Darwin in production), so
+// this test forces that fallback on a Linux CI runner via the
+// launchdFallbackOnCorruptJournal seam and replays the failing test's shape:
+// only a corrupt active.json, no transaction directory. The first failing run
+// must surface the actor's error (exit 1, not the stand-down exit 0) AND record
+// the attempt — the budget counts the persistent failure rather than swallowing
+// it, so the burst limit is reachable. The transaction directory the fix
+// recreates (only the leaf, under the surviving upgrade root) is what makes
+// the counter writeable on this adversarial shape.
+func TestBoundLaunchdRecoveryCorruptJournalPassesErrorThroughBelowBurstLimit(t *testing.T) {
+	// Force the Darwin fallback so the corrupt-journal budget path runs on
+	// Linux CI, the way it always runs on the macOS cell.
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	// The adversarial "only active.json" shape from the bug report: a corrupt
+	// journal under a surviving upgrade root, with no transaction directory.
+	home := t.TempDir()
+	upgradeDir := filepath.Join(home, "upgrade")
+	require.NoError(t, os.MkdirAll(upgradeDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(upgradeDir, "active.json"),
+		[]byte("{not-valid-json"), 0o600))
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: "corrupt-txn"}
+
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+	start := time.Now()
+
+	actorFailure := errors.New("corrupt journal load failure")
+	calls := 0
+	run := func() error {
+		calls++
+		return actorFailure
+	}
+
+	// Below the burst limit the actor's error must reach the exit code
+	// unchanged: a single corrupt-journal failure exits 1 (so launchd
+	// relaunches and the budget can progress), not 0 (the stand-down that
+	// would swallow a persistent failure the budget is meant to count).
+	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
+		err := boundLaunchdRecovery(context.Background(), invocation, controller,
+			func() time.Time { return start.Add(time.Duration(attempt) * time.Second) }, run)
+		require.ErrorIs(t, err, actorFailure,
+			"short of exhaustion the bounded wrapper must not change a failing recovery's exit status")
+	}
+	require.Equal(t, launchdRecoveryBurstLimit-1, calls, "the actor must run once per failure below the limit")
+	require.Empty(t, rt.commands, "no stand-down may fire before the burst limit is reached")
+
+	// The budget must have COUNTED each attempt — that is how the burst limit
+	// is reachable — and the transaction directory the fix recreates under
+	// the surviving upgrade root is what made the counter writeable on this
+	// adversarial shape.
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok, "the corrupt-journal attempt must be pre-recorded so the budget counts it")
+	require.Equal(t, launchdRecoveryBurstLimit-1, counter.Attempts)
+	require.False(t, counter.Exhausted, "below the burst limit the budget must not be exhausted")
+	leafInfo, leafErr := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.NoError(t, leafErr,
+		"the transaction leaf must be recreated under the surviving upgrade root so the counter is writeable")
+	require.True(t, leafInfo.IsDir(), "the recreated transaction leaf must be a directory")
+
+	// The Nth failure reaches the burst limit and stands down (exit 0), so
+	// the budget closes the loop the same way it does for a loading journal.
+	err := boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start.Add(launchdRecoveryBurstLimit * time.Second) }, run)
+	require.NoError(t, err, "the burst limit must stand the actor down so launchd stops relaunching")
+	require.Equal(t, launchdRecoveryBurstLimit, calls)
+	require.Equal(t, []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+		rt.commands[0].args)
+}
