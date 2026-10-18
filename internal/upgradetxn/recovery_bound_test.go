@@ -519,7 +519,13 @@ func TestEnsureRecoveryRetryCounterDirDoesNotRecreateRemovedHome(t *testing.T) {
 
 	// Adversarial shape: the transaction directory is gone but the upgrade
 	// root survives. The leaf must be recreated without recreating the home.
+	// The active journal is corrupt (the bug report's primary persistent
+	// trigger: a corrupt journal with no transaction directory), so the
+	// nonterminal-phase refusal does not apply and the leaf is recreated the
+	// way ensureRecoveryLockDirectoryLocked recreates a terminal transaction
+	// directory for crash-during-cleanup.
 	require.NoError(t, os.RemoveAll(transactionDir(invocation.HomeDir, invocation.TransactionID)))
+	require.NoError(t, os.WriteFile(activeJournalPath(invocation.HomeDir), []byte("{not-valid-json"), 0o600))
 	require.NoError(t, ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID))
 	info, err := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
 	require.NoError(t, err)
@@ -858,6 +864,13 @@ func TestEnsureRecoveryRetryCounterDirRejectsSymlinkedTransactionsParent(t *test
 	transactionsRoot := filepath.Dir(txnDir)
 	require.NoError(t, os.RemoveAll(transactionsRoot))
 
+	// A corrupt active.json (the bug report's primary persistent trigger) so
+	// the nonterminal-phase refusal does not preempt the symlinked-parent
+	// validation: the journal cannot reveal a phase, so the missing leaf is
+	// not a nonterminal rollback directory and the create path proceeds to the
+	// symlink check this test pins.
+	require.NoError(t, os.WriteFile(activeJournalPath(invocation.HomeDir), []byte("{not-valid-json"), 0o600))
+
 	// Replace <home>/upgrade/transactions with a symlink to a directory outside
 	// the AF home, so a recursive MkdirAll would create the counter there.
 	outsideHome := t.TempDir()
@@ -1034,4 +1047,218 @@ func TestBoundLaunchdRecoveryStandsDownAndDisablesWhenAFHomeRemovedAndDisableFai
 	require.Equal(t, "disable", rt.commands[0].args[0])
 	_, statErr := os.Stat(upgradeRoot(invocation.HomeDir))
 	require.ErrorIs(t, statErr, os.ErrNotExist, "the removed AF home must not be recreated even when the disable fails")
+}
+
+// TestLaunchdRecoveryBudgetResetsOnBackwardClockJump pins the P2 fix for a
+// wall clock that moves backward past FirstAttemptAt: a negative elapsed time
+// would otherwise look like the window never elapses, pinning a counter at the
+// burst limit forever (JSON serialization strips Go's monotonic component, so
+// the persisted timestamp has no monotonic guard, and an NTP correction, manual
+// change, or a reboot with an incorrect clock can move the wall clock back). A
+// timestamp later than now is treated the same as an elapsed window: the budget
+// resets and a fresh counter starts, the way systemd's StartLimitIntervalSec
+// rolls forward once the interval passes.
+func TestLaunchdRecoveryBudgetResetsOnBackwardClockJump(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	start := time.Now()
+
+	// Record up to the burst limit within the window so the counter is at the
+	// limit but not Exhausted.
+	for attempt := 1; attempt <= launchdRecoveryBurstLimit; attempt++ {
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
+	}
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted)
+
+	// The wall clock jumps backward past FirstAttemptAt: the negative elapsed
+	// time must be treated as an expired/invalid window, not a still-active
+	// window that pins the counter at the burst limit forever. The pre-check
+	// must not stand down (the budget resets the way it does after the interval).
+	backward := start.Add(-time.Hour)
+	require.False(t, launchdRecoveryBudgetExhausted(invocation, backward),
+		"a backward clock jump must not strand the counter at the burst limit; the window resets")
+
+	// The post-run stand-down must not fire either: the at-limit counter is not
+	// Exhausted, and the backward-jumped clock means the window has elapsed, so
+	// the stand-down does not persist Exhausted and the budget is not made
+	// sticky by the pre-record alone.
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+	require.False(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller, backward),
+		"a backward clock jump must not stick the budget; the stand-down does not fire")
+	require.Empty(t, rt.commands, "no stand-down may fire after a backward clock jump resets the window")
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.False(t, counter.Exhausted, "the stand-down must not persist Exhausted after a backward clock jump")
+
+	// The next pre-record after the backward jump starts a fresh window
+	// (Attempts=1, FirstAttemptAt=now) instead of incrementing the stale
+	// at-limit counter, so the budget rolls forward the way it does after the
+	// burst interval elapses.
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, backward))
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, 1, counter.Attempts, "a pre-record after a backward clock jump must start a fresh window")
+	require.True(t, counter.FirstAttemptAt.Equal(backward), "the fresh window's FirstAttemptAt is the jumped-back now")
+	require.False(t, counter.Exhausted)
+}
+
+// TestBoundLaunchdRecoveryRollsWindowForwardOnBackwardClockJump is the
+// end-to-end guard for the P2 backward-clock-jump fix: a launchd recovery job
+// that reached the burst limit and then sees the wall clock move backward must
+// not stand down (the budget is not Exhausted, and the pre-record starts a
+// fresh window), the way the budget rolls forward after the burst interval
+// elapses. The actor runs and its error propagates (exit 1) rather than the
+// stand-down (exit 0) a stuck-at-limit counter would produce, so a recoverable
+// upgrade is not permanently disabled by a clock correction.
+func TestBoundLaunchdRecoveryRollsWindowForwardOnBackwardClockJump(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+	start := time.Now()
+
+	// Pre-record up to the burst limit within the window.
+	for attempt := 1; attempt <= launchdRecoveryBurstLimit; attempt++ {
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
+	}
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted)
+
+	// The wall clock jumps backward past FirstAttemptAt. The bounded wrapper
+	// must not stand down: the budget is not Exhausted, the pre-record rolls
+	// the window forward (Attempts=1), and the actor's error propagates so
+	// launchd relaunches and the budget counts the fresh attempt.
+	backward := start.Add(-time.Hour)
+	supervisorFailure := errors.New("persistent journal load failure")
+	runCalls := 0
+	run := func() error {
+		runCalls++
+		return supervisorFailure
+	}
+	err := boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return backward }, run)
+	require.ErrorIs(t, err, supervisorFailure,
+		"a backward clock jump must not stand the actor down; the budget rolls the window forward and the actor's error propagates")
+	require.Equal(t, 1, runCalls, "the actor must run once after the window rolls forward")
+	require.Empty(t, rt.commands, "no stand-down may fire after a backward clock jump")
+
+	// The counter rolled forward to a fresh window (Attempts=1, not Exhausted)
+	// so the next start within the window is allowed rather than stood down.
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, 1, counter.Attempts, "a backward clock jump must start a fresh window (Attempts=1)")
+	require.False(t, counter.Exhausted)
+}
+
+// TestEnsureRecoveryRetryCounterDirDoesNotRecreateNonterminalMissingStorage
+// pins the P1 fix for the missing nonterminal rollback storage shape: when
+// active.json is readable but the transaction directory has been deleted in a
+// nonterminal phase, both Load calls fail storage validation and the budget
+// path mistakes the condition for an unreadable journal, recreating an empty
+// transaction leaf. The recovery actor's ensureRecoveryLockDirectoryLocked
+// refuses to recreate a nonterminal transaction directory (the missing
+// metadata snapshots make a partial rollback unsafe), and the pre-record must
+// not bypass that by recreating the empty leaf first — recreating it would let
+// the actor load, skip the nonterminal rejection, restore the previous binary,
+// and fail on the absent snapshots, leaving a mixed partial rollback. The fix
+// inspects the active journal and refuses to recreate a missing leaf whose
+// active transaction is in a nonterminal phase, returning
+// errNonterminalStorageMissing so the caller stands the job down rather than
+// recreating the unsafe state.
+func TestEnsureRecoveryRetryCounterDirDoesNotRecreateNonterminalMissingStorage(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	// launchdBoundFixture prepares a PhasePrepared transaction — a nonterminal
+	// phase whose directory must not be recreated by the pre-record.
+	loadedTxn, err := Load(invocation.HomeDir)
+	require.NoError(t, err)
+	require.Equal(t, PhasePrepared, loadedTxn.Journal().Phase,
+		"the fixture must be in a nonterminal phase for this test")
+	require.Equal(t, invocation.TransactionID, loadedTxn.Journal().ID,
+		"the fixture's active transaction must name the invocation")
+
+	// Remove only the transaction leaf; the upgrade root and active.json
+	// survive. A terminal-phase transaction directory would be recreated
+	// (ensureRecoveryLockDirectoryLocked recreates it for crash-during-cleanup),
+	// and a corrupt or missing journal would be recreated (the bug report's
+	// primary persistent trigger), so the active journal must be readable and
+	// nonterminal for the refusal to fire.
+	require.NoError(t, os.RemoveAll(transactionDir(invocation.HomeDir, invocation.TransactionID)))
+
+	err = ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID)
+	require.ErrorIs(t, err, errNonterminalStorageMissing,
+		"a missing nonterminal transaction directory must not be recreated by the pre-record")
+
+	// The missing transaction leaf must not be recreated.
+	_, statErr := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"the missing nonterminal transaction directory must not be recreated by the pre-record")
+
+	// A corrupt active.json (the bug report's primary persistent trigger) must
+	// still recreate the leaf: the journal cannot reveal a nonterminal phase, so
+	// the budget bounds the unbounded relaunch the corrupt-journal load failure
+	// would otherwise produce. The refusal is specific to a readable nonterminal
+	// journal, not to every missing leaf.
+	require.NoError(t, os.WriteFile(activeJournalPath(invocation.HomeDir), []byte("{not-valid-json"), 0o600))
+	require.NoError(t, ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID),
+		"a corrupt journal with a missing leaf must still recreate it so the budget can count the persistent failure")
+	leafInfo, leafErr := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.NoError(t, leafErr)
+	require.True(t, leafInfo.IsDir(), "the corrupt-journal missing leaf must be recreated")
+}
+
+// TestBoundLaunchdRecoveryStandsDownForNonterminalMissingStorage is the
+// end-to-end guard for the P1 fix: when the active journal is readable and
+// names the invocation but the transaction directory is missing in a
+// nonterminal phase, the bounded wrapper must not recreate the empty leaf
+// (which would bypass ensureRecoveryLockDirectoryLocked's nonterminal
+// rejection and let the actor run a partial rollback), must not run the
+// actor, and must disable the still-armed RunAtLoad job so the missing-storage
+// error does not relaunch forever. The budget cannot count attempts without a
+// durable counter (the counter lives in the missing directory), so the stand-
+// down is the same disable + exit 0 the removed-home and unwriteable-counter
+// branches use. The Darwin fallback is forced so the budget path runs on a
+// Linux CI runner the way it runs on the macOS cell.
+func TestBoundLaunchdRecoveryStandsDownForNonterminalMissingStorage(t *testing.T) {
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	invocation := launchdBoundFixture(t)
+	loadedTxn, err := Load(invocation.HomeDir)
+	require.NoError(t, err)
+	require.Equal(t, PhasePrepared, loadedTxn.Journal().Phase,
+		"the fixture must be in a nonterminal phase for this test")
+
+	// Remove only the transaction leaf; active.json survives and is readable,
+	// so the budget path runs (Load fails storage validation, the fallback
+	// classifies it as launchd, and activeTransactionStillNamesInvocation
+	// returns true for the non-ErrNoActiveTransaction error).
+	require.NoError(t, os.RemoveAll(transactionDir(invocation.HomeDir, invocation.TransactionID)))
+	_, statErr := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the transaction leaf must be missing at the start")
+
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+
+	ran := false
+	err = boundLaunchdRecovery(context.Background(), invocation, controller, time.Now, func() error {
+		ran = true
+		return errors.New("actor must not run for missing nonterminal storage")
+	})
+	require.NoError(t, err, "missing nonterminal storage must stand the job down (exit 0) without recreating it")
+	require.False(t, ran, "the actor must not run when the nonterminal transaction directory is missing")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+	}}, rt.commands, "missing nonterminal storage must disable the still-enabled RunAtLoad job so the missing-storage error does not relaunch forever")
+
+	// The missing transaction leaf must not be recreated by the pre-record or
+	// the actor.
+	_, statErr = os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"the missing nonterminal transaction directory must not be recreated by the stand-down")
 }

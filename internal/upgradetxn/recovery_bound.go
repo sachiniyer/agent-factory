@@ -35,6 +35,22 @@ const (
 // see ensureRecoveryRetryCounterDir.
 var errAFHomeRemoved = errors.New("upgrade home removed while recovery job still armed")
 
+// errNonterminalStorageMissing signals that the active journal is readable and
+// names this invocation but the transaction directory is missing in a
+// nonterminal phase, so the pre-record must not recreate the missing rollback
+// storage. ensureRecoveryLockDirectoryLocked refuses to recreate a nonterminal
+// transaction directory (the missing metadata snapshots make a partial rollback
+// unsafe), and the pre-record must not bypass that by recreating the empty leaf
+// first: recreating it would let the recovery actor load, skip the nonterminal
+// rejection, and restore the previous binary before failing on the absent
+// snapshots, leaving a mixed partial rollback. The budget cannot bound this
+// loop without a durable counter (the counter lives in the missing directory),
+// so boundLaunchdRecovery stands the job down (disable + exit 0) the way it
+// does for a removed AF home: a missing nonterminal transaction directory is
+// unrecoverable, and the unbounded relaunch the actor's missing-storage error
+// would otherwise produce is exactly what the budget exists to stop.
+var errNonterminalStorageMissing = errors.New("nonterminal transaction storage is missing; refusing to recreate it")
+
 // recoveryRetryCounter is the persisted attempt counter for the launchd
 // stand-down path. It lives in the transaction directory, so a successful
 // recovery's terminal cleanup removes it with the rest of the transaction
@@ -121,17 +137,24 @@ func clearRecoveryRetryCounter(home, txnID string) error {
 // fresh <home>/upgrade/transactions/<id> here would undo that removal and
 // orphan a config tree the operator deleted. In that case it returns
 // errAFHomeRemoved so boundLaunchdRecovery can stand the stale job down (exit
-// 0) without recreating anything. With the upgrade root present, the create
-// goes through afhome.RequirePresent — the guarded home-present latch that
-// TestNoBareMkdirAllUnderTheAFHome requires for any path at or inside the AF
-// home, which in an abandoned daemon refuses rather than re-creating it —
-// then createDurableDirectory, which validates the transactions parent as a
-// real directory and creates only the immediate transaction leaf (not the full
-// hierarchy) so a symlinked transactions root cannot redirect the counter
-// outside the home, and so the adversarial shape still works without
-// recreating the home or upgrade storage above it. The path is
-// package-constructed under the canonical home so ancestor symlinks are
-// already resolved.
+// 0) without recreating anything. It also refuses to recreate a missing
+// transaction leaf when the active journal is readable and names this
+// invocation in a nonterminal phase: ensureRecoveryLockDirectoryLocked refuses
+// to recreate a nonterminal transaction directory (the missing metadata
+// snapshots make a partial rollback unsafe), and the pre-record must not
+// bypass that by recreating the empty leaf first. In that case it returns
+// errNonterminalStorageMissing so boundLaunchdRecovery stands the job down
+// rather than recreating the unsafe state. With the upgrade root present and
+// a terminal or unreadable journal, the create goes through afhome.RequirePresent
+// — the guarded home-present latch that TestNoBareMkdirAllUnderTheAFHome
+// requires for any path at or inside the AF home, which in an abandoned daemon
+// refuses rather than re-creating it — then createDurableDirectory, which
+// validates the transactions parent as a real directory and creates only the
+// immediate transaction leaf (not the full hierarchy) so a symlinked
+// transactions root cannot redirect the counter outside the home, and so the
+// adversarial shape still works without recreating the home or upgrade
+// storage above it. The path is package-constructed under the canonical home
+// so ancestor symlinks are already resolved.
 func ensureRecoveryRetryCounterDir(home, txnID string) error {
 	dir := transactionDir(home, txnID)
 	if err := validateDirectoryNoSymlink(dir); err == nil {
@@ -144,6 +167,26 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 			return errAFHomeRemoved
 		}
 		return fmt.Errorf("validate upgrade storage root: %w", err)
+	}
+	// Refuse to recreate a missing transaction leaf when the active journal is
+	// readable and names this invocation in a nonterminal phase. The recovery
+	// actor's ensureRecoveryLockDirectoryLocked refuses to recreate a nonterminal
+	// transaction directory — the missing metadata snapshots make a partial
+	// rollback unsafe — and the pre-record must not bypass that by recreating
+	// the empty leaf first: recreating it would let the actor load (the directory
+	// check passes), skip the nonterminal rejection, restore the previous binary,
+	// and fail on the absent snapshots, leaving a mixed partial rollback. A
+	// corrupt or missing journal (the bug report's primary persistent trigger)
+	// cannot reveal a nonterminal phase, so it still reaches the create path
+	// below and the budget bounds the unbounded relaunch its load failure would
+	// otherwise produce; a terminal phase (crash-during-cleanup) is the case
+	// ensureRecoveryLockDirectoryLocked itself recreates for, so it also reaches
+	// the create path. The budget cannot bound this loop without a durable
+	// counter (the counter lives in the missing directory), so the caller stands
+	// the job down rather than recreating the unsafe state.
+	if current, rerr := readJournal(activeJournalPath(home)); rerr == nil &&
+		current.ID == txnID && !terminalPhase(current.Phase) {
+		return errNonterminalStorageMissing
 	}
 	// Validate the transactions parent as a real directory and create only the
 	// immediate transaction leaf, mirroring ensureRecoveryLockDirectoryLocked:
@@ -268,10 +311,28 @@ func launchdRecoveryBudgetExhausted(invocation RecoveryInvocation, now time.Time
 	if counter.Exhausted {
 		return true
 	}
-	if !counter.FirstAttemptAt.IsZero() && now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
+	if burstWindowElapsed(counter.FirstAttemptAt, now) {
 		return false
 	}
 	return counter.Attempts >= launchdRecoveryBurstLimit
+}
+
+// burstWindowElapsed reports whether the burst interval has elapsed since the
+// first recorded attempt, treating a wall clock that jumped backward past
+// FirstAttemptAt as an expired/invalid window. JSON serialization strips Go's
+// monotonic clock component, and an NTP correction, manual change, or a
+// reboot with an incorrect clock can move the wall clock back, so a negative
+// now.Sub(FirstAttemptAt) would otherwise look like the window never elapses —
+// pinning a counter at the burst limit forever and permanently disabling a
+// recoverable upgrade. A zero FirstAttemptAt is not treated as elapsed here
+// (an empty counter is handled by the caller); a timestamp later than now is,
+// so the window resets and a fresh counter starts the way systemd's
+// StartLimitIntervalSec rolls forward once the interval passes.
+func burstWindowElapsed(firstAttemptAt, now time.Time) bool {
+	if firstAttemptAt.IsZero() {
+		return false
+	}
+	return now.Before(firstAttemptAt) || now.Sub(firstAttemptAt) >= launchdRecoveryBurstInterval
 }
 
 // recordLaunchdRecoveryAttempt persists one recovery attempt BEFORE the actor
@@ -295,7 +356,7 @@ func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) 
 		// handle it defensively: don't increment past exhaustion.
 		return nil
 	}
-	if counter.FirstAttemptAt.IsZero() || now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
+	if counter.FirstAttemptAt.IsZero() || burstWindowElapsed(counter.FirstAttemptAt, now) {
 		counter = recoveryRetryCounter{FirstAttemptAt: now}
 	}
 	counter.Attempts++
@@ -342,7 +403,12 @@ func standDownLaunchdRecoveryIfExhausted(
 		// resets. launchdRecoveryBudgetExhausted already gates this for the
 		// pre-check path; the post-run path re-checks here because the actor
 		// may have run past the interval between the pre-record and the return.
-		if !counter.FirstAttemptAt.IsZero() && now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
+		// A wall clock that jumped backward past FirstAttemptAt is treated the
+		// same as an elapsed window: the negative elapsed time would otherwise
+		// pin a counter at the burst limit forever (JSON serialization strips
+		// the monotonic component, so the persisted timestamp has no monotonic
+		// guard), so the window resets and a fresh counter starts instead.
+		if burstWindowElapsed(counter.FirstAttemptAt, now) {
 			return false
 		}
 		counter.Exhausted = true
@@ -444,6 +510,33 @@ func boundLaunchdRecovery(
 				if disableErr := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); disableErr != nil {
 					log.WarningLog.Printf(
 						"upgrade recovery: the AF home for launchd recovery job %s was removed, but the job could not be disabled (%v); standing down (exit 0) to stop the immediate relaunch loop — the job may re-launch on a later login or reboot until the removed home is also cleaned up",
+						invocation.TransactionID, disableErr)
+				}
+				return nil
+			}
+			if errors.Is(err, errNonterminalStorageMissing) {
+				// The active journal is readable and names this invocation,
+				// but the transaction directory is missing in a nonterminal
+				// phase. The recovery actor's ensureRecoveryLockDirectoryLocked
+				// refuses to recreate a nonterminal transaction directory —
+				// the missing metadata snapshots make a partial rollback unsafe
+				// — and the pre-record must not bypass that by recreating the
+				// empty leaf first. Recreating it would let the actor load, skip
+				// the nonterminal rejection, restore the previous binary, and
+				// fail on the absent snapshots, leaving a mixed partial rollback.
+				// The budget cannot bound this loop without a durable counter
+				// (the counter lives in the missing directory), and the
+				// missing-storage error the actor would return is exactly the
+				// unbounded relaunch the budget exists to stop, so stand the job
+				// down (disable + exit 0) rather than recreating the unsafe
+				// state. The same disable + exit 0 the gone-transaction and
+				// removed-home branches use stops the immediate relaunch and
+				// keeps RunAtLoad from re-launching the stale job; the next
+				// boot's RunAtLoad re-enters this path and stands down again
+				// unless the operator has restored the missing storage.
+				if disableErr := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); disableErr != nil {
+					log.WarningLog.Printf(
+						"upgrade recovery: the launchd recovery job for transaction %s has missing nonterminal storage, but the job could not be disabled (%v); standing down (exit 0) to stop the immediate relaunch loop — the job may re-launch on a later login or reboot until the missing storage is restored",
 						invocation.TransactionID, disableErr)
 				}
 				return nil
