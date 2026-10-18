@@ -444,12 +444,13 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 			// Only a capture failure with an AFFIRMATIVE liveness answer
 			// may demote (Codex on #5327, second finding).
 			log.ErrorLog.Printf("tmux session %s: liveness probe unanswered in status monitor: %v", t.sanitizedName, err)
-		case errors.Is(err, errCaptureNeverRan):
+		case errors.Is(err, errCaptureNotAnswered):
 			// The probe may have answered alive, but the capture's own
-			// failure was exec-level — tmux never answered, so "the pane
-			// died under a session still being removed" is not the
-			// evidence on hand (Codex on #5327, third finding).
-			log.ErrorLog.Printf("tmux session %s: capture-pane could not run in status monitor: %v", t.sanitizedName, err)
+			// failure carried no answer from tmux — it never ran, or a
+			// signal destroyed it — so "the pane died under a session
+			// still being removed" is not the evidence on hand (Codex on
+			// #5327).
+			log.ErrorLog.Printf("tmux session %s: capture-pane did not answer in status monitor: %v", t.sanitizedName, err)
 		case initiated && !errors.Is(err, ErrTmuxTimeout):
 			// The same attribution covers the failure a step earlier in
 			// the teardown: a pane can die under a session object tmux
@@ -603,14 +604,15 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 			return "", t.sessionGoneError("capture-pane", err)
 		default:
 			// Only tmux's own failure answer may read as "the pane died
-			// under a session still being removed": a nonzero exit means
-			// capture-pane RAN. An exec-level fault (fork/exec refused,
-			// transport failure) is infrastructure the teardown request
-			// cannot explain even with an affirmative liveness answer —
-			// keep it at ERROR (Codex on #5327, third finding).
+			// under a session still being removed": a nonzero EXIT means
+			// capture-pane ran and reported. An exec-level fault (fork/
+			// exec refused, transport failure) or a process destroyed by
+			// a signal carries no answer about the pane — infrastructure
+			// the teardown request cannot explain even with an
+			// affirmative liveness answer (Codex on #5327).
 			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				return "", fmt.Errorf("%w: %w", errCaptureNeverRan, err)
+			if !errors.As(err, &exitErr) || !exitErr.Exited() {
+				return "", fmt.Errorf("%w: %w", errCaptureNotAnswered, err)
 			}
 			return "", fmt.Errorf("error capturing pane content: %v", err)
 		}
@@ -625,12 +627,14 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 // (#5327 review).
 var errLivenessProbeUnanswered = errors.New("liveness probe did not answer")
 
-// errCaptureNeverRan marks a capture-pane failure that is not tmux's answer
-// at all — the command could not be executed, so its failure carries no
-// evidence about the pane's fate. The mid-teardown demotion exists only for
-// failures tmux itself reported, and an affirmative liveness probe does not
-// turn an exec-level fault into expected teardown noise (#5327 review).
-var errCaptureNeverRan = errors.New("capture-pane could not run")
+// errCaptureNotAnswered marks a capture-pane failure that carries no answer
+// from tmux itself — the command could not be executed, or the process was
+// destroyed by a signal instead of exiting with a status. Either way the
+// failure holds no evidence about the pane's fate: the mid-teardown
+// demotion exists only for failures tmux itself reported, and an
+// affirmative liveness probe does not turn an infrastructure fault into
+// expected teardown noise (#5327 review).
+var errCaptureNotAnswered = errors.New("capture-pane did not answer")
 
 // captureTargetLiveness is the gone-probe for a possibly id-bound capture:
 // a bound generation needs the identity answer for THAT generation, not the

@@ -35,9 +35,9 @@ type teardownMarkTmux struct {
 	alive     atomic.Bool // has-session answers "exists"
 	killFails atomic.Bool // kill-session answers a failure instead of removing the session
 	captureOK atomic.Bool // capture-pane succeeds
-	// captureErr, when set, is capture-pane's failure verbatim. A plain
-	// (non-*exec.ExitError) error models an exec-level fault — tmux itself
-	// never ran — which must never demote under teardown attribution.
+	// captureErr, when set, is capture-pane's failure verbatim — an
+	// exec-level fault or a signaled *exec.ExitError, neither of which is
+	// tmux's own answer and neither may demote under teardown attribution.
 	captureErr  atomic.Value
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
 	// captureWedged stalls capture-pane past the shortened deadline — the
@@ -713,12 +713,57 @@ func TestUnrunnableCaptureDuringTeardownStaysError(t *testing.T) {
 			errs := captureErrorLog(t)
 			session.HasUpdatedExpectingTeardown(tc.expect)
 			require.Equal(t, int32(1), m.captureCalls.Load())
-			require.Contains(t, errs.String(), "capture-pane could not run in status monitor",
+			require.Contains(t, errs.String(), "capture-pane did not answer in status monitor",
 				"an exec-level capture failure is infrastructure, not expected teardown noise")
 			require.Contains(t, errs.String(), "resource temporarily unavailable",
 				"the capture command's own failure must survive to the log")
 			require.NotContains(t, infos.String(), "during af-initiated teardown",
 				"only tmux's own failure answer may demote under teardown attribution")
+			require.False(t, session.monitor.dead)
+		})
+	}
+}
+
+// TestSignaledCaptureDuringTeardownStaysError pins the demotion's fifth edge
+// (Codex on #5327, fourth finding): *exec.ExitError is produced for ANY
+// unsuccessful process exit — including a capture-pane destroyed by a
+// signal, which reports no exit status at all. With an affirmative liveness
+// answer and a teardown mark, the previous check still demoted it to INFO.
+// Only a capture-pane that ran and exited normally with a failure status is
+// tmux's answer; a signaled one is infrastructure and keeps ERROR.
+func TestSignaledCaptureDuringTeardownStaysError(t *testing.T) {
+	// A genuine signaled *exec.ExitError: the process ran and was destroyed
+	// by SIGKILL, so it reports no exit status (Exited() is false).
+	_, signalErr := exec.Command("sh", "-c", "kill -9 $$").Output()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, signalErr, &exitErr)
+	require.False(t, exitErr.Exited(), "the fixture must be a signaled death, not a normal exit")
+
+	for _, tc := range []struct {
+		name   string
+		mark   bool
+		expect func() bool
+	}{
+		{name: "marked by close()", mark: true},
+		{name: "predicate attribution", expect: func() bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, m := newMarkedTeardownSession(t)
+			if tc.mark {
+				marked, answered := session.markTeardownInitiated()
+				require.True(t, answered)
+				require.NotNil(t, marked)
+			}
+			m.captureOK.Store(false)
+			m.captureErr.Store(error(signalErr))
+			infos := captureInfoLog(t)
+			errs := captureErrorLog(t)
+			session.HasUpdatedExpectingTeardown(tc.expect)
+			require.Equal(t, int32(1), m.captureCalls.Load())
+			require.Contains(t, errs.String(), "capture-pane did not answer in status monitor",
+				"a signaled capture-pane carries no answer from tmux — infrastructure, not teardown noise")
+			require.NotContains(t, infos.String(), "during af-initiated teardown",
+				"only a capture-pane that exited normally with a failure status may demote")
 			require.False(t, session.monitor.dead)
 		})
 	}
