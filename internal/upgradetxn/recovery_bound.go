@@ -377,11 +377,14 @@ func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) 
 // — not one that should keep the loop alive.
 //
 // A non-Exhausted counter that has reached the burst limit only stands down
-// while the starts remain inside the burst window. A slow final attempt that
-// runs past the interval rolls the window forward the way systemd's
-// StartLimitIntervalSec does: the next start is allowed rather than stood down
-// permanently, so the budget is not made sticky by the pre-record alone. now is
-// injected so the window is testable without real time.
+// while the starts remain inside the burst window. A slow first attempt that
+// pushes the next start past the interval rolls the window forward the way
+// systemd's StartLimitIntervalSec does: the next start is allowed rather than
+// stood down permanently, so the budget is not made sticky before a real launch
+// is actually rejected. This is called only from the pre-check (the next
+// start), not the post-run path, so the window is evaluated against the actual
+// launch time rather than the time the actor returned. now is injected so the
+// window is testable without real time.
 func standDownLaunchdRecoveryIfExhausted(
 	ctx context.Context,
 	invocation RecoveryInvocation,
@@ -398,11 +401,14 @@ func standDownLaunchdRecoveryIfExhausted(
 	if !counter.Exhausted {
 		// The at-limit counter has not been made sticky yet. Only stand down
 		// (and persist the marker) while the starts remain inside the burst
-		// window: a slow final attempt that ran past the interval rolls the
-		// window forward instead, so the next start is allowed and the budget
-		// resets. launchdRecoveryBudgetExhausted already gates this for the
-		// pre-check path; the post-run path re-checks here because the actor
-		// may have run past the interval between the pre-record and the return.
+		// window: a slow first attempt that pushes the next start past the
+		// interval rolls the window forward instead, so the next start is
+		// allowed and the budget resets. This is called only from the
+		// pre-check, so the window is evaluated against the actual launch
+		// time (which includes launchd's ThrottleInterval delay) rather than
+		// the time the actor returned — the post-run path does not stand
+		// down, so a slow first attempt cannot make the budget sticky just
+		// before the window ends while the next start would fall outside it.
 		// A wall clock that jumped backward past FirstAttemptAt is treated the
 		// same as an elapsed window: the negative elapsed time would otherwise
 		// pin a counter at the burst limit forever (JSON serialization strips
@@ -436,9 +442,13 @@ func standDownLaunchdRecoveryIfExhausted(
 // pre-checks the persisted budget — standing down before re-entering the
 // supervisor if a prior run already exhausted it — pre-records the attempt so
 // a panic or signal termination still counts, runs the actor, clears the
-// counter on success (the budget resets), and on a failing run stands the
-// job down and exits 0 once the budget is reached. now is injected so the
-// burst window is testable without real time.
+// counter on success (the budget resets), and on a failing run returns the
+// error so the next start's pre-check decides whether the budget is exhausted.
+// Sticky exhaustion is deferred to the next start's pre-check (the only place
+// an actual launch is rejected) rather than committed in the post-run path, so
+// a slow first attempt that pushes the fourth start past the burst window
+// rolls the window forward instead of disabling the job permanently. now is
+// injected so the burst window is testable without real time.
 func boundLaunchdRecovery(
 	ctx context.Context,
 	invocation RecoveryInvocation,
@@ -450,9 +460,8 @@ func boundLaunchdRecovery(
 	nowTime := now()
 	if launchd && launchdRecoveryBudgetExhausted(invocation, nowTime) {
 		// The budget is already exhausted. A prior run pre-recorded the
-		// exhausting attempt but never reached the post-run stand-down (a
-		// panic, fatal error, or signal termination on the final attempt), so
-		// this invocation must disable the job: exiting 0 alone stops the
+		// exhausting attempt, and the next start is being rejected here so
+		// launchd does not re-enter the supervisor: exiting 0 alone stops the
 		// immediate relaunch, but the job remains enabled and would run again
 		// at every login or reboot. The stand-down helper reads the exhausted
 		// counter, persists the marker defensively, and fires launchctl
@@ -577,8 +586,21 @@ func boundLaunchdRecovery(
 	if !launchd {
 		return err
 	}
-	if standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller, now()) {
-		return nil
-	}
+	// A failing launchd run returns the error so launchd relaunches (after
+	// its ThrottleInterval) and the NEXT start's pre-check decides whether
+	// the budget is exhausted. Making exhaustion sticky here — in the
+	// post-run path — would disable the job when the first attempt ran for
+	// nearly the whole burst interval and the next two failed quickly: the
+	// three attempts fit inside the window at the post-run call, but the
+	// next launchd start (ThrottleInterval later) would fall outside it and
+	// systemd's StartLimitIntervalSec would permit a retry. Deferring the
+	// stand-down to the next start's pre-check rejects an actual start (the
+	// budget is only exhausted when a real launch is refused while the
+	// starts remain inside the window), so a slow first attempt that pushes
+	// the fourth start past the window rolls the window forward the way
+	// systemd does, instead of disabling the job permanently. A panic or
+	// signal kill on the final attempt is still bounded: the pre-record
+	// already counted it, and the next launch's pre-check stands the job
+	// down before re-entering the supervisor.
 	return err
 }
