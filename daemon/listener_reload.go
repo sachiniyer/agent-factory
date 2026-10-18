@@ -109,6 +109,13 @@ type webListeners struct {
 	// no freeze — its posture is fixed and no refusal retires it.
 	webFreeze  postureFreeze
 	postureSeq uint64
+	// boundSeq is the seq of the generation currently bound (webHandle), set at
+	// adoption. The relaxation pin needs it to draw `through` at boundSeq-1:
+	// generations older than the bound one are all retired or never-served and
+	// may still drain — they freeze — while the bound generation itself must
+	// keep the live read or an allowed posture change would never reach it.
+	// Stale whenever webHandle is nil; only consulted while one is bound.
+	boundSeq uint64
 
 	// postureBeforeSwap is the config the daemon's sockets were serving under
 	// when the current ApplyConfig began — captured at retireWebBeforePostureSwap
@@ -230,8 +237,13 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 // retained socket whose failed rebind left it answering on an address the file
 // no longer names. Retiring here — before the publish — closes that window.
 //
-// Two judgments:
+// Three judgments:
 //
+//   - The apply RELAXES auth (require_token or the loopback switch dropping):
+//     pin the kind's shared freeze onto the serving config before anything
+//     publishes, covering every generation already issued — including ones an
+//     earlier rebind or opt-out retired that are still draining off the
+//     handle's view entirely (#5137 review).
 //   - The CONFIGURED posture refused (non-loopback network.listen_addr, token
 //     off, no opt-in): refuseWebLocked retires the socket AND records the
 //     refusal — the same work reconcile does post-swap, run early under the
@@ -252,6 +264,26 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	// each gate onto, so drain-window requests keep the posture they were
 	// admitted with rather than the refused one about to publish.
 	wl.postureBeforeSwap = wl.manager.Config()
+	// A relaxation apply is a drain-window hazard even when NOTHING is refused:
+	// generations already retired by a rebind or opt-out are invisible to the
+	// serving-socket check below (webHandle names only the newest generation)
+	// but still gate requests on the live read — which this publish is about
+	// to weaken under them (#5137 review). Pin every issued generation onto
+	// the serving config before any retire or swap. Over-pinning is safe: the
+	// pin value is the config those generations were admitted under, so a
+	// drain can never evaluate a posture weaker than the one that let it in.
+	if authPostureRelaxed(wl.postureBeforeSwap, newCfg) {
+		// `through` stops before the bound generation: it stays on the live
+		// read so the posture it was just written picks up normally. Nothing
+		// bound means every issued generation is retired or never-served, so
+		// the pin reaches the newest seq — a still-draining opt-out or rebind
+		// leftover is exactly who needs it.
+		through := wl.postureSeq
+		if wl.webHandle != nil && wl.boundSeq > 0 {
+			through = wl.boundSeq - 1
+		}
+		wl.webFreeze.pin(wl.postureBeforeSwap, through)
+	}
 	if refusal := config.ListenerBindRefusal(newCfg); refusal != "" {
 		if wl.webRefusal != refusal || wl.webHandle != nil {
 			wl.refuseWebLocked(newCfg.ListenAddr, refusal)
@@ -304,6 +336,26 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	log.ErrorLog.Printf("the control listener still bound on %s is retired before its token requirement is lifted: that address is "+
 		"network-reachable, and af refuses to carry it into an unauthenticated posture without network.allow_unauthenticated_network — "+
 		"the configured network.listen_addr %q is unaffected and still applies in this apply", addr, newCfg.ListenAddr)
+}
+
+// authPostureRelaxed reports whether the incoming config admits a peer old
+// would have rejected: the token requirement dropping, or the loopback-token
+// requirement dropping while the incoming posture is tokenless (the loopback
+// switch is inert while require_token holds). It is the kind-freeze trigger
+// for NON-refusal applies (#5137 review): a generation retired by a rebind or
+// opt-out is invisible to the serving-socket refusal check — webHandle names
+// only the newest generation — yet its draining handlers still read the live
+// posture, which the publish is about to weaken beneath them. Tightening
+// deliberately does not match: a stronger posture must reach drains live
+// (#2480), so only the weakening direction freezes.
+func authPostureRelaxed(old, incoming *config.Config) bool {
+	if old == nil || incoming == nil {
+		return false
+	}
+	if old.RequireToken && !incoming.RequireToken {
+		return true
+	}
+	return !incoming.RequireToken && old.RequireLoopbackToken && !incoming.RequireLoopbackToken
 }
 
 // bindWebLocked (re)binds the control-plane web listener to the config address
@@ -464,6 +516,7 @@ func (wl *webListeners) adoptWebListenerLocked(addr string, handle *tcpListenerH
 	wl.webHandle = handle
 	wl.webConfigAddr = addr
 	wl.webBoundAddr = info.Addr
+	wl.boundSeq = wl.postureSeq // the adopted generation is always the seq webBind just issued
 	wl.webGen++
 	gen := wl.webGen
 	if wl.manager.lifecycle != nil {

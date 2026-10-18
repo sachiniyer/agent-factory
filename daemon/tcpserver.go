@@ -258,7 +258,12 @@ func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 		return
 	}
 	f.mu.Lock()
-	f.cfg, f.through = cfg, through
+	f.cfg = cfg
+	// Coverage is monotonic: a generation inside one pin must never fall out
+	// of the freeze because a later pin named a smaller through.
+	if through > f.through {
+		f.through = through
+	}
 	f.mu.Unlock()
 }
 

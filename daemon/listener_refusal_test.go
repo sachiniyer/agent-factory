@@ -531,6 +531,56 @@ func TestPostureFreezeNeverPinsARefusedConfig(t *testing.T) {
 	require.Equal(t, uint64(3), f.through, "the rejected pin must not advance the covered generations")
 }
 
+// TestAuthRelaxationFreezesDrainingGenerations pins the shape from the review
+// finding exactly: a tokened network listener rebound to a tokened loopback
+// one leaves the first generation draining off webHandle's view, and a second
+// apply that drops require_token must still freeze it — the serving-socket
+// refusal check sees only the loopback generation and never fires.
+func TestAuthRelaxationFreezesDrainingGenerations(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	// The normal rebind: generation 2 (loopback) supersedes generation 1
+	// (network), which keeps draining invisibly to webHandle/webConfigAddr.
+	rebind := *cfg
+	rebind.ListenAddr = "127.0.0.1:0"
+	failed, err := wl.reconcile(&rebind)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	// The relaxation apply the finding describes: tokenless loopback is an
+	// ALLOWED config, so no refusal path runs — yet generation 1's still-
+	// draining network socket must not start answering unauthenticated.
+	next := *cfg
+	next.ListenAddr = "127.0.0.1:0"
+	next.RequireToken = false
+	require.Empty(t, config.ListenerBindRefusal(&next),
+		"tokenless loopback is an allowed posture — no refusal fires")
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	wl.webFreeze.mu.Lock()
+	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	wl.webFreeze.mu.Unlock()
+	require.NotNil(t, frozen,
+		"an auth-relaxing apply must freeze draining generations onto the serving config")
+	require.True(t, frozen.RequireToken,
+		"the retired network generation keeps requiring the token it was admitted under")
+	require.Equal(t, uint64(1), through,
+		"the relaxation pin covers generation 1 but NOT generation 2 — the bound listener must keep the live read or the allowed apply would never reach it")
+
+	// Generation 2 is still bound and serves the posture just written;
+	// generation 1 stays on the tokened config it was admitted under.
+	bound := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 2}
+	require.False(t, bound.current().RequireToken,
+		"the bound loopback generation reads live and serves the allowed tokenless posture")
+	draining := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
+	require.True(t, draining.current().RequireToken,
+		"the retired network generation keeps gating on the config that admitted it")
+}
+
 // TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side
 // (#2480): a retire that is NOT a refusal — here the listen_addr="" opt-out —
 // leaves the gate on the live read, so an auth tightening keeps applying to the
