@@ -285,6 +285,16 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// RebuildTeardownPending records that a recovery rebuilt this session's
+	// worktree at a new identity while sessions bound to it still answered
+	// has-session, and that the teardown of those stale panes has not been
+	// confirmed complete. A rebuild committed before the failure is durable
+	// state; the next attempt cannot re-derive it from os.Stat (the rebuilt
+	// directory exists), so the obligation to remove the pre-rebuild panes —
+	// whose cwd is the deleted inode and can never be inside the new checkout
+	// — must persist too (#5370, #5371 review). Set at rebuild commit, cleared
+	// only after every bound name and cleanup handle is confirmed gone.
+	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`

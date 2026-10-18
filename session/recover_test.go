@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,73 @@ func recordingExec(alive map[string]bool, newSessions *int, spawns *[]string) cm
 			return inner.Run(cmd)
 		},
 		OutputFunc: inner.Output,
+	}
+}
+
+// deadPaneAwareExec teaches an executor to answer the pane-row reads the
+// waiting teardown path (CloseAndWaitForPaneExit) makes — list-panes and
+// display-message — instead of countingExec's blanket "content", which parses
+// as an invalid pane pid and turns every teardown confirmation into a
+// refusal. Sessions in `existing` (kept in step with kill/new-session) answer
+// with a held dead-pane row; absent ones answer with tmux's exit-1
+// "can't find session" diagnostic so absence classifies as determinate empty.
+func deadPaneAwareExec(existing map[string]bool, inner cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	state := map[string]bool{}
+	for k, v := range existing {
+		state[k] = v
+	}
+	var missing *exec.ExitError
+	if err := exec.Command("sh", "-c", "exit 1").Run(); err != nil {
+		missing, _ = err.(*exec.ExitError)
+	}
+	nameOf := func(cmd *exec.Cmd) string {
+		// `-t` names the target for list-panes/display-message/kill-session;
+		// `-s` names it only for new-session — for list-panes `-s` is a
+		// flagless "session format" switch that must not eat the next arg.
+		takeValue := !strings.Contains(cmd.String(), "list-panes")
+		for i, a := range cmd.Args {
+			switch {
+			case a == "-t" && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case a == "-s" && takeValue && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimSuffix(strings.TrimPrefix(a, "-t="), ":")
+			case strings.HasPrefix(a, "-s=") && takeValue:
+				return strings.TrimSuffix(strings.TrimPrefix(a, "-s="), ":")
+			}
+		}
+		return ""
+	}
+	return cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if err := inner.Run(cmd); err != nil {
+				return err
+			}
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "new-session"):
+				state[nameOf(cmd)] = true
+			case strings.Contains(s, "kill-session"):
+				delete(state, nameOf(cmd))
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			if !strings.Contains(s, "list-panes") && !strings.Contains(s, "display-message") {
+				return inner.Output(cmd)
+			}
+			name := nameOf(cmd)
+			if state[name] {
+				return []byte("999999|1|\n"), nil
+			}
+			if missing == nil {
+				return nil, errors.New("can't find session: " + name)
+			}
+			missing.Stderr = []byte("can't find session: " + name)
+			return nil, missing
+		},
 	}
 }
 
@@ -352,7 +420,8 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 
 	var newSessions int
 	var spawns []string
-	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -444,7 +513,8 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 
 	var newSessions int
 	var spawns []string
-	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -629,7 +699,8 @@ func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
 	// panes whose cwd is the deleted inode.
 	var newSessions int
 	var spawns, kills []string
-	inner := recordingExec(map[string]bool{agentName: true, shellName: true}, &newSessions, &spawns)
+	inner := deadPaneAwareExec(map[string]bool{agentName: true, shellName: true},
+		recordingExec(map[string]bool{agentName: true, shellName: true}, &newSessions, &spawns))
 	exec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "kill-session") {
@@ -675,4 +746,101 @@ func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
 	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
 	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
 		"the respawn must keep the recorded conversation via the resume path")
+}
+
+// TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry is the retry half of
+// the #5370 property (#5371 review): when a rebuild commits but a stale-pane
+// teardown fails mid-attempt, the next Recover MUST NOT skip the teardown just
+// because os.Stat now sees the rebuilt directory — the rebuilt gate is
+// re-derived per attempt while a stale survivor still answers has-session.
+// Without a durable indication the second attempt reattaches the stale pane
+// and ConfirmLive binds it as Running — the original defect through a retry.
+func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-retry"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_retry"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-retry")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-retry",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-retry",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	// The stale agent session survives; kill-session is wedged on attempt 1
+	// only, so the rebuild commits while the teardown fails.
+	var newSessions int
+	var spawns, kills []string
+	inner := deadPaneAwareExec(map[string]bool{agentName: true},
+		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+	failKills := true
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				kills = append(kills, cmd.String())
+				if failKills {
+					return errors.New("tmux wedged on kill-session")
+				}
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+
+	require.Error(t, restored.Recover(), "attempt 1 must fail — the stale pane refused to die")
+	require.DirExists(t, worktreePath, "the rebuild committed before the teardown failed")
+	assert.Equal(t, 0, newSessions, "no replacement may launch while the stale pane survives")
+
+	// Attempt 2: the worktree now EXISTS, so a re-derived rebuild flag would
+	// skip teardown and reattach the stale survivor.
+	failKills = false
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Contains(t, strings.Join(kills, "\n"), agentName,
+		"the retry must still tear down the stale pane from the earlier rebuild")
+	require.Len(t, spawns, 1, "the retry must respawn the agent inside the rebuilt worktree")
+	assert.Contains(t, spawns[0], "codex resume "+conversationID)
 }

@@ -563,6 +563,28 @@ func (i *Instance) MarkLoadRuntimeReplacedForTest() {
 	i.markLoadRuntimeReplaced()
 }
 
+// RebuildTeardownPending reports whether a recovery rebuilt the worktree at a
+// new identity without confirming the stale-pane teardown — see the field's
+// comment on Instance for the retry hazard it closes.
+func (i *Instance) RebuildTeardownPending() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.rebuildTeardownPending
+}
+
+// SetRebuildTeardownPending records or clears the stale-pane teardown
+// obligation a worktree rebuild commits. Transitions touch the row so the
+// durable state survives the daemon, not only the attempt that set it.
+func (i *Instance) SetRebuildTeardownPending(pending bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.rebuildTeardownPending == pending {
+		return
+	}
+	i.rebuildTeardownPending = pending
+	i.touchLocked()
+}
+
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
 // previous daemon would have left behind (#2669). Test-only: the real flow
 // writes them from CloseTab's commit and reads them back through

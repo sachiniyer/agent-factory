@@ -150,21 +150,70 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// void (#5370). Kill every surviving name so the restores below spawn
 	// fresh panes inside the new worktree; the agent keeps its conversation
 	// through the recorded resume path.
+	//
+	// The obligation is durable: a rebuild that commits and then fails before
+	// the teardown confirms leaves RebuildTeardownPending set, so the next
+	// attempt still removes the stale names instead of re-deriving `rebuilt`
+	// from the now-present directory (#5371 review).
 	if rebuilt {
+		i.SetRebuildTeardownPending(true)
+	}
+	if teardownPending := i.RebuildTeardownPending(); teardownPending {
+		// Durable state was committed — this attempt's rebuild, or the earlier
+		// one the pending flag survived — so every failure below carries the
+		// committed-rebuild marker, not only the ones on a fresh rebuild.
+		committed := rebuilt || teardownPending
 		i.mu.RLock()
 		stale := make([]*tmux.TmuxSession, 0, len(i.Tabs))
+		processTabs := make([]*Tab, 0, len(i.Tabs))
 		for _, tab := range i.Tabs {
-			if tab.tmux != nil {
-				stale = append(stale, tab.tmux)
+			if tab.tmux == nil {
+				continue
 			}
+			if tab.Kind == TabKindProcess {
+				processTabs = append(processTabs, tab)
+				continue
+			}
+			stale = append(stale, tab.tmux)
 		}
 		i.mu.RUnlock()
+
+		// Process tabs keep their recorded outcome: a finished command's pane
+		// is output the row must not lose, and a still-running one is stopped
+		// through the path that says why (#5371 review).
+		for _, tab := range processTabs {
+			if keepFinishedProcessPane(i, tab) {
+				continue
+			}
+			if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {
+				return markRecoverRebuilt(committed, fmt.Errorf(
+					"recover: could not stop process tab %q surviving in the deleted worktree: %w",
+					tab.Name, err))
+			}
+			stampProcessTabStopped(i, tab, TabStoppedByWorktreeRebuild)
+		}
+
 		for _, staleSession := range stale {
-			if _, err := staleSession.Close(); err != nil {
-				return markRecoverRebuilt(rebuilt, fmt.Errorf(
+			// Wait for the pane's process tree to exit before launching a
+			// replacement: a stale agent can still be flushing provider state
+			// or touching the recreated checkout by absolute path (#5371
+			// review).
+			if _, err := staleSession.CloseAndWaitForPaneExit(); err != nil {
+				return markRecoverRebuilt(committed, fmt.Errorf(
 					"recover: could not stop the pane surviving in the deleted worktree: %w", err))
 			}
 		}
+
+		// Tabs already removed from the roster can still own live sessions via
+		// their durable cleanup handles — kill what answers, keep what does
+		// not, and never drop a handle without a confirmed kill (#5371 review).
+		if _, remaining := i.RetryPendingTabCleanup(); remaining > 0 {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: %d stale session(s) behind pending tab cleanup could not be confirmed dead in the deleted worktree",
+				remaining))
+		}
+
+		i.SetRebuildTeardownPending(false)
 	}
 
 	program, proof := respawnLaunchProgram(

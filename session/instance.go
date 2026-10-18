@@ -71,6 +71,15 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// rebuildTeardownPending records that a recovery rebuilt the worktree at a
+	// new identity but did not finish tearing down the sessions that survived
+	// the deletion. `rebuilt` inside respawnWithConversation is re-derived per
+	// attempt from os.Stat, which sees the rebuilt directory on the retry and
+	// reports false — without this flag a partial teardown would let the next
+	// attempt reattach the stale pane and ConfirmLive it (#5371 review). Set
+	// when the rebuild commits, cleared only after every bound session and
+	// pending-cleanup handle is confirmed gone.
+	rebuildTeardownPending bool
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT
