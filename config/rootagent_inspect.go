@@ -70,18 +70,6 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
 }
 
-// ResolveRootAgentForInspectionWithConfigContext is the bounded diagnostic
-// form used by non-interactive inspections. Unlike the human-invoked explain
-// path above, every repository probe shares the caller's deadline and an
-// unanswered legacy lookup is returned as an error rather than read as absent.
-func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
-	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
-	if err != nil {
-		return ResolvedValue{}, err
-	}
-	return snapshot.ResolvedRootAgent(), nil
-}
-
 // RootAgentInspectionSnapshot binds a resolved root-agent profile to the exact
 // personal-project config document read while producing it. Diagnostics that
 // subsequently resolve program_overrides through ResolveConfigForRepoContext
