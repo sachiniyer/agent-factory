@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -58,6 +59,14 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		return "", fmt.Errorf("cannot push worktree %s: branch name is empty", g.worktreePath)
 	}
 
+	// Probe the worktree's PARENT, not the tracked tree itself: the parent
+	// hosts the worktree directory, so it answers the same filesystem question
+	// (and the common-dir probe below covers the gitdir filesystem), while a
+	// probe file left behind by a failed cleanup lands outside `git add -A`'s
+	// reach — inside the tree it would be staged and pushed as workspace
+	// content on the next archive attempt (#5295 review).
+	probeDir := filepath.Dir(g.worktreePath)
+
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to
 	// commit and we push the committed history as-is.
@@ -74,14 +83,14 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// beneath it, which is the same answer for less work on a big tree.
 	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
-		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), g.worktreePath)
+		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
 	}
 	if strings.TrimSpace(status) != "" {
 		if _, err := g.runGitCommand(g.worktreePath, "add", "-A"); err != nil {
-			return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", err), g.worktreePath)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", err), probeDir)
 		}
 		if _, err := g.runGitCommand(g.worktreePath, "commit", "--no-verify", "-m", archiveSnapshotMessage); err != nil {
-			return "", g.annotateGitWriteError(fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err), g.worktreePath)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err), probeDir)
 		}
 	}
 
@@ -95,7 +104,7 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	refspec := "HEAD:refs/heads/" + branch
 	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
-			branch, strings.TrimSpace(out), err), g.worktreePath)
+			branch, strings.TrimSpace(out), err), probeDir)
 	}
 	return branch, nil
 }

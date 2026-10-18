@@ -195,6 +195,42 @@ func TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached(t *testing.T) {
 		"uncommitted work committed on a detached HEAD must survive on the session branch")
 }
 
+// TestSnapshotAndPushBranch_ProbeStaysOutOfTree is the #5295-review regression:
+// a write probe whose cleanup fails must never leave a 1 MiB
+// .af-add-probe-* inside the tracked worktree, where a later archive retry's
+// `git add -A` would stage it as user content. The push path probes the
+// worktree's PARENT — same filesystem answer, outside the tree.
+func TestSnapshotAndPushBranch_ProbeStaysOutOfTree(t *testing.T) {
+	sandboxHome(t)
+	gw, _ := pushTestRepo(t, "root/probe")
+	wt := gw.GetWorktreePath()
+
+	// Force the push to fail so annotateGitWriteError runs: repoint origin at
+	// a path that does not exist.
+	runGit(t, gw.GetRepoPath(), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	var probed []string
+	old := writeSpaceProbe
+	writeSpaceProbe = func(dir string) error {
+		probed = append(probed, dir)
+		return nil
+	}
+	defer func() { writeSpaceProbe = old }()
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err, "push to a dead origin must fail")
+
+	require.NotEmpty(t, probed, "a failed git write must run the probe")
+	for _, dir := range probed {
+		rel, relErr := filepath.Rel(wt, dir)
+		require.NoError(t, relErr)
+		assert.False(t, rel == "." || !strings.HasPrefix(rel, ".."),
+			"probe dir %s must not be the tracked worktree or inside it", dir)
+	}
+	matches, _ := filepath.Glob(filepath.Join(wt, ".af-add-probe-*"))
+	assert.Empty(t, matches, "no probe debris inside the tracked worktree")
+}
+
 // TestSnapshotAndPushBranch_RejectsExternalWorktree pins that an in-place/external
 // worktree (the user's own tree) is never pushed by the archive primitive.
 func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {

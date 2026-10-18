@@ -55,14 +55,27 @@ var writeSpaceProbe = func(dir string) error {
 		serr = f.Sync()
 	}
 	cerr := f.Close()
-	_ = os.Remove(f.Name())
+	rerr := os.Remove(f.Name())
 	if werr != nil {
 		return werr
 	}
 	if serr != nil {
 		return serr
 	}
-	return cerr
+	if cerr != nil {
+		return cerr
+	}
+	if rerr != nil {
+		// The write proved the filesystem writable, so this is not capacity
+		// evidence — but a silent leftover probe file is litter (and a
+		// staging hazard where a probe target is a tracked tree). Surface it:
+		// the caller's join records it in the error, and because
+		// classification keys on errnos, an ordinary unlink failure still
+		// leaves the git error structural while one carrying a resource errno
+		// is honest environmental evidence (#5295 review).
+		return fmt.Errorf("probe write verified the filesystem, but removing probe file %s failed: %w", f.Name(), rerr)
+	}
+	return nil
 }
 
 // gitCommonDir resolves the repository's Git common directory — the place
@@ -103,10 +116,10 @@ var gitCommonDir = func(g *GitWorktree) (string, error) {
 // too — an unanswerable `rev-parse` is itself evidence about the
 // environment (a fork that fails carries its resource errno).
 //
-// The joined error classifies environmental only when a probe actually
-// fails: a write to that filesystem just failed with the errno. When every
-// probe succeeds the git error returns unchanged, so an ordinary failure on
-// writable filesystems stays structural.
+// The joined error classifies environmental only when a probe reports a
+// resource errno: a write, sync, or unlink to that filesystem just failed
+// with it. When every probe succeeds the git error returns unchanged, so an
+// ordinary failure on writable filesystems stays structural.
 //
 // False positive: a permanent non-space failure (bad ref, stale registration)
 // while a covered filesystem is coincidentally full waits environmentally —
