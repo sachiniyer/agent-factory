@@ -575,14 +575,52 @@ func (i *Instance) RebuildTeardownPending() bool {
 // SetRebuildTeardownPending records or clears the stale-pane teardown
 // obligation a worktree rebuild commits. Transitions touch the row so the
 // durable state survives the daemon, not only the attempt that set it.
-func (i *Instance) SetRebuildTeardownPending(pending bool) {
+//
+// A transition also fires rebuildTeardownNotify — the daemon's synchronous
+// row write — so a restart can never reload the flag a successful attempt
+// already discharged: clearing without that checkpoint would let a daemon
+// exit after the replacements spawned but before the settlement write
+// resurrect `true` and kill the fresh panes on the next startup. On a failed
+// clear-checkpoint the marker is restored and the error returned, so the
+// caller keeps the row Lost instead of spawning on an unrecorded discharge.
+// A failed set-checkpoint likewise keeps the flag set — the rebuild has
+// committed either way — and propagates the error so the attempt reports it.
+func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if i.rebuildTeardownPending == pending {
-		return
+		i.mu.Unlock()
+		return nil
 	}
 	i.rebuildTeardownPending = pending
+	notify := i.rebuildTeardownNotify
 	i.touchLocked()
+	i.mu.Unlock()
+	if notify == nil {
+		return nil
+	}
+	if err := notify(i); err != nil {
+		// The transition did not land durably, so the disk record is still the
+		// pre-transition value — for BOTH directions that is "the obligation may
+		// exist": either it was just committed and unrecorded, or its discharge
+		// was refused. Leaving the flag set keeps memory honest with the disk a
+		// restart would reload, and the error tells the caller to stay Lost.
+		i.mu.Lock()
+		i.rebuildTeardownPending = true
+		i.touchLocked()
+		i.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// SetRebuildTeardownNotify installs the synchronous persist callback a
+// rebuildTeardownPending transition fires. It is in-memory — a recover entry
+// point installs it for the attempt about to run, and a nil notify simply
+// skips the checkpoint (the settlement write still carries the flag).
+func (i *Instance) SetRebuildTeardownNotify(notify func(*Instance) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.rebuildTeardownNotify = notify
 }
 
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a

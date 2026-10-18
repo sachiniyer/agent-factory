@@ -844,3 +844,142 @@ func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 	require.Len(t, spawns, 1, "the retry must respawn the agent inside the rebuilt worktree")
 	assert.Contains(t, spawns[0], "codex resume "+conversationID)
 }
+
+// A committed rebuild whose stale-pane teardown is undischarged must keep the
+// row Lost against ANY positive observation: a live answer can still be the
+// pane bound to the deleted inode, which a status poll cannot tell apart from
+// a fresh one. Lifting the row to Running/Ready would drop it out of the
+// restore loop and strand the teardown (#5371 review: P1 live-status gate).
+func TestTransition_RebuildTeardownPendingHoldsObservedLivenessLost(t *testing.T) {
+	i := &Instance{Title: "pending", liveness: LiveLost}
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+
+	for _, observed := range []Liveness{LiveRunning, LiveReady, LiveLimitReached, LiveDead, LiveArchived} {
+		require.NoError(t, i.Transition(ObserveLiveness(observed)))
+		assert.Equal(t, LiveLost, i.GetLiveness(),
+			"observed %v must not lift a pending-teardown row out of Lost", observed)
+	}
+	// A Lost observation is the poll's own mark — it still applies.
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
+	assert.Equal(t, LiveLost, i.GetLiveness())
+
+	// Even a liveness that slipped to Running before the flag was set is
+	// pulled back: pending means the live answer is unverifiable.
+	running := &Instance{Title: "pending-running", liveness: LiveRunning}
+	require.NoError(t, running.SetRebuildTeardownPending(true))
+	require.NoError(t, running.Transition(ObserveLiveness(LiveReady)))
+	assert.Equal(t, LiveLost, running.GetLiveness(),
+		"a pending row must not keep a positive liveness it cannot verify")
+
+	// Once the obligation is discharged, observations apply again.
+	require.NoError(t, i.SetRebuildTeardownPending(false))
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
+	assert.Equal(t, LiveRunning, i.GetLiveness())
+}
+
+// The durable contract behind the flag: every transition must land on disk
+// through the installed notify before the dependent step runs, and a refused
+// write leaves the flag SET — the obligation may exist either way (unrecorded
+// commit or unrecorded discharge), so "set" is the only honest post-error
+// state (#5371 review: P2 durable discharge).
+func TestSetRebuildTeardownPending_CheckpointContract(t *testing.T) {
+	var transitions []bool
+	i := &Instance{Title: "ckpt"}
+	i.SetRebuildTeardownNotify(func(inst *Instance) error {
+		transitions = append(transitions, inst.RebuildTeardownPending())
+		return nil
+	})
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+	require.NoError(t, i.SetRebuildTeardownPending(false))
+	assert.Equal(t, []bool{true, false}, transitions,
+		"the notify must observe the flag already in its new state")
+
+	failure := errors.New("disk wedged")
+	i.SetRebuildTeardownNotify(func(*Instance) error { return failure })
+	require.ErrorIs(t, i.SetRebuildTeardownPending(true), failure)
+	assert.True(t, i.RebuildTeardownPending(),
+		"a failed set-checkpoint keeps the flag: the rebuild committed either way")
+	require.ErrorIs(t, i.SetRebuildTeardownPending(false), failure)
+	assert.True(t, i.RebuildTeardownPending(),
+		"a failed clear-checkpoint restores the flag: the discharge never landed")
+}
+
+// The clear-checkpoint must precede the first replacement spawn, or a daemon
+// exit in the window between them reloads `true` and kills the fresh panes
+// (#5371 review). The notify sees zero new-session calls at clear time, and a
+// refused clear leaves the row Lost with nothing spawned.
+func TestRecover_RebuildTeardownClearPrecedesRespawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-clear"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_clearckpt"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-clear")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-clear",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-clear",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{agentName: true},
+		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+
+	clearSpawnCount := -1
+	var notifyCalls int
+	restored.SetRebuildTeardownNotify(func(inst *Instance) error {
+		notifyCalls++
+		if !inst.RebuildTeardownPending() {
+			clearSpawnCount = newSessions
+		}
+		return nil
+	})
+	require.NoError(t, restored.Recover())
+	require.Equal(t, 2, notifyCalls, "set at rebuild-commit + clear after confirmed teardown")
+	assert.Equal(t, 0, clearSpawnCount,
+		"the cleared obligation must be durable before any replacement launches")
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Equal(t, 1, newSessions, "the agent respawned after the checkpointed clear")
+}

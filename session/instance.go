@@ -80,6 +80,15 @@ type Instance struct {
 	// when the rebuild commits, cleared only after every bound session and
 	// pending-cleanup handle is confirmed gone.
 	rebuildTeardownPending bool
+	// rebuildTeardownNotify is the daemon-installed persist callback fired on
+	// every rebuildTeardownPending transition, so a durable obligation and its
+	// durable discharge both land before the code that depends on them runs —
+	// the clear must be on disk before a replacement pane spawns, or a daemon
+	// exit in that window reloads a stale `true` and tears the FRESH panes
+	// down as though they belonged to the deleted worktree (#5371 review).
+	// In-memory only: the flag matters only inside Recover, and every Recover
+	// entry point installs it anew.
+	rebuildTeardownNotify func(*Instance) error
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT

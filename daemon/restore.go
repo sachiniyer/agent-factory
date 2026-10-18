@@ -435,6 +435,12 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// instead of re-entering RuntimeActionRecoverLost, which still requires OpNone
 	// and would now refuse its own operation's fence. ConfirmLive clears the fence
 	// on success; the deferred EndRecoverFence above lowers it on failure.
+	//
+	// A rebuild teardown obligation must be durable when it is set and again
+	// when it is discharged — before any replacement launches (#5371 review).
+	instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)

@@ -156,7 +156,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// attempt still removes the stale names instead of re-deriving `rebuilt`
 	// from the now-present directory (#5371 review).
 	if rebuilt {
-		i.SetRebuildTeardownPending(true)
+		// Checkpoint the obligation at rebuild-commit, before the teardown
+		// runs: a daemon exit between the rebuild and the settlement write
+		// would otherwise reload a row that cannot tell a rebuild ever
+		// happened, and reattach the surviving stale panes (#5371 review).
+		if err := i.SetRebuildTeardownPending(true); err != nil {
+			return markRecoverRebuilt(true, fmt.Errorf(
+				"recover: could not make the stale-pane teardown obligation durable: %w", err))
+		}
 	}
 	if teardownPending := i.RebuildTeardownPending(); teardownPending {
 		// Durable state was committed — this attempt's rebuild, or the earlier
@@ -213,7 +220,16 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				remaining))
 		}
 
-		i.SetRebuildTeardownPending(false)
+		// Checkpoint the discharge BEFORE any replacement launches: a daemon
+		// exit between the spawn and the settlement write would reload the
+		// stale `true` and tear down the fresh panes as though they belonged
+		// to the deleted worktree (#5371 review). A failed checkpoint restores
+		// the flag, so the row stays Lost and a retry re-runs the confirmed
+		// teardown instead of spawning on an unrecorded clear.
+		if err := i.SetRebuildTeardownPending(false); err != nil {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: could not make the completed stale-pane teardown durable: %w", err))
+		}
 	}
 
 	program, proof := respawnLaunchProgram(
