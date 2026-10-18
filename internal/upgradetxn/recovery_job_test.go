@@ -539,6 +539,30 @@ func TestRenderLaunchdRecoveryPlistLogPathStableWhenTransactionDirMissing(t *tes
 		"the launchd recovery log path must not live in the transaction directory, which terminal cleanup removes and the adversarial shape never has — launchd would be unable to spawn the actor and the bound would never run")
 }
 
+// TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLog pins the fix for the
+// root-level recovery log the launchd job writes to the upgrade root: terminal
+// cleanup removes the recovery unit, the transaction directory, and the
+// recovery lock, but the per-transaction recovery log launchd created under
+// the upgrade root must also be removed so a completed upgrade does not leave a
+// potentially error-filled log permanently in the AF home.
+func TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLog(t *testing.T) {
+	txn := prepareRecoveryJobFixture(t, RecoveryJobLaunchd)
+	home := txn.Journal().HomeDir
+	id := txn.Journal().ID
+
+	logPath := launchdRecoveryLogPath(home, id)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logPath), 0o700))
+	require.NoError(t, os.WriteFile(logPath, []byte("launchd recovery log"), 0o600))
+	require.FileExists(t, logPath)
+
+	require.NoError(t, AbortPreparedTransaction(home, id),
+		"abort must remove the active journal and the inert artifacts it created")
+
+	_, err := os.Stat(logPath)
+	require.ErrorIs(t, err, os.ErrNotExist,
+		"terminal cleanup must remove the per-transaction launchd recovery log from the upgrade root")
+}
+
 func mustNewRecoveryJob(t *testing.T, kind RecoveryJobKind, id string) RecoveryJob {
 	t.Helper()
 	dir, err := canonicalExistingDir(t.TempDir())

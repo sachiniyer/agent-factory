@@ -478,12 +478,16 @@ func systemdQuoteArgument(value string) string {
 // in-process bound. The upgrade root survives transaction cleanup (only
 // transactions/<id> is removed) and is created by Prepare before the job is
 // installed, so the log path's parent exists for every shape the actor can.
+func launchdRecoveryLogPath(home, id string) string {
+	return filepath.Join(upgradeRoot(home), "recovery-"+id+".log")
+}
+
 func renderLaunchdRecoveryPlist(journal Journal) string {
 	var arguments strings.Builder
 	for _, argument := range recoveryCommand(journal) {
 		fmt.Fprintf(&arguments, "        <string>%s</string>\n", xmlEscape(argument))
 	}
-	logPath := xmlEscape(filepath.Join(upgradeRoot(journal.HomeDir), "recovery-"+journal.ID+".log"))
+	logPath := xmlEscape(launchdRecoveryLogPath(journal.HomeDir, journal.ID))
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

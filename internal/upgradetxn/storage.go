@@ -555,6 +555,11 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
 	}
+	if t.journal.RecoveryJob.Kind == RecoveryJobLaunchd {
+		if err := os.Remove(launchdRecoveryLogPath(t.journal.HomeDir, t.journal.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove inactive launchd recovery log: %w", err)
+		}
+	}
 	return nil
 }
 
