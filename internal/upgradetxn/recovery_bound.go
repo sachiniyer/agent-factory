@@ -28,6 +28,12 @@ const (
 	launchdRecoveryBurstLimit    = 3
 )
 
+// errAFHomeRemoved signals that the AF home or its upgrade storage was removed
+// while a stale launchd recovery job was still armed. boundLaunchdRecovery
+// treats it as a stand-down (exit 0) rather than recreating the deleted tree:
+// see ensureRecoveryRetryCounterDir.
+var errAFHomeRemoved = errors.New("upgrade home removed while recovery job still armed")
+
 // recoveryRetryCounter is the persisted attempt counter for the launchd
 // stand-down path. It lives in the transaction directory, so a successful
 // recovery's terminal cleanup removes it with the rest of the transaction
@@ -35,9 +41,18 @@ const (
 // restart a loop that already exhausted its budget: the counter survives the
 // reboot, the pre-check stands the actor down before it re-enters the
 // supervisor, matching systemd's "a failed unit stays failed until reset."
+//
+// Exhausted is set once the burst limit is reached and is sticky:
+// launchdRecoveryBudgetExhausted honors it regardless of the burst window, so
+// a reboot later than launchdRecoveryBurstInterval cannot restart a loop that
+// already stood down — the property systemd's "a failed unit stays failed
+// until reset" gives for free and launchd does not, and the load-bearing
+// guarantee when launchctl disable itself failed and the job is still armed.
+// Terminal cleanup removing the transaction directory is the explicit reset.
 type recoveryRetryCounter struct {
 	Attempts       int       `json:"attempts"`
 	FirstAttemptAt time.Time `json:"first_attempt_at"`
+	Exhausted      bool      `json:"exhausted"`
 }
 
 func recoveryRetryCounterPath(home, txnID string) string {
@@ -65,7 +80,8 @@ func readRecoveryRetryCounter(home, txnID string) (recoveryRetryCounter, bool) {
 // failing ledger write, a launchctl disable failure all happen after Prepare
 // made it); it is created best-effort for the adversarial shape where only
 // active.json survives, so the stand-down still lands when the journal cannot
-// be read.
+// be read — but never by recreating a home or upgrade storage an operator
+// deleted (see ensureRecoveryRetryCounterDir).
 func writeRecoveryRetryCounter(home, txnID string, counter recoveryRetryCounter) error {
 	if err := ensureRecoveryRetryCounterDir(home, txnID); err != nil {
 		return err
@@ -81,18 +97,46 @@ func writeRecoveryRetryCounter(home, txnID string, counter recoveryRetryCounter)
 	return nil
 }
 
+// clearRecoveryRetryCounter reconciles the pre-recorded attempt on a successful
+// recovery run: the budget resets so the next upgrade starts fresh, the way
+// systemd's window rolls forward on success. A missing file is not an error —
+// terminal cleanup removes the transaction directory (and the counter with
+// it) anyway, so a clear after cleanup is a no-op.
+func clearRecoveryRetryCounter(home, txnID string) error {
+	err := os.Remove(recoveryRetryCounterPath(home, txnID))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // ensureRecoveryRetryCounterDir guarantees the transaction directory exists
 // and is a real directory (not a symlink leaf, which would redirect the
 // counter outside the home). In production it already exists from Prepare, so
 // this is a stat; only the adversarial "only active.json" shape reaches the
-// MkdirAll, and the path is package-constructed under the canonical home so
-// ancestor symlinks are already resolved.
+// create path. It does NOT recreate a removed AF home or upgrade storage: if
+// the upgrade root is gone, the home was uninstalled or intentionally removed
+// while a stale launchd recovery job was still armed, and MkdirAll-ing a
+// fresh <home>/upgrade/transactions/<id> here would undo that removal and
+// orphan a config tree the operator deleted. In that case it returns
+// errAFHomeRemoved so boundLaunchdRecovery can stand the stale job down (exit
+// 0) without recreating anything. With the upgrade root present, MkdirAll
+// only creates the transactions parent and the transaction leaf, so the
+// adversarial shape still works without recreating the home or upgrade
+// storage above it. The path is package-constructed under the canonical home
+// so ancestor symlinks are already resolved.
 func ensureRecoveryRetryCounterDir(home, txnID string) error {
 	dir := transactionDir(home, txnID)
 	if err := validateDirectoryNoSymlink(dir); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("recovery retry counter directory is not a real directory: %w", err)
+	}
+	if err := validateDirectoryNoSymlink(upgradeRoot(home)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errAFHomeRemoved
+		}
+		return fmt.Errorf("validate upgrade storage root: %w", err)
 	}
 	if err := os.MkdirAll(dir, transactionDirMode); err != nil {
 		return fmt.Errorf("create recovery retry counter directory: %w", err)
@@ -117,16 +161,20 @@ func recoveryJobIsLaunchd(invocation RecoveryInvocation) bool {
 }
 
 // launchdRecoveryBudgetExhausted is the pre-check the actor runs before
-// re-entering the supervisor. Once the budget is exhausted in the current
-// burst window, the actor exits 0 without retrying, so a reboot's RunAtLoad
-// cannot restart a loop that already stood down — matching systemd's "a
-// failed unit stays failed until reset." A budget whose burst window has
-// elapsed since the first recorded attempt is not exhausted: it resets, the
-// way systemd's StartLimitIntervalSec rolls the window forward.
+// re-entering the supervisor. Once the budget is exhausted it stays stood down
+// regardless of the burst window — Exhausted is sticky until terminal cleanup
+// removes the counter — so a reboot's RunAtLoad cannot restart a loop that
+// already stood down, matching systemd's "a failed unit stays failed until
+// reset." A budget whose burst window has elapsed since the first recorded
+// attempt, and which has not been marked Exhausted, is not exhausted: the
+// window rolls forward the way systemd's StartLimitIntervalSec does.
 func launchdRecoveryBudgetExhausted(invocation RecoveryInvocation, now time.Time) bool {
 	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	if !ok {
 		return false
+	}
+	if counter.Exhausted {
+		return true
 	}
 	if !counter.FirstAttemptAt.IsZero() && now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
 		return false
@@ -134,56 +182,87 @@ func launchdRecoveryBudgetExhausted(invocation RecoveryInvocation, now time.Time
 	return counter.Attempts >= launchdRecoveryBurstLimit
 }
 
-// recordLaunchdRecoveryFailure records one failed recovery run and, when the
-// burst limit is reached within the interval, disarms the relaunch loop by
-// disabling the job — the same launchctl disable the supervisor's
-// DisableRecoveryJob uses, but derived from the transaction id alone so it
-// works even when the journal is corrupt. stoodDown is true when the budget
-// is exhausted in this call; the actor must exit 0 in that case to stop
-// launchd's KeepAlive.SuccessfulExit=false from relaunching. A disable
-// failure does not prevent the stand-down: exiting 0 alone stops the
-// immediate relaunch, and a persistent launchctl failure is exactly the
-// failure mode the budget exists to bound — not one that should keep the loop
-// alive. The persisted counter ensures the next boot's pre-check stands down
-// without retrying even when the disable could not stick, so a reboot cannot
-// turn a one-shot launchctl outage back into the unbounded loop.
-func recordLaunchdRecoveryFailure(
-	ctx context.Context,
-	invocation RecoveryInvocation,
-	controller RecoveryJobController,
-	now time.Time,
-) (stoodDown bool, retErr error) {
+// recordLaunchdRecoveryAttempt persists one recovery attempt BEFORE the actor
+// runs, so a deterministic panic, fatal runtime error, or signal termination
+// — which never returns to a post-run record path — still counts toward the
+// burst budget. launchd treats that abnormal exit as unsuccessful and
+// relaunches, which is exactly the unbounded loop this budget bounds. When
+// the increment reaches the burst limit it also marks the counter Exhausted,
+// so the budget stays sticky past the burst window even if the actor never
+// returns to stand down (a panic on the final attempt) or launchctl disable
+// later fails — the persisted marker is what keeps a later boot's RunAtLoad
+// stood down. Returns errAFHomeRemoved if the AF home/storage was removed and
+// must not be recreated; the caller stands down in that case.
+func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) error {
 	counter, _ := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	if counter.Exhausted {
+		// Already stood down — the pre-check should have caught this, but
+		// handle it defensively: don't increment past exhaustion.
+		return nil
+	}
 	if counter.FirstAttemptAt.IsZero() || now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
 		counter = recoveryRetryCounter{FirstAttemptAt: now}
 	}
 	counter.Attempts++
-	if err := writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter); err != nil {
-		return false, err
+	if counter.Attempts >= launchdRecoveryBurstLimit {
+		counter.Exhausted = true
 	}
-	if counter.Attempts < launchdRecoveryBurstLimit {
-		return false, nil
+	return writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter)
+}
+
+// standDownLaunchdRecoveryIfExhausted disarms the launchd relaunch loop when
+// the persisted counter has reached the burst limit. It does NOT increment:
+// the attempt was pre-recorded before the actor ran (recordLaunchdRecoveryAttempt).
+// It ensures the Exhausted marker is persisted (defensively, in case the
+// pre-record missed it) so a later boot's pre-check stays stood down past the
+// burst window, then runs launchctl disable — the same disable the
+// supervisor's DisableRecoveryJob uses, but derived from the transaction id
+// alone so it works even when the journal is corrupt. A disable failure does
+// not prevent the stand-down: exiting 0 alone stops the immediate relaunch,
+// the Exhausted marker keeps the next boot stood down without retrying, and a
+// persistent launchctl failure is exactly the loop the budget exists to bound
+// — not one that should keep the loop alive.
+func standDownLaunchdRecoveryIfExhausted(
+	ctx context.Context,
+	invocation RecoveryInvocation,
+	controller RecoveryJobController,
+) bool {
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	if !ok {
+		return false
+	}
+	if !counter.Exhausted && counter.Attempts < launchdRecoveryBurstLimit {
+		return false
+	}
+	if !counter.Exhausted {
+		counter.Exhausted = true
+		if err := writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter); err != nil {
+			log.WarningLog.Printf(
+				"upgrade recovery: launchd retry budget exhausted for transaction %s after %d attempts, but the exhausted marker could not be persisted (%v); standing down (exit 0) anyway — the at-limit counter still bounds reboots within the burst window",
+				invocation.TransactionID, counter.Attempts, err)
+		}
 	}
 	if err := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); err != nil {
 		log.WarningLog.Printf(
-			"upgrade recovery: launchd retry budget exhausted for transaction %s after %d attempts, but the recovery job could not be disabled (%v); standing down (exit 0) anyway to stop the relaunch loop — the persisted counter means the next boot's RunAtLoad stands down without retrying",
+			"upgrade recovery: launchd retry budget exhausted for transaction %s after %d attempts, but the recovery job could not be disabled (%v); standing down (exit 0) anyway to stop the relaunch loop — the persisted exhausted marker means the next boot's RunAtLoad stands down without retrying",
 			invocation.TransactionID, counter.Attempts, err)
-		return true, nil
+		return true
 	}
 	log.WarningLog.Printf(
 		"upgrade recovery: launchd retry budget exhausted for transaction %s after %d attempts; the recovery job has been disabled and the actor is standing down (exit 0) so launchd's KeepAlive.SuccessfulExit=false stops relaunching",
 		invocation.TransactionID, counter.Attempts)
-	return true, nil
+	return true
 }
 
 // boundLaunchdRecovery wraps the recovery actor runner with the launchd retry
 // budget. For non-launchd jobs (systemd self-bounds via StartLimit*; detached
 // never relaunches) it is a straight passthrough. For a launchd job it
 // pre-checks the persisted budget — standing down before re-entering the
-// supervisor if a prior run already exhausted it — runs the actor, and on a
-// failing run records the attempt, disarming the relaunch loop and exiting
-// 0 once the budget is reached. now is injected so the burst window is
-// testable without real time.
+// supervisor if a prior run already exhausted it — pre-records the attempt so
+// a panic or signal termination still counts, runs the actor, clears the
+// counter on success (the budget resets), and on a failing run stands the
+// job down and exits 0 once the budget is reached. now is injected so the
+// burst window is testable without real time.
 func boundLaunchdRecovery(
 	ctx context.Context,
 	invocation RecoveryInvocation,
@@ -195,14 +274,40 @@ func boundLaunchdRecovery(
 	if launchd && launchdRecoveryBudgetExhausted(invocation, now()) {
 		return nil
 	}
+	// Persist the attempt BEFORE running the recovery actor so a panic, fatal
+	// runtime error, or signal termination still counts toward the budget —
+	// launchd treats that abnormal exit as unsuccessful and relaunches, which
+	// is exactly the unbounded loop this budget bounds. A successful run
+	// reconciles by clearing the counter below; a failing run checks the
+	// budget after the actor returns and stands down if it is exhausted.
+	if launchd {
+		if err := recordLaunchdRecoveryAttempt(invocation, now()); err != nil {
+			if errors.Is(err, errAFHomeRemoved) {
+				// The AF home/storage was removed while a stale launchd job
+				// was still armed. Recreating it would undo the operator's
+				// removal; stand down (exit 0) so launchd stops relaunching and
+				// the removal stays stable.
+				return nil
+			}
+			return err
+		}
+	}
 	err := run()
 	if err == nil {
+		if launchd {
+			if clearErr := clearRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID); clearErr != nil {
+				// A clear failure does not undo the successful recovery; the
+				// transaction directory's terminal cleanup removes the
+				// counter anyway. Log and continue with the success.
+				log.WarningLog.Printf("upgrade recovery: could not clear launchd retry counter after a successful run for transaction %s: %v", invocation.TransactionID, clearErr)
+			}
+		}
 		return nil
 	}
 	if !launchd {
 		return err
 	}
-	if stoodDown, _ := recordLaunchdRecoveryFailure(ctx, invocation, controller, now()); stoodDown {
+	if standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller) {
 		return nil
 	}
 	return err

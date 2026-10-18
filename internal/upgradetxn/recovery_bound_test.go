@@ -76,8 +76,12 @@ func TestRecoveryJobIsLaunchdFallsBackToOSWhenJournalUnreadable(t *testing.T) {
 // TestLaunchdRecoveryBudgetExhaustedMatchesBurstAndInterval pins the
 // StartLimitBurst=3 / StartLimitIntervalSec=300 mirror: below-limit never
 // exhausts, at-limit within the window exhausts, after the interval the window
-// rolls forward (resets), and a corrupt counter resets rather than stranding
-// the actor in stand-down forever.
+// rolls forward (resets) for a NOT-yet-exhausted budget, a corrupt counter
+// resets rather than stranding the actor in stand-down forever, and an
+// Exhausted budget stays sticky past the burst window until terminal cleanup
+// removes the counter — the property a reboot later than the interval must not
+// restart a loop that already stood down (the load-bearing guarantee when
+// launchctl disable failed and the job is still armed).
 func TestLaunchdRecoveryBudgetExhaustedMatchesBurstAndInterval(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	start := time.Now()
@@ -98,7 +102,14 @@ func TestLaunchdRecoveryBudgetExhaustedMatchesBurstAndInterval(t *testing.T) {
 		"the burst limit within the interval must exhaust the budget")
 
 	require.False(t, launchdRecoveryBudgetExhausted(invocation, start.Add(launchdRecoveryBurstInterval+time.Second)),
-		"after the burst interval elapses the budget resets")
+		"after the burst interval elapses a not-yet-exhausted budget resets")
+
+	// An Exhausted budget stays sticky past the burst window: a reboot later
+	// than the interval must not restart a loop that already stood down.
+	counter.Exhausted = true
+	require.NoError(t, writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter))
+	require.True(t, launchdRecoveryBudgetExhausted(invocation, start.Add(launchdRecoveryBurstInterval+time.Second)),
+		"an exhausted budget must stay stood down past the burst window until terminal cleanup resets it")
 
 	// A corrupt counter resets the budget rather than stranding the actor.
 	require.NoError(t, os.WriteFile(recoveryRetryCounterPath(invocation.HomeDir, invocation.TransactionID),
@@ -107,31 +118,67 @@ func TestLaunchdRecoveryBudgetExhaustedMatchesBurstAndInterval(t *testing.T) {
 		"a corrupt counter must reset the budget, not strand the actor in stand-down")
 }
 
-// TestRecordLaunchdRecoveryFailureIncrementsAndStandsDownAtBurstLimit is the
-// core stand-down guard: the first N-1 failures return (false, nil) with no
-// launchctl (the actor keeps exiting non-zero so launchd keeps retrying, as
-// systemd would below StartLimitBurst), and the Nth within the window returns
-// (true, nil), fires launchctl disable on the deterministic label, and
-// persists Attempts=N. It also covers the interval-reset (a failure after the
-// interval starts a fresh window with Attempts=1).
-func TestRecordLaunchdRecoveryFailureIncrementsAndStandsDownAtBurstLimit(t *testing.T) {
+// TestRecordLaunchdRecoveryAttemptIncrementsAndMarksExhaustedAtBurstLimit is
+// the core pre-record guard: the first N-1 attempts persist Attempts=N with
+// Exhausted=false and fire no launchctl (the pre-record owns the count, not the
+// stand-down), and the Nth within the window persists Attempts=N with
+// Exhausted=true so the budget is sticky past the burst window even before the
+// post-failure stand-down runs. It also covers the interval-reset (an attempt
+// after the interval starts a fresh window with Attempts=1, Exhausted=false).
+func TestRecordLaunchdRecoveryAttemptIncrementsAndMarksExhaustedAtBurstLimit(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	start := time.Now()
+
+	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
+		counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+		require.True(t, ok)
+		require.Equal(t, attempt, counter.Attempts)
+		require.False(t, counter.Exhausted, "below the burst limit the budget must not be marked exhausted")
+	}
+
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(launchdRecoveryBurstLimit*time.Second)))
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.True(t, counter.Exhausted, "the burst limit must mark the budget exhausted so it stays sticky past the window")
+
+	// After the interval elapses, a fresh attempt on a NOT-yet-exhausted budget
+	// starts a new window with Attempts=1 — StartLimitIntervalSec rolls the
+	// window forward. (An Exhausted budget would not reach here: the pre-check
+	// stands it down before the pre-record.)
+	require.NoError(t, os.RemoveAll(recoveryRetryCounterPath(invocation.HomeDir, invocation.TransactionID)))
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(launchdRecoveryBurstInterval+5*time.Second)))
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, 1, counter.Attempts, "the first attempt after the interval starts a fresh window")
+	require.False(t, counter.Exhausted)
+}
+
+// TestStandDownLaunchdRecoveryIfExhaustedFiresDisableAtBurstLimit guards the
+// stand-down lever: below the limit it is a no-op (no launchctl), and at the
+// limit it fires launchctl disable on the deterministic label. The attempt was
+// pre-recorded by recordLaunchdRecoveryAttempt, so standDownLaunchdRecoveryIfExhausted
+// does not increment — it only reads the counter, ensures Exhausted is
+// persisted, and disables.
+func TestStandDownLaunchdRecoveryIfExhaustedFiresDisableAtBurstLimit(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
 	controller := runtime.controller()
 	start := time.Now()
 
 	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
-		stoodDown, err := recordLaunchdRecoveryFailure(context.Background(), invocation, controller,
-			start.Add(time.Duration(attempt)*time.Second))
-		require.NoError(t, err)
-		require.Falsef(t, stoodDown, "attempt %d must not stand down; the burst limit has not been reached", attempt)
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
+		require.False(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+			"below the burst limit the stand-down must not fire")
 		require.Empty(t, runtime.commands, "the disable must not fire before the budget is exhausted")
 	}
 
-	stoodDown, err := recordLaunchdRecoveryFailure(context.Background(), invocation, controller,
-		start.Add(launchdRecoveryBurstLimit*time.Second))
-	require.NoError(t, err)
-	require.True(t, stoodDown, "the third failure in the interval must stand down, mirroring StartLimitBurst=3")
+	// The Nth pre-record marks the budget exhausted; the post-failure
+	// stand-down then fires launchctl disable on the deterministic label.
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(launchdRecoveryBurstLimit*time.Second)))
+	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+		"the third failure in the interval must stand down, mirroring StartLimitBurst=3")
 	require.Equal(t, []recoveryCommandCall{{
 		name: "launchctl",
 		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
@@ -139,26 +186,17 @@ func TestRecordLaunchdRecoveryFailureIncrementsAndStandsDownAtBurstLimit(t *test
 
 	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	require.True(t, ok)
-	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
-
-	// After the interval elapses the next failure starts a fresh window with
-	// Attempts=1 — StartLimitIntervalSec rolls the window forward.
-	stoodDown, err = recordLaunchdRecoveryFailure(context.Background(), invocation, controller,
-		start.Add(launchdRecoveryBurstInterval+5*time.Second))
-	require.NoError(t, err)
-	require.False(t, stoodDown, "the first failure after the interval elapses starts a fresh window")
-	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
-	require.True(t, ok)
-	require.Equal(t, 1, counter.Attempts, "the burst window resets to a single attempt after the interval elapses")
+	require.True(t, counter.Exhausted, "the exhausted marker must be persisted so the budget stays sticky past the window")
 }
 
-// TestRecordLaunchdRecoveryFailureStandsDownEvenWhenDisableFails guards the
-// key invariant: the stand-down (exit 0) is NOT gated on the disable
+// TestStandDownLaunchdRecoveryIfExhaustedStandsDownEvenWhenDisableFails guards
+// the key invariant: the stand-down (exit 0) is NOT gated on the disable
 // succeeding. A persistent launchctl failure is exactly the loop the budget
-// bounds — not one that should keep it alive — and the persisted counter
-// ensures the next boot's pre-check stands down without retrying even when the
-// disable could not stick.
-func TestRecordLaunchdRecoveryFailureStandsDownEvenWhenDisableFails(t *testing.T) {
+// bounds — not one that should keep it alive — and the persisted Exhausted
+// marker ensures the next boot's pre-check stands down without retrying even
+// when the disable could not stick, which is the property a reboot later than
+// the burst window depends on.
+func TestStandDownLaunchdRecoveryIfExhaustedStandsDownEvenWhenDisableFails(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{
 		launchdUserID: 501,
@@ -167,30 +205,33 @@ func TestRecordLaunchdRecoveryFailureStandsDownEvenWhenDisableFails(t *testing.T
 	controller := runtime.controller()
 	start := time.Now()
 
-	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
-		stoodDown, err := recordLaunchdRecoveryFailure(context.Background(), invocation, controller,
-			start.Add(time.Duration(attempt)*time.Second))
-		require.NoError(t, err)
-		require.False(t, stoodDown)
+	for attempt := 1; attempt <= launchdRecoveryBurstLimit; attempt++ {
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
 	}
-	stoodDown, err := recordLaunchdRecoveryFailure(context.Background(), invocation, controller,
-		start.Add(launchdRecoveryBurstLimit*time.Second))
-	require.NoError(t, err, "a disable failure must not surface as an error; the actor would then exit 1 and relaunch")
-	require.True(t, stoodDown, "the disable failure must not prevent the stand-down")
+	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+		"the disable failure must not prevent the stand-down")
 	require.Equal(t, []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
 		runtime.commands[0].args)
+
+	// The Exhausted marker is what keeps a later boot stood down past the
+	// burst window when the disable could not stick. A reboot later than the
+	// interval must still stand down via the pre-check, not restart the loop.
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.True(t, counter.Exhausted)
+	require.True(t, launchdRecoveryBudgetExhausted(invocation, start.Add(launchdRecoveryBurstInterval+time.Second)),
+		"a reboot later than the burst interval must not restart a loop whose disable failed; the exhausted marker keeps it stood down")
 }
 
-// TestRecordLaunchdRecoveryFailureReturnsErrorWhenCounterUnwriteable guards
-// the disk-full/ledger-broken shape from the bug report: the counter write
-// fails, the actor returns the error (exit 1, relaunch) and the budget does
-// not stand down. The disable must not fire when the counter could not be
-// recorded. This is the one residual gap vs systemd's in-memory tracking, and
-// it self-limits — a full disk also bounds recovery.log growth.
-func TestRecordLaunchdRecoveryFailureReturnsErrorWhenCounterUnwriteable(t *testing.T) {
+// TestRecordLaunchdRecoveryAttemptReturnsErrorWhenCounterUnwriteable guards
+// the disk-full/ledger-broken shape from the bug report: the pre-record's
+// counter write fails, so the attempt is not counted and the budget does not
+// progress. The actor returns the error (exit 1, relaunch) — the budget does
+// not stand down, and no disable fires. This is the one residual gap vs
+// systemd's in-memory tracking, and it self-limits — a full disk also bounds
+// recovery.log growth.
+func TestRecordLaunchdRecoveryAttemptReturnsErrorWhenCounterUnwriteable(t *testing.T) {
 	invocation := launchdBoundFixture(t)
-	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
-	controller := runtime.controller()
 
 	// A symlinked transaction directory is rejected by validateDirectoryNoSymlink,
 	// so the counter cannot be persisted and the budget cannot progress.
@@ -198,11 +239,9 @@ func TestRecordLaunchdRecoveryFailureReturnsErrorWhenCounterUnwriteable(t *testi
 	require.NoError(t, os.RemoveAll(txnDir))
 	require.NoError(t, os.Symlink(t.TempDir(), txnDir))
 
-	stoodDown, err := recordLaunchdRecoveryFailure(context.Background(), invocation, controller, time.Now())
+	err := recordLaunchdRecoveryAttempt(invocation, time.Now())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "not a real directory")
-	require.False(t, stoodDown, "when the counter cannot persist the budget must not stand down; the actor keeps retrying")
-	require.Empty(t, runtime.commands, "the disable must not fire when the counter could not be recorded")
 }
 
 // TestBoundLaunchdRecoveryStandsDownAfterBurstLimitAndPreventsNextRun is the
@@ -210,8 +249,9 @@ func TestRecordLaunchdRecoveryFailureReturnsErrorWhenCounterUnwriteable(t *testi
 // error through (exit 1), the Nth stands down (nil so the actor exits 0) and
 // fires launchctl disable, and the (N+1)th invocation — a reboot's RunAtLoad —
 // stands down via the pre-check WITHOUT re-entering the supervisor, so a reboot
-// cannot restart the loop. That last assertion is the property systemd's "a
-// failed unit stays failed until reset" gives for free and launchd does not.
+// cannot restart the loop. A reboot later than the burst interval also stands
+// down via the sticky Exhausted marker — the property systemd's "a failed unit
+// stays failed until reset" gives for free and launchd does not.
 func TestBoundLaunchdRecoveryStandsDownAfterBurstLimitAndPreventsNextRun(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
@@ -247,22 +287,71 @@ func TestBoundLaunchdRecoveryStandsDownAfterBurstLimitAndPreventsNextRun(t *test
 	require.NoError(t, err)
 	require.Equal(t, launchdRecoveryBurstLimit, runCalls,
 		"the pre-check must stand down before re-entering the supervisor; a reboot must not restart the loop")
+
+	// A reboot later than the burst interval must ALSO stand down: the
+	// Exhausted marker is sticky, so a once-exhausted loop cannot restart on
+	// the next boot even after the window elapsed.
+	err = boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start.Add(launchdRecoveryBurstInterval + time.Hour) }, run)
+	require.NoError(t, err)
+	require.Equal(t, launchdRecoveryBurstLimit, runCalls,
+		"the sticky exhausted marker must keep a once-exhausted loop stood down past the burst window")
 }
 
-// TestBoundLaunchdRecoveryReturnsNilOnSuccessWithoutRecording guards that a
-// successful recovery records no attempt and touches no service manager — the
-// budget must not record a failure or persist a counter on the happy path.
-func TestBoundLaunchdRecoveryReturnsNilOnSuccessWithoutRecording(t *testing.T) {
+// TestBoundLaunchdRecoveryPreRecordsBeforeRunSoAPanicCounts guards the P1
+// property: the attempt is persisted BEFORE the actor runs, so a panic, fatal
+// runtime error, or signal termination (which never returns to a post-run
+// record) still counts toward the budget. A run that "does not return" leaves
+// the counter incremented, and the next launchd relaunch sees it via the
+// pre-check (or the pre-record) and progresses the budget toward stand-down
+// rather than relaunching unboundedly.
+func TestBoundLaunchdRecoveryPreRecordsBeforeRunSoAPanicCounts(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+	start := time.Now()
+
+	// Simulate a panic/signal-kill: run increments a side counter (so we can
+	// observe it ran) then returns an error standing in for "the actor did not
+	// return normally." The pre-record must have persisted the attempt before
+	// this returns, so the budget progressed even though the post-run path was
+	// never reached cleanly.
+	ran := false
+	panickedRun := func() error {
+		ran = true
+		return errors.New("actor killed by signal before recording")
+	}
+	require.Error(t, boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start }, panickedRun))
+	require.True(t, ran)
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok, "the attempt must be pre-recorded before the actor runs")
+	require.Equal(t, 1, counter.Attempts)
+	require.False(t, counter.Exhausted, "a single attempt must not exhaust the budget")
+}
+
+// TestBoundLaunchdRecoveryReconcilesCounterOnSuccess guards the success path:
+// the pre-recorded attempt is cleared when the actor returns nil, so the
+// budget resets on a successful recovery (the way systemd's window rolls
+// forward on success) and no stand-down marker is left behind. Terminal
+// cleanup removes the transaction directory anyway, but the clear keeps the
+// budget honest between success and cleanup.
+func TestBoundLaunchdRecoveryReconcilesCounterOnSuccess(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
 	controller := runtime.controller()
 
+	// Pre-record one attempt, then succeed: the counter must be cleared.
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, time.Now()))
+	_, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+
 	require.NoError(t, boundLaunchdRecovery(context.Background(), invocation, controller, time.Now,
 		func() error { return nil }))
 
-	_, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
-	require.False(t, ok, "a successful run must not record a failure or persist a counter")
-	require.Empty(t, runtime.commands)
+	_, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.False(t, ok, "a successful run must clear the pre-recorded counter so the budget resets")
+	require.Empty(t, runtime.commands, "a successful run must not disable the job")
 }
 
 // TestBoundLaunchdRecoveryPassthroughForNonLaunchd guards the no-op for the
@@ -299,6 +388,43 @@ func TestBoundLaunchdRecoveryPassthroughForNonLaunchd(t *testing.T) {
 	}
 }
 
+// TestEnsureRecoveryRetryCounterDirDoesNotRecreateRemovedHome pins the P2
+// fix: ensureRecoveryRetryCounterDir returns errAFHomeRemoved (rather than
+// recreating the tree) when the upgrade root is gone, so a stale launchd job
+// whose AF home was uninstalled or intentionally removed does not get the
+// deleted <home>/upgrade/transactions/<id> hierarchy recreated under it; and
+// it still creates the transaction leaf when only the transaction directory is
+// missing but the upgrade root survives (the adversarial "only active.json"
+// shape). recordLaunchdRecoveryAttempt surfaces the same sentinel so
+// boundLaunchdRecovery can stand the stale job down (exit 0) without recreating
+// anything — a branch reached only on Darwin, where recoveryJobIsLaunchd's
+// fallback yields true when the journal cannot load; on Linux the budget is a
+// no-op when the journal cannot load, so this test covers the sentinel at the
+// unit level the Darwin CI cell exercises through boundLaunchdRecovery.
+func TestEnsureRecoveryRetryCounterDirDoesNotRecreateRemovedHome(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+
+	// Adversarial shape: the transaction directory is gone but the upgrade
+	// root survives. The leaf must be recreated without recreating the home.
+	require.NoError(t, os.RemoveAll(transactionDir(invocation.HomeDir, invocation.TransactionID)))
+	require.NoError(t, ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID))
+	info, err := os.Stat(transactionDir(invocation.HomeDir, invocation.TransactionID))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+
+	// Removed home: the upgrade root is gone. The budget must not recreate it.
+	require.NoError(t, os.RemoveAll(upgradeRoot(invocation.HomeDir)))
+	require.ErrorIs(t, ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID), errAFHomeRemoved)
+	_, statErr := os.Stat(upgradeRoot(invocation.HomeDir))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the upgrade root must not be recreated")
+
+	// The pre-record surfaces the same sentinel so boundLaunchdRecovery can
+	// convert it to a stand-down (exit 0) without running the actor.
+	require.ErrorIs(t, recordLaunchdRecoveryAttempt(invocation, time.Now()), errAFHomeRemoved)
+	_, statErr = os.Stat(upgradeRoot(invocation.HomeDir))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the pre-record must not recreate the removed home")
+}
+
 // TestRecoveryRetryCounterRemovedWithTransactionDirectory confirms the counter
 // rides in the transaction directory so terminal cleanup (which removes the
 // directory) resets the budget for the next upgrade and leaves no stranded
@@ -307,7 +433,7 @@ func TestBoundLaunchdRecoveryPassthroughForNonLaunchd(t *testing.T) {
 func TestRecoveryRetryCounterRemovedWithTransactionDirectory(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	require.NoError(t, writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID,
-		recoveryRetryCounter{Attempts: launchdRecoveryBurstLimit, FirstAttemptAt: time.Now()}))
+		recoveryRetryCounter{Attempts: launchdRecoveryBurstLimit, FirstAttemptAt: time.Now(), Exhausted: true}))
 	_, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	require.True(t, ok)
 
