@@ -153,6 +153,22 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			deleting[repoID] = true
 		}
 	}
+	// Sessions still provisioning live only here — the ghost sweep cannot
+	// find an unpersisted row, so without this they would vanish from the
+	// response despite the contract that every in-scope non-candidate is
+	// accounted (#5136 Codex round 14).
+	type pendingRow struct {
+		repoID string
+		title  string
+	}
+	var pending []pendingRow
+	for key, p := range m.pendingCreates {
+		repoID, _ := splitDaemonInstanceKey(key)
+		if req.RepoID != "" && repoID != req.RepoID {
+			continue
+		}
+		pending = append(pending, pendingRow{repoID: repoID, title: p.Title})
+	}
 	m.mu.Unlock()
 
 	var skipped []PruneSkippedEntry
@@ -172,6 +188,14 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	ghosts, ghostWarns := m.pruneGhostRows(req)
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
+
+	for _, p := range pending {
+		if deleting[p.repoID] {
+			continue
+		}
+		skipped = append(skipped, PruneSkippedEntry{Title: p.title, RepoID: p.repoID,
+			Reason: "session is still being created"})
+	}
 
 	// See PruneSessions: the slice must be non-nil so a zero-candidate run
 	// marshals [] rather than null.
@@ -215,15 +239,21 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
 			continue
 		}
+		worktreeBytes, sizeErr := session.DirSizeBytes(data.Worktree.WorktreePath)
+		if sizeErr != nil {
+			warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, data.Worktree.WorktreePath, sizeErr))
+		}
 		if prunePostProbeHook != nil {
 			prunePostProbeHook(row.instance)
 		}
-		// Revalidate AFTER the filesystem probes: a restore or kill can begin
-		// while they ran — the stale snapshot still classifies archived, and
-		// the missing-path arm treats a moved-away tree as a zero-byte
-		// candidate — so a session already live again would publish (#5136
-		// Codex round 13). Re-read the instance and re-run every quiet-state
-		// gate rather than trusting the earlier snapshot.
+		// Revalidate AFTER the filesystem probes AND the size walk: a
+		// restore or kill can begin while either ran — the stale snapshot
+		// still classifies archived, and the missing-path arm treats a
+		// moved-away tree as a zero-byte candidate — so a session already
+		// live again would publish (#5136 Codex round 13; the walk's 10s
+		// window is part of the gap, round 14). Re-read the instance and
+		// re-run every quiet-state gate rather than trusting the earlier
+		// snapshot.
 		fresh := row.instance.ToInstanceData()
 		if reason := session.PruneSkipReason(fresh, cutoff); reason != "" {
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
@@ -250,10 +280,6 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			RepoID:     row.repoID,
 			Branch:     pruneBranchFor(data),
 			ArchivedAt: session.ArchiveTimeFor(data),
-		}
-		worktreeBytes, sizeErr := session.DirSizeBytes(data.Worktree.WorktreePath)
-		if sizeErr != nil {
-			warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, data.Worktree.WorktreePath, sizeErr))
 		}
 		entry.ReclaimableBytes = worktreeBytes
 		candidates = append(candidates, entry)
@@ -370,8 +396,9 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 	// (#5136 Codex round 10). The answer feeds both the early return and the
 	// identity checks below.
 	probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath)
-	if _, err := sessiongit.BoundedLstat(wtPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	info, lerr := sessiongit.BoundedLstat(wtPath)
+	if lerr != nil {
+		if errors.Is(lerr, os.ErrNotExist) {
 			switch {
 			case errors.Is(probeErr, sessiongit.ErrRepoGone):
 				return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
@@ -392,7 +419,16 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 			}
 			return ""
 		}
-		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, err)
+		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, lerr)
+	}
+	// A symlink at the recorded path is an alias the record never wrote —
+	// archive relocates the directory, it does not link it. Identity checks
+	// resolve through the link, so a swapped-in alias to a live checkout
+	// would pass them and list foreign content as reclaimable, while the
+	// size walk measures the link rather than the tree it names (#5136
+	// Codex round 14). Refuse rather than resolve.
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Sprintf("%s is a symlink — refusing to prove identity through an alias the record never wrote; restore the real archived directory or remove the link", wtPath)
 	}
 
 	switch {

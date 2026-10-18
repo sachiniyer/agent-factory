@@ -454,9 +454,9 @@ func TestPruneSessions_RefusesPresentWorktreeWithDeletedBranchRef(t *testing.T) 
 }
 
 // TestPruneSessions_RevalidatesStateBeforePublishing: a lifecycle flip that
-// lands between the filesystem probes and the candidate append — the exact
-// window the publish-time recheck exists to close — must keep the row out of
-// candidates (#5136 Codex round 13).
+// lands between the filesystem probes + size walk and the candidate append —
+// the exact window the publish-time recheck exists to close — must keep the
+// row out of candidates (#5136 Codex rounds 13-14).
 func TestPruneSessions_RevalidatesStateBeforePublishing(t *testing.T) {
 	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "mid-scan-row")
 	prunePostProbeHook = func(i *session.Instance) {
@@ -473,6 +473,52 @@ func TestPruneSessions_RevalidatesStateBeforePublishing(t *testing.T) {
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "state changed while being evaluated")
 	assert.True(t, exists(archivedPath), "nothing may be touched under a held lifecycle op")
+}
+
+// TestPruneSessions_ReportsPendingCreate: a session still provisioning lives
+// only in pendingCreates — the live-map scan and the ghost sweep both miss
+// it, so without explicit accounting it vanishes from the response (#5136
+// Codex round 14). It must land in skipped, never in candidates.
+func TestPruneSessions_ReportsPendingCreate(t *testing.T) {
+	manager, repoID, repoPath, _, _ := seedPrunableArchive(t, "settled-row")
+	manager.mu.Lock()
+	manager.pendingCreates[daemonInstanceKey(repoID, "mid-flight")] = session.InstanceData{
+		Title: "mid-flight",
+		Path:  repoPath,
+	}
+	manager.mu.Unlock()
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	for _, c := range resp.Candidates {
+		assert.NotEqual(t, "mid-flight", c.Title)
+	}
+	var found bool
+	for _, s := range resp.Skipped {
+		if s.Title == "mid-flight" {
+			found = true
+			assert.Contains(t, s.Reason, "still being created")
+		}
+	}
+	assert.True(t, found, "a pending-create row must be accounted in skipped")
+}
+
+// TestPruneSessions_RefusesSymlinkedArchivedPath: a symlink swapped in at the
+// recorded path resolves every downstream identity check through an alias
+// the record never wrote — refuse rather than prove foreign content
+// reclaimable (#5136 Codex round 14).
+func TestPruneSessions_RefusesSymlinkedArchivedPath(t *testing.T) {
+	manager, repoID, _, _, archivedPath := seedPrunableArchive(t, "linked-row")
+	foreign := filepath.Join(t.TempDir(), "foreign-checkout")
+	require.NoError(t, os.MkdirAll(foreign, 0o755))
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, os.Symlink(foreign, archivedPath))
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "symlink")
 }
 
 // TestPruneSessions_ReportsUnmaterializedNonArchivedGhost: a persisted live
