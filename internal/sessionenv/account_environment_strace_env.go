@@ -57,15 +57,25 @@ func straceAttachedEnvOptionHides(word *syntax.Word, names map[string]struct{}) 
 	}
 	// A '=' in the literal operand separates a fully literal NAME from the
 	// value; the non-literal part sits in the value, after the separator.
-	if strings.IndexByte(operand, '=') >= 0 {
+	if eqIdx := strings.IndexByte(operand, '='); eqIdx >= 0 {
 		// An unquoted backslash escape stays in a syntax.Lit, so the raw
 		// literal operand name is not shell-stable: strace -E\CODEX_HOME="$V"
 		// literalizes the operand to \CODEX_HOME= (not denied) while the
 		// shell removes the backslash and strace receives -ECODEX_HOME=<V>,
 		// overriding the protected variable. Fail closed before trusting the
 		// name; a backslash inside quotes is literal and excluded by
-		// wordHasUnquotedBackslash.
-		if wordHasUnquotedBackslash(word) {
+		// wordHasUnquotedBackslash. A backslash after the first '=' in the
+		// operand is in the VALUE, not the NAME — the shell removes it but
+		// the NAME is already settled (strace -EFOO=\$V passes -EFOO=$V,
+		// whose harmless FOO the literal operand already proved), so it must
+		// not block. The operand is the text after the option prefix, so the
+		// '=' in --env= is the option separator, not the NAME=VALUE separator;
+		// checking the operand for a backslash before its first '=' isolates
+		// the NAME, while wordHasUnquotedBackslash confirms the backslash is
+		// in a top-level Lit part (a DblQuoted backslash is literal and
+		// harmless, e.g. strace -E"CODEX\HOME"="$V" where the quoted backslash
+		// is shell-stable and the name CODEX\HOME is not denied).
+		if bsIdx := strings.IndexByte(operand, '\\'); bsIdx >= 0 && bsIdx < eqIdx && wordHasUnquotedBackslash(word) {
 			return true
 		}
 		if accountEnvironmentOperandDenied(operand, names) {
@@ -276,6 +286,42 @@ func straceTracedPassthroughWrapper(word *syntax.Word) bool {
 		isAccountCommandName(word, "stdbuf") ||
 		isAccountCommandName(word, "ionice") ||
 		isAccountCommandName(word, "taskset")
+}
+
+// systemdRunEnvOptionHides reports whether systemd-run's separate-word -E or
+// --setenv option sets or removes a protected variable. systemd-run's -E is the
+// short form of --setenv and takes NAME[=VALUE] as the NEXT argv word, analogous
+// to strace's -E/--env. The attached --setenv=NAME[=VALUE] form is caught by
+// the generic --opt=DENIED arm the delegation already applies, so this only
+// scans the separate-word spellings the generic scan does not see. A non-literal
+// operand fails closed (its expansion can name a protected variable), and a
+// literal operand is denied when its NAME (the text before the first '=', or
+// the whole operand when no '=' is present) is denied.
+func systemdRunEnvOptionHides(words []*syntax.Word, names map[string]struct{}) bool {
+	for i := 0; i < len(words); i++ {
+		literal, ok := literalShellWord(words[i])
+		if !ok {
+			return false
+		}
+		if literal == "--" {
+			break
+		}
+		if !strings.HasPrefix(literal, "-") || literal == "-" {
+			break
+		}
+		if literal == "-E" || literal == "--setenv" {
+			if i+1 >= len(words) {
+				return true
+			}
+			value, valueOk := literalShellWord(words[i+1])
+			if !valueOk || accountEnvironmentOperandDenied(value, names) {
+				return true
+			}
+			i++
+			continue
+		}
+	}
+	return false
 }
 
 // straceOptionWordHides judges a literal strace option word (still inside
@@ -744,12 +790,17 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// xargs there is no unwrap helper; delegate its tail to the
 		// non-strace wrapper scan, which applies the same generic
 		// --opt=DENIED check a bare `systemd-run --setenv=CODEX_HOME=/other
-		// codex` gets. A leaf command (echo, grep, …) is NOT delegated, so a
+		// codex` gets. systemd-run's separate-word -E NAME and --setenv NAME
+		// spellings are not caught by the generic scan's --opt=DENIED arm
+		// (they take NAME as the NEXT word, not attached to the option), so
+		// systemdRunEnvOptionHides scans them the same way strace's -E/--env
+		// arm does. A leaf command (echo, grep, …) is NOT delegated, so a
 		// -E/--env-shaped argument of the traced command
 		// (strace echo -ECODEX_HOME=$V codex) stays allowed — only a real
 		// env-setting wrapper's options are inspected.
 		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "systemd-run") {
-			return 1, wrapperTailHidesAccountAssignment(words[1:], false, names, memo), strace && inOption, false
+			return 1, systemdRunEnvOptionHides(words[1:], names) ||
+				wrapperTailHidesAccountAssignment(words[1:], false, names, memo), strace && inOption, false
 		}
 		// The traced command can be a modeled peelAccountWrapper passthrough
 		// wrapper (nice, nohup, timeout, setsid, stdbuf, ionice, taskset)
@@ -775,9 +826,19 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// the traced command under strace, ending the option region; a
 		// bare "-" is one too (per straceInputRegion), so the second word
 		// of `strace - -ECODEX_HOME=$V` is the traced program's argv, not a
-		// strace env option.
+		// strace env option. An unrecognized command runner (prlimit, perf,
+		// …) that strace traces but the scan does not model keeps the region
+		// open when its tail begins with a wrapper the scan does model (strace,
+		// xargs, systemd-run, a peel wrapper), so the inner wrapper's env-
+		// mutating options are judged: `strace /usr/bin/prlimit strace -E
+		// CODEX_HOME=/other codex` runs an inner strace whose -E overrides
+		// the protected variable, and closing the region at prlimit would
+		// skip the inner strace's -E. A leaf command (echo, grep, …) whose
+		// tail does not begin with a modeled wrapper ends the region as
+		// before; its arguments are the traced command's own, not strace's.
 		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
-			shellCommandIsUnproven(words), strace && inOption, false
+			shellCommandIsUnproven(words), strace && inOption &&
+			!(strace && inOption && !pending && len(words) >= 2 && straceTracedWrapper(words[1])), false
 	}
 	// A literal option word. "--" ends strace's option region; any other
 	// option keeps parsing options. boundary reports that boundary so the
