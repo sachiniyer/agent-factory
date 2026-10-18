@@ -340,22 +340,22 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 
 // authPostureRelaxed reports whether the incoming config admits a peer old
 // would have rejected: the token requirement dropping, or the loopback-token
-// requirement dropping while the incoming posture is tokenless (the loopback
-// switch is inert while require_token holds). It is the kind-freeze trigger
-// for NON-refusal applies (#5137 review): a generation retired by a rebind or
-// opt-out is invisible to the serving-socket refusal check — webHandle names
-// only the newest generation — yet its draining handlers still read the live
-// posture, which the publish is about to weaken beneath them. Tightening
-// deliberately does not match: a stronger posture must reach drains live
-// (#2480), so only the weakening direction freezes.
+// requirement dropping. The loopback switch is NEVER inert — under
+// require_token it is exactly what exempts loopback peers from the token — so
+// its true→false transition relaxes the gate for loopback traffic whether or
+// not require_token also moved (#5137 review). It is the kind-freeze trigger
+// for NON-refusal applies: a generation retired by a rebind or opt-out is
+// invisible to the serving-socket refusal check — webHandle names only the
+// newest generation — yet its draining handlers still read the live posture,
+// which the publish is about to weaken beneath them. Tightening deliberately
+// does not match: a stronger posture must reach drains live (#2480), so only
+// the weakening direction freezes.
 func authPostureRelaxed(old, incoming *config.Config) bool {
 	if old == nil || incoming == nil {
 		return false
 	}
-	if old.RequireToken && !incoming.RequireToken {
-		return true
-	}
-	return !incoming.RequireToken && old.RequireLoopbackToken && !incoming.RequireLoopbackToken
+	return (old.RequireToken && !incoming.RequireToken) ||
+		(old.RequireLoopbackToken && !incoming.RequireLoopbackToken)
 }
 
 // bindWebLocked (re)binds the control-plane web listener to the config address

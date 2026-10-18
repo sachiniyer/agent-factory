@@ -233,49 +233,60 @@ type livePosture struct {
 // was just refused. Generations are the point: a normal rebind leaves the old
 // listener draining, and a refusal arriving while that drain runs must cover
 // it, not just the handle bound right now.
+//
+// pins holds the freeze history as ascending `through` ranges. Each pin
+// covers exactly the generations issued since the previous pin — (lastThrough,
+// through] — frozen to the config they were serving at that moment. FIRST
+// COVERAGE WINS, and that is a security rule, not an implementation detail:
+// a generation keeps the pin that first covered it, so a later apply can
+// never weaken an already-draining generation's gate by re-pinning it onto a
+// posture that relaxed further (#5137 review — the single-cfg shape let a
+// refusal following an opt-in apply move an older tokened generation onto the
+// tokenless config the new one legitimately served).
 type postureFreeze struct {
-	mu sync.Mutex
-	// cfg is the config the covered generations were serving at the refusal —
-	// what their drain-window requests keep evaluating.
-	cfg *config.Config
-	// through is the last generation the freeze covers. A listener bound after
-	// the refusal has a higher seq and reads live: it was admitted under a
-	// newer config the posture allowed. Every pin re-arms both halves, so a
-	// second refusal freezes the generations added since the first against the
-	// config they actually served.
+	mu   sync.Mutex
+	pins []frozenRange
+}
+
+// frozenRange freezes generations (prev, through] to cfg — the config they
+// were serving when this pin landed.
+type frozenRange struct {
+	cfg     *config.Config
 	through uint64
 }
 
-// pin freezes every generation with seq <= through onto cfg. Called only by
-// refusal-driven retires: a posture change the operator was allowed to write
-// keeps the ordinary live-read semantics. Two inputs are no-ops: cfg==nil (a
-// refusal without a serving config has nothing to preserve) and a cfg that is
-// ITSELF refused — a refused posture was never legitimately served, so pinning
-// it would hand draining sockets the very gate the freeze exists to keep out;
-// the generations an earlier refusal pinned keep their own serving config.
+// pin freezes the generations issued since the last pin, up to through, onto
+// cfg — the config they were serving. Called only by refusal-driven retires
+// and relaxation applies: a posture change the operator was allowed to write
+// keeps the ordinary live-read semantics otherwise. Three no-ops: cfg==nil (a
+// refusal without a serving config has nothing to preserve), a cfg that is
+// ITSELF refused (a refused posture was never legitimately served — pinning
+// it would hand draining sockets the very gate the freeze exists to keep
+// out), and a through that adds no coverage (every generation it names is
+// already frozen under an earlier pin, and first coverage wins).
 func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 	if cfg == nil || config.ListenerBindRefusal(cfg) != "" {
 		return
 	}
 	f.mu.Lock()
-	f.cfg = cfg
-	// Coverage is monotonic: a generation inside one pin must never fall out
-	// of the freeze because a later pin named a smaller through.
-	if through > f.through {
-		f.through = through
+	if n := len(f.pins); n == 0 || through > f.pins[n-1].through {
+		f.pins = append(f.pins, frozenRange{cfg: cfg, through: through})
 	}
 	f.mu.Unlock()
 }
 
-// current returns the config this listener evaluates requests under — the live
-// snapshot unless this generation is inside a refusal freeze.
+// current returns the config this listener evaluates requests under — the
+// serving config of the first pin that covered this generation, or the live
+// snapshot when no pin reaches it.
 func (l *livePosture) current() *config.Config {
 	if f := l.freeze; f != nil {
 		f.mu.Lock()
-		if f.cfg != nil && l.seq <= f.through {
-			cfg := f.cfg
-			f.mu.Unlock()
-			return cfg
+		for _, r := range f.pins {
+			if l.seq <= r.through {
+				cfg := r.cfg
+				f.mu.Unlock()
+				return cfg
+			}
 		}
 		f.mu.Unlock()
 	}

@@ -424,7 +424,15 @@ func TestClosedWebSocketUnregistersFromTracker(t *testing.T) {
 		defer wl.webTracker.mu.Unlock()
 		return len(wl.webTracker.conns)
 	}
-	require.Equal(t, 1, tracked(), "the upgrade must register the hijacked conn")
+	// The assert cannot be a bare Equal: WriteHeader(101) flushes to the wire
+	// BEFORE hj.Hijack() reaches setState(StateHijacked) — net/http's
+	// hijackLocked Resets (discards) the buffered writer, so the response the
+	// client read must already have gone out. websocket.Dial returning proves
+	// the upgrade was accepted, not that track() has run; the registration is
+	// guaranteed in-flight on the handler goroutine, so wait for it.
+	require.Eventually(t, func() bool { return tracked() == 1 },
+		5*time.Second, time.Millisecond,
+		"the upgrade must register the hijacked conn")
 
 	require.NoError(t, conn.Close(websocket.StatusNormalClosure, "done"))
 	require.Eventually(t, func() bool { return tracked() == 0 },
@@ -454,14 +462,13 @@ func TestRefusalFreezesRetiredListenerOnServedPosture(t *testing.T) {
 
 	require.False(t, m.Config().RequireToken, "the refused tokenless config is now live")
 	wl.webFreeze.mu.Lock()
-	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
 	wl.webFreeze.mu.Unlock()
-	require.NotNil(t, frozen,
-		"a refusal retire must pin the gate to the config the socket was serving")
-	require.True(t, frozen.RequireToken,
+	require.Len(t, pins, 1, "a refusal retire must pin the gate to the config the socket was serving")
+	require.True(t, pins[0].cfg.RequireToken,
 		"drain-window requests must evaluate the posture they were admitted under")
-	require.False(t, frozen.AllowUnauthenticatedNetwork)
-	require.Equal(t, wl.postureSeq, through,
+	require.False(t, pins[0].cfg.AllowUnauthenticatedNetwork)
+	require.Equal(t, wl.postureSeq, pins[0].through,
 		"the pin must cover every control generation issued so far, not just the bound handle")
 }
 
@@ -494,12 +501,12 @@ func TestRefusalFreezesEveryDrainingGeneration(t *testing.T) {
 	m.live.Store(&next)
 
 	wl.webFreeze.mu.Lock()
-	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
 	wl.webFreeze.mu.Unlock()
-	require.NotNil(t, frozen, "the refusal must pin the kind's shared freeze")
-	require.True(t, frozen.RequireToken,
+	require.Len(t, pins, 1, "the refusal must pin the kind's shared freeze")
+	require.True(t, pins[0].cfg.RequireToken,
 		"draining generations gate on the config they were serving, never the refused one")
-	require.Equal(t, uint64(2), through,
+	require.Equal(t, uint64(2), pins[0].through,
 		"the pin covers the retired generation AND the one bound at the refusal")
 
 	// The retired generation's posture consults the freeze; a post-refusal
@@ -507,7 +514,7 @@ func TestRefusalFreezesEveryDrainingGeneration(t *testing.T) {
 	draining := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
 	require.True(t, draining.current().RequireToken,
 		"the earlier generation keeps the posture it was admitted under")
-	nextGen := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: through + 1}
+	nextGen := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: pins[0].through + 1}
 	require.False(t, nextGen.current().RequireToken,
 		"a listener bound after the refusal was admitted under the newer config and reads live")
 }
@@ -527,8 +534,61 @@ func TestPostureFreezeNeverPinsARefusedConfig(t *testing.T) {
 	var f postureFreeze
 	f.pin(served, 3)
 	f.pin(&refused, 5)
-	require.Same(t, served, f.cfg, "a refused config must never replace a serving pin")
-	require.Equal(t, uint64(3), f.through, "the rejected pin must not advance the covered generations")
+	require.Len(t, f.pins, 1, "a refused config must never join the freeze")
+	require.Same(t, served, f.pins[0].cfg, "a refused config must never replace a serving pin")
+	require.Equal(t, uint64(3), f.pins[0].through, "the rejected pin must not advance the covered generations")
+}
+
+// TestPostureFreezePreservesEachGenerationsOwnPin pins the security rule the
+// ranges exist for (#5137 review): a later pin must not move an ALREADY-covered
+// generation onto a weaker config. A tokened generation frozen during a
+// relaxation stays tokened even when a subsequent refusal freezes a newer
+// generation onto the tokenless posture IT legitimately served under the
+// opt-in.
+func TestPostureFreezePreservesEachGenerationsOwnPin(t *testing.T) {
+	tokened := config.DefaultConfig()
+	tokened.RequireToken = true
+	optInTokenless := *tokened
+	optInTokenless.ListenAddr = "0.0.0.0:0"
+	optInTokenless.RequireToken = false
+	optInTokenless.AllowUnauthenticatedNetwork = true
+	require.Empty(t, config.ListenerBindRefusal(&optInTokenless))
+
+	var f postureFreeze
+	f.pin(tokened, 2)
+	f.pin(&optInTokenless, 5)
+
+	live := func() *config.Config { return &optInTokenless }
+	older := &livePosture{snapshot: live, freeze: &f, seq: 2}
+	require.Same(t, tokened, older.current(),
+		"the earlier generation keeps the pin that first covered it — never re-pinned weaker")
+	newer := &livePosture{snapshot: live, freeze: &f, seq: 5}
+	require.Same(t, &optInTokenless, newer.current(),
+		"the newer generation froze onto the posture it was actually serving")
+}
+
+// TestAuthPostureRelaxedCatchesLoopbackTokenDrop pins the predicate's
+// loopback half (#5137 review): require_loopback_token true→false relaxes the
+// gate even while require_token stays on, because the switch is exactly what
+// exempts loopback peers under it.
+func TestAuthPostureRelaxedCatchesLoopbackTokenDrop(t *testing.T) {
+	old := config.DefaultConfig()
+	old.RequireToken = true
+	old.RequireLoopbackToken = true
+	incoming := *old
+	incoming.RequireLoopbackToken = false
+	require.True(t, authPostureRelaxed(old, &incoming),
+		"dropping the loopback-token switch exempts loopback peers even while require_token holds")
+
+	steady := *old
+	require.False(t, authPostureRelaxed(old, &steady), "an unchanged posture relaxes nothing")
+	incomingTighten := *old
+	incomingTighten.RequireToken = false
+	incomingTighten.RequireLoopbackToken = true
+	require.True(t, authPostureRelaxed(old, &incomingTighten),
+		"dropping require_token relaxes even when the loopback switch tightens")
+	require.False(t, authPostureRelaxed(&incoming, old),
+		"the reverse direction is a tightening, not a relaxation")
 }
 
 // TestAuthRelaxationFreezesDrainingGenerations pins the shape from the review
@@ -562,13 +622,13 @@ func TestAuthRelaxationFreezesDrainingGenerations(t *testing.T) {
 	m.live.Store(&next)
 
 	wl.webFreeze.mu.Lock()
-	frozen, through := wl.webFreeze.cfg, wl.webFreeze.through
+	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
 	wl.webFreeze.mu.Unlock()
-	require.NotNil(t, frozen,
+	require.Len(t, pins, 1,
 		"an auth-relaxing apply must freeze draining generations onto the serving config")
-	require.True(t, frozen.RequireToken,
+	require.True(t, pins[0].cfg.RequireToken,
 		"the retired network generation keeps requiring the token it was admitted under")
-	require.Equal(t, uint64(1), through,
+	require.Equal(t, uint64(1), pins[0].through,
 		"the relaxation pin covers generation 1 but NOT generation 2 — the bound listener must keep the live read or the allowed apply would never reach it")
 
 	// Generation 2 is still bound and serves the posture just written;
@@ -600,8 +660,8 @@ func TestNonRefusalRetireLeavesPostureLive(t *testing.T) {
 	require.Empty(t, failed)
 
 	wl.webFreeze.mu.Lock()
-	frozen := wl.webFreeze.cfg
+	pins := wl.webFreeze.pins
 	wl.webFreeze.mu.Unlock()
-	require.Nil(t, frozen,
+	require.Empty(t, pins,
 		"a non-refusal retire must keep the live-posture read, not latch the old config")
 }
