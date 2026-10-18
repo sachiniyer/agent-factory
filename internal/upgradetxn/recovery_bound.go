@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -116,12 +117,15 @@ func clearRecoveryRetryCounter(home, txnID string) error {
 // this is a stat; only the adversarial "only active.json" shape reaches the
 // create path. It does NOT recreate a removed AF home or upgrade storage: if
 // the upgrade root is gone, the home was uninstalled or intentionally removed
-// while a stale launchd recovery job was still armed, and MkdirAll-ing a
+// while a stale launchd recovery job was still armed, and creating a
 // fresh <home>/upgrade/transactions/<id> here would undo that removal and
 // orphan a config tree the operator deleted. In that case it returns
 // errAFHomeRemoved so boundLaunchdRecovery can stand the stale job down (exit
-// 0) without recreating anything. With the upgrade root present, MkdirAll
-// only creates the transactions parent and the transaction leaf, so the
+// 0) without recreating anything. With the upgrade root present, the
+// create goes through afhome.MkdirAll — the guarded os.MkdirAll that
+// TestNoBareMkdirAllUnderTheAFHome requires for any path at or inside the AF
+// home, which in an abandoned daemon refuses rather than re-creating it —
+// and only creates the transactions parent and the transaction leaf, so the
 // adversarial shape still works without recreating the home or upgrade
 // storage above it. The path is package-constructed under the canonical home
 // so ancestor symlinks are already resolved.
@@ -138,7 +142,15 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 		}
 		return fmt.Errorf("validate upgrade storage root: %w", err)
 	}
-	if err := os.MkdirAll(dir, transactionDirMode); err != nil {
+	if err := afhome.MkdirAll(dir, transactionDirMode); err != nil {
+		// afhome.MkdirAll refuses when a process that armed the home-present
+		// latch observes the home gone; that is the same removed-home shape the
+		// upgrade-root check above stands down for, so collapse it to the same
+		// sentinel and let boundLaunchdRecovery stand the stale job down rather
+		// than recreate the home.
+		if errors.Is(err, afhome.ErrRemoved) {
+			return errAFHomeRemoved
+		}
 		return fmt.Errorf("create recovery retry counter directory: %w", err)
 	}
 	return nil
