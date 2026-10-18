@@ -139,6 +139,29 @@ func (c RecoveryJobController) Wake(ctx context.Context, txn *Transaction) error
 	}
 }
 
+// launchdRecoveryJobName is the deterministic launchd label for a transaction's
+// recovery job. The transaction id fixes it: validateRecoveryJob rejects any
+// other spelling, so the retry-budget stand-down can disable the job by label
+// even when the journal is corrupt and the unit path is unreadable.
+func launchdRecoveryJobName(transactionID string) string {
+	return "com.agent-factory.upgrade-recovery." + transactionID
+}
+
+// disableLaunchdRecoveryJobByName disarms a launchd recovery job by its
+// deterministic label, without reading or validating the journal. It is the
+// stand-down lever for the launchd retry budget (recordLaunchdRecoveryFailure):
+// the budget must disarm the relaunch loop even when the journal is corrupt,
+// which RecoveryJobController.Disable cannot do because it reloads and
+// validates the journal first. The label is derived from the transaction id
+// alone, mirroring the launchd arm of Disable without that prerequisite.
+func (c RecoveryJobController) disableLaunchdRecoveryJobByName(ctx context.Context, transactionID string) error {
+	target := launchdRecoveryDomain(c.userID()) + "/" + launchdRecoveryJobName(transactionID)
+	if err := c.run(ctx, "launchctl", "disable", target); err != nil {
+		return fmt.Errorf("disable launchd recovery job: %w", err)
+	}
+	return nil
+}
+
 // Disable disarms restart without stopping the current recovery actor. The
 // actor still owns the flock and must remove the active journal afterward, so
 // systemctl --now and launchctl bootout are deliberately forbidden by shape.
@@ -433,6 +456,17 @@ func systemdQuoteArgument(value string) string {
 	return quoted.String()
 }
 
+// renderLaunchdRecoveryPlist renders the persistent launchd recovery job. The
+// restart policy is KeepAlive.SuccessfulExit=false (relaunch on a non-zero exit)
+// paced by ThrottleInterval=2 — launchd's only restart knobs. Unlike the systemd
+// unit above, launchd has no native StartLimitIntervalSec/StartLimitBurst, so a
+// persistently failing actor would relaunch every ~2s forever. The actor
+// enforces the same budget in process instead (see recovery_bound.go): after
+// launchdRecoveryBurstLimit failed runs in launchdRecoveryBurstInterval it runs
+// launchctl disable on this job and exits 0, so KeepAlive.SuccessfulExit=false
+// stops relaunching — the operator-visible stand-down systemd produces as a
+// failed unit. ThrottleInterval stays at 2 to mirror RestartSec=2 so the budget
+// counts the same pacing systemd's StartLimitIntervalSec counts against.
 func renderLaunchdRecoveryPlist(journal Journal) string {
 	var arguments strings.Builder
 	for _, argument := range recoveryCommand(journal) {

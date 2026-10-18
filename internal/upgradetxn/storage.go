@@ -224,7 +224,7 @@ func NewRecoveryJob(kind RecoveryJobKind, transactionID, unitDir string) (Recove
 		if err != nil {
 			return RecoveryJob{}, fmt.Errorf("resolve launchd recovery unit directory: %w", err)
 		}
-		job.Name = "com.agent-factory.upgrade-recovery." + transactionID
+		job.Name = launchdRecoveryJobName(transactionID)
 		job.UnitPath = filepath.Join(canonicalUnitDir, job.Name+".plist")
 	default:
 		return RecoveryJob{}, fmt.Errorf("unsupported upgrade recovery job kind %q", kind)
@@ -249,7 +249,7 @@ func validateRecoveryJob(transactionID string, job RecoveryJob) error {
 		expectedName := "agent-factory-upgrade-recovery-" + transactionID + ".service"
 		expectedBase := expectedName
 		if job.Kind == RecoveryJobLaunchd {
-			expectedName = "com.agent-factory.upgrade-recovery." + transactionID
+			expectedName = launchdRecoveryJobName(transactionID)
 			expectedBase = expectedName + ".plist"
 		}
 		if job.Name != expectedName || filepath.Base(job.UnitPath) != expectedBase {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -46,8 +47,17 @@ func ParseRecoveryInvocation(args []string) (invocation RecoveryInvocation, matc
 // preserved previous binary — never a candidate — runs the recovery/rollback
 // state machine. The supervisor's SupervisorOperations are injected by the
 // daemon package, which cannot be imported here without a cycle.
+//
+// The runner is wrapped in boundLaunchdRecovery so the launchd job's
+// persistent failure cannot relaunch forever: launchd has no native
+// StartLimitBurst, so the actor bounds itself (see recovery_bound.go). systemd
+// and detached jobs pass straight through — systemd self-bounds via its unit's
+// StartLimit* directives and detached is a one-shot the manager never
+// relaunches.
 func RunRecoveryActor(ctx context.Context, invocation RecoveryInvocation, supervisor Supervisor) error {
-	return runRecoveryActorWith(ctx, invocation, (*Transaction).TryAcquireRecovery, supervisor.Run)
+	return boundLaunchdRecovery(ctx, invocation, RecoveryJobController{}, time.Now, func() error {
+		return runRecoveryActorWith(ctx, invocation, (*Transaction).TryAcquireRecovery, supervisor.Run)
+	})
 }
 
 // runRecoveryActorWith is the runner core for the production entrypoint binding
