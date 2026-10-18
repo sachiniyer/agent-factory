@@ -117,6 +117,12 @@ var worktreeMissingReasonForms = [...]worktreeMissingReasonForm{
 	// Stamped by an archived-name reuse that repointed a deleted archive's record
 	// at its renamed title's path; the path is that new destination.
 	{prefix: "archived worktree was already deleted outside af when the session was renamed; nothing has been placed at ", suffix: " yet"},
+	// Stamped by a restore of a deleted archive while it places the worktree at
+	// the restore destination; the committed restore clears it.
+	{prefix: "restore was placing the deleted worktree at ", suffix: " and had not finished (deleted outside af)"},
+	// Stamped by the archive route that found both the worktree and its branch
+	// already deleted, so restore has nothing to rebuild from.
+	{prefix: "worktree was already absent at ", suffix: " when archived, and its branch had been deleted too (deleted outside af)"},
 }
 
 // WorktreeMissingDeletedReason is the reason recorded when the tracked worktree
@@ -136,6 +142,19 @@ func WorktreeMissingArchivedReason(path string) string {
 // row whose deleted worktree it repointed to the renamed title's path, dest.
 func WorktreeMissingRepointedReason(dest string) string {
 	return worktreeMissingReasonForms[2].render(dest)
+}
+
+// WorktreeMissingPlacingReason is the reason a restore stamps while it places
+// a deleted archive's worktree at dest — rebuilt from the branch, or an earlier
+// rebuild adopted — until the committed restore clears it.
+func WorktreeMissingPlacingReason(dest string) string {
+	return worktreeMissingReasonForms[3].render(dest)
+}
+
+// WorktreeMissingBranchGoneReason is the reason an archive stamps on a row
+// whose worktree at path and whose branch were both already deleted.
+func WorktreeMissingBranchGoneReason(path string) string {
+	return worktreeMissingReasonForms[4].render(path)
 }
 
 // RewriteWorktreeMissingReasonPath rebuilds an af-authored MissingReason with

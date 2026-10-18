@@ -140,6 +140,28 @@ func TestRebuildAbsentArchivedWorktree(t *testing.T) {
 		out, err := exec.Command("git", "-C", dest, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
 		require.NoError(t, err, string(out))
 		assert.Equal(t, "af/rebuilt", strings.TrimSpace(string(out)))
+		// The flag follows the pointer until the caller's restore commits, and
+		// the rebuilt directory is pinned for the caller's boundary checks.
+		missing, reason := inst.WorktreeMissing()
+		assert.True(t, missing)
+		assert.Equal(t, WorktreeMissingPlacingReason(dest), reason)
+		require.NoError(t, inst.ReconfirmPlacedWorktree())
+		require.NoError(t, os.Rename(dest, dest+"-swapped"))
+		require.NoError(t, os.Mkdir(dest, 0o755))
+		require.Error(t, inst.ReconfirmPlacedWorktree(), "a directory swapped in after the rebuild is refused")
+	})
+
+	t.Run("an unflagged row's failed rebuild is left flagged at its recorded path", func(t *testing.T) {
+		inst, gw, repoRoot, wtPath := setup(t, "unflagged")
+		inst.ClearWorktreeMissing()
+		runRenameGit(t, repoRoot, "worktree", "prune")
+		runRenameGit(t, repoRoot, "branch", "-D", "af/unflagged")
+		dest := filepath.Join(filepath.Dir(repoRoot), "unflagged-restored")
+		require.Error(t, inst.RebuildAbsentArchivedWorktree(dest))
+		assert.Equal(t, wtPath, gw.GetWorktreePath())
+		missing, reason := inst.WorktreeMissing()
+		assert.True(t, missing, "a row that entered unflagged must leave the route flagged")
+		assert.Equal(t, WorktreeMissingDeletedReason(wtPath), reason)
 	})
 
 	t.Run("a missing branch fails and re-aims back", func(t *testing.T) {

@@ -57,11 +57,30 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 				title, source, lerr))
 		}
 		if live {
+			// Moving it back terminates: the claim then finds the session's own
+			// checkout at the recorded path, which git proves even on a row
+			// already flagged missing (see ArchiveSession's missing guard).
 			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s and retry, or remove it with 'git worktree remove' and retry to archive it as deleted",
+				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s with 'git worktree move' and retry, or remove it with 'git worktree remove' and retry to archive it as deleted",
 				title, moved, source))
 		}
-		return m.archiveSessionWorktreeGone(repoID, title, instance, false)
+		// The deletion route promises restore can rebuild from the kept branch,
+		// which holds only if the branch is still there: a user who deleted the
+		// worktree may have deleted the branch with it. That row is still worth
+		// archiving — its tmux is torn down, nothing is moved, and archive is the
+		// one action that resolves it — but it must say what it is rather than
+		// promise a rebuild that can never run. Its reason records the deleted
+		// branch, the outcome messages drop the "branch kept" claim, and restore
+		// refuses with the same fact (rebuildAbsentArchivedWorktree checks the
+		// branch again, since the user may recreate it). A probe that cannot
+		// answer refuses: af will not guess which of the two it is archiving.
+		branch, branchKept, berr := instance.RecordedBranchExists()
+		if berr != nil {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone, and af could not tell whether its branch %s still exists, so it cannot say whether the archive could be restored: %w",
+				title, source, branch, berr))
+		}
+		return m.archiveSessionWorktreeGone(repoID, title, instance, false, branchKept)
 	}
 	if err != nil {
 		return refuse(fmt.Errorf(
@@ -87,7 +106,7 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 	// any of them reloads the old path — whose retry lands back here and
 	// re-adopts on the same proof.
 	m.info().Printf("archive of session %q: %s was gone and git proves an earlier interrupted archive moved it to %s; adopting that location", title, source, dest)
-	return m.archiveSessionWorktreeGone(repoID, title, instance, true)
+	return m.archiveSessionWorktreeGone(repoID, title, instance, true, true)
 }
 
 // archiveSessionWorktreeGone archives a local session whose source worktree is
@@ -106,8 +125,16 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 // Because nothing moved, nothing can roll back. That removes the undo the
 // relocating route performs on a late failure, but not the rule it protects
 // (#3448/#3335): a committed outcome is claimed only once it is durable.
-func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *session.Instance, adopted bool) (string, session.InstanceData, error) {
+func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *session.Instance, adopted, branchKept bool) (string, session.InstanceData, error) {
 	origPath := instance.GetWorktreePath()
+	// What the archived row says about the worktree, and what the outcome
+	// messages may claim about the branch (#5102).
+	archivedReason := session.WorktreeMissingArchivedReason(origPath)
+	branchOutcome := "branch kept"
+	if !branchKept {
+		archivedReason = session.WorktreeMissingBranchGoneReason(origPath)
+		branchOutcome = "its branch was already deleted too, so restore has nothing to rebuild it from"
+	}
 	// Settle the worktree-missing flag to what this route has just proven,
 	// BEFORE any exit below persists the row — the cancel paths included.
 	if adopted {
@@ -127,9 +154,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	}
 	vscodeKey := daemonInstanceKey(repoID, title)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
-		_ = instance.Transition(session.CancelArchive())
-		m.persistInstance(repoID, instance)
-		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", title, err)
+		return "", session.InstanceData{}, m.cancelArchiveWorktreeGone(repoID, instance, origPath, adopted, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", title, err))
 	}
 	// The worktree is gone, but a post-worktree hook runner may still be alive
 	// with its cwd in the unlinked directory. Join it before teardown for the
@@ -137,9 +162,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	// re-checks that a process from it has stopped.
 	if worktree, wtErr := instance.GetGitWorktree(); wtErr == nil && worktree != nil {
 		if err := worktree.CancelAndJoinHooks(); err != nil {
-			_ = instance.Transition(session.CancelArchive())
-			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its post-worktree hooks could not be confirmed stopped; no session teardown was started: %w", title, err)
+			return "", session.InstanceData{}, m.cancelArchiveWorktreeGone(repoID, instance, origPath, adopted, fmt.Errorf("cannot archive session %q because its post-worktree hooks could not be confirmed stopped; no session teardown was started: %w", title, err))
 		}
 	}
 
@@ -205,7 +228,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 
 	_ = instance.Transition(session.CommitArchive())
 	if !adopted {
-		instance.SetWorktreeMissing(session.WorktreeMissingArchivedReason(origPath))
+		instance.SetWorktreeMissing(archivedReason)
 	}
 	// Revocation follows the committed state exactly as on the relocating route
 	// (#2999/#3012). There is no rollback here to disarm it.
@@ -239,7 +262,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	if adopted {
 		m.info().Printf("archived session %q (repo %s): tmux torn down; adopted worktree at %s, where an earlier interrupted archive had moved it; branch kept", title, repoID, origPath)
 	} else {
-		m.info().Printf("archived session %q (repo %s): tmux torn down; worktree was already absent at %s (deleted outside af); branch kept", title, repoID, origPath)
+		m.info().Printf("archived session %q (repo %s): tmux torn down; worktree was already absent at %s (deleted outside af); %s", title, repoID, origPath, branchOutcome)
 	}
 	archived := instance.ToInstanceData()
 	// Inside opLock, for the event-ordering reason on the relocating route.
@@ -255,3 +278,52 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 // route (#5102): the same tmux teardown and hook, no move. Indirected for the
 // same reason.
 var archiveGoneTeardown = (*session.Instance).ArchiveTeardownWorktreeGone
+
+// refuseUnverifiedArchiveSource refuses an archive of a worktree-missing row
+// whose claim found a directory git does not prove is the session's (#5102).
+// The claim goes back unverified, so the refused directory is never recorded as
+// the worktree's identity. The durable fence is the persisted missing flag
+// itself (and its rollback projection, see ForStorage): it is what keeps every
+// later archive, restore and respawn refusing the directory, so the refusal is
+// reported together with any failure to write it rather than left to a
+// best-effort persist that could lose it across a daemon exit.
+func (m *Manager) refuseUnverifiedArchiveSource(repoID, title string, instance *session.Instance, claim sessiongit.RelocationClaim, cause error) error {
+	_ = instance.Transition(session.CancelArchive())
+	instance.ReturnWorktreeClaimUnverified(claim)
+	refusal := fmt.Errorf(
+		"cannot archive session %q: its tracked worktree %s was recorded as deleted outside af, and the directory now at that path is not one git proves is the session's checkout (%v) — af will not run the on-archive hook in it or move it into the archive; inspect %s, remove it or move it aside if it is not the session's work, then retry (the session then archives as deleted)",
+		title, claim.Path, cause, claim.Path)
+	if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		return errors.Join(refusal, fmt.Errorf("could not persist the session's worktree-missing fence: %w", perr))
+	}
+	return refusal
+}
+
+// cancelArchiveWorktreeGone settles a pre-teardown cancellation of the gone
+// route (#5102). Both arms have already settled the missing flag to what the
+// route proved, so this persist is what carries that to disk: it takes the
+// error-returning persist, and a write that did not land is reported with the
+// cancellation instead of swallowed — a lost stamp is the fence a restart
+// would no longer have.
+//
+// The adopted arm persists a path it re-aimed on git's proof, with the flag
+// cleared. That proof is bound to the directory identity AdoptLandedArchiveMove
+// pinned, and the editor and hook teardown ran since, so the pin is reconfirmed
+// before the path is written as authoritative. A mismatch has fenced the
+// record (ReconfirmAdoptedWorktree); a directory that vanished is recorded as
+// missing again. Either way the fence is what is persisted, not the path.
+func (m *Manager) cancelArchiveWorktreeGone(repoID string, instance *session.Instance, origPath string, adopted bool, cause error) error {
+	_ = instance.Transition(session.CancelArchive())
+	if adopted {
+		if rerr := instance.ReconfirmPlacedWorktree(); rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
+				instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
+			}
+			cause = fmt.Errorf("%w; the adopted worktree at %s is also no longer the directory git proved, so its record is fenced and af will not start an agent in or remove it: %v", cause, origPath, rerr)
+		}
+	}
+	if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		return errors.Join(cause, fmt.Errorf("could not record the session's worktree state on disk: %w", perr))
+	}
+	return cause
+}

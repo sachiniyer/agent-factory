@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -100,6 +101,16 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 			"cannot restore session %q: its archived worktree %s is gone, but git has its branch checked out at %s (moved outside af, or placed by an earlier restore that was cut off before it could record it) — move it back to %s and retry, or remove it with 'git worktree remove' and retry to rebuild it from the branch",
 			title, source, moved, source)
 	}
+	// Nothing to rebuild from is a fact to report, not a rebuild to attempt: the
+	// archive may have recorded that the branch was deleted too, and either way
+	// the branch is re-checked here, since the user may have recreated it. A
+	// probe that cannot answer falls through to the rebuild, which fails on its
+	// own terms if the branch is in fact gone.
+	if branch, exists, berr := instance.RecordedBranchExists(); berr == nil && !exists {
+		return fmt.Errorf(
+			"cannot restore session %q: its archived worktree %s is gone and its branch %s no longer exists either, so there is nothing to rebuild it from; the session stays archived — recreate the branch (for example 'git branch %s <commit>') and retry",
+			title, source, branch, branch)
+	}
 	if err := instance.RebuildAbsentArchivedWorktree(dest); err != nil {
 		wrapped := fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, and rebuilding it from branch %s at %s failed; the session stays archived with its branch kept: %w",
@@ -110,8 +121,14 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 		return wrapped
 	}
 	m.info().Printf("restore of session %q: archived worktree %s was gone; rebuilt it from branch %s at %s", title, source, instance.GetBranch(), dest)
+	afterRestoreWorktreePlaced()
 	return nil
 }
+
+// afterRestoreWorktreePlaced is a test seam that runs once a rebuild or
+// adoption has proved and pinned the restored directory, before the restore
+// tail reconfirms it. Production never reassigns it.
+var afterRestoreWorktreePlaced = func() {}
 
 // adoptRebuiltArchivedWorktree re-aims the restoring row at preferred, where git
 // has its branch checked out, once the adoption proof holds; see
@@ -129,5 +146,29 @@ func (m *Manager) adoptRebuiltArchivedWorktree(repoID, title string, instance *s
 		return wrapped
 	}
 	m.info().Printf("restore of session %q: archived worktree %s was gone; adopted the rebuild of branch %s an earlier restore left at %s", title, source, instance.GetBranch(), preferred)
+	afterRestoreWorktreePlaced()
 	return nil
+}
+
+// reconfirmPlacedRestoreWorktree re-checks, at a restore boundary, that the
+// directory a rebuild or adoption proved is still the one at the recorded path
+// (#5102). On a mismatch the git layer has already fenced the record; a
+// directory that vanished is recorded as missing again. Either way the row is
+// persisted before the refusal is returned, so the fence survives a restart.
+func (m *Manager) reconfirmPlacedRestoreWorktree(repoID, title string, instance *session.Instance, boundary string) error {
+	err := instance.ReconfirmPlacedWorktree()
+	if err == nil {
+		return nil
+	}
+	path := instance.GetWorktreePath()
+	if errors.Is(err, os.ErrNotExist) {
+		instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(path))
+	}
+	refusal := fmt.Errorf(
+		"cannot restore session %q: the worktree af placed at %s is no longer the directory it verified there, so af stopped %s; the record is fenced and af will not start an agent in or remove that path — inspect %s, then retry: %w",
+		title, path, boundary, path, err)
+	if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		return errors.Join(refusal, fmt.Errorf("could not persist its worktree fence: %w", perr))
+	}
+	return refusal
 }

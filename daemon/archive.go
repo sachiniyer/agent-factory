@@ -317,20 +317,24 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		)
 	}
 	// A persisted worktree-missing flag means the directory af tracked was
-	// deleted (#5102). A claim that now succeeds found SOMETHING at that path, but
-	// nothing proves it is the session's worktree — a mkdir, an unrelated
-	// checkout, a restore from backup all look the same from here. The moving
-	// route would run the on-archive hook inside it and relocate its bytes into
-	// the archive, so refuse closed instead: once the path is cleared, the retry
-	// takes the deletion route and archives with the branch kept. The flag is
-	// sticky exactly so a reappearing path cannot quietly re-qualify the row.
+	// deleted (#5102). A claim that now succeeds found SOMETHING at that path, and
+	// by default nothing proves it is the session's worktree — a mkdir, an
+	// unrelated checkout, a restore from backup all look the same from here. The
+	// moving route would run the on-archive hook inside it and relocate its bytes
+	// into the archive, so it may continue only on git's own proof that the
+	// claimed directory is this session's checkout (VerifyClaimedWorktree). That
+	// is the state the user is told to reach — put the checkout back where af
+	// tracked it — and refusing it too left no way out. Anything else refuses
+	// closed: once the path is cleared, the retry takes the deletion route and
+	// archives with the branch kept. The flag is sticky exactly so a reappearing
+	// path cannot quietly re-qualify the row.
 	if missing, _ := instance.WorktreeMissing(); missing {
-		_ = instance.Transition(session.CancelArchive())
-		instance.ReturnWorktreeClaimUnverified(relocationClaim)
-		m.persistInstance(repoID, instance)
-		return "", session.InstanceData{}, fmt.Errorf(
-			"cannot archive session %q: its tracked worktree %s was recorded as deleted outside af, and the directory now at that path is not one af can verify is the session's — af will not run the on-archive hook in it or move it into the archive; inspect %s, remove it or move it aside if it is not the session's work, then retry (the session archives with its branch kept)",
-			req.Title, relocationClaim.Path, relocationClaim.Path)
+		if verifyErr := instance.VerifyClaimedWorktree(relocationClaim); verifyErr == nil {
+			m.info().Printf("archive of session %q: git proves the directory at %s is the session's own checkout (put back after it was recorded as deleted); archiving it", req.Title, relocationClaim.Path)
+			instance.ClearWorktreeMissing()
+		} else {
+			return "", session.InstanceData{}, m.refuseUnverifiedArchiveSource(repoID, req.Title, instance, relocationClaim, verifyErr)
+		}
 	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).

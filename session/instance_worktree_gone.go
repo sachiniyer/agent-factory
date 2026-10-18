@@ -62,7 +62,13 @@ func (i *Instance) AdoptRebuiltArchivedWorktree(dest string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
-	return gw.AdoptLandedWorktreeMove(dest)
+	if err := gw.AdoptLandedWorktreeMove(dest); err != nil {
+		return err
+	}
+	// The record now names dest; the flag follows it, as for a rebuild, until
+	// the caller's committed restore clears it.
+	i.SetWorktreeMissing(WorktreeMissingPlacingReason(dest))
+	return nil
 }
 
 // LiveBranchCheckout reports where git has this session's branch checked out
@@ -113,13 +119,21 @@ func (i *Instance) ReturnWorktreeClaimUnverified(claim git.RelocationClaim) {
 // out there again from the branch, the same rebuild the Lost-recovery respawn
 // performs. It never creates a branch: a branch that is gone fails the rebuild.
 //
-// On a failed rebuild the record is re-aimed back at the recorded path, so the
-// row stays the archived-missing row it was. If dest is no longer absent —
-// a `git worktree add` that failed after creating it — the record stays at
-// dest and still flagged missing, and every later restore then refuses the
-// unverified directory rather than adopting it. The caller persists either
-// outcome. The flag itself is left for the caller to clear once the restore
-// commits.
+// The missing flag follows the pointer. The moment the record names dest it is
+// stamped missing for dest, before git creates anything there, so every exit
+// that leaves the record at dest — a rebuild that failed after creating the
+// directory, a repoint back that could not run — leaves a row whose directory
+// at dest is unverified rather than one a later archive or restore would take
+// at face value. The row may not have been flagged on entry (an archive
+// directory deleted between polls takes this route too), which is exactly why
+// the stamp cannot be left to the poll. A rollback to the recorded path
+// re-stamps it for that path, which is just as absent.
+//
+// On success the rebuilt directory is proven (ProveRecordedWorktree: git's
+// registration on the branch plus the back-binding) and its identity pinned,
+// so the caller's ReconfirmPlacedWorktree at the persist and respawn
+// boundaries refuses a directory swapped in after the rebuild. The flag is
+// left for the caller to clear once the restore commits.
 func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
 	i.mu.RLock()
 	gw := i.gitWorktree
@@ -131,11 +145,16 @@ func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
 	if err := gw.RepointAbsentWorktreePath(dest); err != nil {
 		return err
 	}
+	i.SetWorktreeMissing(WorktreeMissingPlacingReason(dest))
 	if err := gw.RebuildFromExistingBranch(); err != nil {
 		if backErr := gw.RepointAbsentWorktreePath(orig); backErr != nil {
 			return errors.Join(err, fmt.Errorf("the record now names %s: %w", dest, backErr))
 		}
+		i.SetWorktreeMissing(WorktreeMissingDeletedReason(orig))
 		return err
+	}
+	if err := gw.ProveRecordedWorktree(); err != nil {
+		return fmt.Errorf("rebuilt the worktree at %s but could not prove the directory there is the rebuild: %w", dest, err)
 	}
 	return nil
 }

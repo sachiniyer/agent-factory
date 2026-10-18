@@ -221,6 +221,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// archive commits (#5102). There are no bytes to move back; the kept branch
 	// is rebuilt into the restore destination instead.
 	placement := "worktree moved back to"
+	// placedByProof is true when the worktree was rebuilt or adopted rather than
+	// moved back under a claim: its directory was proven and its identity pinned
+	// (rebuildAbsentArchivedWorktree), and that pin is re-checked below at each
+	// boundary that would make the directory authoritative.
+	placedByProof := false
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
 	switch {
 	case err == nil:
@@ -232,8 +237,22 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			return "", err
 		}
 		placement = "worktree rebuilt from its kept branch at"
+		placedByProof = true
 	default:
 		return "", err
+	}
+	// The directory af just placed is the only thing a missing row's restore may
+	// record and start the agent in. Rebuild and adoption both proved it and
+	// pinned its device/inode, but the hooks a rebuild starts, and anything else
+	// running as this user, can swap the name between that proof and the commit
+	// below — so the pin is reconfirmed before the commit (which clears the flag
+	// and persists the path as authoritative) and again before the respawn
+	// (#5102). A failure leaves the row archived, still flagged, and fenced by the
+	// git layer, and that state is persisted before the refusal is reported.
+	if placedByProof {
+		if err := m.reconfirmPlacedRestoreWorktree(repoID, req.Title, instance, "before recording it"); err != nil {
+			return "", err
+		}
 	}
 	// The worktree is back where af put it — moved back, or rebuilt from the
 	// branch — so a worktree-missing flag on this row is stale and the commit
@@ -291,6 +310,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
+	if placedByProof {
+		if err := m.reconfirmPlacedRestoreWorktree(repoID, req.Title, instance, "before starting the agent in it"); err != nil {
+			return failedRestoredArchiveResult(instance, restoredPath, err)
+		}
+	}
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,
@@ -329,22 +353,29 @@ func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *sessi
 
 	// A persisted worktree-missing flag means the directory af tracked was
 	// deleted (#5102). A claim that now succeeds found SOMETHING at that path,
-	// but nothing proves it is the session's worktree — a mkdir, an unrelated
-	// checkout, a restore from backup all look the same from here. Moving it
-	// back and starting the agent in it would hand its files to the agent, so
-	// refuse closed: once the path is cleared, the retry takes the rebuild
-	// route. The flag is sticky exactly so a reappearing path cannot quietly
-	// re-qualify the row.
+	// and by default nothing proves it is the session's worktree — a mkdir, an
+	// unrelated checkout, a restore from backup all look the same from here.
+	// Moving it back and starting the agent in it would hand its files to the
+	// agent, so it may continue only on git's own proof that the claimed
+	// directory is this session's checkout (VerifyClaimedWorktree) — the user
+	// putting the archive back, which the rebuild route's refusal asks for.
+	// Anything else refuses closed: once the path is cleared, the retry takes the
+	// rebuild route. The flag is sticky exactly so a reappearing path cannot
+	// quietly re-qualify the row; the caller clears it once the restore commits.
 	if missing, _ := instance.WorktreeMissing(); missing {
-		claimTransferred = true
-		instance.ReturnWorktreeClaimUnverified(relocationClaim)
-		refusal := fmt.Errorf(
-			"cannot restore session %q: its archived worktree %s was recorded as deleted outside af, and the directory now at that path is not one af can verify is the session's — af will not move it back or start the agent in it; inspect %s, remove it or move it aside if it is not the session's work, then retry (restore then rebuilds the worktree from its kept branch)",
-			title, relocationClaim.Path, relocationClaim.Path)
-		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return errors.Join(refusal, fmt.Errorf("could not persist its unverified-worktree fence: %w", perr))
+		verifyErr := instance.VerifyClaimedWorktree(relocationClaim)
+		if verifyErr != nil {
+			claimTransferred = true
+			instance.ReturnWorktreeClaimUnverified(relocationClaim)
+			refusal := fmt.Errorf(
+				"cannot restore session %q: its archived worktree %s was recorded as deleted outside af, and the directory now at that path is not one git proves is the session's checkout (%v) — af will not move it back or start the agent in it; inspect %s, remove it or move it aside if it is not the session's work, then retry (restore then rebuilds the worktree from its kept branch)",
+				title, relocationClaim.Path, verifyErr, relocationClaim.Path)
+			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+				return errors.Join(refusal, fmt.Errorf("could not persist its unverified-worktree fence: %w", perr))
+			}
+			return refusal
 		}
-		return refusal
+		m.info().Printf("restore of session %q: git proves the directory at %s is the session's own checkout (put back after it was recorded as deleted); moving it back", title, relocationClaim.Path)
 	}
 
 	repoPath := instance.GetRepoPath()
