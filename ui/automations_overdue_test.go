@@ -159,9 +159,16 @@ func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 // the narrowest supported rendering is " Automations: [!] 100" — the glyph
 // beside the noun — which fits at any count, where a spelling picked by digit
 // count would break when a keys rebind repriced the affordance.
+//
+// The ONE exception is a primary too wide to sit beside the name: past four
+// digits "[!] 10000" is 9 cells and the joint fit needs 23, so the compact
+// line — the whole section — keeps the warning rather than the noun
+// (" [!] 10000"). A hidden ten-thousand-task warning would be worse than an
+// unnamed count; and the affordance cannot borrow a slot here — it only
+// rejoins beside the full joint spelling, or the hint would hump.
 func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 	last := time.Date(2026, time.June, 14, 3, 0, 0, 0, time.UTC)
-	for _, overdue := range []int{1, 99, 150} {
+	for _, overdue := range []int{1, 99, 150, 9999, 10000} {
 		var tasks []task.Task
 		for i := 0; i < overdue; i++ {
 			tasks = append(tasks, task.Task{
@@ -176,8 +183,23 @@ func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 		out := a.View()
 		assert.Contains(t, out, fmt.Sprintf("[!] %d", overdue),
 			"the warning count survives at %d overdue:\n%s", overdue, out)
-		assert.Contains(t, out, "Automations:",
-			"and the noun is still the last fragment standing at %d overdue (#5372):\n%s", overdue, out)
+		if overdue <= 9999 {
+			assert.Contains(t, out, "Automations:",
+				"the noun is still the last fragment standing at %d overdue (#5372):\n%s", overdue, out)
+		} else {
+			assert.NotContains(t, out, "Automations:",
+				"past the joint fit the warning outranks the noun at %d overdue:\n%s", overdue, out)
+			assert.NotContains(t, out, "m manage",
+				"the affordance can only rejoin beside the full joint spelling — borrowing it here would hump the hint at the joint's own boundary:\n%s", out)
+			// And the count itself is never clipped: below the joint fit the
+			// primary renders alone, at and above it the joint does — so the
+			// warning is on the line at every width the rail can produce.
+			for w := 22; w <= 36; w++ {
+				a.SetRect(layout.Rect{W: w, H: 1})
+				assert.Containsf(t, a.View(), fmt.Sprintf("[!] %d", overdue),
+					"%d overdue at rail width %d: the warning is on the line:\n%s", overdue, w, a.View())
+			}
+		}
 	}
 }
 

@@ -691,10 +691,12 @@ func (a *AutomationsPane) compactRailHeader() railHeader {
 		// straight through to the clip. #5372 re-ordered the tail (the noun now
 		// outlives the affordance), so the narrowest supported renderings are
 		// " Automations: [!] 100" beside the name rather than "[!] 100 · m
-		// manage" beside nothing — the glyph form still fits at any count,
-		// where a spelling picked by digit count would break when a keys rebind
-		// repriced the affordance. It is also the mark the rows above carry at
-		// wider widths.
+		// manage" beside nothing — the glyph form fits beside the noun to four
+		// digits, where a spelling picked by digit count would break when a
+		// keys rebind repriced the affordance. Past that the ladder keeps the
+		// warning and drops the name rather than the number (the compact line
+		// IS the whole section — #5374 review). It is also the mark the rows
+		// above carry at wider widths.
 		//
 		// The label is the GLYPH rather than the word "overdue", because the
 		// count includes every task carrying the mark — one whose expression the

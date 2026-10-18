@@ -114,6 +114,15 @@ func (h railHeader) shrunk(w int) string {
 // informative thing that still does. The swap is bounded — the noun and the
 // primary count still shed strictly last, in that order.)
 //
+// One exception to "noun last", and only past the supported floor: when the
+// primary itself can never sit beside the noun — a five-digit warning pushes
+// the joint spelling past 22 cells — the primary renders alone before the
+// noun stands by itself (" [!] 10000", not " [!] 10000 · m manage": the
+// affordance only rejoins beside the full joint spelling, or the hint would
+// hump at the boundary). In the compact summary this line IS the whole
+// section, and hiding a huge warning behind " Automations:" would be worse
+// than an unnamed count.
+//
 // Three rules hold at every step, and #3630 was the first two failing at once in
 // the Automations header while #3642 was the third failing in the Projects one.
 //
@@ -162,14 +171,27 @@ func railTitleLine(h railHeader, w int, nameStyle, hintStyle lipgloss.Style, hin
 		// its primary, then the noun stands alone — and only below the noun's
 		// own fit does the line clip, a band the 22-cell rail floor never
 		// reaches.
-		if titled := " " + h.noun + " " + h.primary; h.primary != "" && fits(titled, sticky) {
-			return render(titled, sticky)
+		joint := " " + h.noun + " " + h.primary
+		if h.primary != "" && fits(joint, sticky) {
+			return render(joint, sticky)
 		}
 		if fits(h.text(), "") {
 			return render(h.text(), "")
 		}
-		if titled := " " + h.noun + " " + h.primary; h.primary != "" && fits(titled, "") {
-			return render(titled, "")
+		if h.primary != "" && fits(joint, "") {
+			return render(joint, "")
+		}
+		// One exception to noun-last, and only past the supported floor: a
+		// primary so wide it can never sit beside the noun (a five-digit
+		// warning — " [!] 10000" — pushes the joint spelling past 22 cells).
+		// Hiding it behind " Automations:" would be worse than an unnamed
+		// count — the compact line IS the whole section — so the primary
+		// outranks the noun down here. No sticky on this rung: the affordance
+		// could only rejoin where the joint itself fits, which is the rung
+		// above, and borrowing it here would re-create the non-monotonic
+		// hint hump at the joint's own boundary.
+		if h.primary != "" && layout.Cells(joint) > layout.TreeMinWidth && fits(h.primaryOnly(), "") {
+			return render(h.primaryOnly(), "")
 		}
 		if fits(" "+h.noun, "") {
 			return render(" "+h.noun, "")
