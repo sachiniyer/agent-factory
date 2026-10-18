@@ -49,8 +49,21 @@ func (i *Instance) PendingTabCleanup() []TabCleanupData {
 // A zero retired count means no handle was retired and therefore nothing needs
 // persisting, so the caller can skip the write entirely.
 func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
+	return i.retryPendingTabCleanup(false)
+}
+
+// RetryPendingTabCleanupAndWait is RetryPendingTabCleanup on the waiting
+// teardown path: each leftover session's pane process tree must be observed
+// exited before its handle retires. The rebuild teardown uses it because a
+// replacement spawned over Close's async reaper can launch while a survivor
+// is still writing the checkout it just vacated (#5371 review).
+func (i *Instance) RetryPendingTabCleanupAndWait() (retired, remaining int) {
+	return i.retryPendingTabCleanup(true)
+}
+
+func (i *Instance) retryPendingTabCleanup(wait bool) (retired, remaining int) {
 	for _, handle := range i.PendingTabCleanup() {
-		if err := killTabCleanupSession(handle); err != nil {
+		if err := killTabCleanupSession(handle, wait); err != nil {
 			log.WarningLog.Printf(
 				"session %q: tab cleanup for tmux session %q is still unconfirmed and will be retried on the next daemon start: %v",
 				i.Title, handle.TmuxName, err)
@@ -76,15 +89,17 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 // production builds a real tmux session. Pane state is ignored for the reason
 // closeRemovedTab ignores it: reaping one tab's session touches no worktree, so
 // nothing destructive follows an unknown.
-func killTabCleanupSession(handle TabCleanupData) error {
+func killTabCleanupSession(handle TabCleanupData, wait bool) error {
 	if handle.TmuxName == "" {
 		return fmt.Errorf("tab cleanup handle has no tmux session name")
 	}
 	// The program is irrelevant to a kill and this session is never started from
 	// here, so an empty one keeps the handle honest about carrying no command.
 	ts := restoreTmuxSession(handle.TmuxName, "")
-	if _, err := ts.Close(); err != nil {
+	if wait {
+		_, err := ts.CloseAndWaitForPaneExit()
 		return err
 	}
-	return nil
+	_, err := ts.Close()
+	return err
 }

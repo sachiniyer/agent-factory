@@ -69,6 +69,7 @@ func accountLostInstanceForRecover(
 	}
 	instance, err := FromInstanceData(data)
 	require.NoError(t, err)
+	instance.SetRebuildTeardownNotify(func(*Instance) error { return nil })
 	return instance
 }
 

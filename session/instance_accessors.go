@@ -585,6 +585,9 @@ func (i *Instance) RebuildTeardownPending() bool {
 // caller keeps the row Lost instead of spawning on an unrecorded discharge.
 // A failed set-checkpoint likewise keeps the flag set — the rebuild has
 // committed either way — and propagates the error so the attempt reports it.
+// A nil notify is a failed checkpoint too, not a skipped one: every respawn
+// entry point that can rebuild installs the callback, so reaching a
+// transition without it means an entry point was missed (#5371 review).
 func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 	i.mu.Lock()
 	if i.rebuildTeardownPending == pending {
@@ -596,7 +599,16 @@ func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 	i.touchLocked()
 	i.mu.Unlock()
 	if notify == nil {
-		return nil
+		// A transition that cannot checkpoint is a transition that did not
+		// happen durably: a restart reloads the pre-transition value, which for
+		// both directions is "the obligation may exist". Keep the flag set and
+		// refuse, so a respawn entry point that forgot to install the callback
+		// cannot quietly skip the checkpoint it exists to make (#5371 review).
+		i.mu.Lock()
+		i.rebuildTeardownPending = true
+		i.touchLocked()
+		i.mu.Unlock()
+		return fmt.Errorf("rebuild teardown transition has no durable checkpoint: install SetRebuildTeardownNotify before recovering")
 	}
 	if err := notify(i); err != nil {
 		// The transition did not land durably, so the disk record is still the
@@ -614,9 +626,10 @@ func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 }
 
 // SetRebuildTeardownNotify installs the synchronous persist callback a
-// rebuildTeardownPending transition fires. It is in-memory — a recover entry
-// point installs it for the attempt about to run, and a nil notify simply
-// skips the checkpoint (the settlement write still carries the flag).
+// rebuildTeardownPending transition fires. It is in-memory — every recover
+// entry point that can reach the rebuild teardown installs it for the
+// attempt about to run; SetRebuildTeardownPending refuses a transition that
+// has no callback to make it durable.
 func (i *Instance) SetRebuildTeardownNotify(notify func(*Instance) error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()

@@ -101,6 +101,17 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			// restore loop's escalation log should say so.
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
+		// Arm the teardown obligation BEFORE the rebuild commits. A daemon exit
+		// between the rebuild landing the directory and a later arm would reload
+		// a row whose worktree exists and whose RebuildTeardownPending reads
+		// false — `rebuilt` re-derives false from os.Stat, the teardown gate
+		// skips, and a surviving stale pane reattaches to the deleted inode
+		// (#5371 review). The flag therefore goes durable while the worktree is
+		// still missing, so the rebuilt directory and the obligation to clear
+		// its predecessor's panes can never be separated by a crash.
+		if err := i.SetRebuildTeardownPending(true); err != nil {
+			return fmt.Errorf("recover: could not make the stale-pane teardown obligation durable before rebuilding: %w", err)
+		}
 		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
 			if !resume {
 				// The fresh-rebuild fallback below is an EXACT-RESUME command, which
@@ -151,20 +162,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// fresh panes inside the new worktree; the agent keeps its conversation
 	// through the recorded resume path.
 	//
-	// The obligation is durable: a rebuild that commits and then fails before
-	// the teardown confirms leaves RebuildTeardownPending set, so the next
-	// attempt still removes the stale names instead of re-deriving `rebuilt`
-	// from the now-present directory (#5371 review).
-	if rebuilt {
-		// Checkpoint the obligation at rebuild-commit, before the teardown
-		// runs: a daemon exit between the rebuild and the settlement write
-		// would otherwise reload a row that cannot tell a rebuild ever
-		// happened, and reattach the surviving stale panes (#5371 review).
-		if err := i.SetRebuildTeardownPending(true); err != nil {
-			return markRecoverRebuilt(true, fmt.Errorf(
-				"recover: could not make the stale-pane teardown obligation durable: %w", err))
-		}
-	}
+	// The obligation is durable: it was armed before the rebuild above
+	// committed, so a rebuild that then fails before the teardown confirms
+	// leaves RebuildTeardownPending set — and the next attempt still removes
+	// the stale names instead of re-deriving `rebuilt` from the now-present
+	// directory (#5371 review).
 	if teardownPending := i.RebuildTeardownPending(); teardownPending {
 		// Durable state was committed — this attempt's rebuild, or the earlier
 		// one the pending flag survived — so every failure below carries the
@@ -192,12 +194,20 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			if keepFinishedProcessPane(i, tab) {
 				continue
 			}
-			if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {
+			state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+			if err != nil {
 				return markRecoverRebuilt(committed, fmt.Errorf(
 					"recover: could not stop process tab %q surviving in the deleted worktree: %w",
 					tab.Name, err))
 			}
-			stampProcessTabStopped(i, tab, TabStoppedByWorktreeRebuild)
+			// Only an OBSERVED stop earns a stopped reason: a session that was
+			// already gone (blind — vanished with no pane observed) was not
+			// terminated by this recovery, and stamping StoppedBy would invent
+			// an outcome it did not produce. The tab stays inert, which is what
+			// absence means on every other process-tab path (#5371 review).
+			if state == tmux.PaneStateKnown && !blind {
+				stampProcessTabStopped(i, tab, TabStoppedByWorktreeRebuild)
+			}
 		}
 
 		for _, staleSession := range stale {
@@ -213,8 +223,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 
 		// Tabs already removed from the roster can still own live sessions via
 		// their durable cleanup handles — kill what answers, keep what does
-		// not, and never drop a handle without a confirmed kill (#5371 review).
-		if _, remaining := i.RetryPendingTabCleanup(); remaining > 0 {
+		// not, and never drop a handle without a confirmed kill AND an observed
+		// process-tree exit: Close's async reaper could otherwise still be
+		// running in the deleted worktree when the replacements below spawn
+		// (#5371 review).
+		if _, remaining := i.RetryPendingTabCleanupAndWait(); remaining > 0 {
 			return markRecoverRebuilt(committed, fmt.Errorf(
 				"recover: %d stale session(s) behind pending tab cleanup could not be confirmed dead in the deleted worktree",
 				remaining))

@@ -325,6 +325,15 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
+	//
+	// RestoreFromArchive reaches LocalBackend's Recover → respawn, which can
+	// rebuild the restored path if it vanishes before being inspected — and a
+	// rebuild arms a stale-pane teardown obligation that must be durable at
+	// both its transitions (#5371 review). Install the checkpoint the setter
+	// requires.
+	instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,

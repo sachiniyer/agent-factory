@@ -624,6 +624,23 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return instance, nil
 	}
 
+	// A rebuild-teardown obligation means every tmux name this row binds was
+	// last observed inside the deleted inode: Start(false) would reattach
+	// them before the teardown owner retries, which is the stale-pane bind
+	// the flag exists to prevent (#5371 review). Load the row materialized
+	// but unrestored — started, so storage keeps it and whichever loop owns
+	// its liveness stays eligible: the lost-restore loop for a Lost row, the
+	// limit-resume scheduler for a limit-parked one (each requires Started),
+	// and the status poll for anything else — a positive observation is held
+	// at Lost by the pending gate until the teardown discharges.
+	if data.RebuildTeardownPending {
+		instance.mu.Lock()
+		instance.started = true
+		instance.touchLocked()
+		instance.mu.Unlock()
+		return instance, nil
+	}
+
 	if err := instance.Start(false); err != nil {
 		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not
