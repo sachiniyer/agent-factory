@@ -467,12 +467,23 @@ func systemdQuoteArgument(value string) string {
 // stops relaunching — the operator-visible stand-down systemd produces as a
 // failed unit. ThrottleInterval stays at 2 to mirror RestartSec=2 so the budget
 // counts the same pacing systemd's StartLimitIntervalSec counts against.
+//
+// The standard I/O paths live in the upgrade root (not the transaction
+// directory), mirroring recoveryLockPath. launchd opens StandardOutPath /
+// StandardErrorPath (creating them when absent) before it spawns the actor, so
+// a path inside the transaction directory would make the job unspawnable in the
+// exact stale-job and "only active.json" shapes this budget is meant to bound:
+// terminal cleanup removes transactions/<id>, and the adversarial shape never
+// has it, so launchd could not create the log file and would never reach the
+// in-process bound. The upgrade root survives transaction cleanup (only
+// transactions/<id> is removed) and is created by Prepare before the job is
+// installed, so the log path's parent exists for every shape the actor can.
 func renderLaunchdRecoveryPlist(journal Journal) string {
 	var arguments strings.Builder
 	for _, argument := range recoveryCommand(journal) {
 		fmt.Fprintf(&arguments, "        <string>%s</string>\n", xmlEscape(argument))
 	}
-	logPath := xmlEscape(filepath.Join(transactionDir(journal.HomeDir, journal.ID), "recovery.log"))
+	logPath := xmlEscape(filepath.Join(upgradeRoot(journal.HomeDir), "recovery-"+journal.ID+".log"))
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

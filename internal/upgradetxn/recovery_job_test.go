@@ -510,3 +510,40 @@ func TestRecoveryCommandEscapesServiceManagerMetacharacters(t *testing.T) {
 	require.NotContains(t, systemdQuoteArgument("safe\n[Service]\nExecStart=/tmp/evil"), "\n",
 		"a newline in a path must not inject another unit directive")
 }
+
+// TestRenderLaunchdRecoveryPlistLogPathStableWhenTransactionDirMissing pins the
+// fix for the stale-job / "only active.json" shape: launchd opens
+// StandardOutPath/StandardErrorPath (creating them when absent) before it
+// spawns the actor, so a path inside the transaction directory would make the
+// job unspawnable in exactly the shapes this budget is meant to bound — terminal
+// cleanup removes transactions/<id>, and the adversarial shape never has it —
+// and the in-process bound would never run. The log path must live in the
+// upgrade root (mirroring recoveryLockPath), which survives transaction cleanup
+// and is created by Prepare before the job is installed, so its parent exists
+// for every shape the actor can be in.
+func TestRenderLaunchdRecoveryPlistLogPathStableWhenTransactionDirMissing(t *testing.T) {
+	journal := Journal{
+		ID:                 "txn-log-path",
+		HomeDir:            t.TempDir(),
+		PreviousBinaryPath: "/tmp/previous-binary",
+		RecoveryJob:        mustNewRecoveryJob(t, RecoveryJobLaunchd, "txn-log-path"),
+	}
+	plist := renderLaunchdRecoveryPlist(journal)
+
+	wantLogPath := filepath.Join(upgradeRoot(journal.HomeDir), "recovery-"+journal.ID+".log")
+	require.Contains(t, plist, wantLogPath,
+		"the launchd recovery log path must live in the upgrade root so launchd can open it when the transaction directory is gone")
+
+	transactionLogPath := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "recovery.log")
+	require.NotContains(t, plist, transactionLogPath,
+		"the launchd recovery log path must not live in the transaction directory, which terminal cleanup removes and the adversarial shape never has — launchd would be unable to spawn the actor and the bound would never run")
+}
+
+func mustNewRecoveryJob(t *testing.T, kind RecoveryJobKind, id string) RecoveryJob {
+	t.Helper()
+	dir, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
+	job, err := NewRecoveryJob(kind, id, dir)
+	require.NoError(t, err)
+	return job
+}
