@@ -369,6 +369,22 @@ func boundLaunchdRecovery(
 		// active transaction explicitly. The actor returns nil for the gone or
 		// superseded case without recreating anything.
 		if !activeTransactionStillNamesInvocation(invocation) {
+			// The active transaction this job was armed for is gone (terminal
+			// cleanup removed active.json) or has been superseded, so the actor
+			// would return nil for a stale job. A successful exit stops
+			// KeepAlive.SuccessfulExit=false from relaunching, but the plist
+			// stays enabled with RunAtLoad, so a later login or boot would
+			// re-launch the stale previous binary. Disable the job before
+			// standing down so removal or replacement does not leave a
+			// permanently recurring recovery job (launchctl disable persists
+			// across boots). A disable failure does not keep the loop alive:
+			// exit 0 already stops the immediate relaunch, and the next boot's
+			// RunAtLoad re-enters this path and disables again.
+			if disableErr := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); disableErr != nil {
+				log.WarningLog.Printf(
+					"upgrade recovery: the active transaction for launchd recovery job %s is gone, but the job could not be disabled (%v); standing down (exit 0) to stop the immediate relaunch loop — the job may re-launch on a later login or reboot",
+					invocation.TransactionID, disableErr)
+			}
 			return nil
 		}
 		if err := recordLaunchdRecoveryAttempt(invocation, now()); err != nil {

@@ -497,7 +497,10 @@ func TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction(t *testing.T) 
 	// The active journal names a different id than the stale job's invocation.
 	// The stale transaction directory does not exist (a newer transaction
 	// replaced it and terminal cleanup removed it). The pre-record must not
-	// recreate it, and the actor must not run.
+	// recreate it, and the actor must not run. The job must still be disabled:
+	// exit 0 stops KeepAlive.SuccessfulExit=false from relaunching, but the
+	// plist stays enabled with RunAtLoad, so without the disable a later login
+	// or boot would re-launch the stale previous binary.
 	stale := RecoveryInvocation{HomeDir: invocation.HomeDir, TransactionID: "stale-transaction-id"}
 	staleDir := transactionDir(invocation.HomeDir, "stale-transaction-id")
 	_, statErr := os.Stat(staleDir)
@@ -509,7 +512,10 @@ func TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction(t *testing.T) 
 	})
 	require.NoError(t, err, "a stale job naming a superseded transaction must stand down (exit 0)")
 	require.False(t, ran, "the actor must not run for a stale job naming a superseded transaction")
-	require.Empty(t, runtime.commands, "no launchctl disable is needed when no attempt was recorded")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/com.agent-factory.upgrade-recovery.stale-transaction-id"},
+	}}, runtime.commands, "a stale job must be disabled so RunAtLoad cannot re-launch it on a later login or boot")
 	_, counterExists := readRecoveryRetryCounter(invocation.HomeDir, "stale-transaction-id")
 	require.False(t, counterExists, "the pre-record must not write a counter for a superseded transaction")
 	_, statErr = os.Stat(staleDir)
