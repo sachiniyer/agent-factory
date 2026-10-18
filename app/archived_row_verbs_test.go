@@ -70,6 +70,8 @@ func TestHandleRestore_ExpandedArchivedHeader(t *testing.T) {
 // TestHandleRestore_CollapsedArchivedHeaderIsInert: while the folder is
 // collapsed no row carries the ▾ marker, so `r` must not reach the hidden
 // binding — the footer is the header menu there and advertises no restore.
+// The dead key is not silent, though: it lands the #5373 notice, and it must
+// not unfold the section or move the cursor to make its point.
 func TestHandleRestore_CollapsedArchivedHeaderIsInert(t *testing.T) {
 	h := newTestHome(t)
 	inst := archiveActionInstance(t, "worker", session.Archived)
@@ -87,7 +89,85 @@ func TestHandleRestore_CollapsedArchivedHeaderIsInert(t *testing.T) {
 
 	require.Equal(t, session.OpNone, inst.GetInFlightOp(),
 		"`r` on a collapsed Archived header must not reach a hidden binding")
-	require.Nil(t, cmd)
+	require.NotNil(t, cmd, "the dead key lands its notice, which schedules the auto-clear")
+	text, _ := h.errBox.RetainedNotice()
+	require.Contains(t, text, "No archived session under the cursor",
+		"`r` on a collapsed Archived header must say why nothing happened (#5373)")
+
+	sel = h.sidebar.GetSelection()
+	require.True(t, sel.IsHeader, "the notice must not move the cursor off the header")
+	require.Equal(t, ui.SectionArchived, sel.Kind)
+	require.Nil(t, h.sidebar.RowVerbTarget(),
+		"the notice must not expand the folder to reach the hidden binding")
+}
+
+// TestHandleRestore_NonRestorableTargetsNotice is the rest of #5373's surface:
+// `r` used to no-op silently on everything that was not a restorable row. Each
+// refusal now lands a transient notice through the same path `S` and `R` use —
+// and the working path (an expanded archived row) is untouched.
+func TestHandleRestore_NonRestorableTargetsNotice(t *testing.T) {
+	t.Run("live row under the cursor", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := archiveActionInstance(t, "worker", session.Ready)
+		h.store.AddInstance(inst)
+		h.sidebar.SetSelectedInstance(0)
+
+		model, cmd := h.handleRestore()
+		h = model.(*home)
+
+		require.NotNil(t, cmd, "the notice schedules its auto-clear")
+		text, _ := h.errBox.RetainedNotice()
+		require.Contains(t, text, "worker")
+		require.Contains(t, text, "nothing to restore",
+			"a live row's `r` must say why nothing happened")
+		require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore was raised")
+	})
+
+	t.Run("sessions header keeps the cursor parked", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := archiveActionInstance(t, "worker", session.Ready)
+		h.store.AddInstance(inst)
+		h.store.SelectInstance(inst)
+		// Collapse and re-expand the Instances section so the cursor parks on
+		// its header while a LIVE row keeps the display binding — headers never
+		// adopt a live binding (#4755).
+		h.sidebar.ClickHeaderKind(ui.SectionInstances)
+		h.sidebar.ClickHeaderKind(ui.SectionInstances)
+
+		sel := h.sidebar.GetSelection()
+		require.True(t, sel.IsHeader, "precondition: cursor on the Sessions header")
+		require.Nil(t, h.sidebar.RowVerbTarget(),
+			"precondition: a live binding resolves no row-verb target")
+
+		model, cmd := h.handleRestore()
+		h = model.(*home)
+
+		require.NotNil(t, cmd, "the notice schedules its auto-clear")
+		text, _ := h.errBox.RetainedNotice()
+		require.Contains(t, text, "No archived session under the cursor")
+
+		sel = h.sidebar.GetSelection()
+		require.True(t, sel.IsHeader, "the notice must not move the cursor off the header")
+	})
+
+	t.Run("fenced resting row", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := archiveActionInstance(t, "worker", session.Lost)
+		inst.MarkStartupStateUnknown()
+		h.store.AddInstance(inst)
+		h.sidebar.SetSelectedInstance(0)
+		require.Equal(t, session.LifecycleActionNone, inst.LifecycleAction(),
+			"precondition: the startup-unknown fence reports no lifecycle verb")
+
+		model, cmd := h.handleRestore()
+		h = model.(*home)
+
+		require.NotNil(t, cmd, "the notice schedules its auto-clear")
+		text, _ := h.errBox.RetainedNotice()
+		require.Contains(t, text, "can't be restored",
+			"a fenced resting row's `r` must say why nothing happened")
+		require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore was raised")
+	})
 }
 
 // TestSelectionChanged_ExpandedArchivedHeaderAdvertisesRestore: the footer must

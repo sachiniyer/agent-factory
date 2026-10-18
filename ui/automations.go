@@ -634,15 +634,19 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
-// manageHint is the section's sticky affordance — the last fragment the width
-// ladder is allowed to shed (TestAutomationsTitleWidthAware's contract).
+// manageHint is the section's sticky affordance — the last NON-NOUN fragment
+// the width ladder is allowed to shed: it outranks the secondary count, and
+// only the noun itself survives it (TestAutomationsTitleWidthAware's contract,
+// re-ordered by #5372).
 func (a *AutomationsPane) manageHint() string {
 	return railHintSeparator + railActionHint(keys.KeyTaskList, "manage")
 }
 
 // titleLine renders the section header through the shared rail ladder
-// (ui/rail_header.go). The manage affordance is hints[0], so it is the last
-// thing cut — the shipped contract TestAutomationsTitleWidthAware pins.
+// (ui/rail_header.go). The manage affordance is hints[0], so of the hints it is
+// the last cut — under the header's nounLast order it still outlives the
+// secondary count, and the noun outlives it (the contract
+// TestAutomationsTitleWidthAware pins since #5372).
 func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
 	return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle,
 		a.manageHint(),
@@ -654,16 +658,20 @@ func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style)
 // 1-line summary's line and every full-mode width both speak it, because "n (m
 // on)" carries strictly more than the old full form's bare "(n)" — restoring
 // the noun on a bare count used to remove the enabled and warning numbers at
-// the threshold. The noun is whole-or-omitted in both uses — below
-// " Automations: …"'s fit the ladder jumps straight to the counts rather than
-// ellipsizing the noun into "Autom…".
+// the threshold. The noun is whole-or-omitted in both uses — and now whole-OR-
+// LAST (#5372): nounLast keeps "Automations:" on the line until nothing else
+// fits, because the affordance-last tail dropped it while a bare count still
+// rendered, leaving " 1 (1 on) · m manage" at the rail's 22-cell floor with no
+// word saying what was counted. Below even the noun's fit the line clips, a
+// band the rail's floor never reaches.
 func (a *AutomationsPane) compactRailHeader() railHeader {
 	tasks := a.proj.GetTasks()
 	header := railHeader{
-		noun:    "Automations:",
-		counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
-		primary: fmt.Sprintf("%d", len(tasks)),
-		whole:   true,
+		noun:     "Automations:",
+		counts:   fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
+		primary:  fmt.Sprintf("%d", len(tasks)),
+		whole:    true,
+		nounLast: true,
 	}
 	if attention := a.attentionCount(); attention > 0 {
 		// The degraded one-line mode has no rows, so this line IS the section —
@@ -677,14 +685,16 @@ func (a *AutomationsPane) compactRailHeader() railHeader {
 		// the total.
 		//
 		// The primary carries the ROW GLYPH rather than the word, and that is a
-		// width decision rather than a style one. #3641's last rung exists to
-		// keep the manage affordance from being clipped at the 22-column rail
-		// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
-		// measured, it fell straight through to the clip and truncated the
-		// affordance, which is the contract that rung was added to protect. A
-		// spelling picked by digit count would be no better: rebinding the
-		// manager key changes the budget. "[!] 100" fits at any count, and it is
-		// the mark the rows above carry at wider widths.
+		// width decision rather than a style one. #3641 added the primary rung
+		// so the affordance could not be clipped at the 22-column rail minimum —
+		// " 100 overdue" needed 12 of the 11 cells that rung had and fell
+		// straight through to the clip. #5372 re-ordered the tail (the noun now
+		// outlives the affordance), so the narrowest supported renderings are
+		// " Automations: [!] 100" beside the name rather than "[!] 100 · m
+		// manage" beside nothing — the glyph form still fits at any count,
+		// where a spelling picked by digit count would break when a keys rebind
+		// repriced the affordance. It is also the mark the rows above carry at
+		// wider widths.
 		//
 		// The label is the GLYPH rather than the word "overdue", because the
 		// count includes every task carrying the mark — one whose expression the

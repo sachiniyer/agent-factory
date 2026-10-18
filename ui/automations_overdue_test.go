@@ -131,12 +131,15 @@ func TestAutomationsOverdueSurvivesTheNarrowRail(t *testing.T) {
 
 // TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum: the compact mode
 // has no rows, so this one line is the entire section — and it is also the
-// narrowest thing the rail ever draws. At 22 columns #3641's ladder has shed the
-// noun and the secondary number; the count that says something is WRONG has to
-// be what survives that last rung, or the degraded rail shows no warning at all.
+// narrowest thing the rail ever draws. At 22 columns the ladder has shed the
+// affordance and the secondary numbers; the count that says something is WRONG
+// has to survive beside the section's name (#5372 made the noun the last
+// fragment shed, so the warning primary and the noun are the floor pair), or
+// the degraded rail shows no warning at all.
 //
-// It survives as the row glyph rather than the word, and that is a width
-// decision rather than a style one — see TestAutomationsCompactPrimaryFitsAtAnyCount.
+// The warning survives as the row glyph rather than the word, and that is a
+// width decision rather than a style one — see
+// TestAutomationsCompactPrimaryFitsAtAnyCount.
 func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 	a := newTestAutomations([]task.Task{overdueStripTask(), stripTasks()[1]})
 	a.SetRect(layout.Rect{W: 22, H: 1})
@@ -144,17 +147,18 @@ func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "compact strip at the rail minimum")
-	assert.Contains(t, out, "[!] 1", "the warning count outranks the total here:\n%s", out)
-	assert.Contains(t, out, "m manage", "and the manager key is still the last thing cut")
+	assert.Contains(t, out, "Automations: [!] 1",
+		"the warning count outranks the total here, beside the noun (#5372):\n%s", out)
+	assert.NotContains(t, out, "m manage",
+		"the affordance sheds ahead of the noun at this width:\n%s", out)
 }
 
-// TestAutomationsCompactPrimaryFitsAtAnyCount: #3641's last rung exists to keep
-// the manage affordance from being clipped at the 22-column rail minimum, and a
-// three-digit count spelled out as "100 overdue" needs 12 of the 11 cells that
-// rung has — measured, it fell straight through to the clip and truncated the
-// affordance, which is the contract that rung protects. The glyph form fits at
-// any count, and a spelling chosen by digit count would be no better: rebinding
-// the manager key changes the budget.
+// TestAutomationsCompactPrimaryFitsAtAnyCount: the glyph primary exists because
+// a three-digit count spelled out as "100 overdue" needs 12 cells and used to
+// fall straight through #3641's last rung to the clip. Under #5372's re-order
+// the narrowest supported rendering is " Automations: [!] 100" — the glyph
+// beside the noun — which fits at any count, where a spelling picked by digit
+// count would break when a keys rebind repriced the affordance.
 func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 	last := time.Date(2026, time.June, 14, 3, 0, 0, 0, time.UTC)
 	for _, overdue := range []int{1, 99, 150} {
@@ -172,8 +176,8 @@ func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 		out := a.View()
 		assert.Contains(t, out, fmt.Sprintf("[!] %d", overdue),
 			"the warning count survives at %d overdue:\n%s", overdue, out)
-		assert.Contains(t, out, "m manage",
-			"and the affordance is still the last thing cut at %d overdue:\n%s", overdue, out)
+		assert.Contains(t, out, "Automations:",
+			"and the noun is still the last fragment standing at %d overdue (#5372):\n%s", overdue, out)
 	}
 }
 

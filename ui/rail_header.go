@@ -50,6 +50,13 @@ type railHeader struct {
 	// contract that the affordance is cut last, at a SUPPORTED width rather than
 	// below one (#3641 review). Empty means counts is already minimal.
 	primary string
+	// nounLast inverts the ladder's tail so the counts and the affordance shed
+	// before the noun rather than after it (#5372). The affordance-last tail
+	// kept the noun alive only while the full header fit, then dropped it while
+	// the counts still had room — at the 22-cell rail floor that left
+	// " 1 (1 on) · m manage" counting something the reader could not name.
+	// Automations runs on this order; Projects keeps the affordance-last one.
+	nounLast bool
 }
 
 // text is the header at full width: " Automations (2)".
@@ -91,6 +98,22 @@ func (h railHeader) shrunk(w int) string {
 //	(2) · m manage                          then the noun goes, counts intact
 //	100 · m manage                          then the secondary count goes
 //
+// A header that sets nounLast swaps the tail of that order — the counts and the
+// affordance shed before the noun, which is the last thing standing:
+//
+//	Automations: 2 (2 on) · m manage        full counts beside the sticky hint
+//	Automations: 2 · m manage               the secondary count goes first —
+//	                                        the affordance still outranks it
+//	Automations: 2 (2 on)                   then the affordance goes
+//	Automations: 2                          then the secondary count again
+//	Automations:                            the noun is the last fragment
+//
+// (The "noun + counts" rung sits between the affordance's fall and the
+// primary's: the affordance outranks the secondary number while it fits, so
+// when the affordance falls the fuller count spelling returns as the most
+// informative thing that still does. The swap is bounded — the noun and the
+// primary count still shed strictly last, in that order.)
+//
 // Three rules hold at every step, and #3630 was the first two failing at once in
 // the Automations header while #3642 was the third failing in the Projects one.
 //
@@ -130,6 +153,28 @@ func railTitleLine(h railHeader, w int, nameStyle, hintStyle lipgloss.Style, hin
 	sticky := ""
 	if len(hints) > 0 {
 		sticky = hints[0]
+	}
+	if h.nounLast {
+		// #5372's contract: the section's noun is the last fragment the header
+		// sheds. The affordance keeps the primary count's slot for as long as
+		// it fits (it still outranks the secondary number); below that the
+		// full counts return beside the noun, then the count steps down to
+		// its primary, then the noun stands alone — and only below the noun's
+		// own fit does the line clip, a band the 22-cell rail floor never
+		// reaches.
+		if titled := " " + h.noun + " " + h.primary; h.primary != "" && fits(titled, sticky) {
+			return render(titled, sticky)
+		}
+		if fits(h.text(), "") {
+			return render(h.text(), "")
+		}
+		if titled := " " + h.noun + " " + h.primary; h.primary != "" && fits(titled, "") {
+			return render(titled, "")
+		}
+		if fits(" "+h.noun, "") {
+			return render(" "+h.noun, "")
+		}
+		return nameStyle.Render(fitLine(" "+h.noun, w))
 	}
 	if shrunk := h.shrunk(w - layout.Cells(sticky)); shrunk != "" && fits(shrunk, sticky) {
 		return render(shrunk, sticky)
