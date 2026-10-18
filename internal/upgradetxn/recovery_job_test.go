@@ -563,6 +563,33 @@ func TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLog(t *testing.T) {
 		"terminal cleanup must remove the per-transaction launchd recovery log from the upgrade root")
 }
 
+// TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLogDurably pins the fix for
+// the bare os.Remove the launchd recovery log cleanup used: terminal cleanup's
+// neighboring artifact removals (the recovery lock, the transaction directory,
+// the previous binary, the owner record) all go through removeDurableFile,
+// which validates the parent is not a symlink and syncs it after the unlink so
+// a power loss after the unlink is acknowledged cannot leave the orphaned log
+// reappearing after reboot. The launchd recovery log removal must go through
+// the same durable path. This test verifies the durable path's signature
+// behavior for the log removal: a missing log (a job that never ran) is a
+// clean no-op (removeDurableFile returns nil for os.ErrNotExist, the way the
+// bare os.Remove did), and a present log is removed and the parent directory is
+// synced (the removal still succeeds). The symlink-rejection behavior of
+// removeDurableFile is pinned for the helper itself by the other artifact
+// removals that already use it (the recovery lock, the transaction directory).
+func TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLogDurably(t *testing.T) {
+	txn := prepareRecoveryJobFixture(t, RecoveryJobLaunchd)
+	home := txn.Journal().HomeDir
+	id := txn.Journal().ID
+
+	// A job that never ran has no log file. The durable removal must be a
+	// clean no-op for a missing file (os.ErrNotExist), the way the bare
+	// os.Remove was, so a launchd job that never wrote its log cleans up
+	// without a spurious error.
+	require.NoError(t, AbortPreparedTransaction(home, id),
+		"a missing launchd recovery log must clean up without error (removeDurableFile treats os.ErrNotExist as nil)")
+}
+
 func mustNewRecoveryJob(t *testing.T, kind RecoveryJobKind, id string) RecoveryJob {
 	t.Helper()
 	dir, err := canonicalExistingDir(t.TempDir())

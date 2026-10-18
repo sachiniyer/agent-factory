@@ -193,18 +193,40 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 // that only surfaces on macOS (the original CI failure this guards) escapes CI.
 var launchdFallbackOnCorruptJournal = func() bool { return runtime.GOOS == "darwin" }
 
-// recoveryJobIsLaunchd reports whether the active transaction's recovery job
-// is the launchd kind. The journal is the authority when it loads. When it
-// does not — the corrupt-journal failure mode that is one of the persistent
+// recoveryJobIsLaunchd reports whether the recovery job that is actually
+// firing this invocation is the launchd kind, so the budget bounds the right
+// relaunch loop. The active journal is the authority when it loads AND still
+// names this invocation: the recovery job kind belongs to the transaction the
+// job was armed for, so a matching id is the only case where the loaded
+// journal's kind describes the job that is running. When the journal does not
+// load — the corrupt-journal failure mode that is one of the persistent
 // triggers this budget bounds — the detached fallback is a one-shot the
 // service manager never relaunches, so on Darwin a re-invoked recovery actor
 // must be in a launchd relaunch loop and the budget applies. On Linux the
 // recovery job is never launchd (validateDaemonRecoveryPair forbids it), so a
 // non-loading journal yields false and the budget is a no-op: systemd's own
 // StartLimit* directives bound the same failure there.
+//
+// When the active journal loads but names a different transaction — a stale
+// launchd job whose RunAtLoad/delayed restart fired after a newer transaction
+// replaced it — the loaded journal's kind describes the newer transaction's
+// recovery job, not the stale job that is actually running. The newer job's
+// kind cannot downgrade the still-armed launchd job's relaunch loop, so this
+// falls back to the same OS classification a corrupt journal uses, and the
+// stale-transaction gate below (activeTransactionStillNamesInvocation) then
+// disables and stands the stale job down. On Linux this is moot — a stale
+// launchd job cannot exist (validateDaemonRecoveryPair forbids launchd on
+// Linux) — so the fallback yields false and the budget stays a no-op.
 func recoveryJobIsLaunchd(invocation RecoveryInvocation) bool {
 	if txn, err := Load(invocation.HomeDir); err == nil {
-		return txn.Journal().RecoveryJob.Kind == RecoveryJobLaunchd
+		journal := txn.Journal()
+		if journal.ID == invocation.TransactionID {
+			return journal.RecoveryJob.Kind == RecoveryJobLaunchd
+		}
+		// The active transaction replaced the one this job was armed for, so
+		// its kind describes the newer job, not the stale launchd job that is
+		// actually firing this invocation. Classify from the platform.
+		return launchdFallbackOnCorruptJournal()
 	}
 	return launchdFallbackOnCorruptJournal()
 }

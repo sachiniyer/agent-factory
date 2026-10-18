@@ -481,15 +481,26 @@ func TestActiveTransactionStillNamesInvocation(t *testing.T) {
 // different transaction (a newer transaction replaced the one this stale job
 // was armed for), the pre-record must not recreate the replaced
 // transactions/<id> directory the actor's stale-job path does not clean up.
-// recoveryJobIsLaunchd loads the journal and returns true (the kind is still
-// launchd), so the budget path runs; activeTransactionStillNamesInvocation
-// gates the pre-record and stands the stale job down (exit 0) without writing a
-// counter or recreating the leaf. The gone-active.json shape (terminal cleanup
-// removed active.json) is the same gate on Darwin, where recoveryJobIsLaunchd
-// falls back to the OS; it is covered by TestActiveTransactionStillNamesInvocation
-// at the unit level because on Linux that fallback yields false and the budget
-// is a no-op there.
+// recoveryJobIsLaunchd does not trust the newer journal's kind for a stale
+// invocation whose transaction it does not name — it falls back to the
+// platform — so on Darwin (where a stale launchd job can survive cleanup) the
+// budget path runs and activeTransactionStillNamesInvocation gates the
+// pre-record and stands the stale job down (exit 0) without writing a counter
+// or recreating the leaf. The Darwin fallback is forced via the
+// launchdFallbackOnCorruptJournal seam so the budget path runs on Linux CI the
+// way it runs on the macOS cell; the gone-active.json shape (terminal cleanup
+// removed active.json) is the same gate on Darwin and is covered by
+// TestActiveTransactionStillNamesInvocation at the unit level.
 func TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction(t *testing.T) {
+	// Force the Darwin fallback so the stale-launchd-job budget path runs on a
+	// Linux CI runner. A stale launchd job only exists on Darwin, so the OS
+	// fallback is what classifies the invocation when the loaded journal names
+	// a different transaction; without forcing it the budget is a no-op on
+	// Linux (the platform where the launchd kind never exists in production).
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
 	controller := runtime.controller()
@@ -520,6 +531,95 @@ func TestBoundLaunchdRecoveryDoesNotRecreateSupersededTransaction(t *testing.T) 
 	require.False(t, counterExists, "the pre-record must not write a counter for a superseded transaction")
 	_, statErr = os.Stat(staleDir)
 	require.ErrorIs(t, statErr, os.ErrNotExist, "the stale transaction directory must not be recreated by the pre-record")
+}
+
+// TestBoundLaunchdRecoveryStaleJobDisabledWhenActiveTransactionIsDetached pins
+// the fix for the cross-kind superseding-transaction shape: a stale launchd job
+// for transaction A survives cleanup (it stays enabled with RunAtLoad after a
+// newer transaction B replaced it), and B uses RecoveryJobDetached (valid on
+// macOS when no daemon or an ad-hoc daemon was captured). recoveryJobIsLaunchd
+// loads B's journal and must NOT return B's Kind (Detached) for the stale
+// invocation — that would bypass the budget, leave A enabled with RunAtLoad,
+// and let it re-launch on every login or reboot. The loaded journal's kind
+// describes the newer job, not the stale launchd job that is actually firing,
+// so the invocation is classified from the platform (the Darwin fallback), the
+// budget path runs, and the stale-transaction gate disables A and stands it
+// down (exit 0) without recreating anything or running the actor. The Darwin
+// fallback is forced so the launchd budget path runs on Linux CI the way it
+// runs on the macOS cell.
+func TestBoundLaunchdRecoveryStaleJobDisabledWhenActiveTransactionIsDetached(t *testing.T) {
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	// The active transaction is Detached, the way a newer transaction on macOS
+	// is when no daemon (or an ad-hoc daemon) was captured. The stale launchd
+	// job for the prior transaction survived cleanup and is firing RunAtLoad.
+	txn := prepareRecoveryJobFixture(t, RecoveryJobDetached)
+	home := txn.Journal().HomeDir
+
+	// The stale invocation's transaction id differs from the active Detached
+	// transaction's id — this is the launchd job that survived the prior
+	// transaction's terminal cleanup.
+	stale := RecoveryInvocation{HomeDir: home, TransactionID: "stale-launchd-transaction-id"}
+	staleDir := transactionDir(home, "stale-launchd-transaction-id")
+	_, statErr := os.Stat(staleDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the stale transaction directory must not exist at the start")
+
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), stale, controller, time.Now, func() error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err, "a stale launchd job naming a superseded transaction must stand down (exit 0)")
+	require.False(t, ran, "the actor must not run for a stale job the active transaction does not name")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/com.agent-factory.upgrade-recovery.stale-launchd-transaction-id"},
+	}}, rt.commands, "a stale launchd job must be disabled even when the active transaction's kind is Detached so RunAtLoad cannot re-launch it on a later login or boot")
+	_, counterExists := readRecoveryRetryCounter(home, "stale-launchd-transaction-id")
+	require.False(t, counterExists, "the pre-record must not write a counter for a superseded transaction")
+	_, statErr = os.Stat(staleDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the stale transaction directory must not be recreated by the pre-record")
+}
+
+// TestRecoveryJobIsLaunchdFallsBackToPlatformForSupersededTransaction pins the
+// unit-level behavior the cross-kind shape above depends on: when the active
+// journal loads but names a different transaction, the loaded journal's kind
+// describes the newer job, not the stale invocation that is actually firing, so
+// recoveryJobIsLaunchd must not return it for the stale invocation. On Darwin
+// (the only platform whose service-managed recovery is launchd) the fallback
+// yields true so the budget bounds the stale launchd job's relaunch loop; on
+// Linux it yields false because launchd jobs cannot exist in production, so the
+// budget stays a no-op.
+func TestRecoveryJobIsLaunchdFallsBackToPlatformForSupersededTransaction(t *testing.T) {
+	// The active transaction is Detached; the stale invocation names the
+	// prior launchd transaction that was superseded.
+	txn := prepareRecoveryJobFixture(t, RecoveryJobDetached)
+	home := txn.Journal().HomeDir
+	stale := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID + "-superseded"}
+
+	// On Darwin the stale launchd job must be bounded (fallback true), even
+	// though the active journal's kind is Detached.
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+	require.True(t, recoveryJobIsLaunchd(stale),
+		"a stale launchd invocation whose active transaction was superseded by a Detached job must still be classified as launchd on Darwin so the budget bounds it")
+
+	// On Linux the budget is a no-op for a stale invocation because launchd
+	// jobs cannot exist in production; the fallback yields false.
+	launchdFallbackOnCorruptJournal = func() bool { return false }
+	require.False(t, recoveryJobIsLaunchd(stale),
+		"a stale invocation must not be classified as launchd on Linux even when the active transaction was superseded")
+
+	// When the active journal names the invocation, the loaded kind is the
+	// authority regardless of the platform fallback.
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	require.False(t, recoveryJobIsLaunchd(RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}),
+		"a matching Detached transaction must not be classified as launchd even when the platform fallback yields true")
 }
 
 // TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob pins the P2 fix for the

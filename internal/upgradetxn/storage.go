@@ -556,7 +556,13 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
 	}
 	if t.journal.RecoveryJob.Kind == RecoveryJobLaunchd {
-		if err := os.Remove(launchdRecoveryLogPath(t.journal.HomeDir, t.journal.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// removeDurableFile (not bare os.Remove) so the unlink is durable the
+		// way the neighboring artifact removals above are: it validates the
+		// upgrade root is not a symlink, removes the file (returning nil for
+		// os.ErrNotExist so a job that never ran cleans up cleanly), and syncs
+		// the parent directory so a power loss after the unlink is acknowledged
+		// cannot leave the orphaned log reappearing after reboot.
+		if err := removeDurableFile(launchdRecoveryLogPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 			return fmt.Errorf("remove inactive launchd recovery log: %w", err)
 		}
 	}
