@@ -254,7 +254,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
-			preserveAgentHandle = retainsInertInstance(err)
+			// A spawn-dir refusal likewise keeps the handle: nothing was ever
+			// spawned under it, and FromInstanceData loads the row Lost so the
+			// lost-restore loop can Recover it — which needs this exact
+			// persisted binding to respawn the same name (#5172).
+			preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
@@ -368,7 +372,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	if err := b.setupTabs(i); err != nil {
 		// A retained failure leaves the agent RUNNING, so keep the handle that
 		// names it: nilling the ref here would orphan the pane. See the predicate.
-		preserveAgentHandle = retainsInertInstance(err)
+		// A sibling spawn-dir refusal keeps it too — the binding (live or
+		// never-spawned) is what Recover reattaches or re-spawns (#5172).
+		preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}

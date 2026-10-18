@@ -720,7 +720,14 @@ func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byt
 }
 
 func (p *dockerProvisioner) agentName() string {
-	agent := sessionenv.AgentForCommand(p.program)
+	// The grant predicate, not the identity classifier: the credential mounts
+	// and run_args validation this feeds install operator material, so the
+	// agent name must be one af can attribute to the operator. The remote
+	// variant is the honest one here — the executable resolves on the image's
+	// filesystem, which the host cannot stat; the container's clone lives at
+	// dockerWorkspaceDir, so an absolute program path inside it resolves to
+	// repository content and earns no grant (#5265).
+	agent := sessionenv.GrantAgentForRemoteCommand(p.program, dockerWorkspaceDir)
 	if agent == "" && strings.TrimSpace(p.program) == "" {
 		return tmux.ProgramClaude
 	}

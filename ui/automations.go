@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,6 +205,27 @@ func (a *AutomationsPane) ScrollDown() {
 	}
 }
 
+// Shed order for the expanded row's fields (#5153): each field the rail shows
+// renders whole or not at all, and this is the order they are dropped in. The
+// warning leads (it is the reason the row is marked), the last run answers
+// "did it actually fire" ahead of the next one's "when will it", and the
+// trigger is configuration — the least informative field at width.
+const (
+	detailPrioAttention = iota
+	detailPrioLast
+	detailPrioNext
+	detailPrioErrored
+	detailPrioTrigger
+)
+
+// runFragment is one field of a row's run summary — a single "next", "last",
+// "armed", or "errored" clause — tagged with the order it sheds under width
+// pressure.
+type runFragment struct {
+	text string
+	prio int
+}
+
 // nextRunSummary derives the "next/last" column of a compact row: a cron
 // task's next fire time (from its schedule), a watch task's supervision
 // state, plus the last run when one is recorded.
@@ -259,10 +281,19 @@ func nextRunLabel(tsk task.Task, now time.Time) string {
 }
 
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
-	var parts []string
+	frags := a.runFragments(tsk)
+	parts := make([]string, 0, len(frags))
+	for _, f := range frags {
+		parts = append(parts, f.text)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (a *AutomationsPane) runFragments(tsk task.Task) []runFragment {
+	var parts []runFragment
 	if tsk.IsWatch() {
 		if s := watchSupervision(tsk); s != "" {
-			parts = append(parts, s)
+			parts = append(parts, runFragment{s, detailPrioNext})
 		}
 	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
 		// An unschedulable record says nothing HERE, in any of the cases below.
@@ -283,7 +314,7 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// The LIVE armed entry when the record carries one (#3623): a number
 			// read off the scheduler cannot promise a fire the scheduler is not
 			// holding.
-			parts = append(parts, "next "+nextRunLabel(tsk, a.now()))
+			parts = append(parts, runFragment{"next " + nextRunLabel(tsk, a.now()), detailPrioNext})
 		case notArmed(tsk):
 			// Nothing: attentionFragment leads the line with "not armed", and the
 			// rail's rule is to say it once. Emphatically NOT falling through to the
@@ -295,7 +326,7 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// Falling through to the expression here would label a LIVE observation
 			// as computed, which is the mislabel in the other direction; the
 			// observation is worth more than the number anyway.
-			parts = append(parts, "armed")
+			parts = append(parts, runFragment{"armed", detailPrioNext})
 		default:
 			// Nothing has reported on this task, so the expression is all there is
 			// and the fragment SAYS so (#3626). The rail is a tasks.json reader on a
@@ -315,7 +346,7 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 					// No caveat on this one: an expression that matches no date will
 					// never fire whoever is holding it, so the absence is a property of
 					// the record and not of what was observed (#2596).
-					parts = append(parts, "No upcoming run")
+					parts = append(parts, runFragment{"No upcoming run", detailPrioNext})
 				} else {
 					// The caveat comes FIRST, inside the fragment. Trailing, it was the
 					// half a clip ate: this line is ellipsized from the right and the
@@ -323,13 +354,13 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 					// survived while "(from cron)" became the ellipsis — leaving an
 					// inference rendered exactly like an observation, which is the one
 					// ambiguity the qualifier exists to remove (#3626 review).
-					parts = append(parts, "from cron: next "+next.Format("Jan 02 15:04"))
+					parts = append(parts, runFragment{"from cron: next " + next.Format("Jan 02 15:04"), detailPrioNext})
 				}
 			}
 		}
 	}
 	if tsk.LastRunAt != nil {
-		parts = append(parts, "last "+tsk.LastRunAt.Format("Jan 02 15:04"))
+		parts = append(parts, runFragment{"last " + tsk.LastRunAt.Format("Jan 02 15:04"), detailPrioLast})
 	}
 	// An errored task says so even with no LastRunAt. A task refused at arming
 	// has never run, so gating this on a timestamp would hide the one thing it
@@ -340,20 +371,24 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	// watchTaskStatus, which reads the same "errored:" prefix, and appending here
 	// too renders "watch: … · errored · errored".
 	if !tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
-		parts = append(parts, "errored")
+		parts = append(parts, runFragment{"errored", detailPrioErrored})
 	}
-	return strings.Join(parts, " · ")
+	return parts
 }
 
-// itemPrefixWidth is the fixed lead of a collapsed row — marker (1) + the
-// enabled glyph "[✓]" (3) + a 2-cell gap — that the title starts after and the
-// expanded detail line indents to, so a row's detail aligns under its title.
-const itemPrefixWidth = 6
+// itemPrefixWidth is the fixed lead of a collapsed row — the selection marker
+// (1) + its 2-cell slot gap + the enabled glyph "[✓]" (3) + a 1-cell gap —
+// that the title starts after and the expanded detail line indents to, so a
+// row's detail aligns under its title.
+const itemPrefixWidth = 7
 
 // titleRow renders one collapsed automation row: the enabled/disabled glyph and
 // the task title in the instance-title color — and nothing else (#1126: no
 // always-on trailing cron/next/last text). The focused, expanded row is marked
-// "▾" and its title bolded; every other row leads with a blank marker.
+// "▾" and its title bolded; every other row leads with a blank marker. The
+// marker occupies the same slot session rows give theirs — two blank cells
+// before the row content (#5350) — so the ▾ never reads as fused to the
+// checkbox.
 func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	glyph, glyphStyle := "[✓]", automationsEnabledStyle
 	if !tsk.Enabled {
@@ -388,36 +423,14 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	if name == "" {
 		name = "(unnamed)"
 	}
-	gap := "  "
+	// Both gaps carry the selection background when the row is expanded so the
+	// highlighted band stays continuous from the marker to the title.
+	markerGap, titleGap := "  ", " "
 	if expanded {
-		gap = nameStyle.Render(gap)
+		markerGap = nameStyle.Render(markerGap)
+		titleGap = nameStyle.Render(titleGap)
 	}
-	return fitLine(marker+glyphStyle.Render(glyph)+gap+nameStyle.Render(name), a.rect.W)
-}
-
-// rowDetail is the text an expanded row reveals: the trigger (cron expression
-// or watch command) and the next/last-run or supervision summary — the details
-// that used to trail every collapsed row (#1126). Empty when a task has neither.
-func (a *AutomationsPane) rowDetail(tsk task.Task) string {
-	var parts []string
-	// An overdue task leads with the problem, ahead of its own configuration
-	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
-	// sits last is what gets cut: at the 22-column minimum the cron expression
-	// would survive and the warning would not, which is backwards.
-	if fragment := attentionFragment(tsk, a.now()); fragment != "" {
-		parts = append(parts, fragment)
-	}
-	trigger := tsk.CronExpr
-	if tsk.IsWatch() {
-		trigger = "watch: " + tsk.WatchCmd
-	}
-	if trigger != "" {
-		parts = append(parts, trigger)
-	}
-	if next := a.nextRunSummary(tsk); next != "" {
-		parts = append(parts, next)
-	}
-	return strings.Join(parts, " · ")
+	return fitLine(marker+markerGap+glyphStyle.Render(glyph)+titleGap+nameStyle.Render(name), a.rect.W)
 }
 
 // needsAttention reports whether the row carries a warning: the task has stopped
@@ -505,39 +518,90 @@ func attentionFragment(tsk task.Task, now time.Time) string {
 	return ""
 }
 
+// detailField is one whole-or-nothing fragment of the expanded row's detail
+// line: the styled text to render, its cell width, and its shed priority
+// (detailPrio* — smaller survives longer).
+type detailField struct {
+	styled string
+	width  int
+	prio   int
+}
+
 // detailRow renders the expanded row's detail as a dim line indented under the
-// title, ellipsized to the rail width. Returns "" when the task has no detail.
+// title — the trigger and run facts a collapsed row hides (#1126). Every field
+// renders whole or not at all (#5153): the rail never ellipsizes a timestamp
+// into "Oct…", it keeps the fields that fit in detailPrio* order and omits the
+// rest. The fields fit inside the fixed itemPrefixWidth indent — the indent is
+// layout, not budget, and a detail line pulled left of it reads as a top-level
+// row — so a field that does not fit beside it is dropped, never bought with
+// indent cells.
 func (a *AutomationsPane) detailRow(tsk task.Task) string {
-	detail := a.rowDetail(tsk)
-	if detail == "" {
-		return ""
+	var fields []detailField
+	push := func(text string, style lipgloss.Style, prio int) {
+		// Budget with the clamp's own measure (CellsUpperBound): a field priced
+		// by Cells can still be tightened by the rectangle contract — a
+		// width-ambiguous emoji accepted as "whole" would render clipped by
+		// ClampToRect, quietly re-breaking the no-mid-token rule.
+		fields = append(fields, detailField{style.Render(text), layout.CellsUpperBound(text), prio})
 	}
-	indent := strings.Repeat(" ", itemPrefixWidth)
-	// Primary scheduling facts precede secondary cron/delivery metadata.
-	var parts []string
+	// An overdue task leads with the problem, ahead of its own configuration
+	// (#3623) — and ahead of every other field in the shed order too, for the
+	// same reason: a warning the rail drops is a mark left unexplained.
 	if attention := attentionFragment(tsk, a.now()); attention != "" {
 		style := lipgloss.NewStyle().Foreground(activeTheme.Ink)
 		if needsAttention(tsk) {
 			style = style.Foreground(activeTheme.Dead)
 		}
-		parts = append(parts, style.Render(attention))
+		push(attention, style, detailPrioAttention)
 	}
-	if next := a.nextRunSummary(tsk); next != "" {
-		primary, previous, found := strings.Cut(next, "last ")
-		value := lipgloss.NewStyle().Foreground(activeTheme.Ink).Render(primary)
-		if found {
-			value += automationDetailStyle.Render("last " + previous)
+	for _, frag := range a.runFragments(tsk) {
+		style := automationDetailStyle
+		if frag.prio == detailPrioNext {
+			style = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 		}
-		parts = append(parts, value)
+		push(frag.text, style, frag.prio)
 	}
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
 		trigger = "watch: " + tsk.WatchCmd
 	}
 	if trigger != "" {
-		parts = append(parts, automationDetailStyle.Render(trigger))
+		push(trigger, automationDetailStyle, detailPrioTrigger)
 	}
-	return fitLine(indent+strings.Join(parts, " · "), a.rect.W)
+
+	// Keep fields in shed order, each one only ever whole; " · " prices the
+	// join between every pair that survives.
+	keep := make([]bool, len(fields))
+	order := make([]int, len(fields))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return fields[order[i]].prio < fields[order[j]].prio
+	})
+	keptW := 0
+	avail := a.rect.W - itemPrefixWidth
+	for _, i := range order {
+		cost := fields[i].width
+		if keptW > 0 {
+			cost += layout.CellsUpperBound(railHintSeparator)
+		}
+		if keptW+cost > avail {
+			continue
+		}
+		keep[i] = true
+		keptW += cost
+	}
+	if keptW == 0 {
+		return ""
+	}
+	var parts []string
+	for i := range fields {
+		if keep[i] {
+			parts = append(parts, fields[i].styled)
+		}
+	}
+	return fitLine(strings.Repeat(" ", itemPrefixWidth)+strings.Join(parts, " · "), a.rect.W)
 }
 
 // attentionCount returns how many of the projection's tasks carry a WARNING —
@@ -570,14 +634,67 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
+// manageHint is the section's sticky affordance — the last fragment the width
+// ladder is allowed to shed (TestAutomationsTitleWidthAware's contract).
+func (a *AutomationsPane) manageHint() string {
+	return railHintSeparator + railActionHint(keys.KeyTaskList, "manage")
+}
+
 // titleLine renders the section header through the shared rail ladder
 // (ui/rail_header.go). The manage affordance is hints[0], so it is the last
 // thing cut — the shipped contract TestAutomationsTitleWidthAware pins.
 func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
 	return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle,
-		railHintSeparator+railActionHint(keys.KeyTaskList, "manage"),
+		a.manageHint(),
 		railHintSeparator+railActionHint(keys.KeyHooks, "hooks"),
 	)
+}
+
+// compactRailHeader is the section's ONE header vocabulary (#5153): the
+// 1-line summary's line and every full-mode width both speak it, because "n (m
+// on)" carries strictly more than the old full form's bare "(n)" — restoring
+// the noun on a bare count used to remove the enabled and warning numbers at
+// the threshold. The noun is whole-or-omitted in both uses — below
+// " Automations: …"'s fit the ladder jumps straight to the counts rather than
+// ellipsizing the noun into "Autom…".
+func (a *AutomationsPane) compactRailHeader() railHeader {
+	tasks := a.proj.GetTasks()
+	header := railHeader{
+		noun:    "Automations:",
+		counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
+		primary: fmt.Sprintf("%d", len(tasks)),
+		whole:   true,
+	}
+	if attention := a.attentionCount(); attention > 0 {
+		// The degraded one-line mode has no rows, so this line IS the section —
+		// and it is the narrowest thing the rail draws. A task that has stopped
+		// firing is easiest to miss exactly here, so the count rides the header
+		// (#3623).
+		//
+		// It becomes the PRIMARY as well as riding the counts, which is what
+		// #3641's ladder is for: when the width sheds everything but one number,
+		// the number that must survive is the one saying something is wrong, not
+		// the total.
+		//
+		// The primary carries the ROW GLYPH rather than the word, and that is a
+		// width decision rather than a style one. #3641's last rung exists to
+		// keep the manage affordance from being clipped at the 22-column rail
+		// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
+		// measured, it fell straight through to the clip and truncated the
+		// affordance, which is the contract that rung was added to protect. A
+		// spelling picked by digit count would be no better: rebinding the
+		// manager key changes the budget. "[!] 100" fits at any count, and it is
+		// the mark the rows above carry at wider widths.
+		//
+		// The label is the GLYPH rather than the word "overdue", because the
+		// count includes every task carrying the mark — one whose expression the
+		// scheduler cannot fire is not late, and compact mode has no rows to
+		// correct the impression with (#3623 review). It is also what the primary
+		// rung below shows, so the two rungs speak the same vocabulary.
+		header.counts = fmt.Sprintf("%d (%d on · [!] %d)", len(tasks), a.enabledCount(), attention)
+		header.primary = fmt.Sprintf("[!] %d", attention)
+	}
+	return header
 }
 
 // View implements layout.Pane: exactly rect-sized.
@@ -603,55 +720,25 @@ func (a *AutomationsPane) String() string {
 
 	// 1-line degraded summary (RFC §2.6, <80 cols).
 	if a.compact || a.rect.H <= 1 {
-		header := railHeader{
-			noun:    "Automations:",
-			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
-			primary: fmt.Sprintf("%d", len(tasks)),
-		}
-		if attention := a.attentionCount(); attention > 0 {
-			// The degraded one-line mode has no rows, so this line IS the section —
-			// and it is the narrowest thing the rail draws. A task that has stopped
-			// firing is easiest to miss exactly here, so the count rides the header
-			// (#3623).
-			//
-			// It becomes the PRIMARY as well as riding the counts, which is what
-			// #3641's ladder is for: when the width sheds everything but one number,
-			// the number that must survive is the one saying something is wrong, not
-			// the total.
-			//
-			// The primary carries the ROW GLYPH rather than the word, and that is a
-			// width decision rather than a style one. #3641's last rung exists to
-			// keep the manage affordance from being clipped at the 22-column rail
-			// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
-			// measured, it fell straight through to the clip and truncated the
-			// affordance, which is the contract that rung was added to protect. A
-			// spelling picked by digit count would be no better: rebinding the
-			// manager key changes the budget. "[!] 100" fits at any count, and it is
-			// the mark the rows above carry at wider widths.
-			//
-			// The label is the GLYPH rather than the word "overdue", because the
-			// count includes every task carrying the mark — one whose expression the
-			// scheduler cannot fire is not late, and compact mode has no rows to
-			// correct the impression with (#3623 review). It is also what the primary
-			// rung below shows, so the two rungs speak the same vocabulary.
-			header.counts = fmt.Sprintf("%d (%d on · [!] %d)", len(tasks), a.enabledCount(), attention)
-			header.primary = fmt.Sprintf("[!] %d", attention)
-		}
 		style := automationsTitleDimStyle
 		if a.focused {
 			style = automationsTitleStyle
 		}
-		return layout.ClampToRect(a.titleLine(header, style), a.rect)
+		return layout.ClampToRect(a.titleLine(a.compactRailHeader(), style), a.rect)
 	}
 
 	nameStyle := automationsTitleDimStyle
 	if a.focused {
 		nameStyle = automationsTitleStyle
 	}
-	title := a.titleLine(railHeader{
-		noun:   "Automations",
-		counts: fmt.Sprintf("(%d)", len(tasks)),
-	}, nameStyle)
+	// The header speaks the compact summary's counts vocabulary at every width
+	// (#5153 review): "n (m on)" — and "[!] n" when a task needs attention — is
+	// strictly more information than the bare "(n)" the old full form carried,
+	// so restoring the noun at its threshold used to REMOVE the enabled and
+	// warning counts. With one vocabulary the ladder stays monotonic, and the
+	// whole-or-omitted noun still sheds rather than ellipsizing into "Autom…".
+	header := a.compactRailHeader()
+	title := a.titleLine(header, nameStyle)
 	lines := []string{title}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace
@@ -674,13 +761,16 @@ func (a *AutomationsPane) String() string {
 	// scrolls into view instead of moving invisibly. The focused selection
 	// expands to a 2-line row (title + detail), so reserve a line for the
 	// detail when scrolling the selection to the bottom keeps it fully visible
-	// rather than clipping its detail off the fold.
+	// rather than clipping its detail off the fold. The reservation holds only
+	// when the row actually has detail to reveal — a task whose every field is
+	// omitted still renders one line, and reserving a phantom second would
+	// scroll a visible row away for nothing.
 	visible := contentH - 1
 	if visible < 0 {
 		visible = 0
 	}
 	effVisible := visible
-	if a.focused && effVisible > 1 {
+	if a.focused && effVisible > 1 && a.selected < len(tasks) && a.detailRow(tasks[a.selected]) != "" {
 		effVisible--
 	}
 	if a.offset > a.selected {
@@ -689,7 +779,11 @@ func (a *AutomationsPane) String() string {
 	if effVisible > 0 && a.selected >= a.offset+effVisible {
 		a.offset = a.selected - effVisible + 1
 	}
-	if max := len(tasks) - visible; a.offset > max {
+	// The bottom-clamp must use the window that was actually reserved: a larger
+	// bound here undoes the reservation — the selection's row renders at the
+	// fold and its detail falls off below it, which is what the reservation
+	// exists to prevent.
+	if max := len(tasks) - effVisible; a.offset > max {
 		a.offset = max
 	}
 	if a.offset < 0 {

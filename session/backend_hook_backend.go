@@ -895,7 +895,13 @@ func (p *hookProvisioner) environmentProgram() string {
 }
 
 func (p *hookProvisioner) environmentAgent() string {
-	agent := sessionenv.AgentForCommand(p.environmentProgram())
+	// The grant predicate filters the environment repo-controlled hook scripts
+	// receive, so it must not be satisfied by a relative or resolution-mutating
+	// program (#5265). The remote variant — the hook runs on a host af cannot
+	// stat, and its remote working directory is equally unknowable, so ""
+	// leaves the absolute-path containment check open while every
+	// non-absolute spelling still earns no grant.
+	agent := sessionenv.GrantAgentForRemoteCommand(p.environmentProgram(), "")
 	if agent == "" && strings.TrimSpace(p.environmentProgram()) == "" {
 		return tmux.ProgramClaude
 	}

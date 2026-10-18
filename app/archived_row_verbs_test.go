@@ -146,9 +146,12 @@ func TestHandleKill_ExpandedArchivedHeaderConfirmsBoundRow(t *testing.T) {
 	require.Contains(t, h.confirmationOverlay.Render(), "worker")
 }
 
-// TestPaneSelectionHint_SkipsArchivedBinding: after the selected session is
-// archived, no pane can ever show it — the "— selected: <name>" clause must not
-// name it. A live selection still renders the clause.
+// TestPaneSelectionHint_SkipsArchivedBinding: after the session under the
+// cursor is archived, no pane can ever show it — the "— cursor: <name>"
+// clause must not name it. A live row under the cursor still renders the
+// clause. The cursor itself is driven, because the clause names the cursor's
+// row — a binding-only store.SetSelectedInstance leaves the cursor where it
+// is by design, so it is not the path this contract exercises (#5154 review).
 func TestPaneSelectionHint_SkipsArchivedBinding(t *testing.T) {
 	h := newTestHome(t)
 	live := archiveActionInstance(t, "alpha", session.Ready)
@@ -160,13 +163,13 @@ func TestPaneSelectionHint_SkipsArchivedBinding(t *testing.T) {
 
 	p := openTestPane(t, h, live, 0)
 
-	h.store.SetSelectedInstance(archived)
+	h.sidebar.SelectInstance(archived)
 	require.Empty(t, h.paneSelectionHint(p),
-		"an archived selection can never be what the pane shows — the hint must drop it")
+		"an archived row under the cursor can never be what the pane shows — the hint must drop it")
 
-	h.store.SetSelectedInstance(other)
+	h.sidebar.SelectInstance(other)
 	require.NotEmpty(t, h.paneSelectionHint(p),
-		"a live selection elsewhere must still be named")
+		"a live row under the cursor, diverging from the pane, must still be named")
 }
 
 // TestPaneSelectionHint_SkipsRestoringBinding: MarkRestoring keeps liveness
@@ -184,8 +187,8 @@ func TestPaneSelectionHint_SkipsRestoringBinding(t *testing.T) {
 
 	p := openTestPane(t, h, live, 0)
 
-	h.store.SetSelectedInstance(restoring)
-	require.Empty(t, h.paneSelectionHint(p), "precondition: archived binding hidden")
+	h.sidebar.SelectInstance(restoring)
+	require.Empty(t, h.paneSelectionHint(p), "precondition: archived row hidden")
 
 	restoring.SetInFlightOpForTest(session.OpRestoring)
 	require.False(t, restoring.ShownArchived(),
@@ -295,7 +298,7 @@ func (b capsBackend) Capabilities() session.Capabilities { return b.caps }
 // TestPaneSelectionHint_LostBindingKeepsDivergenceHint: a Lost (or Dead) row
 // can still own a preview pane — ui/tab_pane.go renders their fallback
 // content — so when the workspace pane shows a different session, the
-// — selected: hint is an honest divergence marker and must stay (#4755
+// — cursor: hint is an honest divergence marker and must stay (#4755
 // review). Only archived/restoring bindings (no pane surface, ever) suppress
 // it.
 func TestPaneSelectionHint_LostBindingKeepsDivergenceHint(t *testing.T) {
@@ -307,9 +310,9 @@ func TestPaneSelectionHint_LostBindingKeepsDivergenceHint(t *testing.T) {
 
 	p := openTestPane(t, h, live, 0)
 
-	h.store.SetSelectedInstance(lost)
+	h.sidebar.SelectInstance(lost)
 	require.NotEmpty(t, h.paneSelectionHint(p),
-		"a lost selection diverging from the pane is real — keep the hint")
+		"a lost row under the cursor diverging from the pane is real — keep the hint")
 }
 
 // TestTabPickerRefusal_PrefersCapabilityGate: on a backend that can never

@@ -511,7 +511,7 @@ func startedLocalTabInstanceWithExec(t *testing.T, m *Manager, repoID, repoPath,
 	t.Helper()
 	pty := tabPtyFactory{t: t, cmdExec: exec}
 	gw, err := sessiongit.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), title,
+		repoPath, existingWorktreeDir(t, filepath.Join(t.TempDir(), "wt")), title,
 		title+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
