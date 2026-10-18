@@ -512,6 +512,11 @@ func (d InstanceData) ForStorage() InstanceData {
 	// d.StartupStateUnknown = true and snapshot the projected value as the
 	// "original". Snapshot the fence now and reuse it at recapture, exactly as the
 	// live block does. Guarded to the recapture path so the live path pays nothing.
+	// Before the pending projections below overwrite StartupStateUnknown: the
+	// worktree-missing fence records the row's real ownership values.
+	if d.Worktree.Missing && d.Worktree.RelocationRecovery == nil {
+		d.Worktree.RelocationRecovery = worktreeMissingRollbackFence(d)
+	}
 	var fenceSnapshot *git.ArchiveRollbackFence
 	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
 		fenceSnapshot = archiveRollbackFence(d)

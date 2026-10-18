@@ -41,13 +41,16 @@ type GitWorktreeData struct {
 	// did not establish a safe outcome. Some states retain a second pathname;
 	// every state blocks consumers until its owning retry resolves it.
 	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
-	// Missing records that WorktreePath was conclusively absent (ENOENT, with no
-	// af relocation owning it) the last time the daemon probed it: the worktree
-	// was deleted outside af (#5102). It is passive record state: the projection
-	// carries it to every listing surface, and archive takes the no-move route
-	// for such a row. It is additive and omitempty, so an older binary ignores it on read and drops it
-	// on write — which only costs one poll interval before a current daemon
-	// re-derives it.
+	// Missing records that WorktreePath was found conclusively absent (ENOENT,
+	// with no af relocation owning it): the worktree was deleted outside af
+	// (#5102). It is sticky — only af placing the worktree clears it — and it is
+	// what keeps a directory that later reappears at the path unverified, so a
+	// binary that does not know it must not treat the row as an ordinary one. An
+	// older binary ignores it on read and drops it on write, and once the path
+	// has reappeared a current daemon cannot re-derive it from a probe. So storage
+	// also projects it through the relocation-recovery record those binaries
+	// already honor (worktreeMissingRollbackFence), and current readers turn that
+	// projection back into this flag on load.
 	Missing bool `json:"missing,omitempty"`
 	// MissingReason is the operator-facing explanation behind Missing.
 	MissingReason string `json:"missing_reason,omitempty"`
@@ -113,4 +116,49 @@ func runtimeRelocationRecoveryState(
 		return "", fmt.Errorf("unknown cleanup relocation lifecycle %q", recovery.CleanupLifecycle)
 	}
 	return recovery.CleanupLifecycle, nil
+}
+
+// worktreeMissingRollbackFence is the storage projection of a worktree-missing
+// row for binaries that predate the flag (#5102). They understand relocation
+// recovery and refuse every consumer of an unresolved record, so the row is
+// written with one that can never resolve: claim_stale with an identity no
+// directory has (device, inode and file type all zero) and no alternate. A
+// previous release then refuses to respawn, archive, restore or kill it —
+// whatever is at the path never matches — and the recovery block in ForStorage
+// additionally makes it load inert for the release before relocation
+// recovery. The Original* fields carry the row's real ownership values, exactly
+// as for a real record, so RestoreRelocationRecoveryOriginals restores them.
+//
+// Current readers recognize the shape itself (isWorktreeMissingRollbackFence),
+// not a marker field, because an older binary that rewrites the row drops
+// every field it does not know — Missing and MissingReason included — but
+// round-trips the recovery record. The recognized record is removed and
+// Missing re-set, so a rollback and roll-forward lose only the reason prose.
+func worktreeMissingRollbackFence(d InstanceData) *GitWorktreeRelocationRecoveryData {
+	external := d.Worktree.ExternalWorktree
+	branchCreatedByUs := true
+	if d.Worktree.BranchCreatedByUs != nil {
+		branchCreatedByUs = *d.Worktree.BranchCreatedByUs
+	}
+	startupStateUnknown := d.StartupStateUnknown
+	return &GitWorktreeRelocationRecoveryData{
+		State:                       git.RelocationRecoveryClaimStale,
+		IdentityKnown:               true,
+		OriginalExternalWorktree:    &external,
+		OriginalBranchCreatedByUs:   &branchCreatedByUs,
+		OriginalStartupStateUnknown: &startupStateUnknown,
+	}
+}
+
+// isWorktreeMissingRollbackFence reports whether a canonical (current-reader)
+// recovery record is the projection worktreeMissingRollbackFence writes. No
+// real claim produces it: every recorded claim carries the identity of a
+// directory that existed, whose file type at least is non-zero.
+func isWorktreeMissingRollbackFence(recovery *GitWorktreeRelocationRecoveryData) bool {
+	return recovery != nil &&
+		recovery.State == git.RelocationRecoveryClaimStale &&
+		recovery.CleanupLifecycle == "" &&
+		recovery.IdentityKnown &&
+		recovery.Device == 0 && recovery.Inode == 0 && recovery.FileType == 0 &&
+		recovery.AlternatePath == "" && recovery.CleanupGeneration == ""
 }

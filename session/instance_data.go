@@ -283,6 +283,17 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recovery.CleanupOriginalExternalWorktree = nil
 	recovery.CleanupOriginalBranchCreatedByUs = nil
 	recovery.CleanupOriginalStartupStateUnknown = nil
+	// The worktree-missing rollback projection is not a relocation record; with
+	// the ownership values restored above, it reads back as the flag it stands
+	// for (#5102). An older binary that rewrote the row dropped the flag and its
+	// reason but kept this record, which is why the shape, not Missing, decides.
+	if isWorktreeMissingRollbackFence(recovery) {
+		data.Worktree.RelocationRecovery = nil
+		data.Worktree.Missing = true
+		if data.Worktree.MissingReason == "" {
+			data.Worktree.MissingReason = WorktreeMissingDeletedReason(data.Worktree.WorktreePath)
+		}
+	}
 	return data, nil
 }
 
