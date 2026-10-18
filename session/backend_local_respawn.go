@@ -172,6 +172,20 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// one the pending flag survived — so every failure below carries the
 		// committed-rebuild marker, not only the ones on a fresh rebuild.
 		committed := rebuilt || teardownPending
+
+		i.mu.RLock()
+		stopRuntimes := i.rebuildTeardownStopRuntimes
+		i.mu.RUnlock()
+		if stopRuntimes == nil {
+			// The callback is what stops everything a session owns that tmux
+			// cannot see — the supervised editor, hook runners. Reaching the
+			// teardown without it means an entry point skipped an install, so
+			// this is the same fail-closed contract as the persist notify
+			// (#5371 review).
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: no supervised-runtime stop installed for the rebuild teardown of %q", i.Title))
+		}
+
 		i.mu.RLock()
 		stale := make([]*tmux.TmuxSession, 0, len(i.Tabs))
 		processTabs := make([]*Tab, 0, len(i.Tabs))
@@ -243,6 +257,26 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				remaining))
 		} else {
 			anyBlind = anyBlind || blindHandles
+		}
+
+		// Every bound tmux name is now closed; what remains is what tmux never
+		// owned. The supervised editor and any post-worktree hook runner hold a
+		// cwd inside this checkout with no tab.tmux and no AF_SESSION marker —
+		// the snapshot above cannot see them, and the supervisor's reuse
+		// identity (instance ID + path string) would happily reattach the
+		// stale editor to the rebuilt path (#5371 review). Stop them before
+		// the occupancy gate, the same two fences archive runs before it moves
+		// the tree (#2770/#3650): a refusal here leaves the row Lost and the
+		// obligation armed for the next attempt.
+		if err := stopRuntimes(i); err != nil {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: could not confirm the session's supervised runtimes stopped: %w", err))
+		}
+		if worktree, werr := i.GetGitWorktree(); werr == nil && worktree != nil {
+			if err := worktree.CancelAndJoinHooks(); err != nil {
+				return markRecoverRebuilt(committed, fmt.Errorf(
+					"recover: could not confirm the session's post-worktree hooks stopped: %w", err))
+			}
 		}
 
 		// ONE occupancy check, after every name is closed — teardownTabs' own

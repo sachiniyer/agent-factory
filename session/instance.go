@@ -87,6 +87,15 @@ type Instance struct {
 	// next matching call rather than letting the rebuild proceed on a flag a
 	// restart would reload differently (#5371 review).
 	rebuildTeardownPendingOwed bool
+	// rebuildTeardownStopRuntimes is the daemon-installed "stop what no tmux
+	// session owns" callback the rebuild teardown must run before it may
+	// believe the worktree is clear: the supervised VS Code editor and any
+	// post-worktree hook runner hold a cwd inside the checkout while carrying
+	// no tab.tmux and no AF_SESSION marker, so the tmux snapshot cannot see
+	// them and the occupancy check would find them as strangers (#5371
+	// review). Same installation contract as rebuildTeardownNotify — nil on a
+	// teardown path means an entry point was missed, and it fails closed.
+	rebuildTeardownStopRuntimes func(*Instance) error
 	// rebuildTeardownNotify is the daemon-installed persist callback fired on
 	// every rebuildTeardownPending transition, so a durable obligation and its
 	// durable discharge both land before the code that depends on them runs —

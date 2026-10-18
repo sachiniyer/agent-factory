@@ -617,7 +617,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if isSandboxBackendType(data.BackendType) {
 		instance.mu.Lock()
 		if instance.liveness != LiveLost {
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.touchLocked()
 		}
 		instance.mu.Unlock()
@@ -658,7 +658,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// daemon's lost-restore loop owns the rebuild-then-respawn path,
 			// and it can only reach a row that materialized.
 			instance.mu.Lock()
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.started = true
 			instance.touchLocked()
 			instance.mu.Unlock()

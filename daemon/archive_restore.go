@@ -334,6 +334,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
 		return m.persistInstanceErr(repoID, i)
 	})
+	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+		return m.stopVSCodeForInstance(key, i.ID)
+	})
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,

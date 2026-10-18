@@ -485,7 +485,7 @@ func (i *Instance) SetArchived() {
 		i.started = false
 		i.touchLocked()
 	}
-	i.liveness = LiveArchived
+	i.assignLivenessLocked(LiveArchived)
 	i.inFlightOp = OpNone
 	i.clearAgentModelChangeLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)

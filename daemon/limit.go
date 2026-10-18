@@ -687,6 +687,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
 			return m.persistInstanceErr(repoID, i)
 		})
+		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+			return m.stopVSCodeForInstance(key, i.ID)
+		})
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {

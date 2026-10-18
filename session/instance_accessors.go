@@ -644,6 +644,20 @@ func (i *Instance) SetRebuildTeardownNotify(notify func(*Instance) error) {
 	i.rebuildTeardownNotify = notify
 }
 
+// SetRebuildTeardownRuntimesStop installs the daemon's stop for everything a
+// session owns that no tmux session carries: the supervised VS Code editor
+// (a daemon-owned process rooted at the worktree) plus any runtimes the
+// daemon adds there later. The rebuild teardown calls it after every bound
+// tmux name is closed and BEFORE the occupancy gate — an unstopped one would
+// answer that check as a stranger — and a nil callback fails the teardown
+// closed, the same missed-entry-point contract the persist notify keeps
+// (#5371 review).
+func (i *Instance) SetRebuildTeardownRuntimesStop(stop func(*Instance) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.rebuildTeardownStopRuntimes = stop
+}
+
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
 // previous daemon would have left behind (#2669). Test-only: the real flow
 // writes them from CloseTab's commit and reads them back through

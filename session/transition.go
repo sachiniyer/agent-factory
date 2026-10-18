@@ -735,7 +735,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		}
 	}
 	prevResetAt := i.limitResetAt
-	i.liveness = to.liveness
+	i.assignLivenessLocked(to.liveness)
 	i.inFlightOp = to.op
 	switch spec.limitReset {
 	case limitResetClear:

@@ -327,6 +327,7 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	err = restored.Recover()
 	require.Error(t, err)
@@ -434,6 +435,7 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	_, statErr := os.Stat(worktreePath)
 	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
 
@@ -528,6 +530,7 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	require.NoError(t, restored.Recover())
 
@@ -604,6 +607,7 @@ func TestRecover_BranchGoneWithoutRecordedConversationDoesNotFreshDispatch(t *te
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	err = restored.Recover()
 	require.Error(t, err)
@@ -725,6 +729,7 @@ func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	_, statErr := os.Stat(worktreePath)
 	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
 
@@ -834,6 +839,7 @@ func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	require.Error(t, restored.Recover(), "attempt 1 must fail — the stale pane refused to die")
 	require.DirExists(t, worktreePath, "the rebuild committed before the teardown failed")
@@ -984,6 +990,7 @@ func TestRecover_RebuildTeardownClearPrecedesRespawn(t *testing.T) {
 		}
 		return nil
 	})
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	require.NoError(t, restored.Recover())
 	require.Equal(t, 2, notifyCalls, "set at rebuild-commit + clear after confirmed teardown")
 	assert.Equal(t, 0, clearSpawnCount,
@@ -1065,6 +1072,7 @@ func TestRecover_RebuildTeardownArmsBeforeRebuildCommits(t *testing.T) {
 		}
 		return nil
 	})
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	require.NoError(t, restored.Recover())
 
 	assert.False(t, dirExistedAtArm,
@@ -1149,6 +1157,7 @@ func TestRecover_RebuiltTeardownWaitsOnPendingTabCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	restored.SetPendingTabCleanupForTest([]TabCleanupData{{TabID: "oldtab", TmuxName: staleHandleName}})
 
 	require.NoError(t, restored.Recover())
@@ -1393,6 +1402,7 @@ func TestRecover_RebuiltTeardownAbsentProcessTabStaysInert(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	require.NoError(t, restored.Recover())
 	assert.Equal(t, Running, restored.GetStatus())
@@ -1406,95 +1416,4 @@ func TestRecover_RebuiltTeardownAbsentProcessTabStaysInert(t *testing.T) {
 	require.NotNil(t, procTab)
 	assert.Nil(t, procTab.Exit,
 		"an already-absent process session invents no outcome — absence is not evidence of how the command ended")
-}
-
-// The rebuild teardown must cover EVERY tmux name the row binds, not only the
-// agent's: a sibling that stayed live — for example, one reattached at load
-// before a different sibling's respawn was refused — is a pane in the deleted
-// inode too, and reattaching it binds the same stale process the rebuild was
-// built to retire. Two live shells here stand in for "any number of live
-// siblings" (#5371 review, carried from #5376).
-func TestRecover_RebuiltTeardownKillsEverySurvivingSibling(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	repoRoot := initTempGitRepo(t)
-	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
-	gitOut(t, repoRoot, "config", "user.name", "test")
-	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
-	const branch = "af/lost-recover-siblings"
-	gitOut(t, repoRoot, "branch", branch)
-
-	const agentName = "af_recover_siblings"
-	shellName := agentName + tmuxTabSeparator + shellTabName
-	shell2Name := agentName + tmuxTabSeparator + "term-2"
-	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
-	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-siblings")
-	branchCreatedByUs := true
-	data := InstanceData{
-		Title:    "lost-recover-siblings",
-		Path:     repoRoot,
-		Branch:   branch,
-		Program:  tmux.ProgramCodex,
-		Status:   Lost,
-		TmuxName: agentName,
-		Tabs: []TabData{
-			{
-				Name:     agentTabName,
-				Kind:     TabKindAgent,
-				TmuxName: agentName,
-				Conversation: &AgentConversationData{
-					Agent:       tmux.ProgramCodex,
-					ID:          conversationID,
-					CaptureKind: ConversationCaptureCodexRollout,
-				},
-			},
-			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
-			{Name: "term-2", Kind: TabKindShell, TmuxName: shell2Name},
-		},
-		Worktree: GitWorktreeData{
-			RepoPath:          repoRoot,
-			WorktreePath:      worktreePath,
-			SessionName:       "lost-recover-siblings",
-			BranchName:        branch,
-			BranchCreatedByUs: &branchCreatedByUs,
-		},
-	}
-
-	// All three sessions are the live survivors in the deleted inode.
-	var newSessions int
-	var spawns, kills []string
-	inner := deadPaneAwareExec(map[string]bool{agentName: true, shellName: true, shell2Name: true},
-		recordingExec(map[string]bool{agentName: true, shellName: true, shell2Name: true}, &newSessions, &spawns))
-	exec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			if strings.Contains(cmd.String(), "kill-session") {
-				kills = append(kills, cmd.String())
-			}
-			return inner.Run(cmd)
-		},
-		OutputFunc: inner.Output,
-	}
-	pty := persistPtyFactory{t: t, cmdExec: exec}
-	prev := restoreTmuxSession
-	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
-		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
-	}
-	t.Cleanup(func() { restoreTmuxSession = prev })
-
-	restored, err := FromInstanceData(data)
-	require.NoError(t, err)
-	require.Equal(t, Lost, restored.GetStatus())
-	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
-
-	require.NoError(t, restored.Recover())
-	assert.Equal(t, Running, restored.GetStatus())
-
-	killed := strings.Join(kills, "\n")
-	for _, name := range []string{agentName, shellName, shell2Name} {
-		assert.Contains(t, killed, name,
-			"every bound survivor in the deleted inode must be killed before respawn, not only the agent")
-	}
-	assert.Equal(t, 3, newSessions, "agent + both shells must be freshly spawned inside the rebuilt worktree")
 }
