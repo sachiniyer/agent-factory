@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/afhome"
@@ -78,9 +80,33 @@ func recoveryRetryCounterPath(home, txnID string) string {
 
 // readRecoveryRetryCounter returns the persisted counter and whether one
 // exists. A missing or unparseable counter is not an error: the budget resets,
-// matching a fresh transaction or a counter wiped by terminal cleanup.
+// matching a fresh transaction or a counter wiped by terminal cleanup. A special
+// file at the counter path (a FIFO, a device, or a symlink to one) is also not a
+// valid counter: os.ReadFile on a FIFO blocks indefinitely for a writer, which
+// would hang the budget pre-check before the actor can run recovery or disable
+// itself, so the unbounded relaunch loop this budget exists to stop could not
+// stand down. The counter is opened with O_NOFOLLOW (a symlink at the counter is
+// rejected) and O_NONBLOCK (an open on a FIFO does not block), and the opened
+// inode is verified to be a regular file; anything else is treated as an invalid
+// counter and resets the budget, the way a corrupt or missing one does.
 func readRecoveryRetryCounter(home, txnID string) (recoveryRetryCounter, bool) {
-	data, err := os.ReadFile(recoveryRetryCounterPath(home, txnID))
+	path := recoveryRetryCounterPath(home, txnID)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return recoveryRetryCounter{}, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return recoveryRetryCounter{}, false
+	}
+	if info.Mode()&os.ModeType != 0 {
+		// A non-regular file (FIFO, device, socket, etc.) at the counter path
+		// is not a valid counter; treat it as missing so the budget resets and
+		// the pre-check/stand-down cannot hang on a blocking read.
+		return recoveryRetryCounter{}, false
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return recoveryRetryCounter{}, false
 	}
@@ -289,10 +315,34 @@ func recoveryJobIsLaunchd(invocation RecoveryInvocation) bool {
 // and a superseding transaction returns a different id and returns false.
 func activeTransactionStillNamesInvocation(invocation RecoveryInvocation) bool {
 	txn, err := Load(invocation.HomeDir)
-	if err != nil {
-		return !errors.Is(err, ErrNoActiveTransaction)
+	if err == nil {
+		return txn.Journal().ID == invocation.TransactionID
 	}
-	return txn.Journal().ID == invocation.TransactionID
+	if errors.Is(err, ErrNoActiveTransaction) {
+		// Terminal cleanup removed active.json: the budget must not recreate
+		// the deleted transaction directory the pre-record would otherwise
+		// orphan, and the stale job stands down (exit 0 + disable).
+		return false
+	}
+	// Load failed validation (for example, a superseding transaction's
+	// directory is missing so validateTransactionStorage rejects it) but
+	// active.json may still decode and identify the active transaction. A
+	// loaded raw journal that names a different transaction means this
+	// invocation is a stale job the active transaction replaced, so the
+	// pre-record must not recreate the stale transaction directory — the same
+	// stale-transaction stand-down the ErrNoActiveTransaction shape takes.
+	// A corrupt or unreadable journal (the bug report's primary persistent
+	// trigger) cannot reveal a different id, so the budget still applies and
+	// bounds the unbounded relaunch a corrupt journal would otherwise produce;
+	// a journal that loads but fails full validation while still naming this
+	// invocation is the shape ensureRecoveryRetryCounterDir handles
+	// (errNonterminalStorageMissing when the transaction directory is missing
+	// in a nonterminal phase, errAFHomeRemoved when the upgrade root is gone).
+	raw, rerr := readJournal(activeJournalPath(invocation.HomeDir))
+	if rerr != nil {
+		return true
+	}
+	return raw.ID == invocation.TransactionID
 }
 
 // launchdRecoveryBudgetExhausted is the pre-check the actor runs before
@@ -500,6 +550,25 @@ func boundLaunchdRecovery(
 				log.WarningLog.Printf(
 					"upgrade recovery: the active transaction for launchd recovery job %s is gone, but the job could not be disabled (%v); standing down (exit 0) to stop the immediate relaunch loop — the job may re-launch on a later login or reboot",
 					invocation.TransactionID, disableErr)
+			}
+			// launchd opened (creating when absent) the per-transaction
+			// recovery log at upgrade/recovery-<id>.log before it spawned this
+			// stale invocation, so a delayed or final restart that fires after
+			// terminal cleanup removed active.json leaves an orphaned log: the
+			// cleanup that would remove it (cleanupInactiveArtifacts) already
+			// ran for the completed transaction and will not run again (no
+			// transaction remains), and the stand-down above is the last chance
+			// to unlink it. The removal is best-effort: a missing log (the job
+			// never reached this invocation, or cleanup already removed it and
+			// launchd did not recreate it) is a clean no-op, and a failure does
+			// not keep the stale job armed — the disable above already stood it
+			// down. removeDurableFile (not bare os.Remove) mirrors the cleanup
+			// path so the unlink is durable the way the other artifact removals
+			// are and a symlinked upgrade root cannot redirect it.
+			if logErr := removeDurableFile(launchdRecoveryLogPath(invocation.HomeDir, invocation.TransactionID)); logErr != nil {
+				log.WarningLog.Printf(
+					"upgrade recovery: could not remove the stale launchd recovery log for transaction %s while standing down (%v); the job is already disabled, so the orphaned log does not re-arm the relaunch loop",
+					invocation.TransactionID, logErr)
 			}
 			return nil
 		}
