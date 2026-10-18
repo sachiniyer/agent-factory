@@ -514,12 +514,23 @@ func (d InstanceData) ForStorage() InstanceData {
 	// live block does. Guarded to the recapture path so the live path pays nothing.
 	// Before the pending projections below overwrite StartupStateUnknown: the
 	// worktree-missing fence records the row's real ownership values.
+	missingRowHasRealRecovery := d.Worktree.Missing && d.Worktree.RelocationRecovery != nil
 	if d.Worktree.Missing && d.Worktree.RelocationRecovery == nil {
 		d.Worktree.RelocationRecovery = worktreeMissingRollbackFence(d)
 	}
 	var fenceSnapshot *git.ArchiveRollbackFence
 	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
 		fenceSnapshot = archiveRollbackFence(d)
+	}
+	// A missing row that already carries a real record keeps it, but a record
+	// the previous release would resolve by accepting whatever is at the path is
+	// written in the fence's unresolvable form
+	// (fenceMissingRowRecoveryForPreviousRelease). After the snapshot above,
+	// which current readers restore from and so must hold the real record.
+	if missingRowHasRealRecovery {
+		recovery := *d.Worktree.RelocationRecovery
+		fenceMissingRowRecoveryForPreviousRelease(&recovery)
+		d.Worktree.RelocationRecovery = &recovery
 	}
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()

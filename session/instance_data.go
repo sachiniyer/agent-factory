@@ -252,6 +252,11 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recoveryClone := *recovery
 	data.Worktree.RelocationRecovery = &recoveryClone
 	recovery = &recoveryClone
+	// First, so the shape check below never mistakes a real stall projected
+	// through the worktree-missing fence for the bare fence itself.
+	if err := restoreMissingFencedState(recovery); err != nil {
+		return InstanceData{}, err
+	}
 	state, err := runtimeRelocationRecoveryState(recovery)
 	if err != nil {
 		return InstanceData{}, err

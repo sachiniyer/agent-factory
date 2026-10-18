@@ -261,8 +261,21 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
-		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
-		if err != nil && worktreeMissing && !retainsInertInstance(err) {
+		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
+		// keeps a live pane bound. Through RestoreWithResult it also refreshed the
+		// pane's account environment, and a transient failure there is a retained
+		// error that loads the row startup-unknown — which archive refuses, so the
+		// row's one remedy was a tmux hiccup away from being stranded. Every
+		// failure of the inert reattach is therefore the plain one below: warn
+		// and keep the row listed.
+		var restoreResult tmux.RestoreResult
+		var err error
+		if worktreeMissing {
+			restoreResult, err = tmux.RestoreReattached, tmuxSession.ReattachInert()
+		} else {
+			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
+		}
+		if err != nil && worktreeMissing {
 			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
 			return nil
 		}

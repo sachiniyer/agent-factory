@@ -661,14 +661,44 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	// nowhere; a live checkout, or a listing that cannot be read, refuses.
 	//
 	// And a row already flagged worktree-missing recorded that the directory af
-	// tracked is gone, so whatever answers at the path now is not the session's
-	// worktree as far as af can prove: moving it would carry an unverified
-	// directory's bytes under the renamed title. Same invariant as archive's
-	// sticky-flag guard — refuse unless the path is conclusively absent.
+	// tracked is gone, so whatever answers at the path now is unverified by
+	// default: moving it would carry a stranger's bytes under the renamed title.
+	// Same invariant as archive's sticky-flag guard, and the same one way out
+	// (#5102): a directory git proves is the session's own checkout — the user
+	// put the archive back where it was recorded — is claimed, verified against
+	// that claim and moved with it, and the flag clears once it has landed.
+	// Without that, the refusal's own advice ("move it back and retry") never
+	// terminated. Anything else — a path that is not conclusively present, or a
+	// directory the proof does not hold for — refuses, and a consumed record
+	// goes back to the fence it came from.
 	var relocate func(string) error = gw.MoveWorktree
+	var unverified func()
 	presence := gw.ProbeWorktreePresence()
 	if i.worktreeMissing && presence != git.WorktreePresenceAbsent {
-		return fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the path is not conclusively absent now, so whatever is there is unverified — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), gw.GetWorktreePath())
+		refusal := fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the path is not conclusively absent now, so whatever is there is unverified — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), gw.GetWorktreePath())
+		if presence != git.WorktreePresencePresent {
+			return refusal
+		}
+		claim, err := gw.ClaimRelocationSource()
+		if err != nil {
+			return fmt.Errorf("%w: %w", refusal, err)
+		}
+		if err := gw.VerifyClaimedWorktree(claim); err != nil {
+			gw.ReturnClaimUnverified(claim)
+			return fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the directory there now is not one git proves is the session's checkout (%v) — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), err, gw.GetWorktreePath())
+		}
+		unverified = func() { gw.ReturnClaimUnverified(claim) }
+		relocate = func(dest string) error {
+			if err := gw.MoveWorktreeWithClaim(dest, claim); err != nil {
+				return err
+			}
+			// The proven directory now sits at dest under the claim's identity:
+			// af placed it, which is the one thing that clears the flag.
+			i.worktreeMissing = false
+			i.worktreeMissingReason = ""
+			i.touchLocked()
+			return nil
+		}
 	}
 	if presence == git.WorktreePresenceAbsent {
 		moved, live, err := liveBranchCheckout(gw)
@@ -701,6 +731,9 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	oldBranch := gw.GetBranchName()
 	if newBranch != "" && newBranch != oldBranch {
 		if err := gw.RenameBranch(newBranch); err != nil {
+			if unverified != nil {
+				unverified()
+			}
 			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
 		}
 	}

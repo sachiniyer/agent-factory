@@ -73,6 +73,11 @@ type GitWorktreeRelocationRecoveryData struct {
 	OriginalExternalWorktree           *bool                       `json:"original_external_worktree,omitempty"`
 	OriginalBranchCreatedByUs          *bool                       `json:"original_branch_created_by_us,omitempty"`
 	OriginalStartupStateUnknown        *bool                       `json:"original_startup_state_unknown,omitempty"`
+	// MissingFencedState carries a real identity-unknown stall's state while a
+	// worktree-missing row projects it as the unresolvable missing fence for
+	// previous releases (worktreeMissingRollbackFence); current readers put it
+	// back. Empty on every other record.
+	MissingFencedState git.RelocationRecoveryState `json:"missing_fenced_state,omitempty"`
 }
 
 func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocationRecoveryData) {
@@ -150,6 +155,55 @@ func worktreeMissingRollbackFence(d InstanceData) *GitWorktreeRelocationRecovery
 	}
 }
 
+// fenceMissingRowRecoveryForPreviousRelease keeps a worktree-missing row fenced
+// for a previous release when the row also carries a real recovery record that
+// release would consume (#5102). An identity-unknown stall names no directory,
+// so the older resolver accepts whatever is at the path — once the deleted
+// worktree's path is occupied again, an older daemon would archive, restore or
+// start an agent in that unverified directory. This is exactly the shape a
+// directory reappearing under an archive leaves (confirmGoneForArchive's fence)
+// and the one an unverified claim is handed back to (ReturnClaimUnverified).
+//
+// So the record is written in the missing fence's unresolvable form —
+// claim_stale with the zero identity — and its own state rides in
+// MissingFencedState, which current readers restore (restoreMissingFencedState).
+// Every other field, Original* included, is the real record's. Records the
+// older resolver checks against a captured identity are left as they are: an
+// older release resolves those only to the directory af itself captured.
+func fenceMissingRowRecoveryForPreviousRelease(recovery *GitWorktreeRelocationRecoveryData) {
+	if recovery == nil || recovery.IdentityKnown || recovery.CleanupLifecycle != "" {
+		return
+	}
+	switch recovery.State {
+	case git.RelocationRecoveryStalled, git.RelocationRecoveryCleanupStalled:
+	default:
+		return
+	}
+	recovery.MissingFencedState = recovery.State
+	recovery.State = git.RelocationRecoveryClaimStale
+	recovery.IdentityKnown = true
+	recovery.Device, recovery.Inode, recovery.FileType = 0, 0, 0
+}
+
+// restoreMissingFencedState reverses fenceMissingRowRecoveryForPreviousRelease
+// for a current reader. A record carrying MissingFencedState in any other shape
+// was not written by it and is refused rather than guessed at.
+func restoreMissingFencedState(recovery *GitWorktreeRelocationRecoveryData) error {
+	if recovery.MissingFencedState == "" {
+		return nil
+	}
+	state := recovery.MissingFencedState
+	if (state != git.RelocationRecoveryStalled && state != git.RelocationRecoveryCleanupStalled) ||
+		recovery.State != git.RelocationRecoveryClaimStale || recovery.CleanupLifecycle != "" ||
+		!recovery.IdentityKnown || recovery.Device != 0 || recovery.Inode != 0 || recovery.FileType != 0 {
+		return fmt.Errorf("worktree-missing fenced recovery state %q is inconsistent with its record", state)
+	}
+	recovery.State = state
+	recovery.IdentityKnown = false
+	recovery.MissingFencedState = ""
+	return nil
+}
+
 // isWorktreeMissingRollbackFence reports whether a canonical (current-reader)
 // recovery record is the projection worktreeMissingRollbackFence writes. No
 // real claim produces it: every recorded claim carries the identity of a
@@ -160,5 +214,6 @@ func isWorktreeMissingRollbackFence(recovery *GitWorktreeRelocationRecoveryData)
 		recovery.CleanupLifecycle == "" &&
 		recovery.IdentityKnown &&
 		recovery.Device == 0 && recovery.Inode == 0 && recovery.FileType == 0 &&
-		recovery.AlternatePath == "" && recovery.CleanupGeneration == ""
+		recovery.AlternatePath == "" && recovery.CleanupGeneration == "" &&
+		recovery.MissingFencedState == ""
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -332,7 +333,20 @@ func TestFromInstanceData_FlaggedRowWithoutTmuxLoadsInert(t *testing.T) {
 // restart even when an account-scoped sibling tab did not survive (#5102).
 // Sibling restore would respawn into the deleted path, the account-scoped
 // refusal would kill the reattached agent, and the load would drop the row.
+//
+// Nor may the reattach's account-environment refresh strand it: a missing row's
+// reattach only keeps the live pane bound so the row stays archivable, so it
+// runs none of those tmux commands, and a transient failure in them can no
+// longer load the row startup-unknown — which archive refuses.
 func TestFromInstanceData_FlaggedRowKeepsLiveAgentDespiteAccountScopedSibling(t *testing.T) {
+	for _, failRefresh := range []bool{false, true} {
+		t.Run(map[bool]string{false: "refresh would succeed", true: "refresh would fail"}[failRefresh], func(t *testing.T) {
+			testFlaggedRowKeepsLiveAgent(t, failRefresh)
+		})
+	}
+}
+
+func testFlaggedRowKeepsLiveAgent(t *testing.T, failRefresh bool) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -342,13 +356,26 @@ func TestFromInstanceData_FlaggedRowKeepsLiveAgentDespiteAccountScopedSibling(t 
 	shellName := agentName + tmuxTabSeparator + shellTabName
 	var commands []string
 	inner := nameKeyedExec(map[string]bool{agentName: true}) // the sibling is gone
+	refreshFailure := func(c *exec.Cmd) error {
+		s := c.String()
+		if failRefresh && (strings.Contains(s, "set-environment") || strings.Contains(s, "default-command")) {
+			return errors.New("transient tmux failure")
+		}
+		return nil
+	}
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			commands = append(commands, c.String())
+			if err := refreshFailure(c); err != nil {
+				return err
+			}
 			return inner.Run(c)
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			commands = append(commands, c.String())
+			if err := refreshFailure(c); err != nil {
+				return nil, err
+			}
 			return inner.Output(c)
 		},
 	}
@@ -392,12 +419,14 @@ func TestFromInstanceData_FlaggedRowKeepsLiveAgentDespiteAccountScopedSibling(t 
 	require.NoError(t, err, "a flagged row with a live agent must load")
 	require.NotNil(t, restored)
 	assert.True(t, restored.Started())
+	assert.False(t, restored.StartupStateUnknown(), "the row must stay archivable, not load startup-unknown")
 	restored.mu.RLock()
 	agentTmux := restored.tmuxLocked()
 	restored.mu.RUnlock()
 	require.NotNil(t, agentTmux, "the reattached agent's tmux handle must be kept")
 	assert.Equal(t, agentName, agentTmux.SanitizedName())
 	for _, c := range commands {
+		assert.NotContains(t, c, "set-environment", "a missing row's reattach must not refresh account env")
 		assert.NotContains(t, c, "new-session", "no tab may be re-spawned into the deleted worktree")
 		assert.False(t, strings.Contains(c, "kill-session") && strings.Contains(c, agentName) && !strings.Contains(c, shellName),
 			"the live agent must not be killed: %s", c)

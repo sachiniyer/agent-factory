@@ -90,7 +90,7 @@ func TestReattachSkipsAccountRefreshOnConfirmedFresh(t *testing.T) {
 	m.nameGen.Store("$5 111 222")
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), true, true))
+	require.NoError(t, session.reattach(t.TempDir(), true, true, true))
 	require.Zero(t, m.setEnvCalls.Load(),
 		"the refresh must not issue set-environment on a confirmedFresh reattach — Start's queue already wrote them")
 	require.Zero(t, m.setOptionCalls.Load(),
@@ -107,7 +107,7 @@ func TestReattachSkipsAccountRefreshOnUnansweredProbe(t *testing.T) {
 	m := &reattachRefreshTmux{}
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), false, false))
+	require.NoError(t, session.reattach(t.TempDir(), false, false, true))
 	require.Zero(t, m.setEnvCalls.Load(),
 		"the refresh must not issue set-environment when the probe went unanswered — a wedged server already spent one timeout")
 	require.Zero(t, m.setOptionCalls.Load(),
@@ -127,7 +127,7 @@ func TestReattachRunsAccountRefreshOnAnsweredNonFresh(t *testing.T) {
 	m.nameGen.Store("$5 111 222")
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), true, false))
+	require.NoError(t, session.reattach(t.TempDir(), true, false, true))
 	require.Positive(t, m.setEnvCalls.Load(),
 		"the refresh must issue set-environment on an answered, non-fresh reattach — this is the heal path")
 	require.Positive(t, m.setOptionCalls.Load(),
@@ -145,7 +145,7 @@ func TestReattachAnsweredNonFreshRefreshFailureWrapsError(t *testing.T) {
 	m.setEnvFails.Store(true)
 	session := accountScopedRefreshSession(t, m)
 
-	err := session.reattach(t.TempDir(), true, false)
+	err := session.reattach(t.TempDir(), true, false, true)
 	require.ErrorIs(t, err, ErrAccountEnvironmentRefresh)
 }
 
@@ -177,4 +177,19 @@ func TestReattachOnlyAnsweredRunsAccountRefresh(t *testing.T) {
 	require.Positive(t, m.setEnvCalls.Load(),
 		"ReattachOnly(true) must issue set-environment — this is the heal path for a live session")
 	require.Positive(t, m.setOptionCalls.Load())
+}
+
+// ReattachInert is the load path of a worktree-missing row (#5102): it rebinds
+// a live pane and nothing else, so a refresh that would fail cannot fail it —
+// the row stays archivable rather than loading startup-unknown.
+func TestReattachInertSkipsAccountRefresh(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	m := &reattachRefreshTmux{}
+	m.nameGen.Store("$5 111 222")
+	m.setEnvFails.Store(true)
+	session := accountScopedRefreshSession(t, m)
+
+	require.NoError(t, session.ReattachInert())
+	require.Zero(t, m.setEnvCalls.Load(), "an inert reattach must not refresh the account environment")
+	require.Zero(t, m.setOptionCalls.Load(), "nor rewrite default-command")
 }

@@ -111,6 +111,64 @@ func TestRenameArchived_FlaggedRowWithARecreatedPathRefuses(t *testing.T) {
 	assert.NoDirExists(t, dest, "nothing may be moved to the renamed path")
 }
 
+// The refusal above tells the user to put the archive back; a checkout git
+// proves is the session's own — registered on its branch, bound back into its
+// repo — must then rename like any archive, and clear the flag once moved.
+// Another branch's checkout at the path is still unverified (#5102).
+func TestRenameArchived_FlaggedRowWithItsCheckoutPutBackRenames(t *testing.T) {
+	setup := func(t *testing.T, title string) (*Instance, *git.GitWorktree, string, string) {
+		t.Helper()
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repoRoot := initTempGitRepo(t)
+		runRenameGit(t, repoRoot, "commit", "--allow-empty", "-m", "init")
+		wtPath := filepath.Join(filepath.Dir(repoRoot), title)
+		runRenameGit(t, repoRoot, "worktree", "add", "-b", "af/"+title, wtPath)
+		inst, err := NewInstance(InstanceOptions{Title: title, Path: repoRoot, Program: "claude"})
+		require.NoError(t, err)
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/"+title, "", false, true)
+		require.NoError(t, err)
+		inst.gitWorktree = gw
+		inst.liveness = LiveArchived
+		inst.SetWorktreeMissing(WorktreeMissingArchivedReason(wtPath))
+		return inst, gw, repoRoot, wtPath
+	}
+
+	t.Run("own checkout moves and clears the flag", func(t *testing.T) {
+		inst, gw, repoRoot, wtPath := setup(t, "putback-title")
+		marker := filepath.Join(wtPath, "session-work.txt")
+		require.NoError(t, os.WriteFile(marker, []byte("mine"), 0o644))
+
+		dest := filepath.Join(filepath.Dir(repoRoot), "putback-title-renamed")
+		require.NoError(t, inst.RenameArchived("putback-title-renamed", dest, "af/putback-title-renamed"))
+		assert.Equal(t, "putback-title-renamed", inst.Title)
+		assert.Equal(t, dest, gw.GetWorktreePath())
+		assert.Equal(t, "af/putback-title-renamed", gw.GetBranchName())
+		data, err := os.ReadFile(filepath.Join(dest, "session-work.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "mine", string(data), "the proven checkout's bytes moved with the rename")
+		missing, _ := inst.WorktreeMissing()
+		assert.False(t, missing, "af placed the proven directory, which clears the flag")
+		assert.False(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("another branch's checkout still refuses", func(t *testing.T) {
+		inst, gw, repoRoot, wtPath := setup(t, "foreign-title")
+		runRenameGit(t, repoRoot, "worktree", "remove", "--force", wtPath)
+		runRenameGit(t, repoRoot, "worktree", "add", "-b", "someone-else", wtPath)
+
+		dest := filepath.Join(filepath.Dir(repoRoot), "foreign-title-renamed")
+		err := inst.RenameArchived("foreign-title-renamed", dest, "af/foreign-title-renamed")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not one git proves is the session's checkout")
+		assert.Equal(t, "foreign-title", inst.Title)
+		assert.Equal(t, wtPath, gw.GetWorktreePath())
+		assert.Equal(t, "af/foreign-title", gw.GetBranchName(), "the branch must not be renamed first")
+		assert.NoDirExists(t, dest)
+		missing, _ := inst.WorktreeMissing()
+		assert.True(t, missing)
+	})
+}
+
 // Restore of an archived-missing row rebuilds the worktree from the kept
 // branch at the chosen destination (#5102); a failed rebuild re-aims the record
 // back at the recorded path so the row stays the archived-missing row it was.
