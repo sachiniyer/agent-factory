@@ -733,3 +733,82 @@ func TestBoundLaunchdRecoveryCorruptJournalPassesErrorThroughBelowBurstLimit(t *
 	require.Equal(t, []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
 		rt.commands[0].args)
 }
+
+// TestBoundLaunchdRecoveryStandsDownAndDisablesWhenAFHomeRemoved pins the P2
+// fix for the removed-AF-home shape: when the entire AF home is gone, Load
+// returns a wrapped os.ErrNotExist from canonicalExistingDir — not
+// ErrNoActiveTransaction — so activeTransactionStillNamesInvocation returns
+// true and the pre-record reaches ensureRecoveryRetryCounterDir, which returns
+// errAFHomeRemoved because the upgrade root is gone. The stand-down must
+// disable the still-enabled RunAtLoad job before exiting 0, the same way the
+// gone-transaction and unwriteable-counter branches do: a successful exit
+// stops the immediate KeepAlive.SuccessfulExit=false relaunch, but without
+// the disable the plist stays enabled and a later login or boot would
+// re-launch the stale previous binary. This branch is reached only on Darwin
+// (where recoveryJobIsLaunchd's corrupt-journal fallback yields true when the
+// home cannot load); on Linux the budget is a no-op when the journal cannot
+// load, so the Darwin fallback is forced via the launchdFallbackOnCorruptJournal
+// seam to cover it on Linux CI.
+func TestBoundLaunchdRecoveryStandsDownAndDisablesWhenAFHomeRemoved(t *testing.T) {
+	// Force the Darwin fallback so the removed-home budget path runs on a Linux
+	// CI runner, the way it always runs on the macOS cell.
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	invocation := launchdBoundFixture(t)
+	rt := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := rt.controller()
+
+	// Remove the entire upgrade root (the AF home is gone). Load fails with a
+	// non-ErrNoActiveTransaction error (canonicalExistingDir returns a wrapped
+	// os.ErrNotExist), so activeTransactionStillNamesInvocation returns true and
+	// the pre-record reaches ensureRecoveryRetryCounterDir, which returns
+	// errAFHomeRemoved because the upgrade root no longer exists. The home must
+	// not be recreated.
+	require.NoError(t, os.RemoveAll(upgradeRoot(invocation.HomeDir)))
+
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), invocation, controller, time.Now, func() error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err, "a removed AF home must stand the stale job down (exit 0) without recreating it")
+	require.False(t, ran, "the actor must not run when the AF home was removed")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+	}}, rt.commands, "a removed AF home must disable the still-enabled RunAtLoad job so it cannot re-launch the stale previous binary on a later login or boot")
+	_, statErr := os.Stat(upgradeRoot(invocation.HomeDir))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the removed AF home must not be recreated")
+}
+
+// TestBoundLaunchdRecoveryStandsDownAndDisablesWhenAFHomeRemovedAndDisableFails
+// guards that a removed AF home still stands down (exit 0) even when launchctl
+// disable itself fails: exiting 0 alone stops the immediate relaunch
+// (KeepAlive.SuccessfulExit=false), and a disable failure must not keep the
+// loop alive — the next boot's RunAtLoad re-enters this path, the home is still
+// gone, and this branch stands down again.
+func TestBoundLaunchdRecoveryStandsDownAndDisablesWhenAFHomeRemovedAndDisableFails(t *testing.T) {
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	invocation := launchdBoundFixture(t)
+	rt := &fakeRecoveryJobRuntime{
+		launchdUserID: 501,
+		commandErr:    errors.New("launchctl persistently broken"),
+	}
+	controller := rt.controller()
+
+	require.NoError(t, os.RemoveAll(upgradeRoot(invocation.HomeDir)))
+
+	err := boundLaunchdRecovery(context.Background(), invocation, controller, time.Now, func() error {
+		return errors.New("actor must not run")
+	})
+	require.NoError(t, err, "a removed AF home must stand down (exit 0) even when the disable fails")
+	require.Len(t, rt.commands, 1)
+	require.Equal(t, "disable", rt.commands[0].args[0])
+	_, statErr := os.Stat(upgradeRoot(invocation.HomeDir))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "the removed AF home must not be recreated even when the disable fails")
+}

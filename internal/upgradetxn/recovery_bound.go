@@ -392,7 +392,19 @@ func boundLaunchdRecovery(
 				// The AF home/storage was removed while a stale launchd job
 				// was still armed. Recreating it would undo the operator's
 				// removal; stand down (exit 0) so launchd stops relaunching and
-				// the removal stays stable.
+				// the removal stays stable. The job is still enabled with
+				// RunAtLoad, though, so a later login or boot would re-launch
+				// the stale previous binary; disable it first (the same path
+				// the gone-transaction and unwriteable-counter branches take).
+				// A disable failure does not keep the loop alive: exit 0 already
+				// stops the immediate relaunch (KeepAlive.SuccessfulExit=false),
+				// and the next boot's RunAtLoad re-enters this path — the home
+				// is still gone, so this branch stands down again.
+				if disableErr := controller.disableLaunchdRecoveryJobByName(ctx, invocation.TransactionID); disableErr != nil {
+					log.WarningLog.Printf(
+						"upgrade recovery: the AF home for launchd recovery job %s was removed, but the job could not be disabled (%v); standing down (exit 0) to stop the immediate relaunch loop — the job may re-launch on a later login or reboot until the removed home is also cleaned up",
+						invocation.TransactionID, disableErr)
+				}
 				return nil
 			}
 			// The budget cannot be persisted, so it cannot bound a persistent
