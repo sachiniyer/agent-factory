@@ -392,3 +392,88 @@ func TestForStorageRebuildTeardownFenceProjectsInertForRollbackReaders(t *testin
 	_, hasFence := clientWire["rebuild_teardown_original_startup_state_unknown"]
 	assert.False(t, hasFence, "clients must not see the storage-only rollback fence")
 }
+
+// TestFromInstanceData_StackedRollbackFencesRestoreTrueStartupState pins the
+// unwind order: ForStorage projects account-swap, then handoff, then
+// rebuild-teardown — each overwriting StartupStateUnknown and stashing the
+// previous value in its own slot — so restores must run in reverse. A row
+// carrying RebuildTeardownPending AND another pending fence restores the
+// LAST-projected slot first; if the rebuild fence is restored last it writes
+// the projected `true` over the real `false` and the row stays inert for good
+// (#5371 review). Each combination keeps the real verdict false.
+func TestFromInstanceData_StackedRollbackFencesRestoreTrueStartupState(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "stacked-rebuilt")
+	base := func() InstanceData {
+		branchCreatedByUs := true
+		return InstanceData{
+			ID:      "stacked-fence-id",
+			Title:   "stacked-fence",
+			Program: "claude",
+			Status:  Lost, Liveness: LiveLost,
+			StartupStateUnknown:    false,
+			RebuildTeardownPending: true,
+			Tabs: []TabData{
+				{Name: agentTabName, Kind: TabKindAgent, TmuxName: "af_stackedfence"},
+			},
+			Worktree: GitWorktreeData{
+				RepoPath:          t.TempDir(),
+				WorktreePath:      worktreePath,
+				SessionName:       "stacked-fence",
+				BranchName:        "af/stacked-fence",
+				BranchCreatedByUs: &branchCreatedByUs,
+			},
+		}
+	}
+	pendingSwap := &AccountSwapData{
+		Manual: true, From: "work", To: "personal",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: PromptCouldNotConfirm,
+	}
+	cases := []struct {
+		name  string
+		apply func(*InstanceData)
+	}{
+		{"swap+rebuild", func(d *InstanceData) { d.PendingAccountSwap = pendingSwap }},
+		{"handoff+rebuild", func(d *InstanceData) {
+			d.PendingHandoffMission = "continue the inherited work"
+			d.HandoffDeliveryStatus = PromptCouldNotConfirm
+		}},
+		{"swap+handoff+rebuild", func(d *InstanceData) {
+			d.PendingAccountSwap = pendingSwap
+			d.PendingHandoffMission = "continue the inherited work"
+			d.HandoffDeliveryStatus = PromptCouldNotConfirm
+		}},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := base()
+			tc.apply(&row)
+
+			stored := row.ForStorage()
+			assert.True(t, stored.StartupStateUnknown,
+				"the stacked row must persist behind the inert fence for older readers")
+
+			payload, err := json.Marshal(stored)
+			require.NoError(t, err)
+			var view InstanceData
+			require.NoError(t, json.Unmarshal(payload, &view))
+			current, err := FromInstanceData(view)
+			require.NoError(t, err)
+			assert.False(t, current.StartupStateUnknown(),
+				"the current reader must recover the real startup verdict, not a leftover projected fence")
+			assert.True(t, current.RebuildTeardownPending(),
+				"the teardown obligation itself survives the round-trip")
+		})
+	}
+}

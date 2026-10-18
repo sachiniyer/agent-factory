@@ -289,9 +289,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	// Rollback fences unwind in REVERSE projection order — each restore writes
+	// back the original its projector captured, so the LAST projector's restore
+	// must run first or it would overwrite the real value with a projected one.
+	// ForStorage projects account-swap, then handoff, then rebuild-teardown.
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
-	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID

@@ -442,9 +442,11 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	// Reverse projection order — see FromInstanceData: the rebuild-teardown
+	// projector runs last in ForStorage, so its restore runs first here.
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
-	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
