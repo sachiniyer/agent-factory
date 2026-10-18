@@ -209,3 +209,83 @@ func TestLifelineShellStartFailureIsAStartError(t *testing.T) {
 		t.Fatalf("start failure surfaced as an exit (%v), not a start error", err)
 	}
 }
+
+// TestLifelineRunReportsTheShellsStatus: the lifeline always dies of its own
+// group SIGKILL once the shell has run, so the run's result must come from the
+// status it reported — a clean exit stays a clean exit, a failure keeps its
+// code, and a SIGTERM death still reads as stop/reload.
+func TestLifelineRunReportsTheShellsStatus(t *testing.T) {
+	s, _ := newTestSupervisor(t, staticTasks())
+	run := func(script string) error {
+		t.Helper()
+		_, err := s.newTaskWatcher(watchTask("status", script, t.TempDir())).runOnce()
+		return err
+	}
+	if err := run("exit 0"); err != nil {
+		t.Fatalf("exit 0 under the lifeline returned %v, want a clean exit", err)
+	}
+	if err := run("exit 3"); err == nil || err.Error() != "exit status 3" {
+		t.Fatalf("exit 3 under the lifeline returned %v, want exit status 3", err)
+	}
+	if err := run("kill -TERM $$; sleep 5"); !exitedFromSignal(err, syscall.SIGTERM) {
+		t.Fatalf("a SIGTERM death under the lifeline returned %v, want it to read as SIGTERM", err)
+	}
+	if s.lifelineUnsupported.Load() {
+		t.Fatal("these runs fell back from the lifeline")
+	}
+}
+
+// TestTaskStartFailureKeepsTheLifeline: a task whose project directory is gone
+// cannot start under the lifeline or without it. That is the task's failure,
+// and every other task must still get a lifeline.
+func TestTaskStartFailureKeepsTheLifeline(t *testing.T) {
+	s, _ := newTestSupervisor(t, staticTasks())
+	missing := filepath.Join(t.TempDir(), "gone")
+	if _, err := s.newTaskWatcher(watchTask("nodir", "true", missing)).runOnce(); err == nil {
+		t.Fatal("a watch task in a missing directory started")
+	}
+	if s.lifelineUnsupported.Load() {
+		t.Fatal("one task's missing directory turned the lifeline off for the whole daemon")
+	}
+}
+
+// TestUnexecutableLifelineFallsBack is the other half: when the lifeline
+// binary itself cannot be exec'd but the shell can, the binary is the problem,
+// and the supervisor falls back once and says so.
+func TestUnexecutableLifelineFallsBack(t *testing.T) {
+	s, _ := newTestSupervisor(t, staticTasks())
+	s.lifelineExe = filepath.Join(t.TempDir(), "no-such-af")
+	warnings := captureWarnings(t)
+	if _, err := s.newTaskWatcher(watchTask("noexe", "exit 0", t.TempDir())).runOnce(); err != nil {
+		t.Fatalf("the shell did not run without its lifeline: %v", err)
+	}
+	if !s.lifelineUnsupported.Load() {
+		t.Fatal("an unexecutable lifeline binary was not latched")
+	}
+	if got := warnings.String(); !strings.Contains(got, s.lifelineExe) || !strings.Contains(got, "cannot exec it") {
+		t.Fatalf("fallback warning %q does not name the binary and the exec failure", got)
+	}
+}
+
+// TestReapFallbackKeepsTheWatchdogUntilExit: when the leader's exit cannot be
+// awaited without reaping it, the stop watchdog must stay in charge until the
+// leader has actually exited — ending it first would leave a later stop with
+// nothing to signal the group, and the stop would hang on the reap.
+func TestReapFallbackKeepsTheWatchdogUntilExit(t *testing.T) {
+	exited := watchLeaderExited
+	t.Cleanup(func() { watchLeaderExited = exited })
+	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
+
+	cmd := exec.Command("sleep", "0.3")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	var leaderRunning bool
+	if err := reapWatchGroupLeader(cmd, func() { leaderRunning = !processGone(pid) }); err != nil {
+		t.Fatal(err)
+	}
+	if leaderRunning {
+		t.Fatal("the stop watchdog was ended while the watch command was still running")
+	}
+}

@@ -13,11 +13,16 @@
 //     process's descriptors. On EOF the lifeline SIGTERMs its group, waits up
 //     to the grace for the shell to exit, then SIGKILLs the group, itself
 //     included.
-//   - fd 4, the WRITE end of the ack pipe. The lifeline writes exactly one line
-//     there once it has started (or failed to start) the shell, then closes it.
-//     A daemon that reads no well-formed ack is talking to a binary that does
-//     not speak this protocol — an older af at the same path after an upgrade —
-//     and falls back to spawning the shell directly, with a warning.
+//   - fd 4, the WRITE end of the ack pipe. The lifeline writes one line there
+//     once it has started (or failed to start) the shell. A daemon that reads
+//     no well-formed ack is talking to a binary that does not speak this
+//     protocol — an older af at the same path after an upgrade — and falls
+//     back to spawning the shell directly, with a warning. When the shell
+//     exits, the lifeline writes its status there as a second line, then
+//     SIGKILLs its group, itself included, so nothing the shell backgrounded
+//     outlives the run even if the daemon dies before it can clean up. The
+//     lifeline's own wait status is therefore always SIGKILL once the shell
+//     has started; the daemon reads the shell's status from that line.
 //
 // Every group signal the lifeline sends names its OWN group while it is alive,
 // so the number cannot have been reused: a process group's number is its
@@ -60,6 +65,10 @@ const (
 	// prefixes it, followed by the error, when it could not be started.
 	AckStarted     = Protocol + " started"
 	AckStartFailed = Protocol + " start-failed: "
+	// AckExited and AckSignaled prefix the second line, the shell's status:
+	// its exit code, or the number of the signal that killed it.
+	AckExited   = Protocol + " exited "
+	AckSignaled = Protocol + " signaled "
 
 	// ExitUsage is returned for an argv this binary cannot run.
 	ExitUsage = 64
@@ -113,11 +122,9 @@ func parse(args []string) (invocation, error) {
 
 // Run is the lifeline. args starts at Arg. lifeline is the read end of the
 // daemon's lifeline pipe and ack the write end of the ack pipe; either may be
-// nil or invalid, which is a protocol failure. It returns the exit code for a
-// shell that exited normally; for a shell killed by a signal it re-raises that
-// signal on itself, so the daemon's wait status reads exactly as it would have
-// for the shell (the watcher treats a SIGTERM death as stop/reload, not a
-// failure).
+// nil or invalid, which is a protocol failure. It returns only when the shell
+// could not be run; once the shell has started, the lifeline ends by its own
+// group SIGKILL, after reporting the shell's status on ack.
 func Run(args []string, lifeline, ack *os.File) int {
 	inv, err := parse(args)
 	if err != nil {
@@ -152,6 +159,7 @@ func Run(args []string, lifeline, ack *os.File) int {
 	// daemon made with Setpgid. That group is what every kill below names.
 	if err := shell.Start(); err != nil {
 		writeAck(ack, AckStartFailed+oneLine(err.Error()))
+		_ = ack.Close()
 		fmt.Fprintf(os.Stderr, "af %s: start %s: %v\n", Arg, inv.shell, err)
 		return ExitStartFailed
 	}
@@ -170,15 +178,18 @@ func Run(args []string, lifeline, ack *os.File) int {
 
 	select {
 	case state := <-exited:
-		// The shell is done. Any backgrounded grandchildren are the daemon's
-		// to kill: it is this process's parent, and it SIGKILLs the group
-		// before it reaps this process (daemon/watcher_reap_*.go), while the
-		// group number is still pinned by this process's pid.
-		return passThrough(state)
+		// The shell is done, but what it backgrounded may not be. Kill that
+		// here rather than leave it to the daemon: a daemon that dies between
+		// this exit and its own cleanup kill would otherwise leave it running,
+		// unbound (#5329). The status goes first, because this process is in
+		// the group it kills.
+		writeAck(ack, exitLine(state))
+		_ = ack.Close()
+		killOwnGroup()
 	case <-daemonGone:
 		stopOwnGroup(inv.grace, exited)
-		return 1 // unreachable: stopOwnGroup's SIGKILL includes this process
 	}
+	return 1 // unreachable: both paths end with a SIGKILL that includes this process
 }
 
 // stopOwnGroup is the daemon-died path: SIGTERM the group so the script can
@@ -192,31 +203,27 @@ func stopOwnGroup(grace time.Duration, exited <-chan *os.ProcessState) {
 	case <-exited:
 	case <-time.After(grace):
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	// SIGKILL to our own group is delivered to us before kill returns on
-	// Linux and macOS; this is a backstop, never a normal exit.
+	killOwnGroup()
+}
+
+// killOwnGroup SIGKILLs this process's group, this process included. The
+// kernel signals every member before the call returns to this process, on
+// Linux and macOS alike; the sleep is a backstop, never a normal exit.
+func killOwnGroup() {
+	_ = syscall.Kill(-syscall.Getpgrp(), syscall.SIGKILL)
 	time.Sleep(time.Second)
 }
 
-// passThrough turns the shell's wait status into this process's: the same exit
-// code, or death by the same signal.
-func passThrough(state *os.ProcessState) int {
-	if state == nil {
-		return 1
-	}
+// exitLine is the shell's status as the ack pipe's second line.
+func exitLine(state *os.ProcessState) string {
 	if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		sig := ws.Signal()
-		signal.Reset(sig)
-		_ = syscall.Kill(os.Getpid(), sig)
-		time.Sleep(time.Second)
-		return 128 + int(sig)
+		return AckSignaled + strconv.Itoa(int(ws.Signal()))
 	}
-	return state.ExitCode()
+	return AckExited + strconv.Itoa(state.ExitCode())
 }
 
 func writeAck(ack *os.File, line string) {
 	_, _ = ack.WriteString(line + "\n")
-	_ = ack.Close()
 }
 
 func oneLine(s string) string {
@@ -244,4 +251,26 @@ func ParseAck(line string) (supported, ok bool, startErr error) {
 		return true, false, errors.New(strings.TrimPrefix(line, AckStartFailed))
 	}
 	return false, false, nil
+}
+
+// ParseExit reads the ack pipe's second line, the shell's status. ok is false
+// for anything else, including no line at all: the lifeline was killed before
+// the shell exited, and its own wait status is the run's.
+func ParseExit(line string) (code int, sig syscall.Signal, ok bool) {
+	line = strings.TrimSuffix(line, "\n")
+	for _, prefix := range []string{AckExited, AckSignaled} {
+		rest, found := strings.CutPrefix(line, prefix)
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(rest)
+		if err != nil || n < 0 {
+			return 0, 0, false
+		}
+		if prefix == AckSignaled {
+			return 0, syscall.Signal(n), n > 0
+		}
+		return n, 0, true
+	}
+	return 0, 0, false
 }

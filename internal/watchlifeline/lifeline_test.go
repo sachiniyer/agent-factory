@@ -26,6 +26,7 @@ type lifelineProc struct {
 	cmd    *exec.Cmd
 	keep   *os.File // the daemon's lifeline write end; closing it = daemon death
 	ack    string
+	acks   *bufio.Reader // the rest of the ack pipe: the shell's status line
 	stdout *bufio.Reader
 	done   chan error
 }
@@ -64,10 +65,11 @@ func startLifeline(t *testing.T, grace time.Duration, script string) *lifelinePr
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		_ = lw.Close()
 		_ = outR.Close()
+		_ = ar.Close()
 	})
-	ackLine, _ := bufio.NewReader(ar).ReadString('\n')
-	_ = ar.Close()
-	p := &lifelineProc{cmd: cmd, keep: lw, ack: strings.TrimSuffix(ackLine, "\n"), stdout: bufio.NewReader(outR), done: make(chan error, 1)}
+	acks := bufio.NewReader(ar)
+	ackLine, _ := acks.ReadString('\n')
+	p := &lifelineProc{cmd: cmd, keep: lw, ack: strings.TrimSuffix(ackLine, "\n"), acks: acks, stdout: bufio.NewReader(outR), done: make(chan error, 1)}
 	go func() { p.done <- cmd.Wait() }()
 	return p
 }
@@ -96,6 +98,24 @@ func (p *lifelineProc) wait(t *testing.T, within time.Duration) *os.ProcessState
 	}
 }
 
+// exitLine is the ack pipe's second line; call it once the lifeline is gone.
+func (p *lifelineProc) exitLine(t *testing.T) string {
+	t.Helper()
+	line, err := p.acks.ReadString('\n')
+	if err != nil && err != io.EOF {
+		t.Fatalf("read exit line: %v", err)
+	}
+	return line
+}
+
+func killedByOwnGroup(t *testing.T, state *os.ProcessState) {
+	t.Helper()
+	ws, ok := state.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("lifeline wait status %v, want death by its own group SIGKILL", state)
+	}
+}
+
 func gone(pid int) bool {
 	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
@@ -111,26 +131,42 @@ func waitGone(t *testing.T, pid int, within time.Duration, what string) {
 	}
 }
 
-func TestShellExitCodePassesThrough(t *testing.T) {
+func TestShellExitCodeIsReported(t *testing.T) {
 	p := startLifeline(t, time.Second, "exit 7")
 	if p.ack != AckStarted {
 		t.Fatalf("ack %q, want %q", p.ack, AckStarted)
 	}
-	state := p.wait(t, 5*time.Second)
-	if state.ExitCode() != 7 {
-		t.Fatalf("lifeline exit %v, want the shell's exit status 7", state)
+	killedByOwnGroup(t, p.wait(t, 5*time.Second))
+	line := p.exitLine(t)
+	if code, sig, ok := ParseExit(line); !ok || code != 7 || sig != 0 {
+		t.Fatalf("exit line %q, want the shell's exit status 7", line)
 	}
 }
 
-// TestShellSignalDeathPassesThrough: a shell killed by SIGTERM must read as a
+// TestShellSignalDeathIsReported: a shell killed by SIGTERM must read as a
 // SIGTERM death to the daemon, which treats that as stop/reload rather than a
 // failure that counts against the crash-loop budget.
-func TestShellSignalDeathPassesThrough(t *testing.T) {
+func TestShellSignalDeathIsReported(t *testing.T) {
 	p := startLifeline(t, time.Second, "kill -TERM $$; sleep 5")
+	killedByOwnGroup(t, p.wait(t, 5*time.Second))
+	line := p.exitLine(t)
+	if _, sig, ok := ParseExit(line); !ok || sig != syscall.SIGTERM {
+		t.Fatalf("exit line %q, want death by SIGTERM", line)
+	}
+}
+
+// TestShellExitKillsWhatItBackgrounded: the shell exits while a TERM-ignoring
+// child it backgrounded runs, and nobody else cleans up — the daemon died
+// between the shell's exit and its own group kill. The lifeline's exit must
+// take that child with it.
+func TestShellExitKillsWhatItBackgrounded(t *testing.T) {
+	p := startLifeline(t, time.Second, `sh -c 'trap "" TERM; echo $$; exec sleep 300' & sleep 0.2; exit 0`)
+	child := p.readPID(t)
 	state := p.wait(t, 5*time.Second)
-	ws, ok := state.Sys().(syscall.WaitStatus)
-	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
-		t.Fatalf("lifeline wait status %v, want death by SIGTERM", state)
+	waitGone(t, child, 5*time.Second, "backgrounded child of an exited shell")
+	killedByOwnGroup(t, state)
+	if code, _, ok := ParseExit(p.exitLine(t)); !ok || code != 0 {
+		t.Fatal("no clean exit line for the shell")
 	}
 }
 
@@ -145,11 +181,7 @@ func TestDaemonDeathStopsWholeGroup(t *testing.T) {
 
 	_ = p.keep.Close()
 
-	state := p.wait(t, grace+5*time.Second)
-	ws, ok := state.Sys().(syscall.WaitStatus)
-	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
-		t.Fatalf("lifeline wait status %v, want death by its own group SIGKILL", state)
-	}
+	killedByOwnGroup(t, p.wait(t, grace+5*time.Second))
 	waitGone(t, grandchild, 5*time.Second, "TERM-ignoring grandchild")
 }
 
@@ -267,6 +299,29 @@ func TestArgvParses(t *testing.T) {
 	} {
 		if _, err := parse(bad); err == nil {
 			t.Fatalf("parse(%q) accepted a malformed argv", bad)
+		}
+	}
+}
+
+func TestParseExit(t *testing.T) {
+	cases := []struct {
+		line string
+		code int
+		sig  syscall.Signal
+		ok   bool
+	}{
+		{AckExited + "0\n", 0, 0, true},
+		{AckExited + "3\n", 3, 0, true},
+		{AckSignaled + "15\n", 0, syscall.SIGTERM, true},
+		{AckSignaled + "0\n", 0, 0, false},
+		{AckExited + "x\n", 0, 0, false},
+		{"", 0, 0, false},
+		{AckStarted + "\n", 0, 0, false},
+	}
+	for _, c := range cases {
+		code, sig, ok := ParseExit(c.line)
+		if code != c.code || sig != c.sig || ok != c.ok {
+			t.Errorf("ParseExit(%q) = %d,%v,%v, want %d,%v,%v", c.line, code, sig, ok, c.code, c.sig, c.ok)
 		}
 	}
 }

@@ -50,44 +50,108 @@ func resolveWatchLifelineExe() string {
 	return exe
 }
 
+// watchLifeline is the daemon's half of one run's lifeline: the write end of
+// the lifeline pipe, whose closing tells the lifeline its daemon is gone, and
+// the ack pipe the shell's status arrives on.
+type watchLifeline struct {
+	keep *os.File
+	ackR *os.File
+	acks *bufio.Reader
+}
+
+// Close ends the lifeline; call it only once the run's group is reaped.
+func (l *watchLifeline) Close() {
+	_ = l.keep.Close()
+	_ = l.ackR.Close()
+}
+
+// shellResult turns the reaped lifeline's wait result into the shell's. Once
+// the shell has run, the lifeline reports its status on the ack pipe and dies
+// of its own group SIGKILL; without that line — the lifeline was killed before
+// the shell exited, by the stop escalation or from outside — the lifeline's
+// own result stands. The lifeline is reaped, and it alone held the write end,
+// so the read ends at EOF; the timeout only bounds a broken invariant.
+func (l *watchLifeline) shellResult(waitErr error) error {
+	line, _ := readWatchLifelineAck(l.ackR, l.acks, time.Second)
+	code, sig, ok := watchlifeline.ParseExit(line)
+	switch {
+	case !ok:
+		return waitErr
+	case sig == 0 && code == 0:
+		return nil
+	}
+	return &watchShellExit{code: code, sig: sig}
+}
+
+// watchShellExit is a watch shell's non-zero exit or signal death as its
+// lifeline reported it. It reads as the *exec.ExitError a direct spawn would
+// have returned (exitedFromSignal accepts both).
+type watchShellExit struct {
+	code int
+	sig  syscall.Signal
+}
+
+func (e *watchShellExit) Error() string {
+	if e.sig != 0 {
+		return "signal: " + e.sig.String()
+	}
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
 // startWatchProcess starts script for one watch run and returns the running
-// command plus the lifeline write end the caller must hold, and close, only
-// once the run is over. configure applies the run's directory, environment,
-// stdio and process group to whichever command is started.
+// command plus the lifeline the caller must hold, and close, only once the run
+// is over. configure applies the run's directory, environment, stdio and
+// process group to whichever command is started.
 //
 // With a lifeline binary, the started process is `af __watch-lifeline`, the
 // leader of the run's process group, with the shell as its child in the same
-// group; the process group, its signals and its exit status read exactly as
-// the shell's would. Without one — none resolved, or a binary that does not
-// speak the protocol — the shell is started directly, which is the behavior
-// before the lifeline existed. keep is then nil.
-func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, keep *os.File, err error) {
-	if exe := s.lifelineExe; exe != "" && !s.lifelineUnsupported.Load() {
-		cmd, keep, err, spoke := s.startWithLifeline(taskID, exe, script, configure)
+// group; lifeline.shellResult recovers the shell's own exit status. Without one
+// — none resolved, or a binary that does not speak the protocol — the shell is
+// started directly, which is the behavior before the lifeline existed.
+// lifeline is then nil.
+func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
+	var execErr error
+	exe := s.lifelineExe
+	if exe != "" && !s.lifelineUnsupported.Load() {
+		var spoke bool
+		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, configure)
 		if spoke {
-			return cmd, keep, err
+			return cmd, lifeline, err
 		}
 	}
 	cmd = systemdunit.NewBoundChildCommand(s.shell, "-c", script)
 	configure(cmd)
-	return cmd, nil, cmd.Start()
+	err = cmd.Start()
+	if execErr != nil && err == nil {
+		// The lifeline could not be exec'd but the shell, with the same
+		// directory, environment and scope, could: the lifeline binary is the
+		// problem. When both fail, the failure is this task's own (a missing
+		// project directory, say), and the next task should still get one.
+		s.lifelineUnusable(taskID, exe, fmt.Sprintf("cannot exec it: %v", execErr))
+	}
+	return cmd, nil, err
 }
 
 // startWithLifeline is startWatchProcess's lifeline path. spoke is false when
-// the binary at exe did not speak the protocol; nothing of that attempt is
-// left running and the caller falls back.
-func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, keep *os.File, err error, spoke bool) {
+// the attempt did not produce a lifeline-run shell and the caller should start
+// the shell directly; nothing of that attempt is left running. execErr is set
+// when the lifeline could not even be exec'd, which the caller judges against
+// its own start; a binary that ran but did not speak the protocol is recorded
+// here.
+func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, lifeline *watchLifeline, err, execErr error, spoke bool) {
 	lifelineR, lifelineW, err := os.Pipe()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create watch lifeline pipe: %w", err), true
+		return nil, nil, fmt.Errorf("failed to create watch lifeline pipe: %w", err), nil, true
 	}
 	ackR, ackW, err := os.Pipe()
 	if err != nil {
 		_ = lifelineR.Close()
 		_ = lifelineW.Close()
-		return nil, nil, fmt.Errorf("failed to create watch lifeline ack pipe: %w", err), true
+		return nil, nil, fmt.Errorf("failed to create watch lifeline ack pipe: %w", err), nil, true
 	}
-	defer ackR.Close()
+	// One reader for both ack lines: a shell that exits at once can land its
+	// status in the same read as the ack.
+	acks := bufio.NewReader(ackR)
 
 	cmd = systemdunit.NewBoundChildCommand(exe, watchlifeline.Argv(s.stopGrace, s.shell, "-c", script)...)
 	configure(cmd)
@@ -101,11 +165,11 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 	_ = ackW.Close()
 	if startErr != nil {
 		_ = lifelineW.Close()
-		s.lifelineUnusable(taskID, exe, fmt.Sprintf("cannot exec it: %v", startErr))
-		return nil, nil, nil, false
+		_ = ackR.Close()
+		return nil, nil, nil, startErr, false
 	}
 
-	line, ackErr := readWatchLifelineAck(ackR, watchLifelineAckTimeout)
+	line, ackErr := readWatchLifelineAck(ackR, acks, watchLifelineAckTimeout)
 	supported, started, shellErr := watchlifeline.ParseAck(line)
 	if !supported || !started {
 		// The group's leader is this daemon's own unreaped child, so the group
@@ -115,14 +179,15 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		_ = watchGroupKill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = reapWatchGroupLeader(cmd)
 		_ = lifelineW.Close()
+		_ = ackR.Close()
 		if !supported {
 			reason := fmt.Sprintf("no ack: %s", describeWatchLifelineAck(line, ackErr, cmd))
 			s.lifelineUnusable(taskID, exe, reason)
-			return nil, nil, nil, false
+			return nil, nil, nil, nil, false
 		}
-		return nil, nil, fmt.Errorf("start %s: %v", s.shell, shellErr), true
+		return nil, nil, fmt.Errorf("start %s: %v", s.shell, shellErr), nil, true
 	}
-	return cmd, lifelineW, nil, true
+	return cmd, &watchLifeline{keep: lifelineW, ackR: ackR, acks: acks}, nil, nil, true
 }
 
 // lifelineUnusable records, once per daemon, that watch commands now start
@@ -138,14 +203,16 @@ func (s *watcherSupervisor) lifelineUnusable(taskID, exe, reason string) {
 		"restart the daemon (af daemon restart) so it runs the installed binary", taskID, exe, reason)
 }
 
-func readWatchLifelineAck(r *os.File, timeout time.Duration) (string, error) {
+// readWatchLifelineAck reads one line from the ack pipe f through its reader
+// br, giving up after timeout.
+func readWatchLifelineAck(f *os.File, br *bufio.Reader, timeout time.Duration) (string, error) {
 	type result struct {
 		line string
 		err  error
 	}
 	got := make(chan result, 1)
 	go func() {
-		line, err := bufio.NewReader(r).ReadString('\n')
+		line, err := br.ReadString('\n')
 		got <- result{line, err}
 	}()
 	select {
@@ -153,7 +220,7 @@ func readWatchLifelineAck(r *os.File, timeout time.Duration) (string, error) {
 		return res.line, res.err
 	case <-time.After(timeout):
 		// Closing the read end unblocks the reader goroutine.
-		_ = r.Close()
+		_ = f.Close()
 		return "", fmt.Errorf("no ack within %s", timeout)
 	}
 }
@@ -197,13 +264,16 @@ func reapWatchGroupLeader(cmd *exec.Cmd, beforeKill ...func()) error {
 	if err := watchLeaderExited(pid); err != nil {
 		// No unreaped exit to wait on, so no pinned number to kill under.
 		// Reap first, as before the lifeline, and skip a kill that could
-		// name someone else's group.
+		// name someone else's group. beforeKill runs only after the reap:
+		// the leader may still be running here, and the stop watchdog it
+		// ends is what signals the group on a stop until it exits.
 		log.WarningLog.Printf("watch command pid %d: cannot wait for its exit without reaping it (%v); "+
 			"skipping the group cleanup kill", pid, err)
+		waitErr := cmd.Wait()
 		for _, f := range beforeKill {
 			f()
 		}
-		return cmd.Wait()
+		return waitErr
 	}
 	for _, f := range beforeKill {
 		f()

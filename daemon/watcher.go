@@ -459,8 +459,13 @@ func nextBackoff(current, base, max time.Duration, healthy bool) (wait, next tim
 }
 
 // exitedFromSignal reports whether err is an exec exit caused by the given
-// signal (as opposed to a non-zero exit code or a start failure).
+// signal (as opposed to a non-zero exit code or a start failure), whether the
+// shell was started directly or its lifeline reported it.
 func exitedFromSignal(err error, sig syscall.Signal) bool {
+	var shellExit *watchShellExit
+	if errors.As(err, &shellExit) {
+		return shellExit.sig == sig
+	}
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {
 		return false
@@ -624,6 +629,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		close(leaderExited)
 		<-watchdogDone
 	})
+	if lifeline != nil {
+		waitErr = lifeline.shellResult(waitErr)
+	}
 	close(stdoutWritersStopped)
 	<-readerDone
 	<-stderrDone
