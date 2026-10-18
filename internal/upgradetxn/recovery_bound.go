@@ -278,13 +278,16 @@ func launchdRecoveryBudgetExhausted(invocation RecoveryInvocation, now time.Time
 // runs, so a deterministic panic, fatal runtime error, or signal termination
 // — which never returns to a post-run record path — still counts toward the
 // burst budget. launchd treats that abnormal exit as unsuccessful and
-// relaunches, which is exactly the unbounded loop this budget bounds. When
-// the increment reaches the burst limit it also marks the counter Exhausted,
-// so the budget stays sticky past the burst window even if the actor never
-// returns to stand down (a panic on the final attempt) or launchctl disable
-// later fails — the persisted marker is what keeps a later boot's RunAtLoad
-// stood down. Returns errAFHomeRemoved if the AF home/storage was removed and
-// must not be recreated; the caller stands down in that case.
+// relaunches, which is exactly the unbounded loop this budget bounds. The
+// pre-record counts the attempt but does NOT mark the counter Exhausted:
+// exhaustion is decided at stand-down time, only when a start is actually
+// rejected while the starts remain inside the burst window, so a slow final
+// attempt that runs past the burst interval does not make the budget sticky
+// (systemd's StartLimitIntervalSec rolls the window forward once it elapses).
+// A panic on the final attempt is still bounded — the next launch's pre-check
+// sees the at-limit counter within the window and stands the job down. Returns
+// errAFHomeRemoved if the AF home/storage was removed and must not be
+// recreated; the caller stands down in that case.
 func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) error {
 	counter, _ := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	if counter.Exhausted {
@@ -296,9 +299,6 @@ func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) 
 		counter = recoveryRetryCounter{FirstAttemptAt: now}
 	}
 	counter.Attempts++
-	if counter.Attempts >= launchdRecoveryBurstLimit {
-		counter.Exhausted = true
-	}
 	return writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter)
 }
 
@@ -314,10 +314,18 @@ func recordLaunchdRecoveryAttempt(invocation RecoveryInvocation, now time.Time) 
 // the Exhausted marker keeps the next boot stood down without retrying, and a
 // persistent launchctl failure is exactly the loop the budget exists to bound
 // — not one that should keep the loop alive.
+//
+// A non-Exhausted counter that has reached the burst limit only stands down
+// while the starts remain inside the burst window. A slow final attempt that
+// runs past the interval rolls the window forward the way systemd's
+// StartLimitIntervalSec does: the next start is allowed rather than stood down
+// permanently, so the budget is not made sticky by the pre-record alone. now is
+// injected so the window is testable without real time.
 func standDownLaunchdRecoveryIfExhausted(
 	ctx context.Context,
 	invocation RecoveryInvocation,
 	controller RecoveryJobController,
+	now time.Time,
 ) bool {
 	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	if !ok {
@@ -327,6 +335,16 @@ func standDownLaunchdRecoveryIfExhausted(
 		return false
 	}
 	if !counter.Exhausted {
+		// The at-limit counter has not been made sticky yet. Only stand down
+		// (and persist the marker) while the starts remain inside the burst
+		// window: a slow final attempt that ran past the interval rolls the
+		// window forward instead, so the next start is allowed and the budget
+		// resets. launchdRecoveryBudgetExhausted already gates this for the
+		// pre-check path; the post-run path re-checks here because the actor
+		// may have run past the interval between the pre-record and the return.
+		if !counter.FirstAttemptAt.IsZero() && now.Sub(counter.FirstAttemptAt) >= launchdRecoveryBurstInterval {
+			return false
+		}
 		counter.Exhausted = true
 		if err := writeRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID, counter); err != nil {
 			log.WarningLog.Printf(
@@ -363,7 +381,8 @@ func boundLaunchdRecovery(
 	run func() error,
 ) error {
 	launchd := recoveryJobIsLaunchd(invocation)
-	if launchd && launchdRecoveryBudgetExhausted(invocation, now()) {
+	nowTime := now()
+	if launchd && launchdRecoveryBudgetExhausted(invocation, nowTime) {
 		// The budget is already exhausted. A prior run pre-recorded the
 		// exhausting attempt but never reached the post-run stand-down (a
 		// panic, fatal error, or signal termination on the final attempt), so
@@ -372,7 +391,7 @@ func boundLaunchdRecovery(
 		// at every login or reboot. The stand-down helper reads the exhausted
 		// counter, persists the marker defensively, and fires launchctl
 		// disable.
-		_ = standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller)
+		_ = standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller, nowTime)
 		return nil
 	}
 	// Persist the attempt BEFORE running the recovery actor so a panic, fatal
@@ -465,7 +484,7 @@ func boundLaunchdRecovery(
 	if !launchd {
 		return err
 	}
-	if standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller) {
+	if standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller, now()) {
 		return nil
 	}
 	return err

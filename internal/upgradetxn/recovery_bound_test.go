@@ -118,14 +118,16 @@ func TestLaunchdRecoveryBudgetExhaustedMatchesBurstAndInterval(t *testing.T) {
 		"a corrupt counter must reset the budget, not strand the actor in stand-down")
 }
 
-// TestRecordLaunchdRecoveryAttemptIncrementsAndMarksExhaustedAtBurstLimit is
-// the core pre-record guard: the first N-1 attempts persist Attempts=N with
-// Exhausted=false and fire no launchctl (the pre-record owns the count, not the
-// stand-down), and the Nth within the window persists Attempts=N with
-// Exhausted=true so the budget is sticky past the burst window even before the
-// post-failure stand-down runs. It also covers the interval-reset (an attempt
-// after the interval starts a fresh window with Attempts=1, Exhausted=false).
-func TestRecordLaunchdRecoveryAttemptIncrementsAndMarksExhaustedAtBurstLimit(t *testing.T) {
+// TestRecordLaunchdRecoveryAttemptIncrementsAtBurstLimit is the core pre-record
+// guard: each attempt persists Attempts=N and fires no launchctl (the pre-record
+// owns the count, not the stand-down), and the Nth within the window persists
+// Attempts=N WITHOUT marking Exhausted — exhaustion is decided at stand-down
+// time, only when a start is actually rejected while the starts remain inside
+// the burst window, so a slow final attempt that runs past the interval rolls
+// the window forward instead of sticking the budget. It also covers the
+// interval-reset (an attempt after the interval starts a fresh window with
+// Attempts=1, Exhausted=false).
+func TestRecordLaunchdRecoveryAttemptIncrementsAtBurstLimit(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	start := time.Now()
 
@@ -141,7 +143,7 @@ func TestRecordLaunchdRecoveryAttemptIncrementsAndMarksExhaustedAtBurstLimit(t *
 	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	require.True(t, ok)
 	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
-	require.True(t, counter.Exhausted, "the burst limit must mark the budget exhausted so it stays sticky past the window")
+	require.False(t, counter.Exhausted, "the burst limit pre-records the count without making the budget sticky; the stand-down owns exhaustion")
 
 	// After the interval elapses, a fresh attempt on a NOT-yet-exhausted budget
 	// starts a new window with Attempts=1 — StartLimitIntervalSec rolls the
@@ -169,15 +171,16 @@ func TestStandDownLaunchdRecoveryIfExhaustedFiresDisableAtBurstLimit(t *testing.
 
 	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
 		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
-		require.False(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+		require.False(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller, start.Add(time.Duration(attempt)*time.Second)),
 			"below the burst limit the stand-down must not fire")
 		require.Empty(t, runtime.commands, "the disable must not fire before the budget is exhausted")
 	}
 
-	// The Nth pre-record marks the budget exhausted; the post-failure
-	// stand-down then fires launchctl disable on the deterministic label.
+	// The Nth pre-record reaches the burst limit; the post-failure stand-down
+	// (within the burst window) then fires launchctl disable on the
+	// deterministic label and persists the Exhausted marker.
 	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(launchdRecoveryBurstLimit*time.Second)))
-	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller, start.Add(launchdRecoveryBurstLimit*time.Second)),
 		"the third failure in the interval must stand down, mirroring StartLimitBurst=3")
 	require.Equal(t, []recoveryCommandCall{{
 		name: "launchctl",
@@ -208,7 +211,7 @@ func TestStandDownLaunchdRecoveryIfExhaustedStandsDownEvenWhenDisableFails(t *te
 	for attempt := 1; attempt <= launchdRecoveryBurstLimit; attempt++ {
 		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
 	}
-	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller),
+	require.True(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller, start.Add(launchdRecoveryBurstLimit*time.Second)),
 		"the disable failure must not prevent the stand-down")
 	require.Equal(t, []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
 		runtime.commands[0].args)
@@ -296,6 +299,116 @@ func TestBoundLaunchdRecoveryStandsDownAfterBurstLimitAndPreventsNextRun(t *test
 	require.NoError(t, err)
 	require.Equal(t, launchdRecoveryBurstLimit, runCalls,
 		"the sticky exhausted marker must keep a once-exhausted loop stood down past the burst window")
+}
+
+// TestBoundLaunchdRecoveryPreRecordsBeforeRunSoAPanicCounts guards the P1
+// TestStandDownLaunchdRecoveryIfExhaustedDoesNotStickWhenBurstIntervalElapsed
+// pins the P1 fix for the slow-final-attempt shape: when the first N starts
+// occur close together but the Nth actor runs for at least the burst interval
+// before failing, the pre-recorded counter is at the limit but not Exhausted
+// (the pre-record no longer makes it sticky), and the post-run stand-down must
+// NOT fire — the burst window has elapsed by the time the actor returns, so
+// the budget rolls forward the way systemd's StartLimitIntervalSec does, and a
+// recoverable upgrade is not disabled after one slow attempt. The next start is
+// allowed rather than stood down permanently.
+func TestStandDownLaunchdRecoveryIfExhaustedDoesNotStickWhenBurstIntervalElapsed(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+	start := time.Now()
+
+	// Three starts close together reach the limit within the burst window.
+	for attempt := 1; attempt <= launchdRecoveryBurstLimit; attempt++ {
+		require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Duration(attempt)*time.Second)))
+	}
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted, "the pre-record counts the attempt but does not make the budget sticky")
+
+	// The Nth actor ran for at least the burst interval before failing: by the
+	// time the post-run stand-down runs, the burst window has elapsed, so the
+	// stand-down must not fire and must not persist Exhausted — the next start
+	// is allowed and the window rolls forward.
+	pastInterval := start.Add(launchdRecoveryBurstInterval + time.Minute)
+	require.False(t, standDownLaunchdRecoveryIfExhausted(context.Background(), invocation, controller, pastInterval),
+		"a slow final attempt that outlasts the burst interval must not stick the budget; the window rolls forward")
+	require.Empty(t, runtime.commands, "no disable when the burst interval elapsed during the final attempt")
+
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.False(t, counter.Exhausted, "the stand-down must not persist Exhausted when the window has elapsed")
+
+	// The pre-check agrees: the at-limit counter with an elapsed window is not
+	// exhausted, so the next launch runs the actor rather than standing down.
+	require.False(t, launchdRecoveryBudgetExhausted(invocation, pastInterval),
+		"the pre-check must not stand down a not-yet-exhausted budget whose burst window has elapsed")
+}
+
+// TestBoundLaunchdRecoveryRollsWindowForwardWhenFinalAttemptOutlastsBurstInterval
+// is the end-to-end P1 guard: when the first N-1 starts fail quickly within the
+// burst window but the Nth actor runs for at least the burst interval before
+// failing (the default supervisor phase deadline is itself five minutes, the
+// same as the burst interval), the pre-run write must not make the budget
+// sticky. The post-run stand-down sees the window has elapsed and does not
+// fire, the actor's error propagates, and the next start rolls the window
+// forward (the way systemd's StartLimitIntervalSec does) and runs the actor
+// again rather than standing down permanently.
+func TestBoundLaunchdRecoveryRollsWindowForwardWhenFinalAttemptOutlastsBurstInterval(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+	start := time.Now()
+
+	supervisorFailure := errors.New("persistent journal load failure")
+	runCalls := 0
+	clock := start
+	now := func() time.Time { return clock }
+	run := func() error {
+		runCalls++
+		// The third attempt runs for at least the burst interval before failing.
+		if runCalls == launchdRecoveryBurstLimit {
+			clock = start.Add(launchdRecoveryBurstInterval + time.Minute)
+		}
+		return supervisorFailure
+	}
+
+	// The first N-1 starts fail quickly within the burst window.
+	for attempt := 1; attempt < launchdRecoveryBurstLimit; attempt++ {
+		clock = start.Add(time.Duration(attempt) * time.Second)
+		err := boundLaunchdRecovery(context.Background(), invocation, controller, now, run)
+		require.ErrorIs(t, err, supervisorFailure)
+	}
+	require.Equal(t, launchdRecoveryBurstLimit-1, runCalls)
+	require.Empty(t, runtime.commands, "no stand-down before the burst limit is reached")
+
+	// The Nth start is pre-recorded within the window, but the actor runs past
+	// the burst interval before failing. The post-run stand-down must not fire.
+	clock = start.Add(time.Duration(launchdRecoveryBurstLimit) * time.Second)
+	err := boundLaunchdRecovery(context.Background(), invocation, controller, now, run)
+	require.ErrorIs(t, err, supervisorFailure,
+		"a slow final attempt that outlasts the burst interval must not stick the budget; the error propagates")
+	require.Equal(t, launchdRecoveryBurstLimit, runCalls, "the third attempt must run the actor")
+	require.Empty(t, runtime.commands, "the post-run stand-down must not fire when the burst interval elapsed during the run")
+
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted, "the pre-record must not make the budget sticky when the final attempt outlasts the interval")
+
+	// The next start, past the interval, rolls the window forward: the pre-check
+	// is not exhausted, the pre-record resets the window (Attempts=1), and the
+	// actor runs again rather than standing down.
+	clock = start.Add(launchdRecoveryBurstInterval + 2*time.Minute)
+	err = boundLaunchdRecovery(context.Background(), invocation, controller, now, run)
+	require.ErrorIs(t, err, supervisorFailure,
+		"the next start after the interval must run the actor, not stand down")
+	require.Equal(t, launchdRecoveryBurstLimit+1, runCalls, "the window rolled forward and the actor ran again")
+	require.Empty(t, runtime.commands, "no stand-down when the window rolled forward")
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, 1, counter.Attempts, "the first attempt after the interval starts a fresh window")
+	require.False(t, counter.Exhausted)
 }
 
 // TestBoundLaunchdRecoveryPreRecordsBeforeRunSoAPanicCounts guards the P1
@@ -624,10 +737,13 @@ func TestRecoveryJobIsLaunchdFallsBackToPlatformForSupersededTransaction(t *test
 
 // TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob pins the P2 fix for the
 // crash-on-the-final-attempt shape: if the third attempt pre-records the
-// exhausted marker but panics or is killed before the post-run stand-down runs
+// at-limit counter but panics or is killed before the post-run stand-down runs
 // launchctl disable, the next launch's pre-check must disable the job. Exiting
 // 0 alone stops the immediate relaunch, but the job remains enabled and would
-// run again at every login or reboot without the disable.
+// run again at every login or reboot without the disable. The pre-record does
+// not make the budget sticky (the stand-down owns that), so the crash leaves the
+// counter at the limit but not Exhausted; the next launch's pre-check sees the
+// at-limit counter within the burst window and stands the job down.
 func TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob(t *testing.T) {
 	invocation := launchdBoundFixture(t)
 	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
@@ -636,17 +752,21 @@ func TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob(t *testing.T) {
 
 	// Pre-record the exhausting attempt (simulating a panic on the third
 	// attempt after the pre-record but before the post-run stand-down). The
-	// counter is exhausted on disk but the job was never disabled.
+	// counter is at the limit but not yet Exhausted, and the job was never
+	// disabled.
 	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start))
 	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Second)))
 	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(2*time.Second)))
 	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
 	require.True(t, ok)
-	require.True(t, counter.Exhausted)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted, "the pre-record counts the attempt but the stand-down owns the sticky marker")
 	require.Empty(t, runtime.commands, "the crash happened before the post-run stand-down, so the job is still enabled")
 
 	// The next launch enters the pre-check, which must disable the job rather
-	// than only returning nil.
+	// than only returning nil. The pre-check sees the at-limit counter within
+	// the burst window and stands the job down (persisting Exhausted so a
+	// later boot stays stood down).
 	ran := false
 	err := boundLaunchdRecovery(context.Background(), invocation, controller,
 		func() time.Time { return start.Add(3 * time.Second) }, func() error {
@@ -659,6 +779,9 @@ func TestBoundLaunchdRecoveryExhaustedPreCheckDisablesJob(t *testing.T) {
 		name: "launchctl",
 		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
 	}}, runtime.commands, "the pre-check must disable the job so a crash on the final attempt cannot leave it armed")
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.True(t, counter.Exhausted, "the pre-check stand-down persists the exhausted marker so a later boot stays stood down")
 }
 
 // TestBoundLaunchdRecoveryStandsDownWhenCounterUnwriteable pins the P1 fix for
