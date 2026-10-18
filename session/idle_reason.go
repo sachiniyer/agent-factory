@@ -64,7 +64,11 @@ func IdleReasonFor(data InstanceData) IdleReason {
 		if data.LostRestoreFailure != nil && data.LostRestoreFailure.valid() {
 			return IdleReasonRestoreGaveUp
 		}
-		if data.LostRestoreWait != nil && data.LostRestoreWait.valid() {
+		// A kill tombstone permanently disables automatic restore, so a
+		// persisted wait on a tombstoned row is an armed retry nothing runs —
+		// exclude it even when the record somehow still carries one (#5295
+		// review).
+		if !data.UserKilled && data.LostRestoreWait != nil && data.LostRestoreWait.valid() {
 			return IdleReasonRestoreWaitingOnEnvironment
 		}
 		return IdleReasonProcessExited

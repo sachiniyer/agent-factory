@@ -195,12 +195,14 @@ func TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached(t *testing.T) {
 		"uncommitted work committed on a detached HEAD must survive on the session branch")
 }
 
-// TestSnapshotAndPushBranch_ProbeStaysOutOfTree is the #5295-review regression:
-// a write probe whose cleanup fails must never leave a 1 MiB
-// .af-add-probe-* inside the tracked worktree, where a later archive retry's
-// `git add -A` would stage it as user content. The push path probes the
-// worktree's PARENT — same filesystem answer, outside the tree.
-func TestSnapshotAndPushBranch_ProbeStaysOutOfTree(t *testing.T) {
+// TestSnapshotAndPushBranch_ProbesWorktreeFilesystem pins the two #5295-review
+// invariants together: the push path probes the worktree itself — the
+// destination filesystem git writes hit, including when the worktree is a
+// mount point and its parent sits on another filesystem — AND no
+// .af-add-probe-* debris may linger in the tracked tree, where a later
+// archive retry's `git add -A` would stage it as user content. The probe's
+// unlink-before-write is what makes inside-tree probing safe.
+func TestSnapshotAndPushBranch_ProbesWorktreeFilesystem(t *testing.T) {
 	sandboxHome(t)
 	gw, _ := pushTestRepo(t, "root/probe")
 	wt := gw.GetWorktreePath()
@@ -220,13 +222,8 @@ func TestSnapshotAndPushBranch_ProbeStaysOutOfTree(t *testing.T) {
 	_, err := gw.SnapshotAndPushBranch()
 	require.Error(t, err, "push to a dead origin must fail")
 
-	require.NotEmpty(t, probed, "a failed git write must run the probe")
-	for _, dir := range probed {
-		rel, relErr := filepath.Rel(wt, dir)
-		require.NoError(t, relErr)
-		assert.False(t, rel == "." || !strings.HasPrefix(rel, ".."),
-			"probe dir %s must not be the tracked worktree or inside it", dir)
-	}
+	assert.Contains(t, probed, wt,
+		"the destination filesystem itself must be probed — a mount-point worktree's parent answers for a different filesystem")
 	matches, _ := filepath.Glob(filepath.Join(wt, ".af-add-probe-*"))
 	assert.Empty(t, matches, "no probe debris inside the tracked worktree")
 }

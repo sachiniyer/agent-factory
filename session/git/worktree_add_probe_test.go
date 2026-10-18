@@ -4,9 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAnnotateWorktreeAddError_DiskFull — the #5295 play-test failure: `git
@@ -114,6 +118,29 @@ func TestAnnotateGitWriteError_CommonDirProbe(t *testing.T) {
 	}
 }
 
+// TestGitCommonDir_RelativeRepoPath is the #5295-review regression: a restored
+// record can carry a relative repoPath, which runGitLocalCommand resolves
+// against daemonLaunchCwd — but a relative --git-common-dir result then has to
+// join onto that RESOLVED repo dir, not the bare relative repoPath (which would
+// leave the probe path relative to the daemon's post-chdir AF home and probe an
+// unrelated filesystem).
+func TestGitCommonDir_RelativeRepoPath(t *testing.T) {
+	sandboxHome(t)
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	require.NoError(t, exec.Command("git", "init", repoDir).Run())
+
+	old := daemonLaunchCwd
+	daemonLaunchCwd = root
+	defer func() { daemonLaunchCwd = old }()
+
+	dir, err := gitCommonDir(&GitWorktree{repoPath: "repo"})
+	require.NoError(t, err)
+	require.True(t, filepath.IsAbs(dir),
+		"a relative repoPath must resolve against the launch cwd, not the daemon's post-chdir cwd")
+	assert.Equal(t, filepath.Join(repoDir, ".git"), dir)
+}
+
 // TestAnnotateGitWriteError_CommonDirUnresolvable — when `rev-parse
 // --git-common-dir` itself fails with a resource errno (a fork under
 // RLIMIT_NPROC), that failure is evidence too and stays in the chain.
@@ -135,7 +162,10 @@ func TestAnnotateGitWriteError_CommonDirUnresolvable(t *testing.T) {
 }
 
 // TestWriteSpaceProbe_RealWrite — the production probe against a real writable
-// dir writes a byte and cleans up after itself.
+// dir writes its payload and cleans up after itself. The file is unlinked
+// BEFORE the first byte is written, which is what makes inside-tree probing
+// safe: nothing matching .af-add-probe-* can exist for `git add -A` to stage
+// at any instant (#5295 review).
 func TestWriteSpaceProbe_RealWrite(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeSpaceProbe(dir); err != nil {

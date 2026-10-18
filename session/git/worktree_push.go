@@ -2,7 +2,6 @@ package git
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -59,13 +58,13 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		return "", fmt.Errorf("cannot push worktree %s: branch name is empty", g.worktreePath)
 	}
 
-	// Probe the worktree's PARENT, not the tracked tree itself: the parent
-	// hosts the worktree directory, so it answers the same filesystem question
-	// (and the common-dir probe below covers the gitdir filesystem), while a
-	// probe file left behind by a failed cleanup lands outside `git add -A`'s
-	// reach — inside the tree it would be staged and pushed as workspace
-	// content on the next archive attempt (#5295 review).
-	probeDir := filepath.Dir(g.worktreePath)
+	// Probe the worktree itself — the destination filesystem these git writes
+	// actually hit. Probing the parent would read the wrong answer when the
+	// worktree is its own mount point, and probing inside the tracked tree is
+	// safe because the probe unlinks its file before writing a single byte:
+	// the name never coexists with content, so `git add -A` can never stage
+	// it (#5295 review).
+	probeDir := g.worktreePath
 
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to

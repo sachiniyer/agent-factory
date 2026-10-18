@@ -36,6 +36,15 @@ var writeSpaceProbe = func(dir string) error {
 	if err != nil {
 		return err
 	}
+	name := f.Name()
+	// Unlink IMMEDIATELY, while the fd is still open: on POSIX the descriptor
+	// stays valid and every write below lands on an inode whose name is
+	// already gone, so the probe file is invisible to `git status`/`git add
+	// -A` at every instant it exists — inside a tracked worktree included —
+	// and no cleanup gap can ever leave it stageable (#5295 review). If the
+	// unlink itself fails the file still exists; keep probing and surface
+	// that failure at the end.
+	rerr := os.Remove(name)
 	var werr error
 	buf := make([]byte, 64<<10)
 	for written := 0; written < writeSpaceProbeSize; {
@@ -55,27 +64,29 @@ var writeSpaceProbe = func(dir string) error {
 		serr = f.Sync()
 	}
 	cerr := f.Close()
-	rerr := os.Remove(f.Name())
+	if rerr != nil {
+		// The early unlink failed, so the probe file exists under its name —
+		// best-effort retry before reporting.
+		_ = os.Remove(name)
+		if werr == nil && serr == nil && cerr == nil {
+			// The write proved the filesystem writable, so this is not
+			// capacity evidence — but a silent leftover probe file is litter
+			// (and a staging hazard where a probe target is a tracked tree).
+			// Surface it: the caller's join records it in the error, and
+			// because classification keys on errnos, an ordinary unlink
+			// failure still leaves the git error structural while one
+			// carrying a resource errno is honest environmental evidence
+			// (#5295 review).
+			return fmt.Errorf("probe write verified the filesystem, but removing probe file %s failed: %w", name, rerr)
+		}
+	}
 	if werr != nil {
 		return werr
 	}
 	if serr != nil {
 		return serr
 	}
-	if cerr != nil {
-		return cerr
-	}
-	if rerr != nil {
-		// The write proved the filesystem writable, so this is not capacity
-		// evidence — but a silent leftover probe file is litter (and a
-		// staging hazard where a probe target is a tracked tree). Surface it:
-		// the caller's join records it in the error, and because
-		// classification keys on errnos, an ordinary unlink failure still
-		// leaves the git error structural while one carrying a resource errno
-		// is honest environmental evidence (#5295 review).
-		return fmt.Errorf("probe write verified the filesystem, but removing probe file %s failed: %w", f.Name(), rerr)
-	}
-	return nil
+	return cerr
 }
 
 // gitCommonDir resolves the repository's Git common directory — the place
@@ -83,8 +94,18 @@ var writeSpaceProbe = func(dir string) error {
 // `push` write objects — which may live on a different filesystem than the
 // worktree itself (#5295 review). It is a test seam so a probe test can pin
 // the second filesystem without a real repository layout.
+//
+// repoPath is resolved against the daemon launch cwd with the same rule the
+// git runner applies: a restored record can carry a RELATIVE repoPath, and a
+// relative --git-common-dir result joins onto the resolved repo dir — joining
+// onto the un-resolved relative repoPath would leave the probe path relative
+// to the daemon's post-chdir AF home and check an unrelated filesystem.
 var gitCommonDir = func(g *GitWorktree) (string, error) {
-	out, err := g.runGitLocalCommand(g.repoPath, "rev-parse", "--git-common-dir")
+	repoPath := g.repoPath
+	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
+		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
+	}
+	out, err := g.runGitLocalCommand(repoPath, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +114,7 @@ var gitCommonDir = func(g *GitWorktree) (string, error) {
 		return "", nil
 	}
 	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(g.repoPath, dir)
+		dir = filepath.Join(repoPath, dir)
 	}
 	return dir, nil
 }
@@ -159,6 +180,16 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 // The #5295 play-test proved the gap this closes: `worktree add` was the
 // first real write under the filled filesystem, every attempt charged the
 // structural budget, and the lost session gave up while the disk stayed full.
+//
+// The destination path itself is probed too when it already exists as a
+// directory — a pre-created mount point or the debris of a partial attempt
+// can sit on a different filesystem than the parent that hosts its name.
+// Probing inside it is safe for the same reason as the push path: the probe
+// unlinks its file before writing, so nothing stageable ever exists.
 func (g *GitWorktree) annotateWorktreeAddError(err error) error {
-	return g.annotateGitWriteError(err, filepath.Dir(g.worktreePath))
+	dirs := []string{filepath.Dir(g.worktreePath)}
+	if st, statErr := os.Stat(g.worktreePath); statErr == nil && st.IsDir() {
+		dirs = append(dirs, g.worktreePath)
+	}
+	return g.annotateGitWriteError(err, dirs...)
 }

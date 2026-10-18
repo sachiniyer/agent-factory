@@ -76,6 +76,31 @@ func TestLostRestoreWaitSanitizesDurableError(t *testing.T) {
 	require.True(t, strings.HasSuffix(wait.Error, "…"), "truncated error = %q", wait.Error)
 }
 
+// TestMarkUserKilledRetiresLostRestoreWait is the #5295-review regression: a
+// kill tombstone permanently disables automatic restore, so a wait that
+// survives the commit keeps telling clients "waiting on the environment" for
+// a retry nothing runs while only tombstone cleanup remains. The wait commits
+// clear with the tombstone, and IdleReasonFor excludes a tombstoned row even
+// when a stale record still carries both fields.
+func TestMarkUserKilledRetiresLostRestoreWait(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "killed-while-waiting", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
+	require.True(t, inst.SetLostRestoreWait(2, errors.New("no space left on device")))
+
+	inst.MarkUserKilled()
+	require.Nil(t, inst.LostRestoreWaitSnapshot(),
+		"the wait must commit clear with the kill tombstone")
+	require.Equal(t, IdleReasonProcessExited, IdleReasonFor(inst.ToInstanceData()))
+
+	// A record written before this edge existed can still carry both flags;
+	// the projection must exclude the wait rather than report it.
+	stale := inst.ToInstanceData()
+	stale.LostRestoreWait = &LostRestoreWait{Attempts: 1, Error: "no space left on device"}
+	require.Equal(t, IdleReasonProcessExited, IdleReasonFor(stale))
+}
+
 // The give-up reason is terminal and the wait is not: a record carrying both —
 // possible only across a sanitize/mirror boundary — must read as gave-up, the
 // same precedence IdleReasonFor applies.

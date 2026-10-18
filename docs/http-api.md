@@ -384,10 +384,10 @@ failures in the current episode and `error` is the last observed environmental
 error, sanitized the same way. The session remains Lost and the daemon keeps
 retrying on a capped backoff — these attempts do NOT draw down the budget
 `lost_restore_failure` reports against. A successful restore, a runtime
-replacement, or a structural failure clears the field, and a row that reloads
-inert — one no automatic retry can ever reach, such as a sandbox session after
-a daemon restart — drops it on load rather than report an armed retry that does
-not exist.
+replacement, a structural failure, or a kill tombstone clears the field, and a
+row that reloads inert — one no automatic retry can ever reach, such as a
+sandbox session after a daemon restart — drops it on load rather than report
+an armed retry that does not exist.
 
 **`last_pane_churn_at`** (RFC 3339 timestamp, omitted when no churn is on
 record) — when the daemon last observed the session's pane **render different
