@@ -41,10 +41,24 @@ var writeSpaceProbe = func(dir string) error {
 	// stays valid and every write below lands on an inode whose name is
 	// already gone, so the probe file is invisible to `git status`/`git add
 	// -A` at every instant it exists — inside a tracked worktree included —
-	// and no cleanup gap can ever leave it stageable (#5295 review). If the
-	// unlink itself fails the file still exists; keep probing and surface
-	// that failure at the end.
-	rerr := os.Remove(name)
+	// and no cleanup gap can ever leave it stageable (#5295 review).
+	if rerr := os.Remove(name); rerr != nil {
+		// The name still exists — never write into a file whose name could
+		// not be dropped: a partially written .af-add-probe-* left in a
+		// tracked worktree is exactly what a later `git add -A` would stage
+		// as workspace content. Retry once after Close (the only state the
+		// unlink could depend on), then leave nothing stageable and report
+		// the unlink failure itself — its errno is still honest evidence.
+		cerr := f.Close()
+		_ = os.Remove(name)
+		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
+		if cerr != nil {
+			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
+		}
+		return err
+	}
+	// From here on the file has no name: nothing stageable exists no matter
+	// how the writes below end.
 	var werr error
 	buf := make([]byte, 64<<10)
 	for written := 0; written < writeSpaceProbeSize; {
@@ -64,22 +78,6 @@ var writeSpaceProbe = func(dir string) error {
 		serr = f.Sync()
 	}
 	cerr := f.Close()
-	if rerr != nil {
-		// The early unlink failed, so the probe file exists under its name —
-		// best-effort retry before reporting.
-		_ = os.Remove(name)
-		if werr == nil && serr == nil && cerr == nil {
-			// The write proved the filesystem writable, so this is not
-			// capacity evidence — but a silent leftover probe file is litter
-			// (and a staging hazard where a probe target is a tracked tree).
-			// Surface it: the caller's join records it in the error, and
-			// because classification keys on errnos, an ordinary unlink
-			// failure still leaves the git error structural while one
-			// carrying a resource errno is honest environmental evidence
-			// (#5295 review).
-			return fmt.Errorf("probe write verified the filesystem, but removing probe file %s failed: %w", name, rerr)
-		}
-	}
 	if werr != nil {
 		return werr
 	}

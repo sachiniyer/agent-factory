@@ -123,7 +123,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName))
 			cancel()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			} else if len(leaked) > 0 {
 				// Start failed and we are tearing the partial session down ourselves;
 				// its processes are going with it by design, not escaping (#2765).
@@ -214,7 +214,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			// already cancelled; recorded as a residual on #2998.
 			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
-				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
+				timeoutErr = fmt.Errorf("%w (cleanup error: %w)", timeoutErr, cleanupErr)
 			}
 			// A successful close+pane-exit confirmation on a positive-policy name
 			// establishes that the exact launch identity is gone. The old blanket
@@ -278,7 +278,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		// Launch now independently fails closed on every post-spawn Start error.
 		state, cleanupErr := t.Close()
 		if cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		if state != PaneStateKnown {
 			err = fmt.Errorf("%w: %w", err, ErrTmuxTimeout)
