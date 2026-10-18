@@ -80,6 +80,13 @@ type Instance struct {
 	// when the rebuild commits, cleared only after every bound session and
 	// pending-cleanup handle is confirmed gone.
 	rebuildTeardownPending bool
+	// rebuildTeardownPendingOwed marks that the in-memory flag's current value
+	// is NOT durably backed: a transition attempted the persist callback and it
+	// failed, or ran without one installed. A value only skips the checkpoint
+	// when it is the durable one — an owed value must re-fire the notify on the
+	// next matching call rather than letting the rebuild proceed on a flag a
+	// restart would reload differently (#5371 review).
+	rebuildTeardownPendingOwed bool
 	// rebuildTeardownNotify is the daemon-installed persist callback fired on
 	// every rebuildTeardownPending transition, so a durable obligation and its
 	// durable discharge both land before the code that depends on them runs —

@@ -590,11 +590,12 @@ func (i *Instance) RebuildTeardownPending() bool {
 // transition without it means an entry point was missed (#5371 review).
 func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 	i.mu.Lock()
-	if i.rebuildTeardownPending == pending {
+	if i.rebuildTeardownPending == pending && !i.rebuildTeardownPendingOwed {
 		i.mu.Unlock()
 		return nil
 	}
 	i.rebuildTeardownPending = pending
+	i.rebuildTeardownPendingOwed = true
 	notify := i.rebuildTeardownNotify
 	i.touchLocked()
 	i.mu.Unlock()
@@ -616,12 +617,19 @@ func (i *Instance) SetRebuildTeardownPending(pending bool) error {
 		// exist": either it was just committed and unrecorded, or its discharge
 		// was refused. Leaving the flag set keeps memory honest with the disk a
 		// restart would reload, and the error tells the caller to stay Lost.
+		// owed stays true, so the next matching call RETRIES the checkpoint
+		// rather than treating the equal in-memory value as durable — the
+		// arm-before-rebuild property is only real if a failed arm is retried
+		// before the rebuild commits (#5371 review).
 		i.mu.Lock()
 		i.rebuildTeardownPending = true
 		i.touchLocked()
 		i.mu.Unlock()
 		return err
 	}
+	i.mu.Lock()
+	i.rebuildTeardownPendingOwed = false
+	i.mu.Unlock()
 	return nil
 }
 

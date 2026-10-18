@@ -539,6 +539,13 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
+	if i.rebuildTeardownPending {
+		// A spawned tab binds a NEW session inside the worktree while the
+		// committed teardown still owes the old one: it snapshots names, not
+		// vintages, and would kill the fresh tab together with the genuinely
+		// stale sessions (#5371 review).
+		return fmt.Errorf("cannot add a tab to session %q while a worktree-rebuild teardown is pending; let its recovery finish", i.Title)
+	}
 	return nil
 }
 

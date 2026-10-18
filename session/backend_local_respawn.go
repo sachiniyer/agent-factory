@@ -187,6 +187,13 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		i.mu.RUnlock()
 
+		// Blindness is AGGREGATED across every close — a conclusive-but-blind
+		// answer ("session already gone") cannot prove nothing the vanished
+		// session spawned survived it, and the marker sweep is vacuous for a
+		// survivor that carries none. The single occupancy check below is what
+		// teardownTabs does for the same shape (#5371 review).
+		anyBlind := false
+
 		// Process tabs keep their recorded outcome: a finished command's pane
 		// is output the row must not lose, and a still-running one is stopped
 		// through the path that says why (#5371 review).
@@ -195,6 +202,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				continue
 			}
 			state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+			anyBlind = anyBlind || blind
 			if err != nil {
 				return markRecoverRebuilt(committed, fmt.Errorf(
 					"recover: could not stop process tab %q surviving in the deleted worktree: %w",
@@ -215,7 +223,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			// replacement: a stale agent can still be flushing provider state
 			// or touching the recreated checkout by absolute path (#5371
 			// review).
-			if _, err := staleSession.CloseAndWaitForPaneExit(); err != nil {
+			_, blind, err := staleSession.CloseAndWaitForPaneExitReportingBlindness()
+			anyBlind = anyBlind || blind
+			if err != nil {
 				return markRecoverRebuilt(committed, fmt.Errorf(
 					"recover: could not stop the pane surviving in the deleted worktree: %w", err))
 			}
@@ -227,10 +237,26 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// process-tree exit: Close's async reaper could otherwise still be
 		// running in the deleted worktree when the replacements below spawn
 		// (#5371 review).
-		if _, remaining := i.RetryPendingTabCleanupAndWait(); remaining > 0 {
+		if _, remaining, blindHandles := i.RetryPendingTabCleanupAndWait(); remaining > 0 {
 			return markRecoverRebuilt(committed, fmt.Errorf(
 				"recover: %d stale session(s) behind pending tab cleanup could not be confirmed dead in the deleted worktree",
 				remaining))
+		} else {
+			anyBlind = anyBlind || blindHandles
+		}
+
+		// ONE occupancy check, after every name is closed — teardownTabs' own
+		// rule (#2998). A blind close means tmux forgot the ancestry and the
+		// marker sweep is the whole evidence; a detached survivor with no
+		// AF_SESSION marker is invisible to it, but a cwd inside the worktree
+		// still shows. Reporting — never killing — is the contract: the match
+		// could be an operator's own shell, so the row stays Lost and retryable
+		// and the decision stays human (#5371 review).
+		if anyBlind {
+			if err := CheckWorktreeOccupants(workDir); err != nil {
+				return markRecoverRebuilt(committed, fmt.Errorf(
+					"recover: stale sessions closed blind; %w", err))
+			}
 		}
 
 		// Checkpoint the discharge BEFORE any replacement launches: a daemon
