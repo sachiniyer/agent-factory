@@ -190,7 +190,7 @@ func TestHandleRestore_LiveRowIsNoOp(t *testing.T) {
 			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "`r` on a live row must not start a restore")
 			require.NotNil(t, cmd, "the notice schedules its auto-clear (#5373)")
 			text, _ := h.errBox.RetainedNotice()
-			require.Contains(t, text, "nothing to restore",
+			require.Contains(t, text, "Session 'worker' is live — nothing to restore",
 				"`r` on a live row must say why nothing happened")
 		})
 	}

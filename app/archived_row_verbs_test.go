@@ -117,8 +117,7 @@ func TestHandleRestore_NonRestorableTargetsNotice(t *testing.T) {
 
 		require.NotNil(t, cmd, "the notice schedules its auto-clear")
 		text, _ := h.errBox.RetainedNotice()
-		require.Contains(t, text, "worker")
-		require.Contains(t, text, "nothing to restore",
+		require.Contains(t, text, "Session 'worker' is live — nothing to restore",
 			"a live row's `r` must say why nothing happened")
 		require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore was raised")
 	})
@@ -164,7 +163,7 @@ func TestHandleRestore_NonRestorableTargetsNotice(t *testing.T) {
 
 		require.NotNil(t, cmd, "the notice schedules its auto-clear")
 		text, _ := h.errBox.RetainedNotice()
-		require.Contains(t, text, "can't be restored",
+		require.Contains(t, text, "Session 'worker' can't be restored",
 			"a fenced resting row's `r` must say why nothing happened")
 		require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore was raised")
 	})

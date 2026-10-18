@@ -405,14 +405,14 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 		// A row with no lifecycle verb — creating, replacing, fenced by
 		// startup-unknown, a kill tombstone — cannot take `r` (#5373: say so
 		// rather than no-op silently).
-		return m, m.handleNotice(fmt.Errorf("session '%s' can't be restored", selected.Title))
+		return m, m.handleNotice(fmt.Errorf("Session '%s' can't be restored", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
 	// restores nothing (archive is on `a`) — and says so (#5373).
 	if lifecycleAction != session.LifecycleActionRestore {
-		return m, m.handleNotice(fmt.Errorf("session '%s' is live — nothing to restore", selected.Title))
+		return m, m.handleNotice(fmt.Errorf("Session '%s' is live — nothing to restore", selected.Title))
 	}
 	_ = selected.Transition(session.MarkRestoring())
 	return m, m.restoreInstanceCmd(target)
