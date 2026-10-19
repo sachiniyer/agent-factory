@@ -54,14 +54,17 @@ func TestOpenProbeFile_AbandonedPathRegisters(t *testing.T) {
 	oldAnon := openAnonymousProbeFile
 	openAnonymousProbeFile = func(string) (*os.File, error) { return nil, syscall.EOPNOTSUPP }
 	defer func() { openAnonymousProbeFile = oldAnon }()
-	oldRemove := removePath
-	removePath = func(string) error { return syscall.EPERM }
-	defer func() { removePath = oldRemove }()
+	// Failing the rename-aside is what makes BOTH identity-bound unlink
+	// attempts fail while the name still points at our inode — the
+	// abandonment precondition.
+	oldRename := renamePath
+	renamePath = func(string, string) error { return syscall.EPERM }
+	defer func() { renamePath = oldRename }()
 
 	dir := t.TempDir()
 	_, err := openProbeFile(dir)
 	require.Error(t, err)
-	removePath = oldRemove // failure path driven; restore before the sweep below
+	renamePath = oldRename // failure path driven; restore before the sweep below
 
 	matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*"))
 	require.Len(t, matches, 1, "the failed double-unlink must leave exactly one leftover")
@@ -81,6 +84,63 @@ func TestOpenProbeFile_AbandonedPathRegisters(t *testing.T) {
 	require.NoError(t, RemoveDebris(dir))
 	_, statErr := os.Lstat(leaked)
 	require.True(t, os.IsNotExist(statErr), "the sweep must remove the proven leftover")
+}
+
+// TestUnlinkIfSame_RemovesOnlyTheVerifiedInode is the #5295-review TOCTOU
+// regression: the entry at path is moved aside and re-verified before
+// unlink, so deletion is bound to the registered inode — a foreign object
+// sitting at the same name is restored to its owner, never removed.
+func TestUnlinkIfSame_RemovesOnlyTheVerifiedInode(t *testing.T) {
+	dir := t.TempDir()
+
+	// Proven ours — removed, path freed.
+	probe := filepath.Join(dir, ".af-add-probe-123")
+	require.NoError(t, os.WriteFile(probe, nil, 0o600))
+	orig, err := os.Lstat(probe)
+	require.NoError(t, err)
+	gone, err := unlinkIfSame(dir, probe, orig)
+	require.NoError(t, err)
+	require.True(t, gone)
+	_, statErr := os.Lstat(probe)
+	require.True(t, os.IsNotExist(statErr), "the proven probe object must be unlinked")
+
+	// Foreign object at a registered-looking name — restored, never deleted.
+	userFile := filepath.Join(dir, ".af-add-probe-456")
+	require.NoError(t, os.WriteFile(userFile, nil, 0o600))
+	userInfo, err := os.Lstat(userFile)
+	require.NoError(t, err)
+	other := filepath.Join(dir, "other")
+	require.NoError(t, os.WriteFile(other, nil, 0o600))
+	otherInfo, err := os.Lstat(other)
+	require.NoError(t, err)
+	gone, err = unlinkIfSame(dir, userFile, otherInfo)
+	require.NoError(t, err)
+	require.False(t, gone, "a foreign object must be restored, not reported removed")
+	cur, lerr := os.Lstat(userFile)
+	require.NoError(t, lerr)
+	require.True(t, os.SameFile(cur, userInfo),
+		"the workspace owner's own object must still sit at its original name")
+	holds, _ := filepath.Glob(filepath.Join(dir, ".af-probe-hold-*"))
+	require.Empty(t, holds, "a restored foreign object must not be stranded at a hold name")
+}
+
+// TestUnlinkIfSame_NonzeroForeignObjectIsRestored — the same TOCTOU guard
+// when the object at path was written into: it belongs to the workspace
+// owner regardless of identity.
+func TestUnlinkIfSame_NonzeroForeignObjectIsRestored(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, ".af-add-probe-789")
+	require.NoError(t, os.WriteFile(victim, []byte("user work"), 0o600))
+	orig, err := os.Lstat(victim)
+	require.NoError(t, err)
+
+	gone, err := unlinkIfSame(dir, victim, orig)
+	require.NoError(t, err)
+	require.False(t, gone)
+	content, rerr := os.ReadFile(victim)
+	require.NoError(t, rerr)
+	require.Equal(t, "user work", string(content),
+		"a nonzero object is the owner's content — it must survive intact")
 }
 
 // TestWrite_BoundsAWedgedProbe is the #5295-review regression: a filesystem

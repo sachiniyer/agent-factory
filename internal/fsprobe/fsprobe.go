@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -134,30 +135,40 @@ func openProbeFile(dir string) (*os.File, error) {
 		return nil, err
 	}
 	name := f.Name()
-	if rerr := removePath(name); rerr != nil {
-		// Capture the abandoned object's identity BEFORE Close — Stat on a
-		// closed handle always errors, which would leave the leftover
-		// unregistered and stageable by a later `git add -A` (#5295 review).
-		info, serr := f.Stat()
+	// Capture the object's identity BEFORE Close and before any unlink —
+	// Stat on a closed handle always errors, and every removal below is
+	// bound to this inode rather than the pathname: a name raced back onto
+	// the path is restored, never deleted (#5295 review).
+	info, serr := f.Stat()
+	if serr != nil {
+		err := fmt.Errorf("cannot identify probe file %s before writing: %w", name, serr)
+		if cerr := f.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
+		}
+		return nil, err
+	}
+	// Drop the name — bound to our inode. A foreign object already sitting
+	// at the name is restored to its owner and our handle is nameless either
+	// way, so writing into it can never leak payload under a stageable name.
+	if _, derr := unlinkIfSame(dir, name, info); derr != nil {
 		cerr := f.Close()
 		// Close releases the only state unlink could have depended on — try
 		// once more before reporting.
-		rerr2 := removePath(name)
-		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
-		if cerr != nil {
-			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
-		}
-		if rerr2 != nil {
-			// Record the abandoned object's identity, not just its name:
-			// os.SameFile is the only proof a future sweep needs, and a
-			// path the owner later replaces or recreates at the same name
-			// can never inherit our claim (#5295 review).
-			if serr == nil {
+		if _, derr2 := unlinkIfSame(dir, name, info); derr2 != nil {
+			err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, derr2)
+			if cerr != nil {
+				err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
+			}
+			// Record the abandoned object only when the name still provably
+			// points at OUR inode: os.SameFile is the only proof a future
+			// sweep needs, and a path the owner later replaces or recreates
+			// at the same name can never inherit our claim (#5295 review).
+			if cur, lerr := lstatPath(name); lerr == nil && os.SameFile(info, cur) {
 				abandonedProbes.Store(name, info)
 			}
-			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
+			return nil, errors.Join(err,
+				fmt.Errorf("leftover probe file %s could not be removed (remove it by hand)", name))
 		}
-		return nil, err
 	}
 	return f, nil
 }
@@ -182,10 +193,78 @@ var statPath = os.Stat
 // path before anything is unlinked.
 var lstatPath = os.Lstat
 
-// removePath is the test seam under openProbeFile — the unlink that drops
-// the named fallback's only directory entry before its first byte. Stubbing
-// it is the only way to drive the double-unlink-failure abandonment path.
+// removePath is the test seam under unlinkIfSame — the unlink that drops a
+// verified held object (and inside openProbeFile, the named fallback's only
+// directory entry before its first byte). Stubbing it is the only way to
+// drive the double-unlink-failure abandonment path.
 var removePath = os.Remove
+
+// renamePath is the test seam under unlinkIfSame — the atomic move that
+// takes the candidate aside so the object being deleted is bound by inode,
+// never by a pathname that can be raced (#5295 review).
+var renamePath = os.Rename
+
+// linkPath is the test seam under unlinkIfSame — the hardlink restore that
+// puts a foreign object back under its original name without clobbering
+// whatever the workspace owner may have placed there in the interim.
+var linkPath = os.Link
+
+// holdSeq numbers the private hold names unlinkIfSame renames candidates
+// aside to.
+var holdSeq atomic.Uint64
+
+// holdName picks a private name inside dir for the rename-aside step. The
+// hold lives in the same directory so the rename stays atomic on one
+// filesystem.
+func holdName(dir string) string {
+	return filepath.Join(dir,
+		fmt.Sprintf(".af-probe-hold-%d-%d", os.Getpid(), holdSeq.Add(1)))
+}
+
+// unlinkIfSame unlinks the directory entry at path only when the object it
+// names is the same filesystem object as orig. It is the identity-bound
+// replacement for a bare os.Remove(path): the entry is first renamed to a
+// private hold name inside dir — atomic on the same filesystem, so whichever
+// inode sat under path at that instant is the object that moved — then the
+// held object is re-verified against orig and unlinked. The window between a
+// caller's earlier check and this unlink can therefore never cost the
+// workspace owner a file: an atomically replaced lookalike is moved, fails
+// verification, and is linked back under path rather than deleted; when
+// path is already taken again the file stays at the hold name and the error
+// says where (#5295 review).
+//
+// Returns true when path is free afterwards — the proven object was removed
+// or the entry was already gone; false when a foreign object was restored to
+// path. A non-nil error means the entry could not be resolved safely.
+func unlinkIfSame(dir, path string, orig os.FileInfo) (bool, error) {
+	hold := holdName(dir)
+	if err := renamePath(path, hold); err != nil {
+		if os.IsNotExist(err) {
+			return true, nil // already gone — nothing left to prove
+		}
+		return false, fmt.Errorf("moving %s aside for identity check: %w", path, err)
+	}
+	moved, lerr := lstatPath(hold)
+	if lerr == nil && orig != nil && moved.Mode().IsRegular() &&
+		moved.Size() == 0 && os.SameFile(orig, moved) {
+		if rerr := removePath(hold); rerr != nil {
+			return false, fmt.Errorf("removing held probe file %s: %w", hold, rerr)
+		}
+		return true, nil
+	}
+	// Not ours (or unverifiable) — restore the workspace owner's file under
+	// its name. Link refuses to clobber an entry that raced back in; when
+	// the name is free again a plain rename restores it instead.
+	if lerr := linkPath(hold, path); lerr == nil {
+		_ = removePath(hold)
+		return false, nil
+	} else if _, serr := lstatPath(path); os.IsNotExist(serr) {
+		if rerr := renamePath(hold, path); rerr == nil {
+			return false, nil
+		}
+	}
+	return false, fmt.Errorf("file at %s was not the registered probe object and is preserved at %s", path, hold)
+}
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing payload bytes, so a
@@ -253,9 +332,14 @@ func removeDebrisScan(dir string) error {
 			abandonedProbes.Delete(path)
 			continue
 		}
-		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+		// The lstat above is advisory — a replacement can still race between
+		// it and the unlink. unlinkIfSame binds the deletion to the verified
+		// inode: the object is moved aside first and re-verified there, so a
+		// replaced lookalike is restored under its name, never unlinked
+		// (#5295 review).
+		if _, uerr := unlinkIfSame(dir, path, orig); uerr != nil {
 			joined = append(joined,
-				fmt.Errorf("removing stale probe file %s: %w", path, rerr))
+				fmt.Errorf("removing stale probe file %s: %w", path, uerr))
 			continue
 		}
 		abandonedProbes.Delete(path)
