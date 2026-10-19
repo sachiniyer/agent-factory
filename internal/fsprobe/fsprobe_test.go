@@ -102,8 +102,9 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 // .af-add-probe-<digits> file this process did not create, because
 // name+size can never prove ownership and deleting user content is data
 // loss the sandbox reap makes permanent. Debris abandoned before a
-// restart is unprovable by design; the snapshot's `:(exclude)` pathspec,
-// not this sweep, is what keeps it out of commits.
+// restart is unprovable by design: it is snapshotted exactly like user
+// content, because no name filter can tell it from a user's file — a
+// committed stray is a cosmetic wart, data loss is not.
 func TestRemoveDebris(t *testing.T) {
 	dir := t.TempDir()
 

@@ -70,14 +70,15 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 
 	// One debris edge survives the unlink-before-write contract: on the
 	// named-fallback path (no O_TMPFILE) a double unlink failure leaves a
-	// .af-add-probe-* name in this tree. Two guards hold that line: the
-	// `add -A` below excludes the name shape outright so NO probe-named file
-	// can ever be staged — proof or none — and this sweep removes the ones
-	// this process can still prove it created (registry-verified zero-length
-	// files only; unprovable lookalikes are user files and stay). A sweep
-	// failure aborts the push with the evidence: a filesystem that cannot
-	// answer is still answering the question this snapshot needs answered
-	// (#5295 review).
+	// .af-add-probe-* name in this tree. The sweep removes only the
+	// leftovers this process can PROVE it created — registry-verified
+	// zero-length files. An unprovable probe-named file is user content and
+	// is treated exactly as such: it is not deleted, and it is snapshotted
+	// like any other file — a committed stray file is a cosmetic wart,
+	// strictly better than discarding user work the name filter cannot
+	// distinguish (#5295 review). A sweep failure aborts the push with the
+	// evidence: a filesystem that cannot answer is still answering the
+	// question this snapshot needs answered.
 	if derr := fsprobe.RemoveDebris(g.worktreePath); derr != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("could not remove stale probe debris before archive push: %w", derr), probeDir)
 	}
@@ -96,22 +97,16 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// rather than `all` because we only need that boolean: `normal` reports an
 	// untracked directory as one `?? dir/` entry instead of walking every file
 	// beneath it, which is the same answer for less work on a big tree.
-	// The :(exclude) pathspec keeps the debris contract honest end to end:
-	// status answers "is there USER work to snapshot?" — a tree whose only
-	// dirt is a probe-named file is clean, so the commit below never runs
-	// empty — and the matching exclusion on `add -A` is a hard guarantee
-	// that no .af-add-probe-* name (debris, unproven leftover, or a
-	// deliberate user file) enters the snapshot, whatever the sweep above
-	// could or could not prove (#5295 review). `*` is fnmatch without
-	// FNM_PATHNAME here, so it matches at any depth.
-	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain",
-		"--untracked-files=normal", "--", ".", ":(exclude)*.af-add-probe-*")
+	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
 	}
 	if strings.TrimSpace(status) != "" {
-		if _, err := g.runGitCommand(g.worktreePath, "add", "-A", "--", ".",
-			":(exclude)*.af-add-probe-*"); err != nil {
+		// No name exclusions here: whatever the sweep could not prove it
+		// created is user content and must be snapshotted like everything
+		// else — filtering probe-shaped names out of `add` would silently
+		// drop a user file whose only sin is its name (#5295 review).
+		if _, err := g.runGitCommand(g.worktreePath, "add", "-A"); err != nil {
 			return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", err), probeDir)
 		}
 		if _, err := g.runGitCommand(g.worktreePath, "commit", "--no-verify", "-m", archiveSnapshotMessage); err != nil {

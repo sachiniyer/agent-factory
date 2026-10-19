@@ -163,9 +163,7 @@ var readDirEntries = os.ReadDir
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing payload bytes, so a
 // leftover exists only when BOTH unlink attempts failed (#5295 review).
-// Snapshotting callers also exclude the .af-add-probe-* name shape from
-// `git add`, so what this sweep leaves behind can never be committed — its
-// job is cleanup, and a failed cleanup is still filesystem evidence worth
+// Its job is cleanup; a failed cleanup is still filesystem evidence worth
 // surfacing.
 //
 // Deletion requires PROVEN ownership — a filename, a size, or file content
@@ -177,13 +175,14 @@ var readDirEntries = os.ReadDir
 // path — re-verified as a still-zero-length regular file (a path the user
 // has since written to is their file again). Everything else survives
 // untouched, including probe debris abandoned before a restart, which the
-// registry no longer covers: it stays on disk, unprovable, and the add
-// exclusion keeps it out of every snapshot — a cosmetic wart, strictly
-// better than deleting unproven content. Enumeration is fail-closed — a
-// directory that cannot be read returns its error rather than an unproven
-// "clean" — and removal failures are joined. The whole sweep runs inside a
-// bounded flight for the same reason Write does: every syscall here can
-// wedge on a dead mount inside the synchronous snapshot path.
+// registry no longer covers: it stays on disk and is snapshotted exactly
+// like user content, because no name filter can tell it from a user's
+// file — a committed stray file is a cosmetic wart, strictly better than
+// dropping work the filter cannot distinguish. Enumeration is fail-closed
+// — a directory that cannot be read returns its error rather than an
+// unproven "clean" — and removal failures are joined. The whole sweep runs
+// inside a bounded flight for the same reason Write does: every syscall
+// here can wedge on a dead mount inside the synchronous snapshot path.
 func RemoveDebris(dir string) error {
 	_, err := runBounded(dir, sweepFlights, "debris sweep",
 		"the filesystem did not answer the debris sweep",
