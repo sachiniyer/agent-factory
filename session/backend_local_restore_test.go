@@ -271,7 +271,7 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 	}
 
 	repoRoot := initTempGitRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
+	worktreePath := existingDir(t, filepath.Join(t.TempDir(), "worktree-511"))
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "respawn-511", "respawn-511-branch", "", false, false)
 	require.NoError(t, err)
 

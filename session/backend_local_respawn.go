@@ -133,7 +133,16 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// durable workspace state (and a fresh rebuild recreates the branch) — so
 	// the later error returns carry RecoverRebuiltWorkspaceError (#3236).
 	rebuilt := false
-	if _, err := os.Stat(workDir); err != nil {
+	if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+		if err == nil {
+			// A non-directory squats on the worktree path — a file, device,
+			// socket, anything af did not create. Rebuild cannot repair it
+			// without deleting foreign data, and the tmux spawn seam refuses
+			// it outright (#5172), so fail fast with the cause named rather
+			// than retrying into the same refusal until give-up.
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+				Err: fmt.Errorf("worktree path exists but is not a directory")}
+		}
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
 			// a deleted worktree is the expected permanent-failure shape, and the

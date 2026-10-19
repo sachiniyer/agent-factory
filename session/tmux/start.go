@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -41,6 +42,25 @@ func (t *TmuxSession) Start(workDir string) error {
 		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
+	// Refuse to spawn into a directory that is not there: `new-session -c`
+	// silently falls back to the tmux server's current directory when the path
+	// is missing, so without this check a respawn of a deleted worktree lands
+	// the agent in an unrelated checkout or the daemon's $HOME (#5172). This is
+	// the one seam every af spawn — create, restore, respawn, tab — passes
+	// through. The name is already proved absent above and nothing has run
+	// new-session, so a refusal here can leave no pane behind.
+	if workDir != "" {
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			// Not just "missing": an unreadable or un-stat-able directory is
+			// equally unverifiable, and either verdict refuses the spawn.
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			t.proveNoPaneIfDeterminatelyAbsent()
+			return fmt.Errorf("%w: %w: session %q cannot start in %s: %v",
+				ErrSessionNotStarted, ErrSpawnDirMissing, t.sanitizedName, workDir, err)
+		}
+	}
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
@@ -58,7 +78,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// No separate program read here: launchEnvironment snapshots the command and
 	// its generated-args declaration together, so the two cannot be torn apart by a
 	// concurrent rewrite (#3083 review).
-	wrappedProgram, launchEnv, importNames, sessionEnv, defaultCommand, envErr := t.prepareLaunchEnvironment()
+	wrappedProgram, launchEnv, importNames, sessionEnv, defaultCommand, envErr := t.prepareLaunchEnvironment(workDir)
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
@@ -76,11 +96,42 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	t.programMu.RLock()
 	remainOnExit := t.remainOnExit
+	account := t.account
+	accountAgent := t.accountAgent
 	t.programMu.RUnlock()
 	if remainOnExit {
 		// Atomic with new-session so even a command that exits instantly is
-		// held as a dead pane rather than racing the option (#4479).
+		// held as a dead pane rather than racing the option (#4479). The pane's
+		// own @af_pane_pid stamp is written by the launch shim inside the pane
+		// (sessionenv stamps its own pid — the shim IS the pane root), so no
+		// spawn-side command is needed and nothing here races death (#5319).
 		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	}
+	// Mask the UNSELECTED account boundary names so a shell tab or
+	// default-command process in this account's session can never inherit
+	// another account's identity or shell-startup variable from the server's
+	// global environment — e.g. a user `set-environment -g`, an
+	// update-environment import, or a server that predates the current
+	// allowlist. The selected names are written by new-session's -e flags
+	// above; the refresh's -r half used to mask the rest on the Start path,
+	// and folding it into this same new-session queue keeps the mask without
+	// a separate bounded command: a transient set-environment failure here
+	// cannot Close() the freshly created, healthy pane, because the existence
+	// poll below confirms the pane before a failed command's exit is ever
+	// observed (review of #5347).
+	if account != "" {
+		selected := make(map[string]struct{}, len(sessionEnv))
+		for _, entry := range sessionEnv {
+			if name, _, ok := strings.Cut(entry, "="); ok {
+				selected[name] = struct{}{}
+			}
+		}
+		for _, name := range accountSessionBoundaryNames(accountAgent) {
+			if _, ok := selected[name]; ok {
+				continue
+			}
+			args = append(args, ";", "set-environment", "-r", "-t", exactTarget(t.sanitizedName), name)
+		}
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits
@@ -623,6 +674,23 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
+		// The respawn launches new-session -c <workDir>; a worktree deleted
+		// since the session persisted means tmux silently falls back to the
+		// server's cwd instead of failing (#5172). Refuse up front, naming the
+		// path, so the caller routes the session to the lost/rebuild loop
+		// rather than launching an agent into an unrelated directory. (Start
+		// itself refuses too — this check keeps the refusal typed for restore
+		// callers before the program rewrite happens.) The live-session
+		// reattach branch below is unaffected: a live pane is not re-launched
+		// into anything.
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			return RestoreReattached, fmt.Errorf(
+				"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
+				ErrSpawnDirMissing, t.sanitizedName, workDir, err)
+		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
 		// stale declaration would refuse an account-scoped restore (#3083 review).
@@ -704,8 +772,23 @@ func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) er
 		resolvedAt = time.Now()
 		resolved, _ = t.confirmedGeneration()
 	}
-	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	// The refresh heals a PRE-EXISTING live session whose boundary environment
+	// predates or lost its account scope — the restore path's legitimate use
+	// (pinned by TestAccountScopedShellTabInheritsSelectedCredentials). It must
+	// NOT run when confirmedFresh: Start's new-session queue already wrote the
+	// -e session-env entries and default-command atomically in the same call, so
+	// re-deriving them here is pure redundancy whose only effect is a dozen extra
+	// bounded tmux commands — and a single transient failure there makes Start
+	// call t.Close() and destroy the freshly created, healthy pane. It must not
+	// run when the probe went unanswered either: a wedged has-session already
+	// spent a full tmuxCommandTimeout, and the refresh's first set-environment
+	// would pay the same deadline for the same non-answer — twelve times over —
+	// violating the one-bounded-has-session discipline the generation probe
+	// above and ReattachOnly's doc both promise (Codex on #4473).
+	if !confirmedFresh && answered {
+		if err := t.refreshRestoredAccountEnvironment(); err != nil {
+			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+		}
 	}
 	// Teardown attribution follows the GENERATION, not the monitor slot: a
 	// resolved id matching the outgoing monitor's generation shares its mark

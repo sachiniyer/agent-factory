@@ -392,14 +392,54 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	}
 	t.Cleanup(func() { restoreTmuxSession = prev })
 
-	// Worktree path deliberately NOT created.
-	restored, err := FromInstanceData(deadInstanceData(t, Lost, agentName, shellName))
+	// Worktree path deliberately absent.
+	data := deadInstanceData(t, Lost, agentName, shellName)
+	require.NoError(t, os.RemoveAll(data.Worktree.WorktreePath))
+	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 
 	err = restored.Recover()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worktree", "the failure must name the missing worktree")
 	assert.Equal(t, 0, newSessions, "no spawn may happen without a worktree")
+	assert.Equal(t, Lost, restored.GetStatus())
+}
+
+// TestRecover_FailsWithNonDirectoryWorktree: a regular file squatting on the
+// persisted worktree path is not rebuildable — rebuild must never delete data
+// af did not create — and stats fine, so it would otherwise skip the rebuild
+// branch and retry into the tmux spawn-dir refusal until give-up (#5172 review).
+// Recover must instead fail fast naming the cause, leave the session Lost, and
+// never attempt a spawn.
+func TestRecover_FailsWithNonDirectoryWorktree(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_filewt"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	// Worktree path exists but is a regular file, not a directory.
+	data := deadInstanceData(t, Lost, agentName, shellName)
+	require.NoError(t, os.RemoveAll(data.Worktree.WorktreePath))
+	require.NoError(t, os.WriteFile(data.Worktree.WorktreePath, []byte("squatter"), 0o644))
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	err = restored.Recover()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory", "the failure must name the squatting file, not a generic spawn error")
+	var wtErr *WorktreeUnavailableError
+	assert.ErrorAs(t, err, &wtErr, "the permanent-failure shape the restore loop escalates on")
+	assert.Equal(t, 0, newSessions, "no spawn may happen when the worktree path is not a directory")
 	assert.Equal(t, Lost, restored.GetStatus())
 }
 
