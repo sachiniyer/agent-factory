@@ -600,6 +600,15 @@ func shellWordAssignmentName(word *syntax.Word) (string, bool) {
 		return "", false
 	}
 	name, _, assignment := strings.Cut(literal.Value, "=")
+	if assignment {
+		// bash's `NAME+=value` append operator leaves a trailing `+` on the
+		// target after `strings.Cut` (`NAME+=value` -> `NAME+`), and `NAME+`
+		// fails `validName`, so the append form slipped past this classifier
+		// and was judged as a non-assignment word. Strip the trailing `+` so
+		// the append form is recognized as an assignment to NAME, matching the
+		// parser's `*syntax.Assign` (Append) node for the bare form.
+		name = strings.TrimSuffix(name, "+")
+	}
 	return name, assignment && validName(name)
 }
 
