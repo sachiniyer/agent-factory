@@ -45,6 +45,44 @@ func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
 	}
 }
 
+// TestOpenProbeFile_AbandonedPathRegisters is the #5295-review regression for
+// Stat-after-Close: when BOTH unlinks of the named fallback fail, the
+// abandoned leftover must be registered with its live identity — captured
+// BEFORE the handle closes, because Stat on a closed file always errors and
+// an unregistered leftover is exactly what `git add -A` would later stage.
+func TestOpenProbeFile_AbandonedPathRegisters(t *testing.T) {
+	oldAnon := openAnonymousProbeFile
+	openAnonymousProbeFile = func(string) (*os.File, error) { return nil, syscall.EOPNOTSUPP }
+	defer func() { openAnonymousProbeFile = oldAnon }()
+	oldRemove := removePath
+	removePath = func(string) error { return syscall.EPERM }
+	defer func() { removePath = oldRemove }()
+
+	dir := t.TempDir()
+	_, err := openProbeFile(dir)
+	require.Error(t, err)
+	removePath = oldRemove // failure path driven; restore before the sweep below
+
+	matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*"))
+	require.Len(t, matches, 1, "the failed double-unlink must leave exactly one leftover")
+	leaked := matches[0]
+	defer abandonedProbes.Delete(leaked)
+
+	v, ok := abandonedProbes.Load(leaked)
+	require.True(t, ok, "the abandoned path must be registered for RemoveDebris")
+	regInfo, ok := v.(os.FileInfo)
+	require.True(t, ok, "the registry value must be the captured os.FileInfo")
+	cur, lerr := os.Lstat(leaked)
+	require.NoError(t, lerr)
+	require.True(t, os.SameFile(regInfo, cur),
+		"the registered identity must be the live leftover's inode, not a stale or empty record")
+
+	// And the sweep can actually collect what the failure registered.
+	require.NoError(t, RemoveDebris(dir))
+	_, statErr := os.Lstat(leaked)
+	require.True(t, os.IsNotExist(statErr), "the sweep must remove the proven leftover")
+}
+
 // TestWrite_BoundsAWedgedProbe is the #5295-review regression: a filesystem
 // that stops completing writes (a degraded mount) must not wedge the
 // synchronous restore poll — the flight surfaces typed DeadlineExceeded

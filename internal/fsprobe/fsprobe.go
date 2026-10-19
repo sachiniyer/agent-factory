@@ -134,11 +134,15 @@ func openProbeFile(dir string) (*os.File, error) {
 		return nil, err
 	}
 	name := f.Name()
-	if rerr := os.Remove(name); rerr != nil {
+	if rerr := removePath(name); rerr != nil {
+		// Capture the abandoned object's identity BEFORE Close — Stat on a
+		// closed handle always errors, which would leave the leftover
+		// unregistered and stageable by a later `git add -A` (#5295 review).
+		info, serr := f.Stat()
 		cerr := f.Close()
 		// Close releases the only state unlink could have depended on — try
 		// once more before reporting.
-		rerr2 := os.Remove(name)
+		rerr2 := removePath(name)
 		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
 		if cerr != nil {
 			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
@@ -148,7 +152,7 @@ func openProbeFile(dir string) (*os.File, error) {
 			// os.SameFile is the only proof a future sweep needs, and a
 			// path the owner later replaces or recreates at the same name
 			// can never inherit our claim (#5295 review).
-			if info, serr := f.Stat(); serr == nil {
+			if serr == nil {
 				abandonedProbes.Store(name, info)
 			}
 			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
@@ -177,6 +181,11 @@ var statPath = os.Stat
 // metadata lookup that verifies the registered identity still sits at the
 // path before anything is unlinked.
 var lstatPath = os.Lstat
+
+// removePath is the test seam under openProbeFile — the unlink that drops
+// the named fallback's only directory entry before its first byte. Stubbing
+// it is the only way to drive the double-unlink-failure abandonment path.
+var removePath = os.Remove
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing payload bytes, so a
