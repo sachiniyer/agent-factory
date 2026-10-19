@@ -405,20 +405,45 @@ func supportedAgent(command string) string {
 // agent-looking word used as data, a compound command, a redirect, or a second
 // possible execution path can never widen the credential allowlist. Nothing is
 // expanded or executed.
+//
+// The selector's value is parsed under BOTH POSIX and Bash and the verdict is
+// only returned when the two variants agree. A command-local assignment whose
+// value is dialect-dependent — the bug report's $'0' / $"0" family — tokenizes
+// under POSIX as Lit{"$"}+SglQuoted{Dollar:false} (literalizing to "$0", which
+// flagValueEnabled calls truthy) while under Bash it tokenizes as a single
+// SglQuoted{Dollar:true} (rejected by the Dollar guard in
+// appendLiteralShellPart). The /bin/sh -c that finally runs the command expands
+// such a word differently per host: bash-as-sh turns $'0' into 0 (falsy — mode
+// OFF), while dash leaves it as the literal "$0" (truthy). Admitting the
+// credential group on the POSIX-only read injects a cloud provider's entire
+// credential group into a session that may run with the mode off, so a
+// dialect-dependent word is unprovable and fails closed as disabled — the
+// documented invariant ("a dynamic value is an explicit but unprovable override
+// and therefore fails closed as disabled"), applied with the same dual-variant
+// treatment commandMutatesAccountEnvironment already uses for the package's
+// other dialect-dependent validators.
 func commandEnvironmentFlagState(command, agent, name string) (found, enabled bool) {
 	if strings.TrimSpace(command) == "" || agent == "" {
 		return false, false
 	}
-	call, ok := singleSimpleCall(command)
+	posix, ok := singleCallVariant(command, false, syntax.LangPOSIX)
 	if !ok {
 		return false, false
 	}
-
-	return directAgentFlagState(call, agent, name)
+	bash, ok := singleCallVariant(command, false, syntax.LangBash)
+	if !ok {
+		return false, false
+	}
+	posixFound, posixEnabled := directAgentFlagState(posix, agent, name)
+	bashFound, bashEnabled := directAgentFlagState(bash, agent, name)
+	if posixFound != bashFound || posixEnabled != bashEnabled {
+		return false, false
+	}
+	return posixFound, posixEnabled
 }
 
 func singleSimpleCall(command string) (*syntax.CallExpr, bool) {
-	return singleCall(command, false)
+	return singleCallVariant(command, false, syntax.LangPOSIX)
 }
 
 // singleCallIgnoringRedirections is singleSimpleCall for callers that ask about
@@ -437,7 +462,15 @@ func singleCallIgnoringRedirections(command string) (*syntax.CallExpr, bool) {
 // rule and nothing else, so the two questions cannot drift apart on any of the
 // others.
 func singleCall(command string, allowRedirections bool) (*syntax.CallExpr, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	return singleCallVariant(command, allowRedirections, syntax.LangPOSIX)
+}
+
+// singleCallVariant is singleCall parameterized by a parser dialect. The
+// selector path parses under BOTH LangPOSIX and LangBash and fails closed on
+// disagreement (see commandEnvironmentFlagState); the other callers stay on the
+// POSIX variant they always used by going through singleCall.
+func singleCallVariant(command string, allowRedirections bool, variant syntax.LangVariant) (*syntax.CallExpr, bool) {
+	file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return nil, false
 	}
