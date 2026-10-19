@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -76,6 +77,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					i.Title, recovery.State, location,
 				)
 			}
+			// Keep the record about to be consumed: if the settle-persist
+			// below fails, the durable file still carries it and the next
+			// retry must re-enter this checkpoint rather than spawn ahead of
+			// the durable clear — re-arm it on that path.
+			consumedRecovery := recovery
 			// Every probe inside is deadline-bounded, so a still-stalled
 			// filesystem fails without wedging this goroutine, and a record
 			// that cannot be established keeps its durable evidence and
@@ -115,6 +121,16 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			// so the spawn never runs ahead of the durable clear.
 			if notify := i.relocationSettleNotifyFn(); notify != nil {
 				if perr := notify(i); perr != nil {
+					// The persist failed, so the durable file still carries
+					// the record the settle just consumed in memory. Re-arm
+					// it: without this, the next retry sees unresolved ==
+					// false, skips the checkpoint entirely, and spawns ahead
+					// of the durable clear — the same settle→exit window this
+					// notify exists to close (#5295 review).
+					if rerr := gw.RestoreRelocationRecovery(consumedRecovery); rerr != nil {
+						perr = errors.Join(perr, fmt.Errorf(
+							"re-arming the relocation record for the next retry: %w", rerr))
+					}
 					return fmt.Errorf(
 						"recover: session %q resolved worktree recovery at %s but the cleared record is not yet durable: %w",
 						i.Title, location, perr,

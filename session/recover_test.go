@@ -316,6 +316,24 @@ func TestRecover_SettlePersistsBeforeSpawn(t *testing.T) {
 	require.Error(t, err, "a persist failure must fail the attempt, not spawn ahead of the durable clear")
 	assert.Contains(t, err.Error(), "not yet durable")
 	assert.Equal(t, 0, newSessions2, "no spawn may proceed on top of a non-durable settle")
+
+	// #5295 review: the failed persist leaves the durable record in place, so
+	// the in-memory fence MUST be re-armed — the next retry re-enters the
+	// settle→persist checkpoint instead of skipping it and spawning on top of
+	// the stale durable record.
+	_, hasRecovery := worktree2.GetRelocationRecovery()
+	assert.True(t, hasRecovery, "a failed settle-persist must re-arm the record so the next retry re-attempts the durable clear")
+
+	var notified2 int
+	restored2.SetRelocationSettleNotify(func(*Instance) error {
+		notified2++
+		return nil
+	})
+	require.NoError(t, restored2.Recover(), "a retry after the re-armed fence must settle and persist again")
+	assert.Equal(t, 1, notified2, "the retry must re-enter the settle→persist checkpoint")
+	assert.Equal(t, 2, newSessions2, "the retry's spawn proceeds only behind a durable clear")
+	_, hasRecovery = worktree2.GetRelocationRecovery()
+	assert.False(t, hasRecovery, "the settled record is consumed once durable")
 }
 
 // TestRecover_UnresolvableClaimKeepsRecordAndRefuses is the fail-closed half:
