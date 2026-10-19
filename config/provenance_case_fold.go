@@ -1,6 +1,67 @@
 package config
 
-import "reflect"
+import (
+	"reflect"
+	"strings"
+)
+
+// candidateLeafProjectionKey returns the map key under which a struct-backed
+// candidate stores a case-variant of leaf, so a non-winner candidate that
+// spells the leaf differently from the winner (e.g. a global [root_agent]
+// ENABLED = false when the winner is a personal [root_agent] Enabled = true)
+// projects its own value rather than being marked absent. physicalLeaf is the
+// winner's physical spelling; for the winner and any same-source candidate
+// whose map still carries that spelling, it is the decoder-winning spelling
+// the collapse retained, so it is preferred when present. For a struct-typed
+// candidate Value (built-in sources) configLeafValue's struct branch folds
+// case via taggedFieldByKey regardless of the key used, so physicalLeaf is
+// returned unchanged. Map-backed composites never reach the struct-backed
+// origin fallback in ResolvedValuePath, so this helper is only called for
+// struct-backed parents. Within one struct, tags are unique by case, so the
+// case-insensitive scan is unambiguous (#5397 review).
+func candidateLeafProjectionKey(value any, leaf, physicalLeaf string) string {
+	if value == nil {
+		return physicalLeaf
+	}
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return physicalLeaf
+		}
+		reflected = reflected.Elem()
+	}
+	if reflected.Kind() != reflect.Map {
+		// Struct-typed (built-in) or scalar: configLeafValue's struct branch
+		// folds case via taggedFieldByKey, so the winner's physical spelling
+		// projects the same field as the canonical leaf. Use it to preserve the
+		// physical-spelling KeyPath behaviour on the exact-match path.
+		return physicalLeaf
+	}
+	// The winner's physical spelling is the decoder-winning spelling the
+	// collapse retained, so prefer it when the candidate's map still carries
+	// it (the winner, and any same-source candidate whose raw map has not been
+	// collapsed to a single spelling).
+	if key := reflect.ValueOf(physicalLeaf); key.Type().AssignableTo(reflected.Type().Key()) {
+		if entry := reflected.MapIndex(key); entry.IsValid() {
+			return physicalLeaf
+		}
+	}
+	// A non-winner candidate may spell the leaf differently from the winner;
+	// scan its own keys case-insensitively so it projects its own value and is
+	// reported as shadowed instead of absent. Within one struct, tags are
+	// unique by case, so the scan is unambiguous.
+	for _, key := range reflected.MapKeys() {
+		if s, ok := key.Interface().(string); ok && strings.EqualFold(s, leaf) {
+			return s
+		}
+	}
+	// No case-variant of leaf is present in this candidate's map; the leaf is
+	// genuinely absent here. Fall back to the canonical leaf so configLeafValue's
+	// exact map lookup returns false and the candidate is correctly marked
+	// absent (a candidate that did not configure this leaf should not be
+	// reported as shadowed by the winner).
+	return leaf
+}
 
 // collapseStructLeaves folds case-variant spellings of the same struct field
 // within one candidate's leaf set to a single entry. encoding/json and
