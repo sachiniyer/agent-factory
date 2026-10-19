@@ -1221,6 +1221,7 @@ func TestRefusedImplicitSubmitLeavesTheTitleUncommitted(t *testing.T) {
 func TestRemoteDefaultDismissesAnOpenProgramPicker(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
+	stubRemoteProgramFeed(t, tmux.ProgramClaude)
 	h := configFollowingHome(t)
 
 	_, cmd := h.startNewInstance()
@@ -1252,6 +1253,9 @@ func TestRemoteOnlyProgramResolvesAccountsFromTheDaemonRoster(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
 	h := configFollowingHome(t)
+	t.Cleanup(SetProgramListerForTest(func(string) (daemon.ListProgramsResponse, error) {
+		return daemon.ListProgramsResponse{}, nil
+	}))
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
 		return daemon.ListAccountsResponse{
 			Agents:         []string{"codex"},

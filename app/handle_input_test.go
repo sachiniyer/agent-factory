@@ -502,6 +502,10 @@ func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
 			require.NoError(t, err)
 			h.namingInstance = naming
 			h.pendingBackend = "hook"
+			// startNewInstance seeds pendingProgram before Enter reaches it; a
+			// test that sets namingInstance directly must do the same, or the
+			// wire program is "" and the implicit-default gate re-reads config.
+			h.pendingProgram = "claude"
 
 			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -547,6 +551,9 @@ func TestHandleStateNewAllowsNonASCIITitleForNonHookSandbox(t *testing.T) {
 	require.NoError(t, err)
 	h.namingInstance = naming
 	h.pendingBackend = string(session.BackendDocker)
+	// Same seed as the hook test: the form's pendingProgram is what production
+	// set when the form opened; "" would make the submit re-read config.
+	h.pendingProgram = "claude"
 
 	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
