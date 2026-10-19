@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -56,9 +57,10 @@ const (
 	// lostRestoreEnvDeadline is a bounded probe that could not answer —
 	// af's relocation probe pair (deadline + relocate-state sentinel), the
 	// setup-side bounded git calls on the rebuild path (cleanup-stall and
-	// removal-ownership sentinels), or the remote preserve push's transport
-	// deadline at that call site. The same verdict shape a permanently
-	// stuck condition produces, so the wait is bounded by
+	// removal-ownership sentinels), the fsprobe write-capacity flight's
+	// deadline + ErrProbeTimedOut pair, or the remote preserve push's
+	// transport deadline at that call site. The same verdict shape a
+	// permanently stuck condition produces, so the wait is bounded by
 	// lostRestoreMaxAttempts and then charged to the structural budget.
 	lostRestoreEnvDeadline
 )
@@ -91,10 +93,13 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	// non-answer and the sentinel names the bounded probe that could not
 	// establish state — the relocation identity probe, the setup cleanup
 	// step killed at its deadline by clearStaleWorktreePath on the rebuild
-	// path, or the bounded `git worktree list` behind
+	// path, the bounded `git worktree list` behind
 	// requireSetupRemovalOwnership, which wraps its local-git deadline in
 	// ErrSetupRemovalOwnershipUnproven before any mutation can be tried —
-	// a repository-filesystem stall the next retry re-probes from scratch.
+	// a repository-filesystem stall the next retry re-probes from scratch —
+	// or the fsprobe write capacity flight, which marks a wedged filesystem's
+	// non-answer with ErrProbeTimedOut so the diagnostic bound reads as the
+	// same environmental class it exists to protect (#5295 review).
 	// A bare ownership refusal (the sentinel without the deadline) stays a
 	// definitive verdict and remains structural. Every other timeout and
 	// every definitive verdict stays on the structural budget (#5295
@@ -102,7 +107,8 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	if errors.Is(err, context.DeadlineExceeded) &&
 		(errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
 			errors.Is(err, sessiongit.ErrWorktreeSetupStalled) ||
-			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven)) {
+			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven) ||
+			errors.Is(err, fsprobe.ErrProbeTimedOut)) {
 		return lostRestoreEnvDeadline
 	}
 	return lostRestoreEnvNone

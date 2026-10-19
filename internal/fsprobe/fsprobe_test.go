@@ -80,6 +80,8 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.DeadlineExceeded),
 		"a wedged probe must surface typed deadline evidence: %v", err)
+	require.True(t, errors.Is(err, ErrProbeTimedOut),
+		"the deadline must carry the fsprobe sentinel so the lost-restore classifier reads the bounded environmental class: %v", err)
 
 	// While the first worker is still stuck, a second probe of the same dir
 	// joins the timed-out flight and is refused immediately — it does not
@@ -87,6 +89,8 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 	err2 := Write(dir)
 	require.Error(t, err2)
 	require.True(t, errors.Is(err2, context.DeadlineExceeded))
+	require.True(t, errors.Is(err2, ErrProbeTimedOut),
+		"the timed-out refusal must carry the same sentinel pair: %v", err2)
 }
 
 // TestWrite_ConcurrentProbesJoinOneFlight — concurrent probes of the same dir

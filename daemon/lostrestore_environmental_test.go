@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -84,6 +85,14 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		// it too, and that is a session defect, not an outage.
 		{"deadline exceeded bare", fmt.Errorf("probe: %w", context.DeadlineExceeded), lostRestoreEnvNone},
 		{"deadline exceeded launch_cmd style", fmt.Errorf("backend=hook: launch_cmd failed for %q: %w", "t", context.DeadlineExceeded), lostRestoreEnvNone},
+		// The fsprobe capacity flight's own non-answer: a filesystem that
+		// accepts the failed git subprocess but then blocks the diagnostic
+		// write reports ErrProbeTimedOut + deadline — the same bounded
+		// environmental class af's other probes produce. The sentinel alone
+		// is a definitive verdict and stays structural (#5295 review).
+		{"deadline carrying fsprobe sentinel", errors.Join(
+			fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"fsprobe sentinel bare", fmt.Errorf("space probe: %w", fsprobe.ErrProbeTimedOut), lostRestoreEnvNone},
 		// The bare sentinel is a definitive verdict — "the recorded worktree
 		// is at no candidate" — not a waiting one; retrying cannot change it.
 		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvNone},

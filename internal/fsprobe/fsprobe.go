@@ -45,6 +45,15 @@ const writeSpaceProbeSize = 1 << 20
 // identity probe's deadline — the same "the mount did not answer" class.
 var probeTimeout = 2 * time.Second
 
+// ErrProbeTimedOut identifies the bounded flight's non-answer: the probe's
+// write/sync/close did not complete inside probeTimeout. It is always paired
+// with context.DeadlineExceeded in the chain — the deadline names the
+// non-answer, the sentinel names WHICH bounded probe could not establish
+// state — so a classifier that only accepts deadline+sentinel pairs (the
+// lost-restore environmental class) can tell this stall from a session's own
+// hung operation, which wraps a bare deadline (#5295 review).
+var ErrProbeTimedOut = errors.New("filesystem write probe did not answer inside its bound")
+
 // writeSpaceProbe is the production probe body (and the test seam): create a
 // file in dir and WRITE a representative payload to it, then Sync before
 // close so the bytes must reach the filesystem's accounting. The write is
@@ -141,8 +150,8 @@ func Write(dir string) error {
 		if active.timedOut {
 			probeFlights.Unlock()
 			return fmt.Errorf(
-				"space probe of %s is still running after an earlier deadline: %w",
-				dir, context.DeadlineExceeded,
+				"space probe of %s is still running after an earlier deadline: %w: %w",
+				dir, ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
 		probeFlights.Unlock()
@@ -186,8 +195,8 @@ func waitForProbe(dir string, flight *probeFlight) error {
 			flight.timedOut = true
 			probeFlights.Unlock()
 			return fmt.Errorf(
-				"space probe of %s did not answer within %s — the filesystem did not complete the write: %w",
-				dir, probeTimeout, context.DeadlineExceeded,
+				"space probe of %s did not answer within %s — the filesystem did not complete the write: %w: %w",
+				dir, probeTimeout, ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
 		probeFlights.Unlock()
