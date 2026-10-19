@@ -454,6 +454,34 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	return false
 }
 
+// codexComposerGlyphs is the set of glyphs Codex draws at the START of its
+// composer line: "›" (U+203A) at every reasoning effort, and "»" (U+00BB)
+// while the Ultra tier is active — upstream codex-rs/tui
+// bottom_pane/effort_ignition.rs EffortTier::prompt_glyph (Max→"›",
+// Ultra→"»"), consumed by chat_composer.rs's prompt span and the ONLY place
+// "»" is rendered at rust-v0.163.0. Picker, trust-dialog, and update-dialog
+// selection markers keep "›" at every effort (bottom_pane/picker_option.rs
+// numbered_row), so a line-leading "»" never carries the selected-option
+// ambiguity a line-leading "›" can — it can only be the composer (#5383).
+const codexComposerGlyphs = "›»"
+
+// IsCodexComposerLine reports whether the line's first non-blank character is
+// a Codex composer glyph. Position is the whole contract — the composer is
+// drawn at the START of its line, so the same glyph mid-line is prose, not a
+// prompt (#3085). Distinguishing the composer from a selected option that
+// shares the "›" marker is the CALLER's job, not the glyph's: readiness runs
+// CodexTrustPromptPresent first, and the safety/update pickers gate on their
+// hidden-cursor modal state.
+func IsCodexComposerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, glyph := range codexComposerGlyphs {
+		if strings.HasPrefix(trimmed, string(glyph)) {
+			return true
+		}
+	}
+	return false
+}
+
 // CodexTrustPromptPresent reports whether content shows Codex's directory-trust
 // modal introduced by 0.144.6:
 //
