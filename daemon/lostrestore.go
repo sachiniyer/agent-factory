@@ -664,6 +664,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// raises no lifecycle fence of its own — the op-lock above serializes daemon
 	// operations, not the status poll, which skips on the op AXIS — so the fence
 	// has to come from the recovery itself.
+	// A respawn that settles a single-candidate relocation record must persist
+	// that cleared state before the spawn proceeds — otherwise a daemon exit
+	// in the settle→boundary window reloads the stale record and strands the
+	// recovery as an inert row (#5295 review).
+	inst.SetRelocationSettleNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
 	if err := inst.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)

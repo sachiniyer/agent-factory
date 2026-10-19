@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -248,6 +249,73 @@ func TestRecover_ResolvesClaimStaleWorktreeRelocation(t *testing.T) {
 	assert.Greater(t, newSessions, 0, "Recover must respawn once the record resolves")
 	_, hasRecovery := worktree.GetRelocationRecovery()
 	assert.False(t, hasRecovery, "a resolved record must be consumed, not left to refuse the next operation")
+}
+
+// TestRecover_SettlePersistsBeforeSpawn is the #5295-review regression: the
+// respawn's settle is in-memory only, so the daemon installs a persist
+// callback that MUST fire before the spawn — otherwise a daemon exit in the
+// settle→boundary window reloads the stale record and strands the recovery.
+// A notify failure must abort the spawn the same way.
+func TestRecover_SettlePersistsBeforeSpawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_settle_notify"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+	}))
+
+	var notified int
+	var spawnedAtNotify = -1
+	restored.SetRelocationSettleNotify(func(*Instance) error {
+		notified++
+		spawnedAtNotify = newSessions
+		return nil
+	})
+	require.NoError(t, restored.Recover())
+	assert.Equal(t, 1, notified, "the settle persist must fire exactly once")
+	assert.Equal(t, 0, spawnedAtNotify, "the notify must run BEFORE the spawn proceeds")
+
+	// The same edge must fail closed: a notify error aborts the attempt
+	// before any spawn.
+	var newSessions2 int
+	exec2 := countingExec(map[string]bool{}, &newSessions2)
+	restored2 := lostInstanceForRecover(t, agentName+"2", shellName+"2", exec2)
+	worktree2, err := restored2.GetGitWorktree()
+	require.NoError(t, err)
+	wp2, _, _ := worktree2.RelocationSnapshot()
+	var st2 syscall.Stat_t
+	require.NoError(t, syscall.Stat(wp2, &st2))
+	require.NoError(t, worktree2.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(st2.Dev),
+		Inode:         uint64(st2.Ino),
+		FileType:      uint32(st2.Mode & syscall.S_IFMT),
+	}))
+	restored2.SetRelocationSettleNotify(func(*Instance) error {
+		return fmt.Errorf("disk full")
+	})
+	err = restored2.Recover()
+	require.Error(t, err, "a persist failure must fail the attempt, not spawn ahead of the durable clear")
+	assert.Contains(t, err.Error(), "not yet durable")
+	assert.Equal(t, 0, newSessions2, "no spawn may proceed on top of a non-durable settle")
 }
 
 // TestRecover_UnresolvableClaimKeepsRecordAndRefuses is the fail-closed half:

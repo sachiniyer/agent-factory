@@ -106,6 +106,21 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					i.Title, recovery.State, location,
 				)
 			}
+			// The settle cleared the record in memory only. Make it durable
+			// BEFORE the spawn proceeds: a daemon exit in this window would
+			// otherwise restart onto the stale record, reload inert, and
+			// strand the automatic recovery this settle just enabled (#5295
+			// review). The daemon installs the persist callback at its
+			// recover/respawn entry points; a write failure fails the attempt
+			// so the spawn never runs ahead of the durable clear.
+			if notify := i.relocationSettleNotifyFn(); notify != nil {
+				if perr := notify(i); perr != nil {
+					return fmt.Errorf(
+						"recover: session %q resolved worktree recovery at %s but the cleared record is not yet durable: %w",
+						i.Title, location, perr,
+					)
+				}
+			}
 		}
 	}
 	if workDir == "" {

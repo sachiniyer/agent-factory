@@ -57,7 +57,7 @@ func (t *TmuxSession) Start(workDir string) error {
 				err = fmt.Errorf("not a directory")
 			}
 			t.proveNoPaneIfDeterminatelyAbsent()
-			return fmt.Errorf("%w: %w: session %q cannot start in %s: %v",
+			return fmt.Errorf("%w: %w: session %q cannot start in %s: %w",
 				ErrSessionNotStarted, ErrSpawnDirMissing, t.sanitizedName, workDir, err)
 		}
 	}
