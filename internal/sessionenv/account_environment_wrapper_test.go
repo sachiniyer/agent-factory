@@ -462,6 +462,22 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace xargs --process-slot-var CODEX_HOME codex", true},
 		{"strace xargs --process-slot-var=PORT codex", false},
 		{"strace xargs echo hi", false},
+		// A traced xargs runs the command in its tail, whose own options or
+		// an inner wrapper (strace, env, a shell) can mutate the traced
+		// child's environment: printf x | strace xargs strace -E
+		// CODEX_HOME=/other codex has xargs exec the inner strace, whose -E
+		// overrides the protected variable. The scan delegates xargs's tail
+		// to the same command analysis a bare xargs gets, so a denied inner
+		// -E/--env, a nested env, or a shell refuses, while a leaf child and
+		// a non-denied inner -E stay allowed. xargs sh is refused the same
+		// way bare xargs sh is (sh is an unproven shell).
+		{"strace xargs strace -E CODEX_HOME=/other codex", true},
+		{"strace xargs strace --env=CODEX_HOME=/other codex", true},
+		{"strace xargs strace echo -E CODEX_HOME=/other codex", false},
+		{"strace xargs strace -E FOO=1 codex", false},
+		{"strace xargs env CODEX_HOME=/other codex", true},
+		{"strace xargs sh", true},
+		{"strace xargs nice strace -E CODEX_HOME=/other codex", true},
 		// A backslash escape in an attached -E operand's VALUE names the
 		// harmless value's variable, not a protected one: the shell removes
 		// the backslash and strace receives -EFOO=$V (FOO is non-protected),
@@ -489,6 +505,22 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace systemd-run --setenv=CODEX_HOME codex", true},
 		{"strace systemd-run --setenv=PORT=3000 codex", false},
 		{"strace systemd-run echo hi", false},
+		// systemd-run takes other value-taking options before the command
+		// (--unit UNIT, -u UNIT, --property NAME=VALUE, …), whose operand
+		// is the next argv word. A later -E/--setenv after the operand is
+		// still systemd-run's --setenv, not the command: strace systemd-run
+		// --unit demo -E CODEX_HOME=/other codex has --unit consume demo,
+		// so -E is systemd-run's --setenv and overrides the protected
+		// variable. systemdRunEnvOptionHides consumes the operand of a
+		// value-taking option so the scan reaches -E instead of ending the
+		// option region at the operand (a non-option word the scan mistook
+		// for the command). A non-denied NAME stays allowed.
+		{"strace systemd-run --unit demo -E CODEX_HOME=/other codex", true},
+		{"strace systemd-run --unit=demo -E CODEX_HOME=/other codex", true},
+		{"strace systemd-run -u demo -E CODEX_HOME=/other codex", true},
+		{"strace systemd-run -p foo=bar -E CODEX_HOME=/other codex", true},
+		{"strace systemd-run --unit demo -E PORT=3000 codex", false},
+		{"strace systemd-run --slice myslice -E CODEX_HOME=/other codex", true},
 		// strace's "--" only ends its OWN option parsing; the next word is
 		// still the traced command. When that command is a wrapper the scan
 		// analyzes (strace re-enters, xargs/systemd-run delegate), the
@@ -620,6 +652,12 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// unwrapXargs past strace's command boundary.
 		"strace xargs --process-slot-var=CODEX_HOME codex",
 		"strace xargs --process-slot-var CODEX_HOME codex",
+		// A traced xargs runs the command in its tail, so the tail's inner
+		// strace -E, a nested env, or a shell refuses the same way a bare
+		// xargs does (xargs sh is refused because sh is an unproven shell).
+		"strace xargs strace -E CODEX_HOME=/other codex",
+		"strace xargs env CODEX_HOME=/other codex",
+		"strace xargs sh",
 		// The traced command is itself strace; its -E/--env applies to the
 		// ultimately traced child.
 		"strace strace -E CODEX_HOME=/other codex",
@@ -635,6 +673,14 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace -- strace -E CODEX_HOME=/other codex",
 		"strace -- xargs --process-slot-var=CODEX_HOME codex",
 		"strace -- systemd-run --setenv=CODEX_HOME=/other codex",
+		// systemd-run takes value-taking options before the command (--unit
+		// UNIT, -u UNIT, --slice SLICE, …), whose operand is the next argv
+		// word. A later -E/--setenv after the operand is still systemd-run's
+		// --setenv, not the command, so the scan consumes the operand and
+		// reaches -E.
+		"strace systemd-run --unit demo -E CODEX_HOME=/other codex",
+		"strace systemd-run -u demo -E CODEX_HOME=/other codex",
+		"strace systemd-run --slice myslice -E CODEX_HOME=/other codex",
 		// The traced command can be a modeled peelAccountWrapper passthrough
 		// wrapper (nice/nohup/timeout/…) that runs a child whose -E/--env
 		// overrides the protected variable; the scan delegates the wrapper's
