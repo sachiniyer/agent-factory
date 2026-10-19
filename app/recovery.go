@@ -57,6 +57,14 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// still see (#4889 review).
 	m.pendingAccountChosen = req.AccountChosen && req.Account != ""
 	m.pendingProgramChosen = req.ProgramChosen
+	// Whatever lookup state the failed form left behind is stale: a restored
+	// field re-earns its verification from the fetches this restore fires
+	// (#4893 review).
+	m.remoteDefaultVerifyPending = false
+	m.remoteDefaultVerifiedFor = ""
+	m.accountVerifyPending = false
+	m.accountVerifiedFor = ""
+	m.accountLookupPending = false
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		if isRemoteTarget() {
 			// pendingProgram already holds the placeholder's remote-resolved
@@ -66,8 +74,6 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// review).
 			m.remoteDefaultPending = true
 			m.remoteDefaultFailed = false
-			m.accountVerifyPending = false
-			m.accountVerifiedFor = ""
 			m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 			m.menu.SetNamingBackend(m.pendingBackend != "")
 			m.menu.SetNamingAccount(m.pendingAccount != "")

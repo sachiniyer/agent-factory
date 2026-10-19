@@ -42,8 +42,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.remoteDefaultVerifyPending = false
+		m.remoteDefaultVerifiedFor = ""
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
+		m.accountLookupPending = false
 		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -177,10 +180,40 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if sendProgram == "" {
 			switch {
 			case m.remoteDefaultPending:
+				// The remote answer is still out. If this Enter is the first
+				// unverified one, arm the in-flight fetch as the submit's
+				// verification so its landed reply stamps the display (#4893
+				// review).
+				if m.pendingProgram != m.remoteDefaultVerifiedFor {
+					m.remoteDefaultVerifyPending = true
+				}
 				return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
 			case m.remoteDefaultFailed:
-				return m, m.handleNotice(errors.New("the remote daemon did not report a default program — pick one explicitly from the program field"))
-			case !isRemoteTarget():
+				// A failed or empty answer must not send a blind "" — but the
+				// failure may be transient. Each Enter re-asks rather than
+				// trapping on an explicit pick (#4893 review).
+				m.remoteDefaultFailed = false
+				m.remoteDefaultPending = true
+				m.remoteDefaultVerifyPending = true
+				return m, tea.Batch(
+					m.handleNotice(errors.New("the remote daemon did not report a default program — retrying the lookup; pick a program explicitly to skip it")),
+					m.fetchRemoteDefaultProgram(instance),
+				)
+			case isRemoteTarget():
+				// The remote default can move under an open form exactly like
+				// the local one — "" resolves the daemon's LIVE value, so the
+				// cached answer from form-open proves nothing at submit time.
+				// Re-query and hold until the submit-armed reply lands (#4893
+				// review); remoteDefaultVerifiedFor records what it showed.
+				if m.pendingProgram != m.remoteDefaultVerifiedFor {
+					m.remoteDefaultPending = true
+					m.remoteDefaultVerifyPending = true
+					return m, tea.Batch(
+						m.handleNotice(errors.New("re-checking the remote daemon's default program — press Enter to confirm")),
+						m.fetchRemoteDefaultProgram(instance),
+					)
+				}
+			default:
 				// The local default may have moved since the field seeded —
 				// another surface can write default_program while the form sits
 				// open. "" resolves the NEW value, so refresh the field and ask
@@ -225,29 +258,50 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// async fetch that seeded the field (#4893 review). A display the
 			// last verify reply left unchanged — accountVerifiedFor — was just
 			// reviewed and may submit; a CHOSEN pair never reaches here (it
-			// pinned the program concrete).
-			if m.pendingAccount != "" && !m.pendingAccountChosen && m.pendingAccount != m.accountVerifiedFor {
-				if m.accountVerifyPending {
+			// pinned the program concrete). The in-flight half is the gap the
+			// earlier draft left: a cleared field with a fetch still out is
+			// just as unverified — the reply may carry a named default.
+			if !m.pendingAccountChosen &&
+				(m.accountLookupPending || (m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
+				switch {
+				case m.accountVerifyPending:
 					// An earlier verify's answer is still out — re-fire in
 					// case it was dropped, and keep holding (#4893 review).
-					// handleAccountDefault clears the flag on the reply.
+					// handleAccountDefault clears both flags on the reply.
 					verify := m.fetchAccountDefault(instance, m.pendingProgram)
+					if verify == nil {
+						// The program lost its registry mid-verify — there is
+						// nothing left to check the display against.
+						m.accountVerifyPending = false
+						m.clearPendingAccount()
+						break
+					}
 					return m, tea.Batch(
 						m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
 						verify,
 					)
-				}
-				verify := m.fetchAccountDefault(instance, m.pendingProgram)
-				if verify == nil {
-					// The resolved program has no account registry to verify
-					// against; a name it cannot have must not keep displaying.
-					m.clearPendingAccount()
-				} else {
+				case m.accountLookupPending:
+					// A fetch is already owed an answer — the form-open
+					// preselect or a program correction's refetch. Arming it
+					// as the verify makes its landed reply the evidence the
+					// display needs, without a second round trip (#4893
+					// review).
 					m.accountVerifyPending = true
-					return m, tea.Batch(
-						m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
-						verify,
-					)
+					return m, m.handleNotice(errors.New("still resolving the displayed account — try again in a moment"))
+				default:
+					verify := m.fetchAccountDefault(instance, m.pendingProgram)
+					if verify == nil {
+						// The resolved program has no account registry to
+						// verify against; a name it cannot have must not keep
+						// displaying.
+						m.clearPendingAccount()
+					} else {
+						m.accountVerifyPending = true
+						return m, tea.Batch(
+							m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
+							verify,
+						)
+					}
 				}
 			}
 		}
@@ -332,8 +386,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.remoteDefaultVerifyPending = false
+		m.remoteDefaultVerifiedFor = ""
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
+		m.accountLookupPending = false
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
@@ -391,7 +448,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// DAEMON's — it can list agents this client's tmux.SupportedPrograms
 		// lacks, and a resolved default absent from it must still render as the
 		// selected row rather than collapsing the pick onto index 0 (#4889
-		// review).
+		// review). While that answer is still out the local enum is the wrong
+		// menu: a client-only program picked now would be sent concretely to a
+		// daemon that may not support it — hold the picker until the
+		// authoritative catalog lands (#4893 review).
+		if isRemoteTarget() && m.remoteDefaultPending {
+			return m, m.handleNotice(errors.New("still resolving the remote daemon's program catalog — try again in a moment"))
+		}
 		catalog := tmux.SupportedPrograms
 		if isRemoteTarget() && len(m.remoteProgramCatalog) > 0 {
 			catalog = m.remoteProgramCatalog
@@ -482,8 +545,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.remoteDefaultVerifyPending = false
+		m.remoteDefaultVerifiedFor = ""
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
+		m.accountLookupPending = false
 		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -534,8 +600,11 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingProgramChosen = false
 	m.remoteDefaultPending = false
 	m.remoteDefaultFailed = false
+	m.remoteDefaultVerifyPending = false
+	m.remoteDefaultVerifiedFor = ""
 	m.accountVerifyPending = false
 	m.accountVerifiedFor = ""
+	m.accountLookupPending = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {

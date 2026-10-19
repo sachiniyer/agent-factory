@@ -226,6 +226,11 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 	// implicit submit: "" would still resolve SOMETHING daemon-side, a program
 	// the field has never shown (#4893 review). The gate flips to its failed
 	// form, which asks for an explicit pick rather than another wait.
+	// wasVerify is captured first: only a reply to a fetch an implicit Enter
+	// armed may stamp remoteDefaultVerifiedFor — the submit-time re-read, not
+	// the form-open seed (#4893 review).
+	wasVerify := m.remoteDefaultVerifyPending
+	m.remoteDefaultVerifyPending = false
 	m.remoteDefaultPending = false
 	m.remoteDefaultFailed = false
 	if len(msg.programs) > 0 {
@@ -264,10 +269,21 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.pendingProgram == msg.program {
+		if wasVerify {
+			// The submit-armed answer matched the display — the field is
+			// verified for this Enter onward (#4893 review).
+			m.remoteDefaultVerifiedFor = msg.program
+		}
 		return m, nil
 	}
 	m.pendingProgram = msg.program
 	m.namingInstance.Program = msg.program
+	if wasVerify {
+		// The submit-armed answer moved the default: the correction below
+		// puts the live value on the field, which is the display the next
+		// Enter reviews (#4893 review).
+		m.remoteDefaultVerifiedFor = msg.program
+	}
 	// Every account state the OLD agent produced must go: a preselect or a
 	// deliberate pick belongs to that agent's registry, and keeping it would
 	// submit a name the resolved agent does not have — or pin a cross-agent

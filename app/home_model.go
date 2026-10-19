@@ -487,6 +487,25 @@ type home struct {
 	// against the live answer. A later reply applying a different name
 	// un-verifies the display until the next check (#4893 review).
 	accountVerifiedFor string
+	// accountLookupPending marks an account-default request still in flight —
+	// the preselect at form open, the refetch a program correction launches,
+	// or the verify an implicit Enter armed. While it is set the account
+	// field's display is unsettled: an implicit submit must hold until a
+	// current reply lands, because "" would let the daemon apply a named
+	// default the form never showed (#4893 review).
+	accountLookupPending bool
+	// remoteDefaultVerifyPending marks a remote ListPrograms answer that an
+	// implicit Enter re-requested rather than the routine form-open fetch:
+	// only that submit-armed reply may stamp remoteDefaultVerifiedFor, so the
+	// verification means "checked at submit", not "checked when the form
+	// opened" (#4893 review).
+	remoteDefaultVerifyPending bool
+	// remoteDefaultVerifiedFor is the remote counterpart of the local re-read
+	// before an implicit wire "": the program the latest submit-armed remote
+	// answer left on the field. A remote default can move under an open form
+	// exactly like the local one, so an implicit Enter may proceed only while
+	// the display still equals it (#4893 review).
+	remoteDefaultVerifiedFor string
 	// programPickerChoices is the option list the open program picker is
 	// showing, held alongside the overlay for the same reason
 	// accountPickerChoices is: a remote catalog cannot be mapped back through
