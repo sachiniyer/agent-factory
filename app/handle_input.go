@@ -280,11 +280,19 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			(m.accountLookupPending || m.accountLookupFailed || !m.accountVerified ||
 				(m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
 			switch {
-			case m.accountVerifyPending, m.accountLookupFailed:
-				// An earlier verify's answer is still out — or the last
-				// read failed, leaving the display unsettled — so re-fire
-				// and keep holding (#4893 review). handleAccountDefault
-				// clears the flags on the reply.
+			case m.accountVerifyPending:
+				// A verify is already in flight — another Enter waits for the
+				// answer that is coming rather than restarting the lookup and
+				// orphaning it: each re-fire bumps the sequence, so the
+				// outstanding reply would land stale and the one allowed to
+				// settle the form would be a request this press just started
+				// — on a slow daemon, key-repeat piles up concurrent lookups
+				// and never lets one answer (#4893 review).
+				return m, m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment"))
+			case m.accountLookupFailed:
+				// The last read failed, leaving the display unsettled — so
+				// re-fire and keep holding (#4893 review).
+				// handleAccountDefault clears the flags on the reply.
 				verify := m.fetchAccountDefault(instance, m.pendingProgram)
 				if verify == nil {
 					// The program lost its registry mid-verify — there is
@@ -296,7 +304,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.accountVerifyPending = true
 				return m, tea.Batch(
-					m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
+					m.handleNotice(errors.New("retrying the account lookup — press Enter to confirm")),
 					verify,
 				)
 			case m.accountLookupPending:

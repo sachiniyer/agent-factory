@@ -331,7 +331,8 @@ func TestWhitespaceOnlyPromptSendsNoPrompt(t *testing.T) {
 	typeRunes(t, h, "  ")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The submit re-checks the displayed account first (#4893 review).
+	submitVerifiedForm(t, h)
 
 	assert.Empty(t, got.Prompt, "a whitespace-only field must send no prompt")
 }

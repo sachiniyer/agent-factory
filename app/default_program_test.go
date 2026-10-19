@@ -304,10 +304,11 @@ func TestRemoteUntouchedSubmitSendsTheVerifiedRemoteDefault(t *testing.T) {
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Empty(t, got.Title, "the first Enter re-checks the remote default")
 	deliver(t, h, msgs)
-	// The unchosen account verifies too (#4893 review): another refire+reply
-	// before the confirming Enter.
+	// The unchosen account verifies too (#4893 review): another refire, and
+	// the ambient answer it lands submits itself — "" has no reviewable
+	// encoding, so a verified ambient reply re-enters the gate while its
+	// answer is still current.
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramClaude, got.Program,
 		"the verified display goes out concretely — a remote default that moved since the re-query cannot launch an unseen agent (#4893 review)")
@@ -354,10 +355,11 @@ func TestProgramPickerReselectingTheShownValueIsStillAChoice(t *testing.T) {
 	seed := h.pendingProgram
 
 	// The picker opens preselected on the seeded value; the user submits it
-	// unchanged — a decision, not an untouched field.
+	// unchanged — a decision, not an untouched field. The pick refires the
+	// account fetch, so its reply is delivered before the submit dance.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateSelectProgram, h.state)
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	require.Equal(t, stateNew, h.state)
 	require.Equal(t, seed, h.pendingProgram, "the re-pick changes nothing by value")
 	require.True(t, h.pendingProgramChosen, "but it IS an explicit choice")
@@ -419,9 +421,9 @@ func TestUntouchedNamingFormSubmitsAnImplicitProgram(t *testing.T) {
 	require.NoError(t, naming.SetTitle("demo"))
 
 	// The ambient account display is unverified too — the first Enter clears
-	// the program gate then refires the account lookup (#4893 review).
+	// the program gate then refires the account lookup; the ambient answer
+	// submits itself, since "" has no reviewable encoding (#4893 review).
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramClaude, got.Program,
 		"the verified display pins the wire — a default that moved after the re-read cannot launch an unseen agent (#4893 review)")
@@ -769,9 +771,9 @@ func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	deliver(t, h, msgs)
 	// The remote program is verified now — the unchosen account verifies too
-	// (#4893 review): one more refire+reply before the wire goes out.
+	// (#4893 review): one more refire, and the ambient answer it lands
+	// submits itself since "" has no reviewable encoding.
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, 0, calls,
 		"a remote target skips client-local prereqs — the daemon's host owns tmux, PATH and default_program")
@@ -909,10 +911,9 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
 		"the first Enter surfaces the moved default before submitting")
 	deliver(t, h, msgs)
-	// The cleared account verifies at submit too (#4893 review): one more
-	// refire+reply before the wire.
+	// The cleared account verifies at submit too (#4893 review): the refire's
+	// ambient answer submits itself — "" has no reviewable encoding.
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, tmux.ProgramCodex, got.Program,
 		"with the account back at ambient, the retry pins the verified config default (#4893 review)")
 	assert.Empty(t, got.Account, "a verified ambient display still encodes as an empty wire value")
@@ -1224,7 +1225,9 @@ func TestFailedRemoteDefaultKeepsImplicitSubmitGated(t *testing.T) {
 	// concretely.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateSelectProgram, h.state)
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The pick refires the account fetch — deliver its reply so the in-flight
+	// lookup is not owed when the submit dance runs (#4893 review).
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	// The chosen program submits concretely — the unchosen account verifies
 	// first (#4893 review): refire+reply, then the confirming Enter.
 	submitVerifiedForm(t, h)
@@ -1249,7 +1252,10 @@ func TestChosenProgramSubmitsWhileRemoteLookupPending(t *testing.T) {
 	got := recordStartRequest(t)
 
 	_, cmd := h.startNewInstance()
-	_ = drainCmd(t, cmd, 200*time.Millisecond)
+	// The blocked ListPrograms never answers inside the drain window, but the
+	// account fetch does — deliver its reply so the in-flight lookup is not
+	// owed when the concrete submit runs (#4893 review).
+	deliver(t, h, drainCmd(t, cmd, 200*time.Millisecond))
 	require.True(t, h.remoteDefaultPending, "the remote fetch armed the gate")
 	require.NoError(t, h.namingInstance.SetTitle("demo"))
 
@@ -1449,9 +1455,9 @@ func TestMovedLocalDefaultRequiresAReviewEnter(t *testing.T) {
 	deliver(t, h, msgs)
 
 	// The review Enter clears the program gate — and the unchosen account
-	// verifies too (#4893 review): one more refire+reply before the wire.
+	// verifies too (#4893 review): the refire's ambient answer submits
+	// itself, since "" has no reviewable encoding.
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramCodex, got.Program,
 		"the reviewed default pins the wire — the submit carries what the field showed (#4893 review)")

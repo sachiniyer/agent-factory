@@ -137,6 +137,11 @@ func submitVerifiedForm(t *testing.T, h *home) []tea.Msg {
 	t.Helper()
 	var msgs []tea.Msg
 	for i := 0; i < 4; i++ {
+		if h.state == stateDefault {
+			// A verified ambient reply re-enters the gate itself (#4893
+			// review): the submit may already have completed inside deliver.
+			return msgs
+		}
 		msgs = pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 		if h.state == stateDefault {
 			return msgs
@@ -563,10 +568,10 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 	assert.Empty(t, got.Title, "a failed verify cannot release the submit")
 	assert.True(t, h.accountLookupFailed, "the dead lookup stays owed")
 
-	// The daemon comes back on the next retry: ambient verifies, the review
-	// Enter submits on the ambient identity the field showed.
+	// The daemon comes back on the next retry: the ambient answer submits
+	// itself — "" has no reviewable encoding, so a verified ambient reply
+	// leaves while it is still the live one (#4893 review).
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account, "the create still goes through, on the ambient identity")
 	assert.Equal(t, "daemon-is-out", got.Title)
 }

@@ -295,7 +295,11 @@ func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea
 	// retire drops the owed-answer markers when no request is going out: a
 	// reply can never arrive to discharge them, so leaving one armed would
 	// hold every later Enter for a fetch that does not exist (#4893 review).
+	// An armed verify retires with them — its reply being superseded is the
+	// only way this path is reached mid-verify, and holding on it would wedge
+	// the submit for good.
 	retire := func() tea.Cmd {
+		m.accountVerifyPending = false
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
 		return nil
@@ -432,6 +436,17 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		}
 		if wasVerify {
 			m.accountVerifiedFor = ambientAccount
+			// Ambient has no wire encoding past "", and "" resolves the LIVE
+			// default at create — a review press would send that same ""
+			// against a default_accounts that may already have moved again.
+			// The only honest submit is the one leaving while this answer is
+			// still current, so a verified ambient reply re-enters the submit
+			// gate itself rather than waiting on a press that can say no more
+			// (#4893 review). stateNew only: a synthetic Enter inside an open
+			// picker would select a row.
+			if m.state == stateNew {
+				return m, func() tea.Msg { return tea.KeyMsg{Type: tea.KeyEnter} }
+			}
 		}
 		return m, nil
 	}
@@ -635,6 +650,7 @@ func (m *home) clearPendingAccount() {
 	m.pendingAccountChosen = false
 	m.accountVerifiedFor = ambientAccount
 	m.accountVerified = false
+	m.accountVerifyPending = false
 	m.accountLookupFailed = false
 	m.menu.SetNamingAccount(false)
 }

@@ -49,9 +49,10 @@ func TestFailedLocalRevalidateRefusesImplicitSubmit(t *testing.T) {
 		return tmux.ProgramClaude, nil
 	}
 	// The account display verifies at submit too (#4893 review): the good
-	// re-read Enter still owes the account its refire+reply.
+	// re-read Enter refires the lookup, and the ambient answer it lands
+	// submits itself — "" has no reviewable encoding, so a verified ambient
+	// reply re-enters the gate while its answer is still current.
 	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
 }
 
@@ -423,9 +424,39 @@ func TestAmbientAccountDisplayStillVerifies(t *testing.T) {
 	require.NotEmpty(t, *calls, "the verify asked the daemon even with nothing displayed")
 	deliver(t, h, msgs)
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Equal(t, "demo", got.Title, "the verified ambient display submits")
+	// Ambient has no wire encoding past "", and "" resolves the live default
+	// at create — a review press could send that same "" against a
+	// default_accounts that already moved, so the verified reply submits
+	// itself while its answer is still current (#4893 review).
+	assert.Equal(t, stateDefault, h.state, "the verified ambient reply submits without a second Enter")
+	assert.Equal(t, "demo", got.Title)
 	assert.Empty(t, got.Account, "ambient stays implicit — honestly, not by skip")
+}
+
+// TestInFlightVerifyDoesNotRefire pins the #4893 review finding on key repeat:
+// an Enter arriving while a verification request is still out must WAIT on the
+// answer that is coming — restarting the lookup orphans the outstanding reply
+// behind a bumped sequence and, on a slow daemon, piles up requests without
+// ever letting one settle the form.
+func TestInFlightVerifyDoesNotRefire(t *testing.T) {
+	h := configFollowingHome(t)
+	calls, _ := stubAccounts(t, daemon.ListAccountsResponse{}, nil)
+	got := recordStartRequest(t)
+	startNaming(t, h, "hold-the-verify")
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, h.accountVerifyPending)
+	require.Equal(t, 1, *calls, "the first Enter fired exactly one verify")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, 1, *calls, "a second Enter waits on the answer it already asked for")
+	assert.True(t, h.accountVerifyPending, "the in-flight verify is not orphaned")
+	assert.Empty(t, got.Title, "no submit while the answer is still out")
+
+	// The original answer still settles the submit — ambient replies submit
+	// themselves, since "" has no reviewable encoding (#4893 review).
+	deliver(t, h, msgs)
+	assert.Equal(t, "hold-the-verify", got.Title)
 }
 
 // TestAccountlessProgramRetiresTheLookupMarkers pins the #4893 review wedge:
