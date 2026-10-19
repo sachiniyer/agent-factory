@@ -63,12 +63,15 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			h.repoRoot = repoDeclaringBackend(t, tc.repoBackend)
 			startNaming(t, h, "repo-declared-backend")
 
-			// A refusal ends in a transient notice whose cmd is a timer, so the
-			// refused leg does not wait on the press's cmd (pressExpectingNotice).
+			// The first Enter arms the submit-time account check (#4893); the
+			// confirming press reaches preflight. A refusal ends in a transient
+			// notice whose cmd is a timer, so the refused leg does not wait on
+			// the press's cmd (pressExpectingNotice).
 			if tc.wantRefused {
+				deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 				pressExpectingNotice(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			} else {
-				pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+				submitVerifiedForm(t, h)
 			}
 
 			if tc.wantRefused {
@@ -80,7 +83,8 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			require.Equal(t, stateDefault, h.state,
 				"a repo that declares a sandbox backend must not be refused for a missing local agent")
 			assert.Empty(t, h.errBox.FullError(),
-				"nothing about the local agent applies to a session that runs off-box")
+				"nothing about the local agent applies to a session that runs off-box — "+
+					"the submit retracts the account-check notice it consumed (#4893 review)")
 			assert.Empty(t, got.Backend,
 				"an untouched backend field still sends nothing — the repo key decides, as it always did")
 		})
@@ -104,7 +108,7 @@ func TestNamingPreflightDoesNotRefuseABackendItCannotResolve(t *testing.T) {
 	startNaming(t, h, "future-backend")
 	h.pendingBackend = "moonbase"
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	require.Equal(t, stateDefault, h.state,
 		"a backend only the daemon knows about must still submit")
@@ -143,6 +147,6 @@ func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
 	submitVerifiedForm(t, h)
 	require.Equal(t, stateDefault, h.state,
 		"a remote create leaves preflight without touching client-local resolution")
-	assert.NotContains(t, h.errBox.FullError(), "preflight",
-		"the transient verify notices are gate feedback, not client-local checks")
+	assert.Empty(t, h.errBox.FullError(),
+		"the submit retracts the verify notice it consumed — nothing is left on the bar")
 }

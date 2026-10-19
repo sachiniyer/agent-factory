@@ -285,17 +285,22 @@ func isActiveStatus(status session.Status) bool {
 }
 
 // confirmNamingSubmit performs the two-stage naming submit: the first Enter
-// re-checks the displayed account against the daemon's live answer (#4893);
-// the real tea loop delivers that reply, and the confirming Enter then
+// either re-checks the displayed account against the daemon's live answer and
+// holds (#4893) or, for a program with no account registry, submits directly.
+// The real tea loop delivers the verify reply; the confirming Enter then
 // releases the wire.
 func (eh *e2eHarness) confirmNamingSubmit() {
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	eh.waitUntil(e2eAsyncTimeout, "submit-time account check answered", func() bool {
-		var verified bool
-		eh.query(func(h *home) { verified = h.accountVerified })
-		return verified
+	eh.waitUntil(e2eAsyncTimeout, "submit-time account check answered or the form submitted", func() bool {
+		var settled bool
+		eh.query(func(h *home) { settled = h.accountVerified || h.state != stateNew })
+		return settled
 	})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	var stillOpen bool
+	eh.query(func(h *home) { stillOpen = h.state == stateNew })
+	if stillOpen {
+		eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	}
 }
 
 // ----------------------------------------------------------------------------

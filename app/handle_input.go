@@ -50,6 +50,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountLookupFailed = false
 		m.accountVerified = false
 		m.remoteProgramCatalog = nil
+		// Same retraction as the submit tail: a gate notice still on the bar
+		// asks for an Enter the closed form can no longer take (#4893 review).
+		m.errBox.Clear()
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -439,6 +442,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
+		// The gate notices all ask for another Enter — retracted rather than
+		// left painted over the sidebar for their remaining timer once the
+		// create actually goes out (#4893 review).
+		m.errBox.Clear()
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
@@ -598,6 +605,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountLookupFailed = false
 		m.accountVerified = false
 		m.remoteProgramCatalog = nil
+		// Same retraction as the submit tail: a gate notice still on the bar
+		// asks for an Enter the closed form can no longer take (#4893 review).
+		m.errBox.Clear()
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 

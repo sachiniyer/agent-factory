@@ -63,7 +63,7 @@ func TestNewRemotePendingCatalogFailureAllowsSubmit(t *testing.T) {
 	h.handleBackendCatalog(backendCatalogMsg{naming: h.namingInstance, err: errors.New("catalog offline")})
 	require.Equal(t, stateNew, h.state)
 	assert.Contains(t, h.errBox.FullError(), "cannot list backends for this repo: catalog offline")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 	assert.Equal(t, "catalog-failed", got.Title, "fetch failure must release the submit guard")
 }
 
@@ -85,7 +85,7 @@ func TestNewRemotePendingCatalogCancelDoesNotBlockNextForm(t *testing.T) {
 			require.Equal(t, stateNew, h.state, "stale reply must not open a picker")
 			h.pendingProgram = "sh"
 			require.NoError(t, h.namingInstance.SetTitle("ordinary-create"))
-			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+			submitVerifiedForm(t, h)
 			assert.Equal(t, "ordinary-create", got.Title)
 		})
 	}
