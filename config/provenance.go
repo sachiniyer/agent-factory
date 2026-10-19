@@ -272,6 +272,28 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		candidate.leaves = leaves
 		candidate.configuredCount = configuredCount
 		candidate.normalizedCount = normalizedCount
+		if structBacked {
+			// A single source that contains both "image" and "Image" decodes
+			// both onto the same struct field (the decoder is last-write-wins),
+			// so compositeLeaves leaves them as two physical spellings in leaves
+			// that both point at the same reflect.Value. Collapse them to one
+			// entry per canonical struct field before the merge loop and the
+			// surviving-count accounting iterate leaves, otherwise the merge
+			// loop deletes and re-adds the origin under the same canonical
+			// mergeKey in map-iteration order (non-deterministic winning
+			// KeyPath) and the surviving count reports the single source as
+			// partially-shadowed (#5397 review). configuredCount is reduced by
+			// the number of collapsed duplicates so the ignored accounting
+			// (configuredCount - len(leaves)) does not count the folded
+			// spellings as load-time-removed; the decoder already resolved
+			// them to one field value, so they are not unknown leaves.
+			collapsed := collapseStructLeaves(targetType, leaves)
+			if len(collapsed) != len(leaves) {
+				candidate.configuredCount -= len(leaves) - len(collapsed)
+				candidate.leaves = collapsed
+				leaves = collapsed
+			}
+		}
 
 		if candidate.document.valueSemantics == sourceValueSnapshot {
 			full, _, _, snapshotMaterialized, err := compositeLeaves(candidate.typed, nil, true)
@@ -771,6 +793,13 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	projected.Default = ""
 	projected.Origins = nil
 	winner, present := parent.Origins[leaf]
+	// physicalLeaf is the file's physical spelling for the leaf, used to
+	// project candidate values whose raw map is keyed by that spelling (the
+	// exact-match path below leaves it equal to leaf). The case-variant
+	// fallback sets it to the physical spelling found in Origins so a
+	// non-built-in candidate's map-keyed Value projects the leaf instead of
+	// being marked absent (#5397 review).
+	physicalLeaf := leaf
 	if !present {
 		// Struct-backed composites key Origins by the file's physical spelling
 		// (e.g. "Image"), so a case-variant leaf that survived the resolver
@@ -789,6 +818,7 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 				if strings.EqualFold(physical, leaf) {
 					winner = candidate
 					present = true
+					physicalLeaf = physical
 					break
 				}
 			}
@@ -817,6 +847,20 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 		parentReason := candidate.Reason
 		candidate.KeyPath = keyPath
 		leafValue, present := configLeafValue(candidate.Value, leaf)
+		if !present && physicalLeaf != leaf {
+			// The parent is a struct-backed composite and the caller passed the
+			// canonical lowercase spelling while the winner's origin (and a
+			// non-built-in candidate's raw map) is keyed by the file's physical
+			// spelling (e.g. "Image"). The winner's layer was identified above by
+			// folding the origin lookup; project the candidate's value with the
+			// physical spelling too, otherwise the winning repo candidate's
+			// map-keyed Value misses the exact lookup and is marked absent even
+			// though Winner identifies that same layer — a contradictory trace
+			// (#5397 review). Built-in candidates carry a typed struct Value, so
+			// configLeafValue already folded case for them via taggedFieldByKey
+			// and the retry is a no-op.
+			leafValue, present = configLeafValue(candidate.Value, physicalLeaf)
+		}
 		candidate.Present = candidate.Present && present
 		if candidate.Present {
 			candidate.Value = leafValue

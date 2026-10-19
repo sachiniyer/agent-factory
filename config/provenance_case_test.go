@@ -600,3 +600,121 @@ func TestResolveConfigCaseVariantLeafCanonicalSpellingDoesNotFoldMapKeys(t *test
 		assert.Equal(t, "", upper.Value, "no value should be projected for a missing exact map key")
 	}
 }
+
+// TestResolveConfigCaseVariantLeafProjectionProjectsWinner is the regression test
+// for the #5397 follow-up finding that the canonical-spelling projection marked the
+// winning repo candidate absent. ResolvedValuePath("docker.image") (the canonical
+// lowercase spelling) finds the winner via the case-folding origin fallback, but the
+// candidate projection loop below called configLeafValue(candidate.Value, "image")
+// with the canonical spelling, and a non-built-in candidate's Value is the raw
+// metadata map keyed by the file's physical spelling ("Image"), so the exact map
+// lookup missed and the winning repo candidate was reported as absent even though
+// Winner identified that same layer — an internally contradictory trace. The fix
+// retains the physical spelling the origin fallback found and retries the candidate
+// projection with it, so the winning repo candidate projects the leaf and is
+// reported as "winner". A lower-precedence built-in source whose typed struct Value
+// is keyed by the canonical tag is projected by taggedFieldByKey's case fold (the
+// retry is a no-op for it), so it is reported as shadowed, not absent.
+func TestResolveConfigCaseVariantLeafProjectionProjectsWinner(t *testing.T) {
+	repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
+	writeInRepoTomlConfig(t, repoRoot, "[docker]\nImage = \"prov/image:latest\"\n")
+
+	res, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	require.Equal(t, "prov/image:latest", res.Docker.Image)
+
+	leaf, ok := res.ResolvedValuePath("docker.image")
+	require.True(t, ok, "the canonical lowercase spelling must project a case-variant leaf")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, SourceRepoShared.String(), leaf.Winner.Layer,
+		"the winner is the in-repo source that supplied the case-variant leaf")
+	assert.Equal(t, "docker.Image", leaf.Winner.KeyPath,
+		"the winner KeyPath retains the file's physical spelling")
+
+	for _, candidate := range leaf.Candidates {
+		switch candidate.Layer {
+		case SourceRepoShared.String():
+			assert.Equal(t, "winner", candidate.Result,
+				"the winning repo candidate must be reported as winner, not absent (its map-keyed Value projects via the physical spelling)")
+			assert.True(t, candidate.Present, "the winning repo candidate must be present in the projection")
+			assert.Equal(t, "prov/image:latest", candidate.Value,
+				"the winning repo candidate's projected value is the case-variant leaf the operator wrote")
+		}
+	}
+}
+
+// TestResolveConfigCaseVariantLeavesCollapseSameSourceDuplicates is the regression
+// test for the #5397 follow-up finding that a single source containing both
+// "docker.image" and a case variant such as "docker.Image" left two physical
+// spellings in candidate.leaves. encoding/json and go-toml/v2 both decode
+// case-variant keys onto the same struct field (last-write-wins for the value),
+// so the two leaves pointed at the same reflect.Value. The merge loop processed
+// both under the same canonical mergeKey, deleting and re-adding the origin in
+// map-iteration order, so the reported winning KeyPath varied between
+// "docker.image" and "docker.Image" across runs, and the surviving-count
+// accounting reported the single source as partially-shadowed (one of the two
+// physical leaves had no surviving origin) even though both came from the same
+// source. The fix collapses each candidate's leaf set to one entry per canonical
+// struct field before origin and contribution accounting, preferring the canonical
+// tag spelling if the source used it (so the origin's KeyPath is deterministic).
+// This test pins both the determinism and the contributed (not partially-shadowed)
+// result, for both a JSON source with both spellings and a TOML source with both.
+func TestResolveConfigCaseVariantLeavesCollapseSameSourceDuplicates(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		body   string
+	}{
+		{
+			name:   "json both image and Image",
+			format: "json",
+			body:   `{"docker":{"Image":"prov/image:latest","image":"prov/image:latest"}}`,
+		},
+		{
+			name:   "json both IMAGE and image",
+			format: "json",
+			body:   `{"docker":{"IMAGE":"prov/image:latest","image":"prov/image:latest"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
+			if tc.format == "toml" {
+				writeInRepoTomlConfig(t, repoRoot, tc.body)
+			} else {
+				writeInRepoConfig(t, repoRoot, tc.body)
+			}
+
+			res, err := ResolveConfig(repoRoot)
+			require.NoError(t, err)
+			require.Equal(t, "prov/image:latest", res.Docker.Image,
+				"the decoded value survives resolution regardless of which spelling the decoder kept")
+
+			value := requireResolvedValue(t, res, "docker")
+			repo := candidateForLayer(t, value, SourceRepoShared)
+			assert.Equal(t, "contributed", repo.Result,
+				"a single source's two spellings of one field are one effective entry, not partially-shadowed")
+			assert.NotContains(t, repo.Reason, "overridden by higher-precedence",
+				"no higher-precedence source overrode the duplicate; both spellings came from the same source")
+
+			// The origin's KeyPath must be deterministic across runs: the collapse
+			// prefers the canonical tag spelling when the source used it, so both
+			// spellings collapse to "docker.image" (the canonical toml tag).
+			seen := map[string]int{}
+			for i := 0; i < 100; i++ {
+				res2, err2 := ResolveConfig(repoRoot)
+				require.NoError(t, err2)
+				v2 := requireResolvedValue(t, res2, "docker")
+				for _, origin := range v2.Origins {
+					seen[origin.KeyPath]++
+				}
+			}
+			require.Len(t, seen, 1,
+				"the winning KeyPath must be deterministic across runs, got %v", seen)
+			for keyPath := range seen {
+				assert.Equal(t, "docker.image", keyPath,
+					"the collapse prefers the canonical tag spelling when the source used it")
+			}
+		})
+	}
+}
