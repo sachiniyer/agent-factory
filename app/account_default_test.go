@@ -237,9 +237,9 @@ func TestImplicitSubmitVerifiesTheDisplayedAccount(t *testing.T) {
 	require.Equal(t, "work", h.pendingAccount, "the live answer stayed on the field")
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Equal(t, "demo", got.Title, "the reviewed display may now submit implicitly")
-	assert.Empty(t, got.Program)
-	assert.Empty(t, got.Account, "an unchosen account still leaves the wire to the daemon")
+	assert.Equal(t, "demo", got.Title, "the reviewed display may now submit")
+	assert.Equal(t, tmux.ProgramClaude, got.Program, "the verified program pins the wire (#4893 review)")
+	assert.Equal(t, "work", got.Account, "the verified account pins alongside it (#4893 review)")
 }
 
 // TestImplicitSubmitShowsTheVerifyAnswer is the moved half of the same
@@ -292,7 +292,7 @@ func TestEmptyChosenAccountDoesNotBlockTheRemoteCorrection(t *testing.T) {
 	h.pendingAccountChosen = true
 	require.Empty(t, h.pendingAccount)
 
-	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex, programs: []string{tmux.ProgramCodex}})
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, seq: h.remoteDefaultSeq, program: tmux.ProgramCodex, programs: []string{tmux.ProgramCodex}})
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
 		"an empty account choice does not freeze the local seed under the remote default")
 	assert.False(t, h.pendingAccountChosen, "the correction still clears the ambient pick")

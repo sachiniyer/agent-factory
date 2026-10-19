@@ -149,6 +149,7 @@ func (m *home) sendProgramForCreate() string {
 // resolve to (#4889 review).
 type remoteDefaultMsg struct {
 	naming   *session.Instance
+	seq      int64
 	program  string
 	programs []string
 	err      error
@@ -190,6 +191,8 @@ func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
 	if naming == nil {
 		return nil
 	}
+	m.remoteDefaultSeq++
+	seq := m.remoteDefaultSeq
 	repoPath := m.repoRoot
 	fetch := listProgramsThroughDaemon
 	return func() tea.Msg {
@@ -198,7 +201,7 @@ func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
 		for _, p := range resp.Programs {
 			programs = append(programs, p.Name)
 		}
-		return remoteDefaultMsg{naming: naming, program: resp.Default, programs: programs, err: err}
+		return remoteDefaultMsg{naming: naming, seq: seq, program: resp.Default, programs: programs, err: err}
 	}
 }
 
@@ -219,6 +222,14 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.namingInstance == nil || m.namingInstance != msg.naming {
+		return m, nil
+	}
+	// The naming pointer alone cannot fence a stale reply: a failed remote
+	// create restores the SAME session.Instance and re-fires the lookup, so
+	// the earlier fetch's answer would pass the pointer guard, clear the new
+	// lookup's gate, and install its stale catalog (#4893 review). The
+	// issuance sequence fences it — only the latest fetch's reply counts.
+	if msg.seq != m.remoteDefaultSeq {
 		return m, nil
 	}
 	// Only a usable answer — no error, and a default to display — lifts the

@@ -273,13 +273,15 @@ func stubRemoteProgramFeed(t *testing.T, program string) {
 	}))
 }
 
-// TestRemoteUntouchedSubmitLeavesTheProgramImplicit: for a remote daemon an
-// untouched field still DISPLAYS the launch-time local default — the remote
-// daemon's default_program is remote state no synchronous read can see — but
-// the wire carries "" so the remote daemon resolves its own live default
-// (#4889 review). Sending the local seed explicitly would override the remote
-// default with a program that may not even exist on that host.
-func TestRemoteUntouchedSubmitLeavesTheProgramImplicit(t *testing.T) {
+// TestRemoteUntouchedSubmitSendsTheVerifiedRemoteDefault: for a remote
+// daemon an untouched field still DISPLAYS the launch-time local default —
+// the remote daemon's default_program is remote state no synchronous read
+// can see. Submit-time re-verification proves the display against the
+// daemon's live answer, and the verified value pins the wire concretely so
+// a remote default that moved between the check and the create cannot
+// launch an agent the form never showed (#4893 review). The draft stays
+// unchosen — a failed create still restores config-following.
+func TestRemoteUntouchedSubmitSendsTheVerifiedRemoteDefault(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
 	stubRemoteProgramFeed(t, tmux.ProgramClaude)
@@ -412,8 +414,8 @@ func TestUntouchedNamingFormSubmitsAnImplicitProgram(t *testing.T) {
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
-	assert.Empty(t, got.Program,
-		"a program the field only showed is not the user's pick — the daemon resolves it live")
+	assert.Equal(t, tmux.ProgramClaude, got.Program,
+		"the verified display pins the wire — a default that moved after the re-read cannot launch an unseen agent (#4893 review)")
 	assert.Equal(t, tmux.ProgramClaude, naming.Program,
 		"the placeholder keeps the resolved value — it is what a failed-create restore reseeds")
 }
@@ -548,9 +550,9 @@ func TestImplicitProgramDropsAnUnchosenAccountPreselect(t *testing.T) {
 		}
 	}
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Empty(t, got.Program, "the untouched program stays implicit")
-	assert.Empty(t, got.Account,
-		"an account preselected FOR the displayed program must not become an explicit account for the resolved one")
+	assert.Equal(t, tmux.ProgramClaude, got.Program, "the verified display pins the wire (#4893 review)")
+	assert.Equal(t, "work", got.Account,
+		"the verified unchosen account pins too — it is exactly what the daemon's live resolution would have applied (#4893 review)")
 }
 
 // TestChosenAccountPinsTheDisplayedProgram is the other half of the pairing
@@ -604,8 +606,8 @@ func TestFailedCreateRestoreKeepsAnImplicitProgramImplicit(t *testing.T) {
 		"the restored field shows the live default the retry resolves")
 	require.NoError(t, h.namingInstance.SetTitle("demo2"))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Empty(t, got.Program,
-		"the retry resolves the live default rather than replaying the dead one")
+	assert.Equal(t, tmux.ProgramAider, got.Program,
+		"the retry pins the verified live default — not the dead draft's and not a later move (#4893 review)")
 }
 
 // TestPreflightChecksTheProgramTheDaemonWillResolve is the preflight half
@@ -645,7 +647,8 @@ func TestPreflightChecksTheProgramTheDaemonWillResolve(t *testing.T) {
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, tmux.ProgramAider, checked,
 		"preflight validates the program the daemon will resolve, not the stale seed")
-	assert.Empty(t, got.Program, "the create itself still goes out implicit")
+	assert.Equal(t, tmux.ProgramAider, got.Program,
+		"the verified display pins the wire (#4893 review)")
 }
 
 // TestPreflightChecksTheProgramAChosenAccountPins is the account-pick half
@@ -895,9 +898,9 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 		"the first Enter surfaces the moved default before submitting")
 	deliver(t, h, msgs)
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Empty(t, got.Program,
-		"with the account back at ambient, the retry follows the config default again")
-	assert.Empty(t, got.Account)
+	assert.Equal(t, tmux.ProgramCodex, got.Program,
+		"with the account back at ambient, the retry pins the verified config default (#4893 review)")
+	assert.Empty(t, got.Account, "a verified ambient display still encodes as an empty wire value")
 }
 
 // TestStaleAccountDefaultReplyCannotOverwriteTheRefetch pins the #4889 review
@@ -1066,7 +1069,7 @@ func TestRemoteTargetSubmitWaitsForTheDefaultAnswer(t *testing.T) {
 	require.Equal(t, stateNew, h.state)
 
 	// The answer lands; the gate lifts and the corrected program shows.
-	_, _ = h.Update(remoteDefaultMsg{naming: h.namingInstance, program: tmux.ProgramCodex})
+	_, _ = h.Update(remoteDefaultMsg{naming: h.namingInstance, seq: h.remoteDefaultSeq, program: tmux.ProgramCodex})
 	require.False(t, h.remoteDefaultPending)
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram)
 }
@@ -1085,7 +1088,7 @@ func TestRemoteDefaultDoesNotReplaceALaunchFixedProgram(t *testing.T) {
 	h.pendingProgram = tmux.ProgramGemini
 	inst.Program = tmux.ProgramGemini
 
-	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex})
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, seq: h.remoteDefaultSeq, program: tmux.ProgramCodex})
 	require.Equal(t, tmux.ProgramGemini, h.pendingProgram,
 		"the launch-fixed program survives the remote answer")
 	assert.Equal(t, tmux.ProgramGemini, h.sendProgramForCreate(),
@@ -1106,7 +1109,7 @@ func TestRemoteDefaultClearsTheOldAgentsAccount(t *testing.T) {
 	inst := startNaming(t, h, "demo")
 	h.pendingAccount = "work"
 
-	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex})
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, seq: h.remoteDefaultSeq, program: tmux.ProgramCodex})
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram)
 	assert.Empty(t, h.pendingAccount, "the old agent's preselect cannot pair with the new program")
 	assert.False(t, h.pendingAccountChosen)
@@ -1125,7 +1128,7 @@ func TestRemoteDefaultPreservesAChosenAccountPair(t *testing.T) {
 	h.pendingAccount = "work"
 	h.pendingAccountChosen = true
 
-	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex})
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, seq: h.remoteDefaultSeq, program: tmux.ProgramCodex})
 	assert.Equal(t, tmux.ProgramClaude, h.pendingProgram,
 		"a chosen account already committed the pair — the correction must not unpair it")
 	assert.Equal(t, "work", h.pendingAccount)
@@ -1144,7 +1147,7 @@ func TestProgramPickerUsesTheRemoteCatalog(t *testing.T) {
 
 	inst := startNaming(t, h, "demo")
 	_, _ = h.Update(remoteDefaultMsg{
-		naming: inst, program: "newagent",
+		naming: inst, seq: h.remoteDefaultSeq, program: "newagent",
 		programs: []string{"claude", "newagent"},
 	})
 
@@ -1190,7 +1193,7 @@ func TestFailedRemoteDefaultKeepsImplicitSubmitGated(t *testing.T) {
 
 	// The lookup answered unusably: the gate flips to its failed form and an
 	// implicit Enter is refused — no silent "" to an unknown resolver.
-	_, _ = h.Update(remoteDefaultMsg{naming: h.namingInstance, err: errors.New("daemon unreachable")})
+	_, _ = h.Update(remoteDefaultMsg{naming: h.namingInstance, seq: h.remoteDefaultSeq, err: errors.New("daemon unreachable")})
 	require.False(t, h.remoteDefaultPending)
 	require.True(t, h.remoteDefaultFailed)
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -1298,7 +1301,7 @@ func TestRemoteDefaultDismissesAnOpenProgramPicker(t *testing.T) {
 	require.NotNil(t, h.selectionOverlay, "picker open on the landed catalog")
 
 	_, _ = h.Update(remoteDefaultMsg{
-		naming:   h.namingInstance,
+		naming: h.namingInstance, seq: h.remoteDefaultSeq,
 		program:  tmux.ProgramCodex,
 		programs: []string{"claude", "codex", "newagent"},
 	})
@@ -1338,7 +1341,7 @@ func TestRemoteOnlyProgramResolvesAccountsFromTheDaemonRoster(t *testing.T) {
 
 	// The remote default names a program the local enum cannot classify.
 	_, refetch := h.Update(remoteDefaultMsg{
-		naming:   h.namingInstance,
+		naming: h.namingInstance, seq: h.remoteDefaultSeq,
 		program:  "newagent",
 		programs: []string{"newagent"},
 	})
@@ -1429,5 +1432,6 @@ func TestMovedLocalDefaultRequiresAReviewEnter(t *testing.T) {
 	// second press submits the same default the field now shows.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
-	assert.Equal(t, "", got.Program, "the submit stays implicit — now showing what it resolves to")
+	assert.Equal(t, tmux.ProgramCodex, got.Program,
+		"the reviewed default pins the wire — the submit carries what the field showed (#4893 review)")
 }

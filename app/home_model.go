@@ -459,6 +459,12 @@ type home struct {
 	// still pends — and the older reply landing last must not overwrite the
 	// newer answer (#4889 review).
 	accountDefaultSeq int64
+	// remoteDefaultSeq is the issuance counter fetchRemoteDefaultProgram
+	// stamps on each remoteDefaultMsg it launches. A restore re-fires the
+	// lookup for the SAME session.Instance, so the naming pointer alone
+	// cannot fence the earlier reply — it would clear the new lookup's gate
+	// and install its stale catalog (#4893 review).
+	remoteDefaultSeq int64
 	// remoteDefaultPending marks the window between a remote-target form open
 	// (or implicit restore) and the ListPrograms reply: submitting "" before the
 	// daemon's resolved default corrects the field would create a program the

@@ -168,6 +168,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		sendProgram := m.sendProgramForCreate()
+		// localProgramVerified records that THIS Enter's synchronous re-read
+		// matched the displayed program — the only proof an implicit wire ""
+		// would resolve what the field showed (#4893 review). The verified
+		// display pins the wire below, like the remote half does.
+		localProgramVerified := false
 		// An IMPLICIT wire program ("" — the daemon resolves default_program at
 		// create) carries honesty obligations a concrete program does not: the
 		// field must have shown what "" will resolve to. These gates therefore
@@ -251,6 +256,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.fetchAccountDefault(instance, resolved),
 					)
 				}
+				localProgramVerified = true
 			}
 			// The displayed account is the same kind of stale cache: the
 			// preselect arrived from a default_accounts read at form open, and
@@ -358,6 +364,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sendAccount := m.pendingAccount
 		if sendProgram == "" {
 			sendAccount = ""
+			// A named display verified at submit pins the wire exactly like
+			// the verified program: default_accounts can move between the
+			// verify reply and this create, and "" would resolve an identity
+			// the form never showed (#4893 review). A verified-ambient display
+			// has no encoding beyond "", which is honest.
+			if m.pendingAccount == m.accountVerifiedFor {
+				sendAccount = m.accountVerifiedFor
+			}
 		}
 		// The failed-create draft needs the user's CHOICES beside the wire
 		// values the rules above produced: an account-pinned program and a
@@ -379,8 +393,15 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// failed create still restores config-following — and an unverified
 		// display can never reach here: the gate above held it.
 		wireProgram := sendProgram
-		if wireProgram == "" && isRemoteTarget() &&
-			m.remoteDefaultVerifiedFor != "" && m.pendingProgram == m.remoteDefaultVerifiedFor {
+		displayVerified := localProgramVerified ||
+			(isRemoteTarget() && m.remoteDefaultVerifiedFor != "" &&
+				m.pendingProgram == m.remoteDefaultVerifiedFor)
+		if wireProgram == "" && displayVerified {
+			// Either side's verification — the synchronous local re-read or
+			// the remote re-query reply — proved the display; pin it so a
+			// default that moves between the check and the daemon's own
+			// resolution cannot launch an agent the form never showed
+			// (#4893 review).
 			wireProgram = m.pendingProgram
 		}
 		// Read the pending prompt here, on the event loop, and clear it with the

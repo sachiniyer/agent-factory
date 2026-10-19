@@ -170,8 +170,8 @@ func TestMovedDefaultHoldsUntilTheRefetchAnswers(t *testing.T) {
 	require.Equal(t, "ci", h.pendingAccount)
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	assert.Equal(t, "demo", got.Title, "the reviewed display may now submit implicitly")
-	assert.Empty(t, got.Account, "unchosen — the daemon resolves the live default")
+	assert.Equal(t, "demo", got.Title, "the reviewed display may now submit")
+	assert.Equal(t, "ci", got.Account, "the verified account pins the wire (#4893 review)")
 }
 
 // TestRemoteImplicitSubmitReverifiesTheDefault pins the #4893 review finding
@@ -280,6 +280,42 @@ func TestFailedAccountLookupStaysOwed(t *testing.T) {
 	require.Equal(t, "ops", h.pendingAccount, "the retry's answer applied")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
-	assert.Empty(t, got.Account,
-		"the submit stays implicit — an empty wire resolves the same verified default the field shows")
+	assert.Equal(t, "ops", got.Account, "the verified account pins the wire (#4893 review)")
+}
+
+// TestStaleRemoteReplyCannotSettleARestoredLookup pins the #4893 review
+// finding on reply ordering across restores: a failed remote create restores
+// the SAME session.Instance and re-fires ListPrograms, so the earlier fetch's
+// reply passes the naming-pointer guard — only the issuance sequence can
+// fence it. Without the fence the stale answer would clear the new lookup's
+// gate and install its catalog for the picker to offer.
+func TestStaleRemoteReplyCannotSettleARestoredLookup(t *testing.T) {
+	clearDaemonTarget(t)
+	stubRemoteTarget(t)
+	stubRemoteProgramFeed(t, tmux.ProgramCodex)
+	h := configFollowingHome(t)
+	inst := startNaming(t, h, "demo")
+
+	// The restored form re-fired the lookup: seq 2 is the one owed, and the
+	// form-open fetch's seq-1 reply is stale the moment it lands.
+	h.remoteDefaultSeq = 2
+	h.remoteDefaultPending = true
+
+	_, _ = h.Update(remoteDefaultMsg{
+		naming:   inst,
+		seq:      1,
+		program:  tmux.ProgramCodex,
+		programs: []string{"stale-catalog-row"},
+	})
+	require.True(t, h.remoteDefaultPending, "a stale reply cannot lift the fresh lookup's gate")
+	assert.NotContains(t, h.remoteProgramCatalog, "stale-catalog-row",
+		"a stale reply cannot install its catalog")
+
+	// The current reply still settles the form it was issued for.
+	_, _ = h.Update(remoteDefaultMsg{
+		naming:  inst,
+		seq:     2,
+		program: tmux.ProgramCodex,
+	})
+	require.False(t, h.remoteDefaultPending, "the current reply lifts the gate")
 }
