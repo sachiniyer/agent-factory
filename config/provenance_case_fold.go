@@ -19,7 +19,20 @@ import "reflect"
 // a field (the decoder already resolved them), so the retained value is
 // unambiguous. Returns leaves unchanged when no two spellings fold to the same
 // canonical field (the common single-spelling case).
-func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Value) map[string]reflect.Value {
+//
+// When the source supplied conflicting values for the case-variant spellings
+// (e.g. {"image":"loser","Image":"winner"}), the decoder is last-write-wins, so
+// the typed reflect.Value holds the final value ("winner") but the raw
+// configured map still carries each spelling's original value. The retained
+// physical spelling must be the one whose raw value matches the decoded value,
+// otherwise a ResolvedValuePath projection that looks up the candidate's raw
+// map by the retained spelling projects the losing sibling ("loser") and
+// reports an internally inconsistent trace. configured is the candidate's raw
+// metadata (a map[string]any for non-built-in sources); when it is unavailable
+// or the decoder winner is ambiguous (multiple spellings share the decoded
+// value, or none do), the spelling selection falls back to the canonical-then
+// lexicographic preference above so the collapse stays deterministic.
+func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Value, configured any) map[string]reflect.Value {
 	if len(leaves) <= 1 {
 		return leaves
 	}
@@ -39,6 +52,7 @@ func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Val
 	if len(byCanonical) == len(leaves) {
 		return leaves
 	}
+	configuredMap, _ := configured.(map[string]any)
 	collapsed := make(map[string]reflect.Value, len(byCanonical))
 	for _, canonical := range order {
 		entries := byCanonical[canonical]
@@ -47,13 +61,44 @@ func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Val
 			continue
 		}
 		chosen := entries[0]
-		for _, e := range entries {
-			if e.physical == canonical {
-				chosen = e
-				break
+		// When the source supplied conflicting values for the case-variant
+		// spellings, the decoder (last-write-wins) left the typed field set to
+		// one value but the raw map still carries each spelling's original
+		// value. Retain the spelling whose raw value matches the decoded value
+		// so a projection that reads the candidate's raw map by this spelling
+		// reports the value the decoder kept. Only act when exactly one
+		// spelling matches; when several (or none) match the decoded value the
+		// decoder winner is ambiguous from the map alone, so fall through to
+		// the deterministic canonical preference below.
+		decoderWinnerKnown := false
+		if configuredMap != nil {
+			decoded := clonedInterface(entries[0].value)
+			var matched leafEntry
+			matchedCount := 0
+			for _, e := range entries {
+				if raw, ok := configuredMap[e.physical]; ok && jsonEquivalent(raw, decoded) {
+					matched = e
+					matchedCount++
+				}
+			}
+			if matchedCount == 1 {
+				chosen = matched
+				decoderWinnerKnown = true
 			}
 		}
-		if chosen.physical != canonical {
+		// When the decoder winner is ambiguous (or no configured map is
+		// available, e.g. a built-in source), prefer the canonical tag
+		// spelling the source used (deterministic KeyPath) and otherwise the
+		// lexicographically smallest spelling.
+		if !decoderWinnerKnown {
+			for _, e := range entries {
+				if e.physical == canonical {
+					chosen = e
+					break
+				}
+			}
+		}
+		if !decoderWinnerKnown && chosen.physical != canonical {
 			for _, e := range entries {
 				if e.physical < chosen.physical {
 					chosen = e

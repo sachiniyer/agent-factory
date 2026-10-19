@@ -718,3 +718,87 @@ func TestResolveConfigCaseVariantLeavesCollapseSameSourceDuplicates(t *testing.T
 		})
 	}
 }
+
+// TestResolveConfigCaseVariantLeavesCollapseKeepsDecoderWinnerSpelling is the
+// regression test for the #5397 review finding that collapseStructLeaves always
+// retained the canonical spelling even when the source supplied conflicting
+// values for two case-variant spellings of one field. encoding/json and
+// go-toml/v2 decode case-variant keys onto the same struct field last-write-wins,
+// so a source such as {"docker":{"image":"loser","Image":"winner"}} leaves the
+// typed field set to "winner" (the decoder's final value) while the raw
+// metadata map still carries both spellings with their original values. The
+// previous collapse retained the canonical "image" spelling, so the origin was
+// keyed "image" and a ResolvedValuePath("docker.image") projection read the raw
+// map at "image" ("loser"), contradicting the effective value ("winner") the
+// decoder kept and the trace's Winner. The fix retains the spelling whose raw
+// value matches the decoded value, so the origin's KeyPath and the candidate
+// projection both follow the decoder-winning spelling. When the spellings share
+// one value the decoder winner is ambiguous from the map alone, so the collapse
+// falls back to the canonical spelling (pinned by the CollapseSameSourceDuplicates
+// test) and determinism is preserved.
+func TestResolveConfigCaseVariantLeavesCollapseKeepsDecoderWinnerSpelling(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantKeyPath   string
+		querySpelling string
+	}{
+		{
+			// Canonical-first then mixed-case: the decoder keeps the last
+			// spelling ("Image":"winner"), so the retained physical spelling is
+			// "Image" and the projection reports "winner", not "loser".
+			name:          "json image-then-Image keeps the Image spelling",
+			body:          `{"docker":{"image":"loser","Image":"winner"}}`,
+			wantKeyPath:   "docker.Image",
+			querySpelling: "docker.image",
+		},
+		{
+			// Mixed-case first then canonical: the decoder keeps the last
+			// spelling ("image":"winner"), so the retained physical spelling is
+			// "image" (also the canonical tag) and the projection reports
+			// "winner", not "loser".
+			name:          "json Image-then-image keeps the image spelling",
+			body:          `{"docker":{"Image":"loser","image":"winner"}}`,
+			wantKeyPath:   "docker.image",
+			querySpelling: "docker.image",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
+			writeInRepoConfig(t, repoRoot, tc.body)
+
+			res, err := ResolveConfig(repoRoot)
+			require.NoError(t, err)
+			require.Equal(t, "winner", res.Docker.Image,
+				"encoding/json decodes case-variant keys last-write-wins, so the typed field holds the decoder's final value")
+
+			value := requireResolvedValue(t, res, "docker")
+			repo := candidateForLayer(t, value, SourceRepoShared)
+			assert.Equal(t, "contributed", repo.Result,
+				"a single source's two spellings of one field are one effective entry, not partially-shadowed")
+			assert.NotContains(t, repo.Reason, "overridden by higher-precedence",
+				"no higher-precedence source overrode the duplicate; both spellings came from the same source")
+
+			leaf, ok := res.ResolvedValuePath(tc.querySpelling)
+			require.True(t, ok, "the canonical lowercase spelling must project a case-variant leaf")
+			assert.Equal(t, "winner", leaf.Value,
+				"the projected value is the decoder's final value, not the losing sibling's value")
+			require.NotNil(t, leaf.Winner)
+			assert.Equal(t, SourceRepoShared.String(), leaf.Winner.Layer,
+				"the winner is the in-repo source that supplied the case-variant leaf")
+			assert.Equal(t, tc.wantKeyPath, leaf.Winner.KeyPath,
+				"the winner KeyPath is the decoder-winning spelling, not the canonical spelling the losing sibling used")
+
+			for _, candidate := range leaf.Candidates {
+				if candidate.Layer == SourceRepoShared.String() {
+					assert.Equal(t, "winner", candidate.Result,
+						"the winning repo candidate must be reported as winner, not absent")
+					assert.True(t, candidate.Present, "the winning repo candidate must be present in the projection")
+					assert.Equal(t, "winner", candidate.Value,
+						"the winning repo candidate's projected value is the decoder-winning spelling's value, not the losing sibling's")
+				}
+			}
+		})
+	}
+}

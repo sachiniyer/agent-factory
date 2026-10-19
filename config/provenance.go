@@ -287,7 +287,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 			// (configuredCount - len(leaves)) does not count the folded
 			// spellings as load-time-removed; the decoder already resolved
 			// them to one field value, so they are not unknown leaves.
-			collapsed := collapseStructLeaves(targetType, leaves)
+			collapsed := collapseStructLeaves(targetType, leaves, configured)
 			if len(collapsed) != len(leaves) {
 				candidate.configuredCount -= len(leaves) - len(collapsed)
 				candidate.leaves = collapsed
@@ -846,20 +846,29 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	for i, candidate := range parent.Candidates {
 		parentReason := candidate.Reason
 		candidate.KeyPath = keyPath
-		leafValue, present := configLeafValue(candidate.Value, leaf)
+		// physicalLeaf is the file's physical spelling for the leaf (equal to
+		// leaf on the exact-match path, or the decoder-winning spelling a
+		// struct-backed case-variant origin was keyed by on the fallback path).
+		// Project the candidate's value with physicalLeaf: a non-built-in
+		// candidate's Value is the raw metadata map keyed by the physical
+		// spelling, and when the source supplied conflicting values for two
+		// case-variant spellings (e.g. {"image":"loser","Image":"winner"}) the
+		// decoder kept the last-write-wins value under the spelling the
+		// collapse retained, so the raw map's canonical key may carry the
+		// losing sibling's value. Using leaf (the queried spelling) would
+		// project the losing sibling; using physicalLeaf projects the value the
+		// decoder kept. Built-in candidates carry a typed struct Value, so
+		// configLeafValue already folds case for them via taggedFieldByKey and
+		// physicalLeaf is equivalent to leaf (#5397 review).
+		leafValue, present := configLeafValue(candidate.Value, physicalLeaf)
 		if !present && physicalLeaf != leaf {
-			// The parent is a struct-backed composite and the caller passed the
-			// canonical lowercase spelling while the winner's origin (and a
-			// non-built-in candidate's raw map) is keyed by the file's physical
-			// spelling (e.g. "Image"). The winner's layer was identified above by
-			// folding the origin lookup; project the candidate's value with the
-			// physical spelling too, otherwise the winning repo candidate's
-			// map-keyed Value misses the exact lookup and is marked absent even
-			// though Winner identifies that same layer — a contradictory trace
-			// (#5397 review). Built-in candidates carry a typed struct Value, so
-			// configLeafValue already folded case for them via taggedFieldByKey
-			// and the retry is a no-op.
-			leafValue, present = configLeafValue(candidate.Value, physicalLeaf)
+			// The candidate's raw map does not carry the physical spelling
+			// either (e.g. a built-in source whose typed struct Value is keyed
+			// by the canonical tag, or a non-built-in source that only spells
+			// the leaf one way). Fall back to the queried spelling so the
+			// candidate is not falsely marked absent when the canonical spelling
+			// is the only one present.
+			leafValue, present = configLeafValue(candidate.Value, leaf)
 		}
 		candidate.Present = candidate.Present && present
 		if candidate.Present {
