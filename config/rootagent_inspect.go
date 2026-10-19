@@ -649,6 +649,20 @@ func ProjectIgnoredGlobalRootAgentLeaf(parent ResolvedValue, keyPath string) (Re
 			candidate.Value = leafValue
 		} else {
 			candidate.Value = nil
+			if candidate.Present && candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Result == "ignored" {
+				// The ignored-global candidate never carried this leaf (e.g. a
+				// global [root_agent] that set only `program`, queried for
+				// `root_agent.enabled`): mark the leaf absent so the trace does
+				// not present a never-configured field as an effective value the
+				// source ignored. Mirrors ResolvedValuePath's
+				// `candidate.Present && present` for this candidate; the
+				// ignored-global candidate that actually carried the leaf keeps
+				// Present/Result/Reason verbatim via the branch above, preserving
+				// the registry cause this rendering exists to surface.
+				candidate.Present = false
+				candidate.Result = "absent"
+				candidate.Reason = "leaf is not present at this source"
+			}
 		}
 		projected.Candidates[i] = candidate
 	}

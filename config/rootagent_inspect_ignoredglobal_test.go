@@ -299,3 +299,55 @@ func TestProjectIgnoredGlobalRootAgentLeafAbsentOptionalLeafIsUnknown(t *testing
 	require.True(t, ok, "root_agent.enabled must still project — the global table set it")
 	assert.Equal(t, false, enabled.Value, "the effective enabled is the built-in disabled default — the global layer was dropped")
 }
+
+// TestProjectIgnoredGlobalRootAgentLeafMarksAbsentGlobalLeafAbsent pins the
+// contract the ignored-global projector shares with the generic
+// ResolvedValuePath for a leaf the ignored global table never configured: a
+// global [root_agent] that set only `program`, queried for `root_agent.enabled`,
+// reaches the projector (the built-in base supplies the `enabled` origin), but
+// the global candidate never carried `enabled`. The candidate must be marked
+// absent — Present=false, Result="absent" — so the trace does not present a
+// never-configured field as an effective value the source ignored, while the
+// built-in base that does carry `enabled` keeps its row verbatim.
+func TestProjectIgnoredGlobalRootAgentLeafMarksAbsentGlobalLeafAbsent(t *testing.T) {
+	home, repoRoot, _ := registeredTestProject(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName),
+		[]byte("schema_version = 1\n\n[root_agent]\nprogram = \"codex\"\n"), 0o644))
+	removed, err := DeregisterProject(repoRoot)
+	require.NoError(t, err)
+	require.True(t, removed, "fixture: project must deregister so the registry-eligibility check drops the global layer")
+
+	rv, err := ResolveRootAgentForInspection(repoRoot, false)
+	require.NoError(t, err)
+	require.True(t, RootAgentValueHasIgnoredGlobal(rv),
+		"fixture must trip the ignored-global detection helper or the test is vacuous")
+
+	// `enabled` still projects: the built-in base supplies its origin, so the
+	// dotted read answers (it does not gate on Origins alone).
+	projected, ok := ProjectIgnoredGlobalRootAgentLeaf(rv, "root_agent.enabled")
+	require.True(t, ok, "root_agent.enabled must project — the built-in base supplies its origin")
+
+	assert.Equal(t, "root_agent.enabled", projected.Key)
+	assert.Equal(t, false, projected.Value, "the effective enabled is the built-in disabled default — the global layer was dropped")
+	require.NotNil(t, projected.Winner, "the surviving built-in `enabled` origin surfaces as the single-leaf Winner")
+	assert.Equal(t, string(RootAgentSourceBuiltIn), projected.Winner.Layer)
+
+	for _, candidate := range projected.Candidates {
+		assert.Equal(t, "root_agent.enabled", candidate.KeyPath)
+		switch candidate.Layer {
+		case string(RootAgentSourceBuiltIn):
+			assert.True(t, candidate.Present, "the built-in base carries enabled")
+			assert.Equal(t, false, candidate.Value)
+			assert.Equal(t, "base", candidate.Result)
+			assert.Equal(t, "root agents are opt-in by default", candidate.Reason)
+		case string(RootAgentSourceGlobal):
+			assert.False(t, candidate.Present, "the ignored global candidate never carried enabled; mark it absent")
+			assert.Nil(t, candidate.Value)
+			assert.Equal(t, "absent", candidate.Result, "a never-configured leaf is absent, not ignored")
+			assert.Equal(t, "leaf is not present at this source", candidate.Reason)
+		case string(RootAgentSourceLegacy), string(RootAgentSourcePersonal):
+			assert.False(t, candidate.Present, "absent rows stay absent")
+			assert.Nil(t, candidate.Value)
+		}
+	}
+}
