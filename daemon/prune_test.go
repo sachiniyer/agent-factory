@@ -475,6 +475,27 @@ func TestPruneSessions_RevalidatesStateBeforePublishing(t *testing.T) {
 	assert.True(t, exists(archivedPath), "nothing may be touched under a held lifecycle op")
 }
 
+// TestPruneSessions_RechecksIdentityBeforePublishing: an archived-title
+// reuse renames the row mid-scan — same liveness, no in-flight op — so only
+// an identity comparison keeps the stale snapshot from publishing a title a
+// live session now owns (#5136 Codex round 15).
+func TestPruneSessions_RechecksIdentityBeforePublishing(t *testing.T) {
+	manager, repoID, _, inst, _ := seedPrunableArchive(t, "renamed-row")
+	prunePostProbeHook = func(i *session.Instance) {
+		i.Title = "renamed-row (archived)"
+	}
+	defer func() {
+		prunePostProbeHook = nil
+		inst.Title = "renamed-row"
+	}()
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "identity changed")
+}
+
 // TestPruneSessions_ReportsPendingCreate: a session still provisioning lives
 // only in pendingCreates — the live-map scan and the ghost sweep both miss
 // it, so without explicit accounting it vanishes from the response (#5136

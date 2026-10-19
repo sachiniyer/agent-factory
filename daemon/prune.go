@@ -260,8 +260,21 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 				Reason: "session state changed while being evaluated: " + reason})
 			continue
 		}
+		// An archived-title reuse renames this row's title, worktree, and
+		// branch without touching liveness or holding an op — `fresh` still
+		// passes every gate above, but an entry built from `data` would
+		// advertise a title now owned by a different live session and a
+		// branch that may no longer resolve (#5136 Codex round 15).
+		if fresh.ID != data.ID || fresh.Title != data.Title ||
+			fresh.Worktree.WorktreePath != data.Worktree.WorktreePath ||
+			pruneBranchFor(fresh) != pruneBranchFor(data) ||
+			!session.ArchiveTimeFor(fresh).Equal(session.ArchiveTimeFor(data)) {
+			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
+				Reason: "session identity changed while being evaluated — rerun to see the current record"})
+			continue
+		}
 		m.mu.Lock()
-		_, busy = m.killsInFlight[daemonInstanceKey(row.repoID, data.Title)]
+		_, busy = m.killsInFlight[daemonInstanceKey(row.repoID, fresh.Title)]
 		captures = m.pendingConversationCaptures[row.instance]
 		m.mu.Unlock()
 		switch {
