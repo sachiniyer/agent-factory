@@ -367,12 +367,19 @@ type dockerProvisioner struct {
 // it BEFORE the error returns to Provision's reap — reaping the failed
 // container frees its partial layer data and could mask the fullness being
 // measured (#5382). The probe still yields nothing when the engine is remote,
-// foreign-namespaced, or reports free capacity — no invented errnos.
+// foreign-namespaced, or reports free capacity — no invented errnos — and it
+// only runs for step failures that could have BEEN a data-root write: each
+// step's error carries its operation class (dockerStepError), so a local
+// parse or validation failure on a coincidentally-full root stays structural
+// instead of waiting on the environment's unbounded budget (#5382 review).
 func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	res, err := p.provisionSteps()
 	if err != nil {
-		if evidence := p.dockerRootFSFullEvidence(); evidence != nil {
-			err = errors.Join(err, evidence)
+		var se *dockerStepError
+		if errors.As(err, &se) && se.op != dockerOpLocal {
+			if evidence := p.dockerRootFSFullEvidence(se.op); evidence != nil {
+				err = errors.Join(err, evidence)
+			}
 		}
 		return ProvisionResult{}, err
 	}
@@ -382,7 +389,7 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if p.spec.Account.Dir != "" {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	} else {
 		// A remote Docker engine publishes the agent-server port on the engine
@@ -392,16 +399,16 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 		// reason (bind-mount identity); refuse here too, before `docker run`, so a
 		// non-account session fails fast with the remote-engine cause instead.
 		if err := p.ensureDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err)
+		return ProvisionResult{}, dockerStepErr(fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err), dockerOpLocal)
 	}
 	p.engineID = engineID
 	if err := p.runContainer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
@@ -410,30 +417,30 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	// reapProvisionFailure tears the container down on the way out — a shadowed
 	// account never reaches the agent. No-op for a session with no account.
 	if err := p.verifyAccountRuntimeBoundary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 	if err := p.prepareAccountUser(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
 	if err := p.configureGit(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.cloneWorkspace(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	if err := p.startAgentServer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	banner, err := p.readBanner()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	hostPort, err := p.publishedPort()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 
 	endpoint := &AgentServerEndpoint{
@@ -635,7 +642,14 @@ func (p *dockerProvisioner) copyAfBinary() error {
 		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
-		return fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err)
+		// execSh pins --user 0:0 for account sessions; otherwise the exec
+		// inherits the image's USER. Mark it so the callsite's daemon-write
+		// default doesn't mislabel an exec that ran as a container user.
+		op := dockerOpSessionExec
+		if p.spec.Account.Dir != "" {
+			op = dockerOpRootExec
+		}
+		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), op)
 	}
 	return nil
 }
@@ -648,7 +662,9 @@ func (p *dockerProvisioner) copyAfBinary() error {
 func (p *dockerProvisioner) startAgentServer() error {
 	filteredInner, err := p.agentServerCommand()
 	if err != nil {
-		return err
+		// A local construction failure, not a docker round-trip — keep the
+		// callsite's session-exec default from lending it the fs verdict.
+		return dockerStepErr(err, dockerOpLocal)
 	}
 	filteredInner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
 
@@ -697,6 +713,7 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 // whose real cause is a permission denied on the banner file.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	deadline := time.Now().Add(dockerBannerPollTimeout)
+	var lastExecErr error
 	for {
 		args := []string{"exec"}
 		args = append(args, p.sessionExecOptions()...)
@@ -707,14 +724,26 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		} else {
+			lastExecErr = err
 		}
 		if time.Now().After(deadline) {
 			logArgs := []string{"exec"}
 			logArgs = append(logArgs, p.sessionExecOptions()...)
 			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
 			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
-			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
+			bannerErr := fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
+			if lastExecErr == nil {
+				// Every banner read ran fine and the answer still never
+				// arrived — a server-side startup problem, not a data-root
+				// write. Keep the fs verdict off it.
+				return dockerBanner{}, dockerStepErr(bannerErr, dockerOpLocal)
+			}
+			// The reads themselves were failing — `docker exec` records
+			// state under the data root, so a full engine breaks exactly
+			// this call. Classify with the daemon's own write privilege.
+			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpDaemonWrite)
 		}
 		// The poll interval bounds how long we can outrun the deadline; use a
 		// non-wall-clock sleep so it is deterministic under test time control.

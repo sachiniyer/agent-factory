@@ -96,10 +96,13 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 		"copyAfBinary cp":    func(args []string) bool { return args[0] == "cp" },
 		"copyAfBinary chmod": func(args []string) bool { return args[0] == "exec" && containsArg(args, "chmod") },
 		"startAgentServer":   func(args []string) bool { return args[0] == "exec" && exactArg(args, "-d") },
+		// A banner read whose every `docker exec` fails — the daemon-side
+		// exec state is itself a data-root write, so the fs verdict applies.
 		"readBanner": func(args []string) bool {
 			return args[0] == "exec" && exactArg(args, "cat") && containsArg(args, dockerBannerPath)
 		},
-		"publishedPort": func(args []string) bool { return args[0] == "port" },
+		// `docker port` is read-only and its parse failures are af's own —
+		// local errors get their own regression test below.
 	}
 
 	for name, failing := range failingSteps {
@@ -395,4 +398,223 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 	require.GreaterOrEqual(t, rmAt, 0, "the failed container was never reaped: %v", events)
 	assert.Less(t, statfsAt, rmAt,
 		"the fullness probe must run BEFORE the failed container is reaped (its partial data frees on reap): %v", events)
+}
+
+// TestProvisionFailure_UnprivilegedWriterReadsBavail is the #5382-review
+// metric-selection regression: on a ROOTFUL engine the reserved-block window
+// (Bfree > 0, Bavail == 0) is full for an unprivileged writer but not for
+// the daemon. The failed step's op class decides which counter answers —
+// a non-root session exec joins the Bavail verdict, while `docker run`'s
+// daemon-side write must not: inventing fullness for a writer that can still
+// allocate would park a structural failure on the environment forever.
+func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
+
+	// failExec kills the configureGit exec; failRun kills `docker run`.
+	failExec := func(args []string) ([]byte, error) {
+		if args[0] == "exec" && containsArg(args, "user.email") {
+			return []byte("error: could not write config file: No space left on device\n"), fmt.Errorf("exit status 3")
+		}
+		if args[0] == "run" {
+			return []byte(dockerCreatedID + "\n"), nil
+		}
+		return nil, nil
+	}
+	failRun := func(args []string) ([]byte, error) {
+		if args[0] == "run" {
+			return []byte("Error response from daemon: no space left on device\n"), fmt.Errorf("exit status 125")
+		}
+		return nil, nil
+	}
+
+	// reservedWindow installs the Bavail-only-exhausted statfs pair: the
+	// privileged answer says "not full" (Bfree > 0 covers the reserved
+	// blocks) while the unprivileged answer reports exhaustion.
+	reservedWindow := func(t *testing.T) {
+		t.Helper()
+		oldPriv, oldUnpriv := statfsFull, statfsFullUnprivileged
+		statfsFull = func(string) (bool, error) { return false, nil }
+		statfsFullUnprivileged = func(string) (bool, error) { return true, nil }
+		t.Cleanup(func() { statfsFull, statfsFullUnprivileged = oldPriv, oldUnpriv })
+	}
+
+	t.Run("account-owned session exec joins the Bavail verdict", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failExec)
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image:         "img:latest",
+			containerUser: "1000:1000", // a mounted account owned by uid 1000
+			spec:          ProvisionSpec{Title: "acct", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"an exec writing as uid 1000 IS Bavail-bounded — its ENOSPC must surface: %v", err)
+	})
+
+	t.Run("daemon-side write does not borrow Bavail on rootful", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		reservedWindow(t)
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "daemon-write"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"docker run's writer is the rootful daemon — Bfree>0 means its writes can still allocate: %v", err)
+	})
+
+	t.Run("root-owned session exec does not borrow Bavail", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failExec)
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image:         "img:latest",
+			containerUser: "0:0",
+			spec:          ProvisionSpec{Title: "acct-root", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a uid-0 exec reaches the reserved blocks — Bavail=0 is not full for it: %v", err)
+	})
+
+	t.Run("image USER non-root joins the Bavail verdict", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+			func(args []string) ([]byte, error) {
+				if args[0] == "image" {
+					return []byte("1000\n"), nil // the image declares USER 1000
+				}
+				return failExec(args)
+			})
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "img-user", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"an exec under a non-root image USER is Bavail-bounded: %v", err)
+	})
+
+	t.Run("unreadable image USER fails closed to Bfree", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+			func(args []string) ([]byte, error) {
+				if args[0] == "image" {
+					return nil, fmt.Errorf("Error: No such image")
+				}
+				return failExec(args)
+			})
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "img-unknown", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"an unproven image USER is not evidence of unprivileged writes: %v", err)
+	})
+
+	t.Run("userns remap makes even a uid-0 exec Bavail-bounded", func(t *testing.T) {
+		// `docker info` reports name=userns when the engine remaps container
+		// uids into a subordinate range — every in-container writer, uid 0
+		// included, is an ordinary user on the data-root filesystem.
+		info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(info, &raw))
+		raw["SecurityOptions"] = []string{"name=seccomp,profile=builtin", "name=userns"}
+		info, err = json.Marshal(raw)
+		require.NoError(t, err)
+		fakeDockerCapacityProbe(t, info, failExec)
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image:         "img:latest",
+			containerUser: "0:0",
+			spec:          ProvisionSpec{Title: "userns", CloneURL: "file:///repo"},
+		}
+		_, err = p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"under userns remap a uid-0 exec is an unprivileged writer: %v", err)
+	})
+}
+
+// TestProvisionFailure_LocalStepFailureGetsNoEvidence is the #5382-review
+// false-full regression: the provision-boundary join must only run for
+// failures that could have been a data-root write. An unparsable `docker
+// port` reply (or the read-only port call itself failing) on a
+// coincidentally-full root must NOT borrow ENOSPC — that would park a
+// structural failure on the environment's unbounded retry budget.
+func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
+
+	cases := map[string]func(args []string) ([]byte, error){
+		"port output unparsable": func(args []string) ([]byte, error) {
+			switch {
+			case args[0] == "run":
+				return []byte(dockerCreatedID + "\n"), nil
+			case args[0] == "exec" && containsArg(args, dockerBannerPath):
+				return []byte(`{"addr":":8000","token":"t","title":"x"}`), nil
+			case args[0] == "port":
+				return []byte("not-a-port\n"), nil // succeeds, unparseable
+			}
+			return nil, nil
+		},
+		"port call fails": func(args []string) ([]byte, error) {
+			switch {
+			case args[0] == "run":
+				return []byte(dockerCreatedID + "\n"), nil
+			case args[0] == "exec" && containsArg(args, dockerBannerPath):
+				return []byte(`{"addr":":8000","token":"t","title":"x"}`), nil
+			case args[0] == "port":
+				return nil, fmt.Errorf("exit status 1") // read-only round-trip
+			}
+			return nil, nil
+		},
+	}
+
+	for name, dispatch := range cases {
+		t.Run(name, func(t *testing.T) {
+			fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), dispatch)
+			old := statfsFull
+			statfsFull = func(string) (bool, error) { return true, nil }
+			defer func() { statfsFull = old }()
+
+			p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "local-failure"}}
+			_, err := p.provision()
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, syscall.ENOSPC),
+				"%s: a non-write failure on a full root must stay structural, not borrow ENOSPC: %v", name, err)
+		})
+	}
+}
+
+// TestDockerStepWriterUnprivileged pins the per-class privilege matrix the
+// evidence path consults, including the classes no provision-level test can
+// reach cheaply (a uid-0 exec under an account session).
+func TestDockerStepWriterUnprivileged(t *testing.T) {
+	p := &dockerProvisioner{}
+	info := dockerEngineInfo{}
+
+	assert.False(t, p.dockerStepWriterUnprivileged(info, dockerOpLocal))
+	assert.False(t, p.dockerStepWriterUnprivileged(info, dockerOpDaemonWrite),
+		"the daemon writes as its own uid — root on a rootful engine")
+	assert.False(t, p.dockerStepWriterUnprivileged(info, dockerOpRootExec),
+		"uid 0 reaches reserved blocks on a rootful engine")
+	assert.False(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpDaemonWrite),
+		"userns remaps CONTAINER uids — the rootful daemon's own writes stay privileged")
+	assert.True(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpRootExec),
+		"under userns, in-container uid 0 maps to a subordinate uid")
+
+	p.containerUser = "1000:1000"
+	assert.True(t, p.dockerStepWriterUnprivileged(info, dockerOpSessionExec))
+	p.containerUser = "0:0"
+	assert.False(t, p.dockerStepWriterUnprivileged(info, dockerOpSessionExec))
+	assert.True(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpSessionExec),
+		"userns remap subordinates every container uid, including the account owner's")
 }
