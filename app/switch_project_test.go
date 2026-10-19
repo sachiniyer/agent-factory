@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -500,7 +501,7 @@ func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
 // the active project.
 func TestProjectsSectionEscReturnsToTree(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	resizeHome(h, 100, 30)
@@ -951,7 +952,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 	h.repoRoot = "/repos/active"
 
 	repoWithSessions := "/repos/busy"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		mk := func(root string) session.InstanceData {
 			d := session.InstanceData{Title: "s", CreatedAt: time.Now()}
 			d.Worktree.RepoPath = root
@@ -989,7 +990,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 func TestBuildProjectListUnionsTheRegistry(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/repos/active"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil // no live sessions anywhere
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -1122,7 +1123,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/repos/active"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -1160,7 +1161,7 @@ func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 // borrowing an ancestor's.
 func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}

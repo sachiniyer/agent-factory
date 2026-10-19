@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -52,7 +53,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 // visible Projects section rebuilds from buildProjectListFrom on the background
 // poll instead (no second on-loop RPC).
 func (m *home) buildProjectList() ([]overlay.Project, bool) {
-	data, err := allReposSnapshotFetcher()
+	data, err := allReposSnapshotFetcher(context.Background())
 	if err != nil {
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		data = nil
@@ -326,6 +327,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
 			projects[i].RegistryID = rec.ID
 			projects[i].RegistryRoot = rec.Root
+			projects[i].RegistryCheckoutID = rec.CheckoutID
 			projects[i].MissingPath = !rec.PathExists
 		}
 	}
@@ -349,11 +351,59 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	return rows
 }
 
+// sidebarProjectRows is projectRows' inverse for the merge fallback in
+// applySidebarProjects: a pane row has no registry fields, so the converted row
+// is session-derived — the merge preserves it unconditionally, and the coalesce
+// grafts a fresh registration's identity back onto it when the RepoID matches.
+func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
+	projects := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		projects = append(projects, overlay.Project{
+			RepoID:       r.RepoID,
+			Name:         r.Name,
+			Root:         r.Root,
+			SessionCount: r.SessionCount,
+			InPlaceCount: r.InPlaceCount,
+		})
+	}
+	return projects
+}
+
+// registryBackedRows filters a row set to the registry-backed half — the rows
+// a degraded registry read cannot prove absent, for a merge where the session
+// snapshot is live truth and the old session rows would only shadow it.
+func registryBackedRows(rows []overlay.Project) []overlay.Project {
+	registry := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		if r.RegistryID != "" {
+			// Both callers run this only when the session snapshot landed and
+			// the REGISTRY read degraded, so the snapshot is the authority on
+			// counts: a repo it does not count has none. A preserved row that
+			// a fresh session row later claims gets the live counts grafted on
+			// (#4888 review); carrying the stale tallies instead would keep
+			// dead sessions on screen for as long as the registry stays
+			// degraded.
+			r.SessionCount = 0
+			r.InPlaceCount = 0
+			registry = append(registry, r)
+		}
+	}
+	return registry
+}
+
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously).
 func (m *home) refreshSidebarProjects() {
 	projects, registryDegraded := m.buildProjectList()
+	m.setSidebarProjects(projects, registryDegraded)
+}
+
+// setSidebarProjects is the funnel every Projects-section update flows
+// through: it records the applied row set in sidebarProjects (the merge
+// source a session-snapshot failure reads) before rendering it.
+func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool) {
+	m.sidebarProjects = projects
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
@@ -365,12 +415,43 @@ func (m *home) refreshSidebarProjects() {
 // second on-loop daemon RPC. A fetch error leaves the last-known rows intact
 // (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
 func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
-	if fetchErr != nil {
-		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
-		return false
-	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
+	return m.applySidebarProjects(projects, registryDegraded, fetchErr)
+}
+
+// applySidebarProjects pushes an already-built project list into the Projects
+// section, for callers that built the list for another consumer too — the
+// section and that consumer must describe the SAME registry read (#4888
+// review). A fetch error means the SESSION half never answered; the registry
+// half may still have read fine, so the section merges the fresh registry
+// rows into its last-known set rather than discarding them — a rebind that
+// moved a record between polls would otherwise leave the old root on screen
+// indefinitely while the poll stays unhealthy (#4888 review). Returns whether
+// the visible rows changed.
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
+	if fetchErr != nil || registryDegraded {
+		if fetchErr != nil {
+			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+		}
+		old := m.sidebarProjects
+		if len(old) == 0 {
+			// The pane can already hold rows the shadow never recorded —
+			// installed before the field existed, or by a direct SetProjects.
+			// An unseeded shadow would merge from nil and empty the visible
+			// list behind a warning it cannot confirm (#4888 review); the
+			// pane's current rows are the last-known set either way.
+			old = sidebarProjectRows(m.projects.Projects())
+		}
+		if fetchErr == nil {
+			// The session snapshot landed — only the registry read degraded.
+			// Old session rows are stale duplicates of the fresh live ones;
+			// only registry-backed rows have absence left unproven.
+			old = registryBackedRows(old)
+		}
+		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
+	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
+	m.sidebarProjects = projects
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
 	}

@@ -47,7 +47,7 @@ func submitPickerRebind(t *testing.T, h *home, path string) tea.Cmd {
 func stubRebind(t *testing.T, err error) {
 	t.Helper()
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
 		if err != nil {
 			return config.Project{}, err
 		}
@@ -187,7 +187,7 @@ func activeRebindHome(t *testing.T) (*home, string) {
 	// The row names the record's real root; it is the active project by its
 	// aggregation id, the way buildProjectList marks the scoped row.
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
-		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, RegistryRoot: rec.Root, MissingPath: true},
+		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, RegistryRoot: rec.Root, RegistryCheckoutID: rec.CheckoutID, MissingPath: true},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 	h.state = stateSwitchProject
@@ -200,7 +200,7 @@ func activeRebindHome(t *testing.T) (*home, string) {
 func stubRebindThrough(t *testing.T, after func()) {
 	t.Helper()
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
 		project, err := config.RebindProject(projectID, path)
 		if err == nil && after != nil {
 			after()
@@ -281,7 +281,7 @@ func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 	h, _ := activeRebindHome(t)
 	rootBefore := h.repoRoot
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
 		if _, err := config.RebindProject(projectID, path); err != nil {
 			return config.Project{}, err
 		}
@@ -301,7 +301,7 @@ func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 func TestCommittedRebindFollowsAndReports(t *testing.T) {
 	h, _ := activeRebindHome(t)
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
 		if _, err := config.RebindProject(projectID, path); err != nil {
 			return config.Project{}, err
 		}
@@ -365,4 +365,31 @@ func TestNoOpRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
 
 	assert.Equal(t, rootBefore, h.repoRoot, "an unmoved record must not look moved because the row displayed another root")
+}
+
+// TestRebindGuardedSendRefusalReArmsWithTheUpgradeMessage pins #4822's
+// mixed-version rule on the TUI: a daemon that does not advertise guarded
+// rebinds is refused BEFORE the send — the reply is a definitive refusal
+// (nothing could have been written), so the picker re-arms showing the
+// upgrade-or-rebind-from-the-daemon-host remedy, never "outcome unknown".
+func TestRebindGuardedSendRefusalReArmsWithTheUpgradeMessage(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	displayed := h.projectPickerOverlay
+	old := rebindProjectThroughDaemon
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
+		return config.Project{}, daemon.ErrGuardedRebindUnsupported
+	}
+	t.Cleanup(func() { rebindProjectThroughDaemon = old })
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	require.Same(t, displayed, h.projectPickerOverlay,
+		"a definitive refusal re-arms the picker, never closes it")
+	assert.False(t, displayed.RebindPending())
+	displayed.SetMaxSize(400, 60)
+	displayed.SetWidth(200)
+	assert.Contains(t, displayed.Render(), "daemon host",
+		"the refusal names the remedy — upgrade the daemon or rebind from its host")
+	assert.Empty(t, h.errBox.FullError(),
+		"a definitive refusal is not reported as an unknown outcome or a failure")
 }

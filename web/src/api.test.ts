@@ -20,6 +20,8 @@ import {
   handoffSession,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  isProjectReboundError,
+  PROJECT_REBOUND_ERROR_CODE,
   killSession,
   listBackends,
   listDirectory,
@@ -1040,6 +1042,84 @@ test("rebindProject posts id + verbatim path to RebindProject", async () => {
   assert.equal(cap.body.id, "prj_0123456789abcdef0123456789abcdef");
   assert.equal(cap.body.path, "~/repos/moved", "the path is forwarded unchanged for the daemon to resolve");
   assert.equal(cap.auth, "Bearer tok");
+});
+
+test("rebindProject sends the observed pair as expected_root + expected_checkout_id", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old", "chk_observed");
+  assert.ok(
+    cap.url.endsWith("/v1/RebindProjectGuarded"),
+    `a guarded send hits the guarded route — the route is the capability check (#4888 review), posted to ${cap.url}`,
+  );
+  assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
+  assert.equal(
+    cap.body.expected_checkout_id,
+    "chk_observed",
+    "the checkout half is what catches a same-path reclone the root spelling cannot (#4822 spec)",
+  );
+});
+
+test("rebindProject omits the precondition when no pair was observed", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok");
+  assert.ok(!("expected_root" in cap.body), "no observed root sends no precondition, not an empty one");
+  assert.ok(
+    !("expected_checkout_id" in cap.body),
+    "no observed checkout sends no field — an empty one would be a guard that cannot hold",
+  );
+});
+
+test("a project_rebound refusal classifies as a definitive rebind conflict", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      data: null,
+      error: { message: "project prj_A was rebound elsewhere", code: PROJECT_REBOUND_ERROR_CODE, daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").catch((e: unknown) => e);
+  assert.ok(isProjectReboundError(err), "the code identifies the conflict");
+  assert.equal(isMutationOutcomeUncertain(err), false, "a conflict is a refusal, not an unknown outcome");
+});
+
+test("rebindProject translates the guarded route's marked 404 into the upgrade remedy", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({
+      data: null,
+      error: { message: 'unknown route "/v1/RebindProjectGuarded"', daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no guarded handler ran");
+  assert.match(err.message, /predates guarded rebinds/);
+  assert.match(err.message, /upgrade it, or rebind from the daemon host/);
+});
+
+test("rebindProject keeps an unmarked 404 unconfirmed rather than unsupported", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true, "an intermediary's 404 never claims route absence");
+  assert.doesNotMatch(err.message, /predates guarded rebinds/);
 });
 
 test("rebindProject returns the rebound project", async () => {

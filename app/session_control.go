@@ -274,13 +274,15 @@ var registerProjectThroughDaemon = func(path string) error {
 // rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
 // `b` — through the daemon (the single writer): config.RebindProject moves the
 // registration's stable id to the replacement checkout, refusing a path another
-// project owns, and publishes projects.changed. A package var so the app test
-// suite can stub it without dialing a real daemon.
-var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+// project owns, and publishes projects.changed. expectedRoot/expectedCheckoutID
+// are the (root, checkout) pair the picker showed; the daemon refuses the
+// rebind if the registry has moved on since (#4822). A package var so the app
+// test suite can stub it without dialing a real daemon.
+var rebindProjectThroughDaemon = func(projectID, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
 	var project config.Project
 	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
-		project, e = c.RebindProject(projectID, path)
+		project, e = c.RebindProject(projectID, expectedRoot, expectedCheckoutID, path)
 		return e
 	})
 	return project, err
@@ -601,11 +603,11 @@ func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
 // per-project session count (#1461). A package var so the project-switch tests
 // can inject a fake multi-repo snapshot. It is a plain read — the switch itself
 // still re-scopes through home.snapshotFetcher(m.repoID).
-var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
+var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, error) {
 	var resp daemon.SnapshotResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: ""})
 		return e
 	})
 	if err != nil {
@@ -616,7 +618,7 @@ var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
 
 // SetAllReposSnapshotFetcherForTest swaps the all-repos discovery fetcher and
 // returns a restore func. Test-only.
-func SetAllReposSnapshotFetcherForTest(f func() ([]session.InstanceData, error)) func() {
+func SetAllReposSnapshotFetcherForTest(f func(context.Context) ([]session.InstanceData, error)) func() {
 	prev := allReposSnapshotFetcher
 	allReposSnapshotFetcher = f
 	return func() { allReposSnapshotFetcher = prev }
