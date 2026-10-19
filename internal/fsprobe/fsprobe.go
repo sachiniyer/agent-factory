@@ -20,6 +20,7 @@ package fsprobe
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -78,6 +79,18 @@ var writeSpaceProbe = func(dir string) error {
 	// matter how the writes below end.
 	var werr error
 	buf := make([]byte, 64<<10)
+	if _, err := crypto_rand.Read(buf); err != nil {
+		// Random content matters: on a filesystem with transparent
+		// compression or zero-block elision (ZFS/btrfs compression, APFS
+		// clones) an all-zero probe "write" can consume almost no data
+		// space — the probe would pass while git's real write still gets
+		// the ENOSPC the classifier never sees (#5295 review). A seeded
+		// counter pattern is far less compressible than zeros if the CSRNG
+		// is somehow unavailable.
+		for i := range buf {
+			buf[i] = byte(i*31 + 7)
+		}
+	}
 	for written := 0; written < writeSpaceProbeSize; {
 		chunk := buf
 		if writeSpaceProbeSize-written < len(chunk) {
@@ -209,7 +222,15 @@ func removeDebrisScan(dir string) error {
 				fmt.Errorf("inspecting stale probe file %s: %w", name, ierr))
 			continue
 		}
-		if !registered || info.Size() != 0 {
+		if !registered {
+			continue
+		}
+		if info.Size() != 0 {
+			// The object at this path is no longer the zero-length file we
+			// abandoned — the workspace owner repurposed it. Retire the
+			// claim so a later truncate-back-to-zero cannot resurface a
+			// stale "ownership" over their file (#5295 review).
+			abandonedProbes.Delete(path)
 			continue
 		}
 		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {

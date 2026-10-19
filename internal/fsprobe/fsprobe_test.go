@@ -157,6 +157,16 @@ func TestRemoveDebris_RegisteredButRepurposed(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err, "a repurposed registered path must not be deleted")
 	require.Equal(t, "user content", string(data))
+
+	// The nonzero observation retires the claim: a later truncate back to
+	// zero must NOT resurrect "ownership" over the user's file (#5295
+	// review — a retained pathname claim would delete their replacement).
+	_, stillRegistered := abandonedProbes.Load(path)
+	require.False(t, stillRegistered, "observing repurposed content must invalidate the registry entry")
+	require.NoError(t, os.Truncate(path, 0))
+	require.NoError(t, RemoveDebris(dir))
+	_, err = os.Stat(path)
+	require.NoError(t, err, "a truncated-back-to-zero user file must survive — its claim was retired")
 }
 
 // TestWrite_ConcurrentProbesJoinOneFlight — concurrent probes of the same dir
