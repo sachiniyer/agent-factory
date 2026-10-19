@@ -331,10 +331,28 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 	// truth must land beside the last-known session row rather than be
 	// dropped behind it (#4888 review).
 	sessionRoots := make(map[string]bool, len(old))
+	// Roots the healthy registry read claims, mapped to the RepoID they now
+	// host. A session row's only navigable target is its Root: when the
+	// registry says that path belongs to a DIFFERENT repository, the preserved
+	// row is stale outright — keeping it would shadow the fresh registration's
+	// row and send its Enter to a checkout the old repo no longer occupies
+	// (#4888 review).
+	freshRootRepo := make(map[string]string, len(projects))
+	for _, row := range projects {
+		if row.RegistryID != "" {
+			freshRootRepo[row.Root] = row.RepoID
+		}
+	}
 	for _, row := range old {
 		if row.RegistryID == "" {
 			// A session-derived row: the snapshot read that produced it never
-			// answered, so nothing fresher exists to replace it with.
+			// answered, so nothing fresher exists to replace it with — unless
+			// the healthy registry just claimed its root for another repo.
+			if !registryDegraded {
+				if claimedRepo, claimed := freshRootRepo[row.Root]; claimed && claimedRepo != row.RepoID {
+					continue
+				}
+			}
 			merged = append(merged, row)
 			seenRepoIDs[row.RepoID] = true
 			seenRoots[row.Root] = true

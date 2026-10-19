@@ -1253,3 +1253,40 @@ func TestRebindConflictReseatParksCursorWhenTheRecordVanishes(t *testing.T) {
 		t.Fatalf("no matching registration — the cursor must park on the add-project row, got idx %d over %d rows", p.selectedIdx, len(p.all))
 	}
 }
+
+// TestMergePreservingSessionRowsDropsASessionRowWhoseRootWasReclaimed pins the
+// #4888 review finding on the healthy-registry case: when the session
+// snapshot fails but the registry read answers that a root now hosts a
+// DIFFERENT repository, the preserved session-only row is stale outright —
+// its only navigable target opens the replacement checkout under the old
+// repo's name and counts. It must drop beside the fresh registration that
+// claimed its root. (registryDegraded=false is what makes the registry's root
+// claim authoritative; the degraded sibling keeps both rows because nothing
+// proved the claim.)
+func TestMergePreservingSessionRowsDropsASessionRowWhoseRootWasReclaimed(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 3},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	if len(merged) != 1 {
+		t.Fatalf("the reclaimed root must show one row, not the stale session claim beside the fresh registration, got %+v", merged)
+	}
+	if merged[0].RepoID != "repo-new" || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("the surviving row is the authoritative registration, got %+v", merged)
+	}
+
+	// The SAME RepoID at the same root is the graft case, not a reclaim: the
+	// session row's target still hosts its own repository, so the
+	// registration's identity lands on the live row rather than dropping it.
+	same := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_new", RegistryRoot: "/repo"},
+	}
+	merged = MergePreservingSessionRows(old, same, false)
+	if len(merged) != 1 || merged[0].SessionCount != 3 || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("a same-repo root claim grafts the registration onto the session row's counts, got %+v", merged)
+	}
+}
