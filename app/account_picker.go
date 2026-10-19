@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -257,6 +258,13 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 	if naming == nil {
 		return m, nil
 	}
+	if m.accountRouteMissing {
+		// The daemon predates /v1/ListAccounts — there is no registry to list
+		// and asking again cannot produce one (#4893 review).
+		return m, m.handleNotice(errors.New(
+			"this daemon does not serve the account registry — it predates /v1/ListAccounts, " +
+				"so the session will run as the ambient identity"))
+	}
 	// The agent the FORM currently names, resolved through the same helper
 	// `af sessions create --account` validates against (api/sessions.go), so the
 	// picker and the create cannot disagree about which registry a program uses.
@@ -303,6 +311,12 @@ func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
 		return nil
+	}
+	if m.accountRouteMissing {
+		// The daemon predates /v1/ListAccounts — no registry exists to check
+		// the display against and no request can succeed, so ambient "" (the
+		// only wire account that daemon can produce) stands (#4893 review).
+		return retire()
 	}
 	if naming == nil || program == "" {
 		return retire()
@@ -396,16 +410,21 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	wasVerify := m.accountVerifyPending
 	m.accountVerifyPending = false
 	m.accountLookupPending = false
-	m.accountLookupFailed = msg.err != nil
-	if msg.err != nil || m.pendingAccountChosen {
-		return m, nil
+	routeMissing := apiclient.IsRouteNotServed(msg.err)
+	if routeMissing {
+		// A daemon that predates /v1/ListAccounts has no account registry to
+		// check the display against — the lookup can never succeed, so
+		// retrying it on every Enter would bar ALL creates against that
+		// daemon, and the picker cannot provide an escape because it is the
+		// same route (#4893 review). Ambient "" is the only wire account such
+		// a daemon can produce; latch the answer so no later fetch re-asks,
+		// and let it fall through as the definitive ambient reply it provably
+		// is rather than a retryable failure.
+		m.accountRouteMissing = true
 	}
-	if wasVerify {
-		// Whatever the reply carries — a named default or ambient — this
-		// display was just checked against the live answer for THIS submit.
-		// The flag is what lets a verified ambient display differ from a
-		// never-checked one (#4893 review).
-		m.accountVerified = true
+	m.accountLookupFailed = msg.err != nil && !routeMissing
+	if m.pendingAccountChosen || (msg.err != nil && !routeMissing) {
+		return m, nil
 	}
 	// Read off the response rather than held on the model: the picker builds its
 	// own rows from a fresh ListAccounts answer, so a second copy here would be a
@@ -418,14 +437,17 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	// reports the runtime a program_overrides entry launches. The roster is
 	// the daemon's account-capable agents, so a label on it is a label whose
 	// own registry the create will consult (#4893 review).
-	agent := msg.agent
-	if agent == "" && slices.Contains(msg.resp.Agents, msg.program) {
-		agent = msg.program
+	preselect := ambientAccount
+	if !routeMissing {
+		agent := msg.agent
+		if agent == "" && slices.Contains(msg.resp.Agents, msg.program) {
+			agent = msg.program
+		}
+		if agent == "" {
+			return m, nil
+		}
+		preselect = msg.resp.Defaults[agent]
 	}
-	if agent == "" {
-		return m, nil
-	}
-	preselect := msg.resp.Defaults[agent]
 	if preselect == ambientAccount {
 		// An empty fresh answer must clear an unchosen preselect an earlier
 		// reply (or a restored draft's wire value) left behind — otherwise the
@@ -433,8 +455,16 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		if m.pendingAccount != ambientAccount {
 			m.pendingAccount = ambientAccount
 			m.menu.SetNamingAccount(false)
+			// The display CHANGED under this reply — a named identity became
+			// ambient. The Enter that armed the verify authorized the named
+			// identity it saw, so the corrected form stays open for review;
+			// auto-submitting would launch under an identity that press never
+			// endorsed (#4893 review). accountVerified stays unset so the
+			// confirming Enter re-checks the live answer rather than trusting
+			// this one twice.
+			return m, nil
 		}
-		if wasVerify {
+		if wasVerify && m.state == stateNew && m.recovery == nil && m.accountVerifyRev == m.namingRev {
 			m.accountVerifiedFor = ambientAccount
 			// Ambient has no wire encoding past "", and "" resolves the LIVE
 			// default at create — a review press would send that same ""
@@ -446,10 +476,22 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 			// re-injecting a KeyMsg would ride the Update path where the
 			// backend-catalog and recovery screens consume keys as user input
 			// and silently eat the submit. stateNew only: inside an open
-			// picker Enter would select a row.
-			if m.state == stateNew {
-				return m.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+			// picker Enter would select a row, and under the recovery notice
+			// the next Enter is owed to its dismissal. And only while the
+			// form is unchanged since the verify armed — an in-flight edit
+			// means this answer describes a submit the Enter never
+			// authorized.
+			m.accountVerified = true
+			mod, cmd := m.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+			if m.namingInstance != nil {
+				// The programmatic Enter did not create — a refusal or
+				// another gate's hold — so this verification is consumed by
+				// the attempt: leaving accountVerified stamped would let a
+				// later Enter send "" off a stale answer without ever
+				// re-checking it (#4893 review).
+				m.accountVerified = false
 			}
+			return mod, cmd
 		}
 		return m, nil
 	}
@@ -457,7 +499,12 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	if wasVerify {
 		// The verify an implicit Enter armed has answered: whatever the field
 		// now displays is the live answer the user just reviewed (#4893
-		// review).
+		// review). A NAMED identity's verification survives for that review
+		// Enter — it travels concretely on the wire, so a default_accounts
+		// that moved in the meantime cannot change what the create gets. An
+		// ambient one does not survive: it is consumed atomically above, or
+		// re-earned by the next Enter.
+		m.accountVerified = true
 		m.accountVerifiedFor = preselect
 	}
 	if m.state == stateSelectAccount && m.selectionOverlay != nil {
@@ -494,6 +541,12 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	if msg.err != nil {
+		if apiclient.IsRouteNotServed(msg.err) {
+			// A daemon that predates /v1/ListAccounts proved it here too —
+			// latch it so the submit gate stops asking the same dead route
+			// and the ambient-only create can proceed (#4893 review).
+			m.accountRouteMissing = true
+		}
 		// Lead with what failed and what it blocks; the daemon's own error text
 		// follows. The naming form stays open — the field is optional, so a registry
 		// we could not read must not cost the user their half-typed create.
@@ -618,6 +671,7 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingAccount = choice.value
 	m.pendingAccountChosen = true
+	m.namingRev++
 	m.menu.SetNamingAccount(m.pendingAccount != ambientAccount)
 	if choice.unregistered {
 		// A row that exists only because the project default names it. It is a

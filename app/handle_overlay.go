@@ -47,6 +47,7 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.clearPendingAccount()
 			}
 			m.pendingProgram = picked
+			m.namingRev++
 			m.selectionOverlay = nil
 			m.state = stateNew
 			m.menu.SetState(ui.StateNewInstance)
@@ -78,6 +79,7 @@ func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	canceled := m.promptOverlay.IsCanceled()
 	if !canceled {
 		m.pendingPrompt = m.promptOverlay.Value()
+		m.namingRev++
 	}
 	m.promptOverlay = nil
 	m.state = stateNew

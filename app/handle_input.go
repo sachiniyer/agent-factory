@@ -48,6 +48,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountRouteMissing = false
 		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		// Same retraction as the submit tail: a gate notice still on the bar
@@ -78,6 +79,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(""); err != nil {
 			return m, m.handleError(err)
 		}
+		m.namingRev++
 		return m, nil
 	}
 	switch msg.Type {
@@ -243,6 +245,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.pendingProgram = resolved
 					m.program = resolved
 					m.namingInstance.Program = resolved
+					m.namingRev++
 					// Same correction the remote handler applies: every account
 					// state the OLD agent produced — preselect, pick, an open
 					// account picker — belongs to a registry the resolved agent
@@ -303,6 +306,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					break
 				}
 				m.accountVerifyPending = true
+				m.accountVerifyRev = m.namingRev
 				return m, tea.Batch(
 					m.handleNotice(errors.New("retrying the account lookup — press Enter to confirm")),
 					verify,
@@ -314,6 +318,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// display needs, without a second round trip (#4893
 				// review).
 				m.accountVerifyPending = true
+				m.accountVerifyRev = m.namingRev
 				return m, m.handleNotice(errors.New("still resolving the displayed account — try again in a moment"))
 			default:
 				verify := m.fetchAccountDefault(instance, m.pendingProgram)
@@ -324,6 +329,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.clearPendingAccount()
 				} else {
 					m.accountVerifyPending = true
+					m.accountVerifyRev = m.namingRev
 					return m, tea.Batch(
 						m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
 						verify,
@@ -446,6 +452,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountRouteMissing = false
 		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
@@ -574,6 +581,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
+		m.namingRev++
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
 		if len(runes) == 0 {
@@ -582,6 +590,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(string(runes[:len(runes)-1])); err != nil {
 			return m, m.handleError(err)
 		}
+		m.namingRev++
 	case tea.KeySpace:
 		newTitle := instance.Title + " "
 		if runewidth.StringWidth(newTitle) > 32 {
@@ -590,6 +599,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
+		m.namingRev++
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
 		// (#717) — see the ctrl+c branch above for the full rationale.
@@ -611,6 +621,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountRouteMissing = false
 		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		// Same retraction as the submit tail: a gate notice still on the bar
@@ -671,6 +682,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.accountVerifiedFor = ""
 	m.accountLookupPending = false
 	m.accountLookupFailed = false
+	m.accountRouteMissing = false
 	m.accountVerified = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()

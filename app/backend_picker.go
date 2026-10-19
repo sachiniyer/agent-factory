@@ -276,6 +276,7 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(errors.New(choice.reason))
 	}
 	m.pendingBackend = choice.value
+	m.namingRev++
 	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)
 	return m, nil
 }

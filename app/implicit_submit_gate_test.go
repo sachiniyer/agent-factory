@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
@@ -497,4 +498,164 @@ func TestAccountlessProgramRetiresTheLookupMarkers(t *testing.T) {
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title,
 		"nothing holds the submit once there is no registry left to verify against")
+}
+
+// TestNamedToAmbientReplyStaysOpenForReview pins the #4893 review finding on
+// the auto-submit boundary: the Enter that armed the verify authorized the
+// NAMED identity the field then showed, so a reply that corrects it to
+// ambient must leave the form open for review — launching under an identity
+// that press never endorsed would break the core promise that a submit
+// creates what the form showed.
+func TestNamedToAmbientReplyStaysOpenForReview(t *testing.T) {
+	h := newTestHome(t)
+	got := recordStartRequest(t)
+	call := 0
+	t.Cleanup(SetAccountListerForTest(func(agent, _ string) (daemon.ListAccountsResponse, error) {
+		call++
+		if call == 1 {
+			return withDefaults(map[string]string{"claude": "work"}), nil
+		}
+		return daemon.ListAccountsResponse{Agents: []string{"claude"}}, nil
+	}))
+
+	inst := startNaming(t, h, "demo")
+	deliverAccountDefault(t, h, inst, "claude")
+	require.Equal(t, "work", h.pendingAccount, "precondition: the field shows the named default")
+
+	// The verify's answer corrects the display to ambient: it stays open for
+	// review, and does NOT count as verified — the next Enter re-checks.
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, h.accountVerifyPending)
+	deliver(t, h, msgs)
+	require.Equal(t, stateNew, h.state, "a named→ambient correction waits for review")
+	assert.Empty(t, got.Title, "the Enter authorized 'work', not ambient")
+	require.Empty(t, h.pendingAccount, "the corrected display is ambient")
+	assert.False(t, h.accountVerified, "a changed display is not verified by the reply that changed it")
+
+	// The review press re-verifies; the now-ambient display's answer submits
+	// atomically while it is still current (#4893 review).
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	assert.Equal(t, "demo", got.Title)
+	assert.Empty(t, got.Account)
+}
+
+// TestAmbientVerifyReplyOverAnOpenFieldDoesNotVerify pins the #4893 review
+// finding on the conditional auto-submit: a verified-ambient reply arriving
+// while a nested field owns the form cannot run Enter's action — and its
+// stamp must not survive either, or the next Enter would send "" off a stale
+// answer. The press that follows re-checks live.
+func TestAmbientVerifyReplyOverAnOpenFieldDoesNotVerify(t *testing.T) {
+	h := newTestHome(t)
+	got := recordStartRequest(t)
+	calls, _ := stubAccounts(t, daemon.ListAccountsResponse{Agents: []string{"claude"}}, nil)
+
+	startNaming(t, h, "demo")
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, h.accountVerifyPending)
+
+	// The account field opens over the in-flight verify.
+	h.state = stateSelectAccount
+	deliver(t, h, msgs)
+	require.Equal(t, stateSelectAccount, h.state, "the field stays open over the reply")
+	assert.Empty(t, got.Title, "Enter inside a picker selects a row — no auto-submit")
+	assert.False(t, h.accountVerified,
+		"a verification the auto-submit could not spend is re-earned, not banked")
+
+	h.state = stateNew
+	before := *calls
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	assert.Greater(t, *calls, before, "the next Enter re-asks live")
+	assert.Equal(t, "demo", got.Title)
+}
+
+// TestAmbientVerifyConsumedByARefusedSubmit pins the #4893 review finding on
+// verification scope: a verified-ambient reply that runs the submit but is
+// refused has NOT created anything, so its stamp must not survive to let a
+// later Enter send "" off a stale answer — the next press re-checks live.
+func TestAmbientVerifyConsumedByARefusedSubmit(t *testing.T) {
+	h := newTestHome(t)
+	got := recordStartRequest(t)
+	calls, _ := stubAccounts(t, daemon.ListAccountsResponse{Agents: []string{"claude"}}, nil)
+	preflightFails := true
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
+		if preflightFails {
+			return errors.New("claude is not installed")
+		}
+		return nil
+	}))
+
+	startNaming(t, h, "demo")
+
+	// The verified ambient reply submits itself — and preflight refuses.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	require.Equal(t, stateNew, h.state, "the refusal keeps the form open")
+	assert.Empty(t, got.Title)
+	assert.False(t, h.accountVerified,
+		"a refused auto-submit consumed its verification — nothing was created")
+
+	// The next Enter re-asks rather than trusting the consumed answer, and
+	// with preflight healthy the re-earned ambient answer submits.
+	before := *calls
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Greater(t, *calls, before, "a consumed verification is re-earned, not reused")
+	preflightFails = false
+	deliver(t, h, msgs)
+	assert.Equal(t, "demo", got.Title)
+}
+
+// TestEditDuringVerifyCancelsAmbientAutoSubmit pins the #4893 review finding
+// on in-flight edits: the Enter that armed the verify authorized the form as
+// it then was — a title typed since means the reply answers for a submit the
+// user never made, so the ambient auto-submit must not run on it. The next
+// Enter re-verifies the CURRENT form.
+func TestEditDuringVerifyCancelsAmbientAutoSubmit(t *testing.T) {
+	h := newTestHome(t)
+	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{Agents: []string{"claude"}}, nil)
+
+	startNaming(t, h, "demo")
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, h.accountVerifyPending)
+
+	// The user keeps typing while the check is in flight.
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	deliver(t, h, msgs)
+	require.Equal(t, stateNew, h.state)
+	assert.Empty(t, got.Title, "the armed Enter authorized the pre-edit title only")
+	assert.False(t, h.accountVerified, "a stale-form verification is not banked")
+
+	// The confirming press re-verifies the CURRENT form and submits
+	// atomically — the title it creates is the edited one.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	assert.Equal(t, "demox", got.Title)
+}
+
+// TestRouteMissingDaemonSubmitsAmbient pins the #4893 review finding on
+// version skew: a daemon that predates /v1/ListAccounts can never answer the
+// account check, and retrying it on every Enter would bar ALL creates
+// against that daemon — with no picker escape, since it is the same route.
+// The latch treats the 404 as the definitive ambient answer it provably is.
+func TestRouteMissingDaemonSubmitsAmbient(t *testing.T) {
+	h := activeProjectHome(t)
+	got := recordStartRequest(t)
+	calls := 0
+	t.Cleanup(SetAccountListerForTest(func(agent, _ string) (daemon.ListAccountsResponse, error) {
+		calls++
+		return daemon.ListAccountsResponse{}, &apiclient.RouteNotServedError{
+			Route:  "/v1/ListAccounts",
+			Detail: `unknown route "/v1/ListAccounts"`,
+		}
+	}))
+
+	_, cmd := h.startNewInstance()
+	deliver(t, h, drainCmd(t, cmd, time.Second))
+	require.True(t, h.accountRouteMissing, "the 404 latches the ambient-only answer")
+	require.False(t, h.accountLookupFailed, "route-missing is not a retryable failure")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+
+	before := calls
+	submitVerifiedForm(t, h)
+	assert.Equal(t, "demo", got.Title)
+	assert.Empty(t, got.Account, "the only wire account that daemon can produce")
+	assert.Equal(t, before, calls, "the latched answer is never re-asked")
 }

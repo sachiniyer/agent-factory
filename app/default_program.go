@@ -289,6 +289,7 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingProgram = msg.program
 	m.namingInstance.Program = msg.program
+	m.namingRev++
 	if wasVerify {
 		// The submit-armed answer moved the default: the correction below
 		// puts the live value on the field, which is the display the next

@@ -513,6 +513,24 @@ type home struct {
 	// (#4893 review). An explicit account or program pick remains the way
 	// out while the service is down.
 	accountLookupFailed bool
+	// accountRouteMissing latches that the daemon predates /v1/ListAccounts:
+	// the lookup can never succeed, so retrying it on every Enter would bar
+	// ALL creates against that daemon — and the picker cannot provide an
+	// escape, it is the same route. The only wire account such a daemon can
+	// produce is ambient, exactly what "" sends, so the verified-ambient
+	// semantics apply without a registry to check (#4893 review).
+	// fetchAccountDefault short-circuits while it is set. Per-form: a daemon
+	// upgrade between creates should be re-probed.
+	accountRouteMissing bool
+	// namingRev counts edits to the values the naming form will submit —
+	// title runes, prompt commits, program/backend/account picks, and
+	// gate-applied program corrections. accountVerifyRev snapshots it when an
+	// implicit Enter arms the account verify; a verified-ambient reply may
+	// auto-submit only while they still match, because that Enter authorized
+	// the form as it then was — an edit in flight means the reply answers
+	// for a form the user already replaced (#4893 review).
+	namingRev        int
+	accountVerifyRev int
 	// remoteDefaultVerifyPending marks a remote ListPrograms answer that an
 	// implicit Enter re-requested rather than the routine form-open fetch:
 	// only that submit-armed reply may stamp remoteDefaultVerifiedFor, so the
