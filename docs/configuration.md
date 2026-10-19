@@ -249,8 +249,20 @@ in-repo `.agent-factory/config.toml` may set, and a checked-in value carrying on
 of those assignments is **rejected at load** with an error naming the selector:
 otherwise cloning a repository and starting a session would hand that
 repository's agent your cloud credentials. A repo may still choose *which*
-program runs — a path, flags, a wrapper — because that grants nothing. Set the
-selector in your own global config or export it in your shell if you want it.
+program runs — a bare name, a relative path, flags, a wrapper — because that
+grants nothing it cannot prove. An **absolute executable path is also rejected
+at load** in checked-in config: the launcher's credential grant treats absolute
+paths as operator-attributable, and a spelling the repository chooses can be
+aimed at content it controls — a file committed in another checkout of the same
+repo, or a payload `post_worktree_commands` writes during setup. And **any
+command-local environment change is rejected at load** in checked-in config — a
+shell assignment prefix like `LD_PRELOAD=./x.so codex` or an `env NAME=…`/
+`env -u`/`env -i`/`env -C` mutation — because the launch grant sees only the
+command string and cannot tell a checked-in assignment apart from one in your
+own global config. Absolute paths and environment-bearing overrides remain
+available in the global config and the machine-local personal per-project file,
+which only you control. Set the selector, the absolute path, or the assignment
+in your own global config or export it in your shell if you want it.
 
 Gemini's cloud modes work the same way, selected by `GOOGLE_GENAI_USE_VERTEXAI`
 or `GOOGLE_GENAI_USE_GCA`. Choosing *which* agent runs is also a repo's to make
@@ -548,7 +560,7 @@ default_program = "codex"
 post_worktree_commands = ["npm install"]
 
 [program_overrides]
-codex = "/usr/local/bin/codex --profile work"
+codex = "codex --profile work"
 
 [remote_hooks]
 launch_cmd = "./infra/launch.sh"
