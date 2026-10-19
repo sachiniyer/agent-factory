@@ -511,3 +511,92 @@ func TestResolveConfigCompositeLeafMapBranchStaysExact(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveConfigCaseVariantLeafProjectsFromCanonicalSpelling pins the
+// contract the #5397 follow-up review raised: a case-variant [docker] Image
+// leaf survives resolution (pinned above) and its origin is keyed by the
+// file's physical spelling (pinned by TestResolveConfigCaseVariantLeafOrigins
+// PreserveFileSpelling), but ResolvedValuePath's origin lookup was exact-only,
+// so the documented canonical command `af config get docker.image --repo ...`
+// (lowercase) reported an unknown key even though res.Docker.Image resolved
+// correctly — only the file's exact spelling (docker.Image) worked. The fix
+// folds the origin lookup for struct-backed composites, so the canonical
+// lowercase spelling now projects the leaf. The physical spelling is retained
+// in the winner's KeyPath (the spelling the operator wrote), not replaced by
+// the queried lowercase spelling. Map-backed composites are not folded
+// (program_overrides keeps exact map keys), pinned by
+// TestResolveConfigCaseVariantStructLeavesPreservesMapKeyExactness.
+func TestResolveConfigCaseVariantLeafProjectsFromCanonicalSpelling(t *testing.T) {
+	repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
+	writeInRepoTomlConfig(t, repoRoot, "[docker]\nImage = \"prov/image:latest\"\n")
+
+	res, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	require.Equal(t, "prov/image:latest", res.Docker.Image)
+
+	// The canonical lowercase spelling must project the case-variant leaf.
+	leaf, ok := res.ResolvedValuePath("docker.image")
+	require.True(t, ok,
+		"ResolvedValuePath with the canonical lowercase spelling must project a case-variant leaf")
+	assert.Equal(t, "prov/image:latest", leaf.Value,
+		"the projected value is the case-variant Image leaf the operator wrote")
+	require.NotNil(t, leaf.Winner,
+		"the canonical spelling must resolve to a winner with a source")
+	assert.Equal(t, SourceRepoShared.String(), leaf.Winner.Layer,
+		"the winner is the in-repo source that supplied the case-variant leaf")
+	assert.Equal(t, "docker.Image", leaf.Winner.KeyPath,
+		"the winner KeyPath retains the file's physical spelling, not the queried lowercase spelling")
+
+	// The physical spelling the operator wrote must still project too — the
+	// exact-match path is unchanged.
+	physicalLeaf, physicalOK := res.ResolvedValuePath("docker.Image")
+	require.True(t, physicalOK, "ResolvedValuePath with the file's physical spelling must still project")
+	assert.Equal(t, "prov/image:latest", physicalLeaf.Value)
+	require.NotNil(t, physicalLeaf.Winner)
+	assert.Equal(t, "docker.Image", physicalLeaf.Winner.KeyPath,
+		"the exact-match path keeps the physical spelling in the winner KeyPath")
+}
+
+// TestResolveConfigCaseVariantLeafCanonicalSpellingDoesNotFoldMapKeys pins the
+// design boundary the #5397 follow-up review drew: the case-insensitive origin
+// lookup is gated on a struct-backed parent, so a map-backed composite's exact
+// map keys are not folded. ResolvedValuePath("program_overrides.codex") must
+// still project the exact "codex" entry, and a mixed-case "Codex" key that
+// exists as a distinct map entry must project the exact "Codex" entry, while a
+// spelling that is not an exact map key (e.g. "CODEX" against a map that
+// carries "codex" and "Codex") must NOT be folded onto either.
+func TestResolveConfigCaseVariantLeafCanonicalSpellingDoesNotFoldMapKeys(t *testing.T) {
+	builtIn := &Config{ProgramOverrides: map[string]string{"codex": "built-in"}}
+	repo := &InRepoConfig{ProgramOverrides: map[string]string{"Codex": "personal"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "program_overrides",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceRepoShared},
+		Merge:      MergeMapByKey,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn}},
+		{
+			layer:    SourceRepoShared,
+			metadata: sourceMetadata{shape: map[string]any{"program_overrides": map[string]any{"Codex": "personal"}}},
+			schemas:  []any{repo},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	lower, lowerOK := resolved.ResolvedValuePath("program_overrides.codex")
+	require.True(t, lowerOK, "the exact lowercase map key must project")
+	assert.Equal(t, "built-in", lower.Value, "the built-in lowercase codex entry wins by precedence")
+
+	mixed, mixedOK := resolved.ResolvedValuePath("program_overrides.Codex")
+	require.True(t, mixedOK, "the exact mixed-case map key must project")
+	assert.Equal(t, "personal", mixed.Value, "the repo-shared mixed-case Codex entry is a distinct key")
+
+	upper, upperOK := resolved.ResolvedValuePath("program_overrides.CODEX")
+	assert.False(t, upperOK,
+		"a non-existent exact map key must NOT be folded onto a same-letter-different-case entry")
+	if upperOK {
+		assert.Equal(t, "", upper.Value, "no value should be projected for a missing exact map key")
+	}
+}

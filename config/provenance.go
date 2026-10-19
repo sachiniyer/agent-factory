@@ -487,6 +487,25 @@ func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
+// isStructBackedValue reports whether value is a struct (or a pointer to one),
+// the shape a MergeTableByField composite resolves into. ResolvedValuePath uses
+// this to gate the case-insensitive origin fallback: struct-backed composites
+// key Origins by the file's physical spelling (taggedFieldByKey folds case), so
+// a canonical lowercase lookup must fold to match; map-backed composites keep
+// exact map keys, and configLeafValue has already returned false for a
+// non-existent exact map key before reaching the fallback, so a map-backed
+// parent never enters it (#5397 review).
+func isStructBackedValue(value any) bool {
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return false
+		}
+		reflected = reflected.Elem()
+	}
+	return reflected.Kind() == reflect.Struct
+}
+
 func manifestValueType(key string) (reflect.Type, bool) {
 	for _, schema := range []any{Config{}, InRepoConfig{}} {
 		if field, ok := taggedFieldByKey(reflect.ValueOf(schema), key); ok {
@@ -753,9 +772,39 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	projected.Origins = nil
 	winner, present := parent.Origins[leaf]
 	if !present {
+		// Struct-backed composites key Origins by the file's physical spelling
+		// (e.g. "Image"), so a case-variant leaf that survived the resolver
+		// (taggedFieldByKey folds case) is absent under the canonical lowercase
+		// spelling a caller passes in (e.g. "image"). configLeafValue already
+		// folded case to project the value above; fold the origin lookup the
+		// same way for struct-backed parents so ResolvedValuePath("docker.image")
+		// reports the leaf the operator wrote as [docker] Image. Map-backed
+		// composites keep exact map keys (compositeLeaf's reflect.Map branch),
+		// and configLeafValue returns false for a non-existent exact map key
+		// before reaching here, so this fallback never fires for a map-backed
+		// parent. Within one struct, tags are unique by case, so the scan is
+		// unambiguous (#5397 review).
+		if isStructBackedValue(parent.Value) {
+			for physical, candidate := range parent.Origins {
+				if strings.EqualFold(physical, leaf) {
+					winner = candidate
+					present = true
+					break
+				}
+			}
+		}
+	}
+	if !present {
 		return ResolvedValue{}, false
 	}
-	winner.KeyPath = keyPath
+	// For the exact-match path the queried keyPath equals the physical spelling,
+	// so overwriting is a no-op; for the case-variant fallback the origin's
+	// physical KeyPath is the spelling the operator wrote, which is what the
+	// trace should report, so keep it instead of replacing it with the queried
+	// spelling.
+	if winner.KeyPath == "" {
+		winner.KeyPath = keyPath
+	}
 	projected.Winner = &winner
 	precedenceRank := make(map[string]int, len(parent.Precedence))
 	for i, layer := range parent.Precedence {
