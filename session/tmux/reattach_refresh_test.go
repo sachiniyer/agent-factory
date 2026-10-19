@@ -90,7 +90,7 @@ func TestReattachSkipsAccountRefreshOnConfirmedFresh(t *testing.T) {
 	m.nameGen.Store("$5 111 222")
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), true, true, true))
+	require.NoError(t, session.reattach(reattachOptions{answered: true, confirmedFresh: true, refreshAccount: true, baseline: true}))
 	require.Zero(t, m.setEnvCalls.Load(),
 		"the refresh must not issue set-environment on a confirmedFresh reattach — Start's queue already wrote them")
 	require.Zero(t, m.setOptionCalls.Load(),
@@ -107,7 +107,7 @@ func TestReattachSkipsAccountRefreshOnUnansweredProbe(t *testing.T) {
 	m := &reattachRefreshTmux{}
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), false, false, true))
+	require.NoError(t, session.reattach(reattachOptions{refreshAccount: true, baseline: true}))
 	require.Zero(t, m.setEnvCalls.Load(),
 		"the refresh must not issue set-environment when the probe went unanswered — a wedged server already spent one timeout")
 	require.Zero(t, m.setOptionCalls.Load(),
@@ -127,7 +127,7 @@ func TestReattachRunsAccountRefreshOnAnsweredNonFresh(t *testing.T) {
 	m.nameGen.Store("$5 111 222")
 	session := accountScopedRefreshSession(t, m)
 
-	require.NoError(t, session.reattach(t.TempDir(), true, false, true))
+	require.NoError(t, session.reattach(reattachOptions{answered: true, refreshAccount: true, baseline: true}))
 	require.Positive(t, m.setEnvCalls.Load(),
 		"the refresh must issue set-environment on an answered, non-fresh reattach — this is the heal path")
 	require.Positive(t, m.setOptionCalls.Load(),
@@ -145,7 +145,7 @@ func TestReattachAnsweredNonFreshRefreshFailureWrapsError(t *testing.T) {
 	m.setEnvFails.Store(true)
 	session := accountScopedRefreshSession(t, m)
 
-	err := session.reattach(t.TempDir(), true, false, true)
+	err := session.reattach(reattachOptions{answered: true, refreshAccount: true, baseline: true})
 	require.ErrorIs(t, err, ErrAccountEnvironmentRefresh)
 }
 

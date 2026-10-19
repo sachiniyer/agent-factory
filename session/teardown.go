@@ -490,27 +490,12 @@ type teardownKill struct {
 	// boundary itself (#3278 review). Nil for everything but an archived,
 	// record-free, local worktree.
 	recheckOrigin func() error
+	// recheckMissing re-probes a worktree-missing LIVE row's recorded path at
+	// the deletion boundary (#5102). Nil for every other row.
+	recheckMissing func() error
 	// trustLiveGeneration is set only by prepareKillTeardown when its caller
 	// holds this session's exclusive lifecycle lock (#3413); see closeTab.
 	trustLiveGeneration bool
-}
-
-// beforeKillTeardownOriginRecheck runs between the daemon's pre-tombstone
-// admission and the teardown-boundary origin recheck below. Tests use it to
-// change the origin's state inside that interval deterministically; production
-// never reassigns it.
-var beforeKillTeardownOriginRecheck = func() {}
-
-// SetBeforeKillTeardownOriginRecheckForTest installs a hook in the interval
-// between kill admission and the archived-origin teardown recheck, returning a
-// restore function. Mirrors the git layer's restore-boundary seams.
-func SetBeforeKillTeardownOriginRecheckForTest(hook func()) func() {
-	previous := beforeKillTeardownOriginRecheck
-	if hook == nil {
-		hook = func() {}
-	}
-	beforeKillTeardownOriginRecheck = hook
-	return func() { beforeKillTeardownOriginRecheck = previous }
 }
 
 // prepareKillTeardown consumes a cleanup-ready record only after the daemon's
@@ -526,6 +511,7 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	i.mu.RLock()
 	gw := i.gitWorktree
 	archived := i.liveness == LiveArchived
+	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
 	if gw == nil {
 		return teardownKill{trustLiveGeneration: trustLiveGeneration}, noop, nil
@@ -591,6 +577,24 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 				return nil
 			}}, noop, nil
 		}
+		// A live row flagged worktree-missing (#5102) reaches here with no record
+		// at all, or with the identity-unknown stall just discharged on proven
+		// absence — either way nothing fences the path any more, and ordinary
+		// Cleanup ends in an unregistered RemoveAll. A directory that appears
+		// there between that proof and the deletion boundary is unverified by
+		// the flag's own definition, so the absence is re-proven at the boundary
+		// and only git's stale registration is reaped. An occupant refuses; the
+		// tombstone stays the retry handle, and once the user clears the path a
+		// further kill passes admission and settles. Archived missing rows keep
+		// recheckOrigin above: its registered-only cleanup already refuses any
+		// occupant that is not a checkout of this session's branch.
+		if worktreeMissing && !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
+			i.Capabilities().Workspace == WorkspaceLocalWorktree {
+			return teardownKill{trustLiveGeneration: trustLiveGeneration, recheckMissing: func() error {
+				beforeKillTeardownOriginRecheck()
+				return recheckMissingWorktreeAbsent(gw.GetWorktreePath())
+			}}, noop, nil
+		}
 		return teardownKill{trustLiveGeneration: trustLiveGeneration}, noop, nil
 	}
 	if recovery.State != git.RelocationRecoveryCleanupReady &&
@@ -641,7 +645,15 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		cleanupState, err = gw.CleanupClaimedRepoGone(*m.cleanupClaim)
 		*m.claimHandled = true
 	} else {
-		if m.recheckOrigin != nil {
+		if m.recheckMissing != nil {
+			if recheckErr := m.recheckMissing(); recheckErr != nil {
+				return stateUnknown, recheckErr
+			}
+			// Proven absent: nothing of the session's is on disk to delete, and
+			// registered-only cleanup can never RemoveAll a directory that
+			// appears while git runs (#5102).
+			cleanupState, err = gw.CleanupRegisteredOnly()
+		} else if m.recheckOrigin != nil {
 			if recheckErr := m.recheckOrigin(); recheckErr != nil {
 				return stateUnknown, recheckErr
 			}
@@ -662,7 +674,7 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		// archived kill must never report ordinary cleanup settled while the
 		// archived directory still occupies its path, because the caller's
 		// next step deletes the row that is the directory's only handle.
-		if m.recheckOrigin != nil && cleanupState == git.CleanupSettled {
+		if (m.recheckOrigin != nil || m.recheckMissing != nil) && cleanupState == git.CleanupSettled {
 			if settleErr := ArchivedCleanupSettled(gw.GetWorktreePath()); settleErr != nil {
 				retained := fmt.Errorf(
 					"%w: ordinary cleanup reported settled but %v — kill the session again to re-establish cleanup authorization",
@@ -691,24 +703,6 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
 	}
 	return stateKnown, nil
-}
-
-// ArchivedCleanupSettled decides whether a settled ordinary cleanup may stand
-// for an archived record-free kill (#3278 review). Nil means the pathname
-// conclusively answers ENOENT — the archive is dealt with. Anything else — the
-// path still occupied, or a stat that failed, stalled, or timed out rather
-// than answered — returns the reason the settlement cannot be trusted, and the
-// caller retains the row. Exported because the daemon's ghost cleanup shares
-// the exact decision.
-func ArchivedCleanupSettled(path string) error {
-	if _, statErr := git.BoundedLstat(path); !errors.Is(statErr, os.ErrNotExist) {
-		reason := fmt.Errorf("the archived worktree could not be proven absent at %s", path)
-		if statErr != nil {
-			reason = errors.Join(reason, statErr)
-		}
-		return reason
-	}
-	return nil
 }
 
 func (teardownKill) clearsStarted() bool { return true }

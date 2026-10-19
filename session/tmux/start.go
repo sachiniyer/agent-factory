@@ -717,7 +717,9 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
-	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh, true)
+	return RestoreReattached, t.reattach(reattachOptions{
+		answered: answered, confirmedFresh: confirmedFresh, refreshAccount: true, baseline: workDir != "",
+	})
 }
 
 // ReattachOnly performs only the live-session rebind half of
@@ -738,7 +740,7 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 // still exists, the monitor simply never fires, and the pane's retained output
 // stays previewable.
 func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
-	return t.reattach(workDir, answered, false, true)
+	return t.reattach(reattachOptions{answered: answered, refreshAccount: true, baseline: workDir != ""})
 }
 
 // ReattachInert rebinds a session that is still alive and does nothing else:
@@ -751,23 +753,45 @@ func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
 // startup-unknown — excluded from reconciliation and refused by archive, the
 // one remedy the row is being kept for. A confirmed-absent session is reported
 // exactly as RestoreWithResult("") reports it.
+//
+// Its monitor baselines like any reattach of persisted state: the pane predates
+// this process, so its first capture is not new output. A fresh monitor would
+// report it as an update across a mere daemon restart, recording false churn and
+// overwriting a persisted Ready or LimitReached with Running.
 func (t *TmuxSession) ReattachInert() error {
 	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
 	if !existsOrUnknown {
 		return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 	}
-	return t.reattach("", answered, false, false)
+	return t.reattach(reattachOptions{answered: answered, baseline: true})
+}
+
+// reattachOptions are the choices reattach's callers make explicitly.
+type reattachOptions struct {
+	// answered is whether the existence probe that routed here answered.
+	answered bool
+	// confirmedFresh is restoreWithResult's: Start's own new-session is what
+	// answered the name.
+	confirmedFresh bool
+	// refreshAccount re-derives the pane's account environment; false only for
+	// ReattachInert.
+	refreshAccount bool
+	// baseline is whether this rebinds persisted state, whose first capture
+	// only establishes the monitor's baseline. It used to be inferred from a
+	// non-empty workDir, which is what Restore's callers with persisted state
+	// pass — but ReattachInert reattaches persisted state with no directory to
+	// name (#5102), so the choice is the caller's to state.
+	baseline bool
 }
 
 // reattach is the live-session rebind shared by restoreWithResult,
-// ReattachOnly and ReattachInert. answered is whether the existence probe that
-// routed here answered, confirmedFresh is restoreWithResult's, and
-// refreshAccount is false only for ReattachInert.
-func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh, refreshAccount bool) error {
+// ReattachOnly and ReattachInert.
+func (t *TmuxSession) reattach(opts reattachOptions) error {
+	answered, confirmedFresh := opts.answered, opts.confirmedFresh
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
-	if workDir != "" {
+	if opts.baseline {
 		monitor = newReattachStatusMonitor()
 	}
 	// Bind the fresh monitor to the generation that just answered live: the
@@ -804,7 +828,7 @@ func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh, refresh
 	// would pay the same deadline for the same non-answer — twelve times over —
 	// violating the one-bounded-has-session discipline the generation probe
 	// above and ReattachOnly's doc both promise (Codex on #4473).
-	if refreshAccount && !confirmedFresh && answered {
+	if opts.refreshAccount && !confirmedFresh && answered {
 		if err := t.refreshRestoredAccountEnvironment(); err != nil {
 			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 		}
