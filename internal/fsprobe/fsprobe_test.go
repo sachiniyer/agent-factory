@@ -52,18 +52,30 @@ func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
 // rather than stacking another blocked goroutine.
 func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 	release := make(chan struct{})
+	dir := t.TempDir()
 	old := writeSpaceProbe
 	writeSpaceProbe = func(string) error {
 		<-release
 		return nil
 	}
-	defer func() { writeSpaceProbe = old }()
 	oldTimeout := probeTimeout
 	probeTimeout = 50 * time.Millisecond
-	defer func() { probeTimeout = oldTimeout }()
-	defer close(release)
+	defer func() {
+		close(release)
+		// The spawned worker reads the package-level seams when the
+		// scheduler runs it, which can lag the Write caller that spawned
+		// it. Wait for the flight to publish its result and unpublish
+		// before restoring the seams — restoring while the worker's read
+		// is still pending races it (CI -race on #5295).
+		require.Eventually(t, func() bool {
+			probeFlights.Lock()
+			defer probeFlights.Unlock()
+			return probeFlights.byDir[dir] == nil
+		}, 5*time.Second, time.Millisecond)
+		writeSpaceProbe = old
+		probeTimeout = oldTimeout
+	}()
 
-	dir := t.TempDir()
 	err := Write(dir)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.DeadlineExceeded),
