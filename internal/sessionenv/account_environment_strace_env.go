@@ -288,129 +288,6 @@ func straceTracedPassthroughWrapper(word *syntax.Word) bool {
 		isAccountCommandName(word, "taskset")
 }
 
-// systemdRunLongOptions models systemd-run's long options that take a value
-// as the next argv word (--unit UNIT, --property NAME=VALUE, …). true means the
-// option requires an argument (separate word or attached =value); false means it
-// takes no argument. Measured from `systemd-run --help` (systemd 256); the
-// attached --opt=value form is already caught by the generic --opt=DENIED arm in
-// the non-strace wrapper scan, so this table only drives the separate-word form
-// here. resolveLongOption resolves abbreviations the way getopt_long does.
-var systemdRunLongOptions = map[string]bool{
-	// Value-taking long options (separate word or attached =value).
-	"host": true, "machine": true, "unit": true, "property": true,
-	"description": true, "slice": true, "expand-environment": true,
-	"service-type": true, "uid": true, "gid": true, "nice": true,
-	"working-directory": true, "setenv": true, "json": true,
-	"background": true, "path-property": true, "socket-property": true,
-	"on-active": true, "on-boot": true, "on-startup": true,
-	"on-unit-active": true, "on-unit-inactive": true, "on-calendar": true,
-	"timer-property": true,
-
-	// Boolean long options (no argument).
-	"help": false, "version": false, "no-ask-password": false, "user": false,
-	"scope": false, "slice-inherit": false, "no-block": false,
-	"remain-after-exit": false, "wait": false, "send-sighup": false,
-	"same-dir": false, "pty": false, "pipe": false, "quiet": false,
-	"collect": false, "shell": false, "ignore-failure": false,
-	"on-timezone-change": false, "on-clock-change": false,
-}
-
-// systemdRunShortValueFlags are systemd-run's short flags that take a value as
-// the next argv word (or the rest of the cluster when the flag is not its last
-// character). E is included so a cluster's value-taking E consumes its value the
-// way a standalone -E does; a -E cluster's value is a --setenv NAME[=VALUE] and
-// is judged by the standalone -E arm above when the cluster is exactly -E.
-const systemdRunShortValueFlags = "EHMup"
-
-// systemdRunOptionAwaitsValue reports whether a literal systemd-run option word
-// takes its argument as the NEXT argv word, so the scan can step past that value
-// instead of mistaking it for the command. A value-taking long option
-// (--unit UNIT) or a short-option cluster whose first value-taking flag is its
-// last character (-u UNIT) consumes the next word; an attached =value
-// (--unit=UNIT, -uUNIT) or a cluster with a flag after the value-taking one
-// (-up UNIT) does not. Unknown options are treated as not taking a value, so
-// the scan stops at the command and a later -E/--setenv is judged.
-func systemdRunOptionAwaitsValue(literal string) bool {
-	switch {
-	case strings.HasPrefix(literal, "--"):
-		name, _, attached := strings.Cut(literal[2:], "=")
-		if attached || name == "" {
-			return false
-		}
-		_, requiresArg, known := resolveLongOption(name, systemdRunLongOptions)
-		return known && requiresArg
-	case strings.HasPrefix(literal, "-") && len(literal) > 1:
-		flags := literal[1:]
-		for i := 0; i < len(flags); i++ {
-			if !strings.ContainsRune(systemdRunShortValueFlags, rune(flags[i])) {
-				continue
-			}
-			// The first value-taking flag consumes the rest of the
-			// cluster as its value when it is not the last character
-			// (attached, e.g. -uUNIT); only when it is the last
-			// character is the value the next argv word (-u UNIT).
-			return i+1 == len(flags)
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-// systemdRunEnvOptionHides reports whether systemd-run's separate-word -E or
-// --setenv option sets or removes a protected variable. systemd-run's -E is the
-// short form of --setenv and takes NAME[=VALUE] as the NEXT argv word, analogous
-// to strace's -E/--env. The attached --setenv=NAME[=VALUE] form is caught by
-// the generic --opt=DENIED arm the delegation already applies, so this only
-// scans the separate-word spellings the generic scan does not see. A non-literal
-// operand fails closed (its expansion can name a protected variable), and a
-// literal operand is denied when its NAME (the text before the first '=', or
-// the whole operand when no '=' is present) is denied.
-//
-// systemd-run takes other value-taking options before the command (--unit UNIT,
-// --property NAME=VALUE, -p NAME=VALUE, …); their operand is the NEXT argv
-// word, so the scan must consume it rather than mistaking it for the command and
-// stopping before a later -E/--setenv (strace systemd-run --unit demo -E
-// CODEX_HOME=/other codex: --unit consumes demo, so -E is systemd-run's
-// --setenv, not the command). systemdRunOptionAwaitsValue drives the consume;
-// the standalone -E/--setenv arm above judges its operand as a protected NAME.
-func systemdRunEnvOptionHides(words []*syntax.Word, names map[string]struct{}) bool {
-	for i := 0; i < len(words); i++ {
-		literal, ok := literalShellWord(words[i])
-		if !ok {
-			return false
-		}
-		if literal == "--" {
-			break
-		}
-		if !strings.HasPrefix(literal, "-") || literal == "-" {
-			break
-		}
-		if literal == "-E" || literal == "--setenv" {
-			if i+1 >= len(words) {
-				return true
-			}
-			value, valueOk := literalShellWord(words[i+1])
-			if !valueOk || accountEnvironmentOperandDenied(value, names) {
-				return true
-			}
-			i++
-			continue
-		}
-		// A value-taking option consumes its operand from the next argv
-		// word, so the scan steps past it rather than ending the option
-		// region at the operand (which would let a later -E/--setenv hide
-		// behind a value the scan mistook for the command).
-		if systemdRunOptionAwaitsValue(literal) {
-			if i+1 >= len(words) {
-				break
-			}
-			i++
-		}
-	}
-	return false
-}
-
 // straceOptionWordHides judges a literal strace option word (still inside
 // strace's option region) and reports how many words it consumes, whether it
 // hides an account assignment, and the pendingValue the caller should carry
@@ -445,9 +322,14 @@ func straceOptionWordHides(literal string, words []*syntax.Word, names map[strin
 		// \CODEX_HOME=/other codex literalizes the operand to
 		// \CODEX_HOME=/other (not denied) while the shell removes the
 		// backslash and strace receives -ECODEX_HOME=/other. Fail closed
-		// when the operand word has such an escape before comparing the
-		// name; a backslash inside quotes is literal and excluded.
-		return 2, !ok || wordHasUnquotedBackslash(words[1]) ||
+		// when such an escape sits in the NAME — the text before the first
+		// '=' — since only the NAME can name a protected variable. A
+		// backslash in the VALUE (strace -E FOO=\$V codex, which the shell
+		// passes as -EFOO=$V) names the harmless FOO and must not block;
+		// a backslash inside quotes is literal and excluded by
+		// wordHasUnquotedBackslashBeforeEq, which mirrors the attached
+		// -E operand path.
+		return 2, !ok || wordHasUnquotedBackslashBeforeEq(words[1]) ||
 			accountEnvironmentOperandDenied(value, names), false, true
 	case strings.HasPrefix(literal, "-E"):
 		// An unquoted backslash escape stays in a syntax.Lit, so the raw
@@ -904,6 +786,22 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// (strace echo -ECODEX_HOME=$V codex) stays allowed — only a real
 		// env-setting wrapper's options are inspected.
 		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "systemd-run") {
+			// systemd-run's tail is delegated to the non-strace wrapper scan
+			// (the generic --opt=DENIED arm, the env arm, the shell arm) for
+			// its own options, but an inner strace the traced systemd-run
+			// launches is judged with the strace scan re-entered for it
+			// (strace systemd-run strace -E CODEX_HOME=/other codex runs an
+			// inner strace whose -E overrides the protected variable; the
+			// non-strace scan treats the inner strace as a leaf command and
+			// never judges its -E). systemdRunCommandTail finds the command
+			// systemd-run execs past its own options so the inner strace arm
+			// below can re-enter for it.
+			tail := systemdRunCommandTail(words[1:])
+			if len(tail) > 0 && isAccountCommandName(tail[0], "strace") {
+				return 1, systemdRunEnvOptionHides(words[1:], names) ||
+						wrapperTailHidesAccountAssignment(tail, true, names, memo),
+					strace && inOption, false
+			}
 			return 1, systemdRunEnvOptionHides(words[1:], names) ||
 				wrapperTailHidesAccountAssignment(words[1:], false, names, memo), strace && inOption, false
 		}
@@ -923,6 +821,20 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// (strace nice echo hello) stays allowed.
 		if strace && inOption && !pending && literal != "-" && straceTracedPassthroughWrapper(word) {
 			return 1, wrapperOperandTailMutates(words, names, memo), strace && inOption, false
+		}
+		// An unquoted backslash in the traced command's name makes the
+		// literal shell-stable: `strace str\ace -E CODEX_HOME=/other codex`
+		// literalizes the name to `str\ace`, which matches no modeled
+		// wrapper, so the boundary logic below treats it as a leaf and
+		// ends the option region — but the shell removes the backslash and
+		// executes `strace`, whose -E overrides the protected variable.
+		// Fail closed for a non-option name with an unquoted backslash in
+		// strace's option region, since the dequoted name could be any
+		// wrapper the scan models (strace, systemd-run, …). A backslash
+		// inside quotes is literal and shell-stable, so it is excluded by
+		// wordHasUnquotedBackslash and the name is matched literally.
+		if strace && inOption && !pending && wordHasUnquotedBackslash(word) {
+			return 1, true, strace && inOption, false
 		}
 		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
 		// codex'`) gets the same verdict a bare shell command gets: the

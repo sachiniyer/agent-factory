@@ -451,6 +451,14 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace strace -E FOO=1 codex", false},
 		{`strace strace -EFOO="$V" codex`, false},
 		{`strace strace -o "-ECODEX_HOME=$V" codex`, false},
+		// An unquoted backslash in the traced command's name makes the
+		// literal shell-unstable: strace str\ace -E CODEX_HOME=/other codex
+		// literalizes the name to str\ace (no match) while the shell removes
+		// the backslash and executes strace, whose -E overrides the protected
+		// variable. Fail closed for a non-option name with an unquoted
+		// backslash in strace's option region; a quoted backslash is literal
+		// and shell-stable, so strace -E"CODEX\HOME"=/other stays allowed.
+		{`strace str\ace -E CODEX_HOME=/other codex`, true},
 		// The traced command can be a modeled wrapper whose own options
 		// mutate the child environment: xargs's --process-slot-var=NAME
 		// sets NAME on every exec'd command. Past strace's traced-command
@@ -487,6 +495,13 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{`strace -EFOO=\$V codex`, false},
 		{`strace -E\CODEX_HOME=/other codex`, true},
 		{`strace -ECODEX_HOME=\$V codex`, true},
+		// A backslash in a separate -E operand's VALUE names the harmless
+		// value's variable (FOO), not a protected one; the shell removes the
+		// backslash and strace receives -E FOO=$V, so the separate-word form
+		// stays allowed the way the attached form does. A backslash in the
+		// NAME (before the first '=') still fails closed.
+		{`strace -E FOO=\$V codex`, false},
+		{`strace -E \CODEX_HOME=/other codex`, true},
 		// A $@ or ${name[@]} nested in a parameter expansion's alternative
 		// (strace -EFOO="${V:+$@}" codex) is still under the outer double
 		// quote, so it splits into a further -E option the scan never sees as
@@ -521,6 +536,46 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace systemd-run -p foo=bar -E CODEX_HOME=/other codex", true},
 		{"strace systemd-run --unit demo -E PORT=3000 codex", false},
 		{"strace systemd-run --slice myslice -E CODEX_HOME=/other codex", true},
+		// systemd-run's -E is the short form of --setenv and takes its
+		// operand attached (-ENAME=VALUE) the same way strace's -E does.
+		// The generic --opt=DENIED arm catches --setenv=NAME=VALUE but not
+		// -ENAME=VALUE (it splits on the first '=' and checks the VALUE,
+		// not the NAME), so the attached short form is judged here the
+		// same way strace's -ENAME=VALUE is.
+		{"strace systemd-run -ECODEX_HOME=/other codex", true},
+		{"strace systemd-run -ECODEX_HOME codex", true},
+		{"strace systemd-run -EFOO=1 codex", false},
+		// systemd-run's --setenv accepts GNU long-option abbreviations
+		// (--set is an unambiguous prefix of --setenv) and short-option
+		// clusters (-qE = -q -E); both take NAME[=VALUE] as the next
+		// argv word, so a denied NAME overrides the protected variable.
+		{"strace systemd-run --set CODEX_HOME=/other codex", true},
+		{"strace systemd-run -qE CODEX_HOME=/other codex", true},
+		{"strace systemd-run --set FOO=1 codex", false},
+		// A non-literal systemd-run env option (--setenv=CODEX_HOME="$V",
+		// -ECODEX_HOME="$V") has a literal NAME that the expansion can
+		// complete into a protected variable, so a QUOTED dynamic value
+		// still refuses; the generic --opt=DENIED arm sees only the
+		// non-literal word and returns false.
+		{`strace systemd-run --setenv=CODEX_HOME="$V" codex`, true},
+		{`strace systemd-run -ECODEX_HOME="$V" codex`, true},
+		// A value-taking systemd-run option whose operand is a non-literal
+		// UNQUOTED expansion can word-split into a further -E/--setenv the
+		// scan never sees as a separate argv word (strace systemd-run
+		// --unit $V codex with V='demo -E CODEX_HOME=/other'); fail closed.
+		// A QUOTED expansion stays one option value and does not split.
+		{`strace systemd-run --unit $V codex`, true},
+		{`strace systemd-run --unit "$V" codex`, false},
+		// systemd-run's command can be strace, whose -E applies to the
+		// traced child. The delegation re-enters the strace scan for the
+		// inner strace so a denied inner -E overrides the protected
+		// variable (strace systemd-run strace -E CODEX_HOME=/other codex
+		// runs an inner strace whose -E sets the protected variable).
+		// A leaf command after the inner strace (echo, …) and a
+		// non-denied inner -E stay allowed.
+		{"strace systemd-run strace -E CODEX_HOME=/other codex", true},
+		{"strace systemd-run strace -E FOO=1 codex", false},
+		{"strace systemd-run strace echo -E CODEX_HOME=/other codex", false},
 		// strace's "--" only ends its OWN option parsing; the next word is
 		// still the traced command. When that command is a wrapper the scan
 		// analyzes (strace re-enters, xargs/systemd-run delegate), the
@@ -681,6 +736,36 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace systemd-run --unit demo -E CODEX_HOME=/other codex",
 		"strace systemd-run -u demo -E CODEX_HOME=/other codex",
 		"strace systemd-run --slice myslice -E CODEX_HOME=/other codex",
+		// systemd-run's -E takes its operand attached (-ENAME=VALUE) the
+		// way strace's -E does; the generic --opt=DENIED arm does not
+		// catch the short attached form (it checks the value after '=',
+		// not the NAME before it), so the attached short form is judged
+		// here the same way strace's -ENAME=VALUE is.
+		"strace systemd-run -ECODEX_HOME=/other codex",
+		// systemd-run's --setenv accepts GNU long-option abbreviations
+		// (--set) and short-option clusters (-qE = -q -E); both take
+		// NAME[=VALUE] as the next argv word.
+		"strace systemd-run --set CODEX_HOME=/other codex",
+		"strace systemd-run -qE CODEX_HOME=/other codex",
+		// A non-literal systemd-run env option (--setenv=CODEX_HOME="$V")
+		// has a literal NAME the expansion can complete into a protected
+		// variable, so a QUOTED dynamic value still refuses.
+		`strace systemd-run --setenv=CODEX_HOME="$V" codex`,
+		// A value-taking systemd-run option whose operand is a non-literal
+		// UNQUOTED expansion can word-split into a further -E/--setenv the
+		// scan never sees as a separate argv word (strace systemd-run
+		// --unit $V codex with V='demo -E CODEX_HOME=/other').
+		`strace systemd-run --unit $V codex`,
+		// systemd-run's command can be strace, whose -E applies to the
+		// traced child; the delegation re-enters the strace scan for the
+		// inner strace.
+		"strace systemd-run strace -E CODEX_HOME=/other codex",
+		// An unquoted backslash in the traced command's name makes the
+		// literal shell-unstable: strace str\ace -E CODEX_HOME=/other codex
+		// literalizes the name to str\ace (no match) while the shell removes
+		// the backslash and executes strace, whose -E overrides the protected
+		// variable.
+		`strace str\ace -E CODEX_HOME=/other codex`,
 		// The traced command can be a modeled peelAccountWrapper passthrough
 		// wrapper (nice/nohup/timeout/…) that runs a child whose -E/--env
 		// overrides the protected variable; the scan delegates the wrapper's
@@ -737,9 +822,25 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// (${V:+x}) stays one word; a non-denied systemd-run --setenv and a
 		// leaf traced command after "--" stay allowed.
 		`strace -EFOO=\$V codex`,
+		// A backslash in a separate -E operand's VALUE names the harmless
+		// value's variable (FOO); the shell removes the backslash and strace
+		// receives -E FOO=$V, so the separate-word form stays allowed the
+		// way the attached form does.
+		`strace -E FOO=\$V codex`,
 		`strace -EFOO="${V:+x}" codex`,
 		"strace systemd-run --setenv=PORT=3000 codex",
 		"strace systemd-run echo hi",
+		// systemd-run's attached -E with a non-denied NAME and a leaf
+		// command stay allowed, the same way strace's -EFOO=1 does.
+		"strace systemd-run -EFOO=1 codex",
+		"strace systemd-run --set FOO=1 codex",
+		// A QUOTED value-taking option operand stays one option value (no
+		// word splitting), so it does not inject a further -E.
+		`strace systemd-run --unit "$V" codex`,
+		// A systemd-run inner strace with a harmless -E (leaf command,
+		// non-denied NAME) stays allowed the same way a bare strace does.
+		"strace systemd-run strace -E FOO=1 codex",
+		"strace systemd-run strace echo -E CODEX_HOME=/other codex",
 		"strace -- strace echo -E CODEX_HOME=/other codex",
 		// A traced passthrough wrapper (nice/nohup/timeout/…) that runs a
 		// harmless child stays allowed: the delegation re-enters the scan for
