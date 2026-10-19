@@ -3008,7 +3008,7 @@ textarea[class] {
   grid-template-columns: minmax(0, 1fr);
 }
 .af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
-  min-width: calc(var(--af-space-4) + var(--af-space-3));
+  min-width: min(calc(var(--af-space-4) + var(--af-space-3)), calc((100% - 6 * var(--af-space-1)) / 7));
 }
 @media (max-width: 768px) {
   .af-session-first .af-appbar {
