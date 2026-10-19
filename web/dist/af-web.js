@@ -12247,6 +12247,7 @@ var IDLE_REASON_LABELS = {
   "usage-limit": "usage limit",
   "process-exited": "process exited",
   "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
   "delivery-unconfirmed": "delivery unknown",
@@ -12264,6 +12265,13 @@ function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
     if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
       const noun = attempts === 1 ? "attempt" : "attempts";
       detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
     }
   }
   if (s.last_pane_churn_at) {

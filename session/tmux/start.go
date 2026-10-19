@@ -1,14 +1,74 @@
 package tmux
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// socketFSProbe is the test seam over the shared bounded filesystem probe on
+// the tmux launch path. The fsprobe implementation answers with the
+// filesystem's own errno from THIS process — the verdict a tmux server's
+// internal failure loses into its output text.
+var socketFSProbe = fsprobe.Write
+
+// statSocketDir is the test seam over fsprobe.Stat — the bounded metadata
+// lookup that decides whether the uid socket root exists. It must be
+// bounded: a launch failure reaches this lookup while the daemon's
+// synchronous restore poll holds the instance, and an unbounded os.Stat on
+// an existing-but-wedged bind/NFS mount would block Start forever instead
+// of entering environmental backoff (#5295 review).
+var statSocketDir = fsprobe.Stat
+
+// tmuxSocketFilesystemDir returns the directory whose filesystem must accept
+// tmux's own server-state writes — the socket file and the tmux-<uid>
+// directory the server creates it under — for a launch from THIS process's
+// environment. It mirrors the socket-identity resolution the dedicated-server
+// scope names itself after: $TMUX names a live socket path (probe the
+// directory that hosts it), otherwise the default socket resolves under
+// ${TMUX_TMPDIR:-/tmp}/tmux-<uid> — probe the base, because the uid dir may
+// not exist yet while its parent must be writable for tmux to create it.
+// The returned error carries a failed uid-dir stat as evidence; the dir is
+// still the right probe target, so callers join the error and probe anyway.
+func tmuxSocketFilesystemDir() (string, error) {
+	if identity := os.Getenv("TMUX"); identity != "" {
+		if socket, _, ok := strings.Cut(identity, ","); ok && socket != "" {
+			return filepath.Dir(socket), nil
+		}
+	}
+	base := os.Getenv("TMUX_TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	// The server creates its socket under base/tmux-<uid>, not base itself —
+	// and an EXISTING uid dir is the filesystem the socket write actually
+	// lands on. If that child is a bind mount or its own (full) filesystem,
+	// probing the healthy parent would answer the wrong filesystem's
+	// question while tmux's failure stays an opaque ExitError (#5295
+	// review). Fall back to base only when the uid dir does not exist yet:
+	// then base is where tmux will create it. A stat that FAILS is not a
+	// fallback to base — the uid dir stays the probe target so the write
+	// probe's own bounded verdict lands for the filesystem tmux actually
+	// uses, and the stat error returns as joined evidence.
+	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
+	st, err := statSocketDir(uidDir)
+	switch {
+	case err == nil && st != nil && st.IsDir():
+		return uidDir, nil
+	case err != nil && !os.IsNotExist(err):
+		return uidDir, err
+	default:
+		return base, nil
+	}
+}
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
@@ -30,7 +90,16 @@ func (t *TmuxSession) Start(workDir string) error {
 	// caller learns the server never answered rather than that the name collided.
 	exists, known := t.ProbeSession()
 	if !known {
-		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
+		// The pre-spawn gate's non-answer is environmental evidence in its
+		// own right: a wedged or filesystem-stuck server cannot answer
+		// has-session, and every retry would charge the structural budget
+		// for a condition that resolves on its own. Pair a distinct
+		// sentinel with the deadline so the classifier's
+		// deadline+sentinel arm reads the bounded environmental class —
+		// NOT every ErrTmuxTimeout, since the later readiness timeout can
+		// also mean the pane command exited instantly (#5295 review).
+		return fmt.Errorf("%w: has-session probe for session %q did not answer: %w: %w",
+			ErrTmuxTimeout, t.sanitizedName, ErrTmuxServerNoAnswer, context.DeadlineExceeded)
 	}
 	if exists {
 		// A live session af did not just create holds the name, so no teardown
@@ -57,7 +126,7 @@ func (t *TmuxSession) Start(workDir string) error {
 				err = fmt.Errorf("not a directory")
 			}
 			t.proveNoPaneIfDeterminatelyAbsent()
-			return fmt.Errorf("%w: %w: session %q cannot start in %s: %v",
+			return fmt.Errorf("%w: %w: session %q cannot start in %s: %w",
 				ErrSessionNotStarted, ErrSpawnDirMissing, t.sanitizedName, workDir, err)
 		}
 	}
@@ -83,7 +152,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
 		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
+		return fmt.Errorf("%w: prepare filtered session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
@@ -143,7 +212,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
+		return fmt.Errorf("%w: prepare existing tmux session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
@@ -174,7 +243,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName))
 			cancel()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			} else if len(leaked) > 0 {
 				// Start failed and we are tearing the partial session down ourselves;
 				// its processes are going with it by design, not escaping (#2765).
@@ -229,6 +298,25 @@ func (t *TmuxSession) Start(workDir string) error {
 					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
 				}
 
+				// tmux's own resource failure mode the exit status cannot
+				// carry: the server dying on its socket/state filesystem
+				// (ENOSPC creating the socket or the tmux-<uid> dir) reports
+				// only as "can't create socket"/"no space" text in the
+				// child's output — invisible to errors.Is by design, and the
+				// lost-restore classifier never reads message text. Probe
+				// that filesystem from THIS process so a real resource verdict
+				// rides the chain instead of the launch failure charging the
+				// structural retry budget (#5295 review).
+				socketDir, statErr := tmuxSocketFilesystemDir()
+				if probeErr := socketFSProbe(socketDir); probeErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
+				}
+				if statErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("could not inspect tmux socket filesystem %s: %w", socketDir, statErr))
+				}
+
 				// The launch process began. Its exit status, even paired with later
 				// name absence, cannot prove a pane never ran and is not still flushing
 				// after tmux removed its session. Keep every answered post-spawn failure
@@ -265,7 +353,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			// already cancelled; recorded as a residual on #2998.
 			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
-				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
+				timeoutErr = fmt.Errorf("%w (cleanup error: %w)", timeoutErr, cleanupErr)
 			}
 			// A successful close+pane-exit confirmation on a positive-policy name
 			// establishes that the exact launch identity is gone. The old blanket
@@ -329,7 +417,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		// Launch now independently fails closed on every post-spawn Start error.
 		state, cleanupErr := t.Close()
 		if cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		if state != PaneStateKnown {
 			err = fmt.Errorf("%w: %w", err, ErrTmuxTimeout)

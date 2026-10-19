@@ -63,6 +63,7 @@ export type IdleReason =
   | "usage-limit"
   | "process-exited"
   | "restore-gave-up"
+  | "restore-waiting-on-environment"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -77,6 +78,13 @@ export interface AgentModelChange {
 
 /** Durable terminal result of the daemon's automatic Lost-session restore loop. */
 export interface LostRestoreFailure {
+  attempts: number;
+  error: string;
+}
+
+/** Durable non-terminal state while the restore loop waits on the environment
+ * — the last failure was a resource limit external to the session (#5295). */
+export interface LostRestoreWait {
   attempts: number;
   error: string;
 }
@@ -169,6 +177,8 @@ export interface SessionData {
   idle_reason?: IdleReason;
   /** Present while a Lost row has exhausted automatic restore attempts. */
   lost_restore_failure?: LostRestoreFailure;
+  /** Present while the restore loop defers a retry on the environment (#5295). */
+  lost_restore_wait?: LostRestoreWait;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
