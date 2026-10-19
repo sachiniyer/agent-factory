@@ -111,13 +111,15 @@ func submittedTurnContent(content, agent string) bool {
 		return IsWorkingContent(content, agent)
 	case tmux.ProgramCodex:
 		// Codex draws "esc to interrupt" as a bare hint row BELOW its
-		// line-leading "›" composer (the daemon/configagent_delivery_test.go
-		// pane shape). Anchoring on the composer keeps a transcript that quotes
-		// the hint from qualifying.
+		// line-leading composer (the daemon/configagent_delivery_test.go
+		// pane shape). The composer glyph is "›" or, under the Ultra
+		// reasoning tier, "»" — tmux.IsCodexComposerLine owns the set (#5383).
+		// Anchoring on the composer keeps a transcript that quotes the hint
+		// from qualifying.
 		lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
 		composer := -1
 		for i, line := range lines {
-			if strings.HasPrefix(strings.TrimSpace(line), "›") {
+			if tmux.IsCodexComposerLine(line) {
 				composer = i
 			}
 		}
