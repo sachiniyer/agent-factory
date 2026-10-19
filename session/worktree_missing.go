@@ -33,11 +33,13 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	gw := i.gitWorktree
 	local := i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree
 	flag := i.worktreeMissing
+	epoch := i.stateEpoch
 	i.mu.RUnlock()
 	if gw == nil || !local || flag {
 		return flag, false
 	}
 	presence, probed := gw.ProbeWorktreePresenceAt()
+	afterWorktreeMissingProbe()
 	if presence != git.WorktreePresenceAbsent {
 		return false, false
 	}
@@ -51,7 +53,16 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	// caused this ENOENT is visible here. An op that already finished re-aimed the
 	// record, which the path comparison catches. Either way the answer is about a
 	// path af owns, not one the user deleted (#5102).
-	if i.inFlightOp != OpNone || i.gitWorktree != gw || gw.GetWorktreePath() != probed {
+	//
+	// Neither catches an op that began AND ended while the probe was out and left
+	// the record where it was: the undo of a committed archive moves the worktree
+	// back to the very path probed, and AbortRestoreToLost clears the op, so the
+	// fence, the pointer and the path all match again over a directory that is
+	// present. The state epoch is what records it — every op begin, commit, abort
+	// and rollback bumps it under i.mu — so an answer whose epoch moved is
+	// dropped, and the next poll re-asks. Dropping is the safe direction: the
+	// worst case is flagging a real deletion one tick later.
+	if i.stateEpoch != epoch || i.inFlightOp != OpNone || i.gitWorktree != gw || gw.GetWorktreePath() != probed {
 		return i.worktreeMissing, false
 	}
 	if !i.worktreeMissing {
@@ -62,6 +73,10 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	}
 	return true, changed
 }
+
+// afterWorktreeMissingProbe is a test seam between RefreshWorktreeMissing's
+// probe and its re-qualification under i.mu. Production never reassigns it.
+var afterWorktreeMissingProbe = func() {}
 
 // WorktreeMissing reports the worktree-missing flag and its operator-facing
 // reason. It reads the last established answer and never probes; callers that
