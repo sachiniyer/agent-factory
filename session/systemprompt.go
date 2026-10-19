@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -248,10 +249,36 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		// OPENCODE_CONFIG at an af-OWNED config that adds af's instructions file.
 		// opencode MERGES it with the user's own config (verified), so their
 		// settings survive, and af writes nothing into ~/.config/opencode.
-		if opencodeCarriesConfigEnv(resolved) {
+		//
+		// A user-supplied OPENCODE_CONFIG reaches this branch through TWO
+		// channels, and af must skip injection for EITHER so it does not
+		// silently shadow the user's file:
+		//
+		//   1. An inline assignment in the resolved command (a program_overrides
+		//      entry like `OPENCODE_CONFIG=~/mine.jsonc opencode`), detected by
+		//      opencodeCarriesConfigEnv. Shell semantics give the LAST
+		//      assignment precedence, so af's injected prefix would lose to it
+		//      anyway — but detecting it lets af SAY the guidance did not land.
+		//   2. An exported OPENCODE_CONFIG in the launching process
+		//      environment, which the opencode allowlist
+		//      (internal/sessionenv) deliberately delivers to the pane.
+		//      Unlike channel 1, a command-prefix assignment SHADOWS an
+		//      already-exported variable of the same name in POSIX shells, so
+		//      injecting af's own OPENCODE_CONFIG would silently override the
+		//      user's exported value and their config file would never be read
+		//      — the exact silent outcome this guard exists to prevent.
+		//
+		// Only OPENCODE_CONFIG needs this treatment: af injects solely that
+		// name; OPENCODE_CONFIG_DIR / OPENCODE_CONFIG_CONTENT pass through the
+		// allowlist unshadowed. Checking os.Getenv here mirrors the same
+		// os.Environ source that prepareLaunchEnvironment (session/tmux)
+		// filters into the pane, so the env-channel decision sees exactly the
+		// value the pane would have inherited.
+		if opencodeCarriesConfigEnv(resolved) || os.Getenv("OPENCODE_CONFIG") != "" {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
-			// their own file via program_overrides and af is honoring it.
-			log.InfoLog.Printf("opencode command already sets OPENCODE_CONFIG; leaving it alone (af guidance not injected for opencode)")
+			// their own file (program_overrides assignment OR exported env var)
+			// and af is honoring it.
+			log.InfoLog.Printf("opencode already has OPENCODE_CONFIG (command or environment); leaving it alone (af guidance not injected for opencode)")
 			return resolved
 		}
 		path, err := ensureOpencodeAfConfig()
