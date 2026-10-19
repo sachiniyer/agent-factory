@@ -3,8 +3,6 @@ package git
 import (
 	"fmt"
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // archiveSnapshotMessage labels the WIP commit SnapshotAndPushBranch makes for
@@ -70,18 +68,12 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 
 	// One debris edge survives the unlink-before-write contract: on the
 	// named-fallback path (no O_TMPFILE) a double unlink failure leaves a
-	// .af-add-probe-* name in this tree. The sweep removes only the
-	// leftovers this process can PROVE it created — registry-verified
-	// zero-length files. An unprovable probe-named file is user content and
-	// is treated exactly as such: it is not deleted, and it is snapshotted
-	// like any other file — a committed stray file is a cosmetic wart,
-	// strictly better than discarding user work the name filter cannot
-	// distinguish (#5295 review). A sweep failure aborts the push with the
-	// evidence: a filesystem that cannot answer is still answering the
-	// question this snapshot needs answered.
-	if derr := fsprobe.RemoveDebris(g.worktreePath); derr != nil {
-		return "", g.annotateGitWriteError(fmt.Errorf("could not remove stale probe debris before archive push: %w", derr), probeDir)
-	}
+	// .af-add-probe-* name in this tree — the probe reports it in its error
+	// text and the file is left alone. It is treated exactly as user
+	// content — never deleted on a name match, and snapshotted like any
+	// other file: a committed stray is a cosmetic wart, strictly better
+	// than discarding user work a name filter cannot distinguish (#5295
+	// review).
 
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to
