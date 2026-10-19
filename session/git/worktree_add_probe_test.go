@@ -161,6 +161,47 @@ func TestAnnotateGitWriteError_CommonDirUnresolvable(t *testing.T) {
 	}
 }
 
+// TestAnnotateWorktreeAddError_DestinationStatError — a stat failure on the
+// destination that is not plain ENOENT (a dead mount reports ETIMEDOUT; an
+// unsearchable parent reports EACCES/ENOTDIR) is probe evidence the git
+// subprocess could never carry, and must join the annotated error rather
+// than be discarded — otherwise mount stalls charge the structural budget
+// (#5295 review).
+func TestAnnotateWorktreeAddError_DestinationStatError(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(string) error { return nil }
+	defer func() { writeSpaceProbe = old }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+	defer func() { gitCommonDir = oldCommon }()
+
+	// worktreePath sits beneath a regular FILE: os.Stat fails ENOTDIR.
+	parent := filepath.Join(t.TempDir(), "a-file")
+	require.NoError(t, os.WriteFile(parent, []byte("x"), 0o600))
+	g := &GitWorktree{worktreePath: filepath.Join(parent, "wt")}
+
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed (exit status 128)"))
+	require.True(t, errors.Is(out, syscall.ENOTDIR),
+		"the destination stat failure must be joined as evidence: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_DestinationAbsentIsSilent — a simply-missing
+// destination is the normal pre-creation answer, not evidence: the stat skip
+// must not add noise to the chain.
+func TestAnnotateWorktreeAddError_DestinationAbsentIsSilent(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(string) error { return nil }
+	defer func() { writeSpaceProbe = old }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+	defer func() { gitCommonDir = oldCommon }()
+
+	g := &GitWorktree{worktreePath: filepath.Join(t.TempDir(), "wt")}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOENT),
+		"plain ENOENT is the expected pre-creation state, not evidence: %v", out)
+}
+
 // TestWriteSpaceProbe_RealWrite — the production probe against a real writable
 // dir writes its payload and cleans up after itself. On Linux this exercises
 // the O_TMPFILE anonymous inode, which never has a name at all; the

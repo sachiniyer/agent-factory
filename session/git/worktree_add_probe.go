@@ -199,10 +199,23 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 // can sit on a different filesystem than the parent that hosts its name.
 // Probing inside it is safe for the same reason as the push path: the probe
 // unlinks its file before writing, so nothing stageable ever exists.
+//
+// A FAILED stat on the destination is evidence in its own right, not a skip:
+// on a dead mount it returns environmental errnos such as ETIMEDOUT that the
+// git subprocess only ever surfaced as an opaque ExitError, and discarding it
+// would charge mount stalls to the structural budget. ENOENT is the normal
+// pre-creation answer and stays silent; anything else joins the chain.
 func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	dirs := []string{filepath.Dir(g.worktreePath)}
-	if st, statErr := os.Stat(g.worktreePath); statErr == nil && st.IsDir() {
+	var statErr error
+	if st, sErr := os.Stat(g.worktreePath); sErr == nil && st.IsDir() {
 		dirs = append(dirs, g.worktreePath)
+	} else if sErr != nil && !os.IsNotExist(sErr) {
+		statErr = sErr
 	}
-	return g.annotateGitWriteError(err, dirs...)
+	out := g.annotateGitWriteError(err, dirs...)
+	if statErr != nil {
+		out = errors.Join(out, fmt.Errorf("stat probe destination %s: %w", g.worktreePath, statErr))
+	}
+	return out
 }
