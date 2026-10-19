@@ -231,6 +231,26 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if !ok {
 		return computedValue{}, fmt.Errorf("manifest key has no schema field")
 	}
+	// A struct-backed MergeTableByField composite resolves case-variant leaf
+	// spellings to one struct field (taggedFieldByKey folds case). Without
+	// canonicalizing the leafValues merge key, a higher-precedence [root_agent]
+	// Enabled = true leaf and a lower-precedence built-in enabled leaf would
+	// occupy separate leafValues entries ("Enabled" and "enabled") that
+	// buildComposite would assign to the same field in map-iteration order,
+	// so the higher-precedence value could randomly lose and the trace would
+	// report both sources as effective. Canonicalize the merge key for struct
+	// targets so the two spellings share one entry; map-backed composites
+	// (MergeMapByKey) keep exact keys so program_overrides can carry distinct
+	// mixed-case entries (#5397 review).
+	structBacked := false
+	structMergeKeys := make(map[string]string)
+	structBaseType := targetType
+	for structBaseType.Kind() == reflect.Pointer {
+		structBaseType = structBaseType.Elem()
+	}
+	if structBaseType.Kind() == reflect.Struct {
+		structBacked = true
+	}
 
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
@@ -264,12 +284,20 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 				}
 				delete(leafValues, leaf)
 				delete(origins, leaf)
+				if structBacked {
+					// The deleted leaf's merge key was canonical for struct-backed
+					// composites, so the same key indexes structMergeKeys.
+					delete(structMergeKeys, leaf)
+				}
 				candidate.removedInherited++
 			}
 			for leaf, value := range full {
 				if explicit, configuredHere := leaves[leaf]; configuredHere {
 					leafValues[leaf] = cloneExportedValue(explicit)
 					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
+					if structBacked {
+						structMergeKeys[leaf] = leaf
+					}
 					continue
 				}
 				inherited, present := leafValues[leaf]
@@ -286,7 +314,21 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 
 		materialized = materialized || candidateMaterialized
 		for leaf, value := range leaves {
-			leafValues[leaf] = cloneExportedValue(value)
+			mergeKey := leaf
+			if structBacked {
+				mergeKey = canonicalStructLeafName(targetType, leaf)
+				// A higher-precedence source's case-variant leaf shares the
+				// canonical merge key with a lower-precedence source's lowercase
+				// leaf (e.g. "Enabled" and "enabled"). Drop the lower-precedence
+				// physical origin so the surviving accounting and the origin map
+				// reflect the winner; the physical spelling the operator wrote
+				// is preserved by the new origin's leafKeyPath.
+				if prevPhysical, ok := structMergeKeys[mergeKey]; ok && prevPhysical != leaf {
+					delete(origins, prevPhysical)
+				}
+				structMergeKeys[mergeKey] = leaf
+			}
+			leafValues[mergeKey] = cloneExportedValue(value)
 			origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
 		}
 	}
@@ -543,6 +585,45 @@ func compositeLeaf(value reflect.Value, name string) (reflect.Value, bool) {
 	default:
 		return reflect.Value{}, false
 	}
+}
+
+// canonicalStructLeafName returns the canonical struct tag name for a leaf of a
+// struct-backed MergeTableByField composite. Case-variant spellings of the
+// same struct field (e.g. "Enabled", "ENABLED", "enabled") all collapse to the
+// field's toml/json/config tag, so a higher-precedence source's case-variant
+// leaf overrides a lower-precedence source's lowercase leaf deterministically
+// instead of leaving both as separate leafValues entries that buildComposite
+// would assign to the same struct field in map-iteration order (#5397 review).
+// The physical spelling is retained separately for source display (origins,
+// leafKeyPath), so the trace still reports the spelling the operator wrote.
+// Map-backed composites (MergeMapByKey) keep exact key matching, so this
+// returns name unchanged when the target is not a struct.
+func canonicalStructLeafName(targetType reflect.Type, name string) string {
+	base := targetType
+	for base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	if base.Kind() != reflect.Struct {
+		return name
+	}
+	for i := 0; i < base.NumField(); i++ {
+		field := base.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if strings.EqualFold(structTagName(field.Tag.Get("toml")), name) ||
+			strings.EqualFold(structTagName(field.Tag.Get("json")), name) ||
+			strings.EqualFold(field.Tag.Get("config"), name) {
+			if tag := structTagName(field.Tag.Get("toml")); tag != "" && tag != "-" {
+				return tag
+			}
+			if tag := structTagName(field.Tag.Get("json")); tag != "" && tag != "-" {
+				return tag
+			}
+			return field.Name
+		}
+	}
+	return name
 }
 
 func configuredChildCount(configured any, builtIn bool) int {

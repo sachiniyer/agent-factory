@@ -354,6 +354,115 @@ func TestTaggedFieldByKeyFoldsCaseForStructTags(t *testing.T) {
 	})
 }
 
+// TestResolveConfigCaseVariantStructLeavesMergeDeterministicallyAcrossSources
+// is the regression test for the multi-source merge-identity bug that the
+// P1 review on this change flagged: taggedFieldByKey's case fold makes a
+// case-variant leaf (e.g. [root_agent] Enabled = true) target the same struct
+// field as a lower-precedence source's lowercase leaf (built-in enabled), but
+// the merge accumulated them as separate leafValues entries under their
+// physical spellings ("Enabled" and "enabled"). buildComposite then iterated
+// the map and assigned both to RootAgent.Enabled in nondeterministic order, so
+// the higher-precedence personal value could randomly lose while the trace
+// reported both sources as effective. The fix canonicalizes struct-backed leaf
+// merge keys (taggedFieldByKey already folds case, so "Enabled" and "enabled"
+// share one leafValues entry), and drops the lower-precedence physical origin
+// so the surviving accounting and origin map reflect the winner. Map-backed
+// composites (MergeMapByKey) are unaffected: program_overrides carries distinct
+// mixed-case keys by design (see TestResolveConfigCompositeLeafMapBranchStaysExact).
+//
+// This test uses resolveManifest directly so it can stage a built-in
+// RootAgent{Enabled: false} (canonical "enabled" leaf) against a personal
+// RootAgent{Enabled: true} whose shape spells the leaf "Enabled", exactly the
+// shape the bug report names. The personal source must win deterministically,
+// the built-in's "enabled" leaf must be shadowed (not contributed), and the
+// origin map must key the winner by its physical spelling so a later
+// ResolvedValuePath projection with the file's spelling still works.
+func TestResolveConfigCaseVariantStructLeavesMergeDeterministicallyAcrossSources(t *testing.T) {
+	builtIn := &Config{RootAgent: RootAgent{Enabled: false, Program: "built-in"}}
+	personal := &ProjectConfig{RootAgent: RootAgent{Enabled: true, Program: "personal"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "root_agent",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceProjectPersonal},
+		Merge:      MergeTableByField,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn, &InRepoConfig{}}},
+		{
+			layer:    SourceProjectPersonal,
+			metadata: sourceMetadata{shape: map[string]any{"root_agent": map[string]any{"Enabled": true}}},
+			schemas:  []any{personal, &InRepoConfig{}},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	value := requireResolvedValue(t, resolved, "root_agent")
+	rootAgent, ok := value.Value.(RootAgent)
+	require.True(t, ok, "root_agent must resolve to a RootAgent value")
+	assert.True(t, rootAgent.Enabled,
+		"the personal [root_agent] Enabled = true must override the built-in enabled = false deterministically, not nondeterministically")
+	assert.Equal(t, "built-in", rootAgent.Program,
+		"the built-in program survives because the personal source did not override it")
+
+	// The built-in's lowercase "enabled" leaf is shadowed by the personal
+	// "Enabled" leaf (same canonical struct field), not reported as a separate
+	// contributed entry alongside the personal's.
+	builtInCandidate := candidateForLayer(t, value, SourceBuiltIn)
+	assert.Equal(t, "partially-shadowed", builtInCandidate.Result,
+		"the built-in enabled leaf must be shadowed by the higher-precedence case-variant Enabled leaf; program still contributes")
+	assert.Contains(t, builtInCandidate.Reason, "overridden by higher-precedence",
+		"the built-in's shadowed leaf must be attributed to the higher-precedence source, not load-time validation")
+
+	personalCandidate := candidateForLayer(t, value, SourceProjectPersonal)
+	assert.Equal(t, "contributed", personalCandidate.Result,
+		"the personal case-variant Enabled leaf must be reported as the contributing source")
+
+	// The origin map is keyed by the winner's physical spelling, so a
+	// ResolvedValuePath projection with the file's spelling projects the leaf.
+	leaf, ok := resolved.ResolvedValuePath("root_agent.Enabled")
+	require.True(t, ok, "ResolvedValuePath with the personal source's physical spelling must project the leaf")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, SourceProjectPersonal.String(), leaf.Winner.Layer,
+		"the leaf winner must be the personal source, not the built-in")
+}
+
+// TestResolveConfigCaseVariantStructLeavesPreservesMapKeyExactness pins that
+// the struct-backed canonicalization does not bleed into map-backed composites.
+// program_overrides is a MergeMapByKey composite, and its keys are exact-match
+// (see TestResolveConfigCompositeLeafMapBranchStaysExact). A built-in
+// "codex" entry and a personal "Codex" entry must remain distinct map keys, not
+// be folded onto each other, so the higher-precedence source's value replaces
+// the lower one only when the keys actually match.
+func TestResolveConfigCaseVariantStructLeavesPreservesMapKeyExactness(t *testing.T) {
+	builtIn := &Config{ProgramOverrides: map[string]string{"codex": "built-in"}}
+	personal := &InRepoConfig{ProgramOverrides: map[string]string{"Codex": "personal"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "program_overrides",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceRepoShared},
+		Merge:      MergeMapByKey,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn}},
+		{
+			layer:    SourceRepoShared,
+			metadata: sourceMetadata{shape: map[string]any{"program_overrides": map[string]any{"Codex": "personal"}}},
+			schemas:  []any{personal},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	value := requireResolvedValue(t, resolved, "program_overrides")
+	overrides, ok := value.Value.(map[string]string)
+	require.True(t, ok, "program_overrides must resolve to a map[string]string")
+	assert.Equal(t, "built-in", overrides["codex"],
+		"the built-in lowercase codex entry must survive exactly; map keys are not case-folded")
+	assert.Equal(t, "personal", overrides["Codex"],
+		"the personal mixed-case Codex entry must survive as a distinct key; map keys are not case-folded")
+}
+
 // TestResolveConfigCompositeLeafMapBranchStaysExact pins the design boundary
 // the bug report's recommended fix explicitly draws: case folding in
 // taggedFieldByKey must NOT bleed into map-key lookups. compositeLeaf's
