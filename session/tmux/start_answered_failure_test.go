@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/stretchr/testify/require"
 )
 
@@ -175,18 +176,61 @@ func TestTmuxSocketFilesystemDir(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", base)
 
 	// No uid dir yet → the base is where tmux will create it.
-	require.Equal(t, base, tmuxSocketFilesystemDir())
+	dir, err := tmuxSocketFilesystemDir()
+	require.NoError(t, err)
+	require.Equal(t, base, dir)
 
 	// An existing uid dir is the socket write's real filesystem — it may be
 	// a bind mount or its own full fs the base knows nothing about.
 	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
 	require.NoError(t, os.Mkdir(uidDir, 0o700))
-	require.Equal(t, uidDir, tmuxSocketFilesystemDir())
+	dir, err = tmuxSocketFilesystemDir()
+	require.NoError(t, err)
+	require.Equal(t, uidDir, dir)
 
 	// $TMUX names a live socket — its own directory is the answer.
 	sock := filepath.Join(t.TempDir(), "sockdir", "default")
 	t.Setenv("TMUX", sock+",123,0")
-	require.Equal(t, filepath.Dir(sock), tmuxSocketFilesystemDir())
+	dir, err = tmuxSocketFilesystemDir()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Dir(sock), dir)
+}
+
+// TestTmuxSocketFilesystemDir_StatFailure is the #5295-review regression:
+// a uid-dir lookup that FAILS (a wedged bind/NFS mount returning the
+// bounded non-answer, or a real errno) must not fall back silently to the
+// parent — the parent can be a different filesystem entirely. The uid dir
+// stays the probe target so the write probe's own verdict lands for the
+// filesystem tmux actually uses, and the stat error is handed back as
+// evidence for the joined launch error.
+func TestTmuxSocketFilesystemDir_StatFailure(t *testing.T) {
+	t.Setenv("TMUX", "")
+	base := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", base)
+	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
+
+	statErr := fmt.Errorf("stat probe of %s did not answer within its bound: %w: %w",
+		uidDir, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+	old := statSocketDir
+	statSocketDir = func(string) (os.FileInfo, error) { return nil, statErr }
+	defer func() { statSocketDir = old }()
+
+	dir, err := tmuxSocketFilesystemDir()
+	require.ErrorIs(t, err, fsprobe.ErrProbeTimedOut,
+		"the bounded stat non-answer must reach the caller as evidence")
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"the sentinel must keep its deadline pair")
+	require.Equal(t, uidDir, dir,
+		"a failed uid-dir stat keeps the uid dir as the probe target")
+
+	// A plain failure (EACCES on an unsearchable mount) is still evidence,
+	// still the uid dir — anything but the normal ENOENT stays honest.
+	statSocketDir = func(string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "stat", Path: uidDir, Err: syscall.EACCES}
+	}
+	dir, err = tmuxSocketFilesystemDir()
+	require.ErrorIs(t, err, syscall.EACCES)
+	require.Equal(t, uidDir, dir)
 }
 
 // TestStartAnsweredFailure_FreeSocketFSStaysStructural — the same launch

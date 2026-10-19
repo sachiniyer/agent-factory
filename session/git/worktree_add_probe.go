@@ -19,6 +19,17 @@ import (
 // synchronous restore path that called it (#5295 review).
 var writeSpaceProbe = fsprobe.Write
 
+// statSpaceProbe is the test seam over fsprobe.Stat — the bounded metadata
+// lookup that decides whether the worktree destination exists as a dir and
+// gets probed itself. It must be bounded for the same reason the write
+// probe is: the annotate path runs inside the synchronous restore poll, and
+// an unbounded os.Stat on a mount that never answers would wedge the loop
+// before any probe is reached (#5295 review). Its non-answer carries the
+// fsprobe ErrProbeTimedOut + context.DeadlineExceeded pair, so the joined
+// evidence classifies as the bounded environmental non-answer, not bare
+// deadline ambiguity.
+var statSpaceProbe = fsprobe.Stat
+
 // gitCommonDir resolves the repository's Git common directory — the place
 // `worktree add` writes its registration (worktrees/<name>/) and `commit`/
 // `push` write objects — which may live on a different filesystem than the
@@ -120,12 +131,15 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 // A FAILED stat on the destination is evidence in its own right, not a skip:
 // on a dead mount it returns environmental errnos such as ETIMEDOUT that the
 // git subprocess only ever surfaced as an opaque ExitError, and discarding it
-// would charge mount stalls to the structural budget. ENOENT is the normal
-// pre-creation answer and stays silent; anything else joins the chain.
+// would charge mount stalls to the structural budget. The stat itself runs
+// bounded — on a mount that never answers at all, an unbounded lookup would
+// wedge the restore poll before the probe is reached, and its typed timeout
+// is evidence too. ENOENT is the normal pre-creation answer and stays
+// silent; anything else joins the chain.
 func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	dirs := []string{filepath.Dir(g.worktreePath)}
 	var statErr error
-	if st, sErr := os.Stat(g.worktreePath); sErr == nil && st.IsDir() {
+	if st, sErr := statSpaceProbe(g.worktreePath); sErr == nil && st != nil && st.IsDir() {
 		dirs = append(dirs, g.worktreePath)
 	} else if sErr != nil && !os.IsNotExist(sErr) {
 		statErr = sErr

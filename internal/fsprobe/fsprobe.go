@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,13 +48,14 @@ const writeSpaceProbeSize = 1 << 20
 var probeTimeout = 2 * time.Second
 
 // ErrProbeTimedOut identifies the bounded flight's non-answer: the probe's
-// write/sync/close did not complete inside probeTimeout. It is always paired
-// with context.DeadlineExceeded in the chain — the deadline names the
-// non-answer, the sentinel names WHICH bounded probe could not establish
-// state — so a classifier that only accepts deadline+sentinel pairs (the
-// lost-restore environmental class) can tell this stall from a session's own
-// hung operation, which wraps a bare deadline (#5295 review).
-var ErrProbeTimedOut = errors.New("filesystem write probe did not answer inside its bound")
+// syscall — the write probe's write/sync/close, or the stat probe's
+// metadata lookup — did not complete inside probeTimeout. It is always
+// paired with context.DeadlineExceeded in the chain — the deadline names
+// the non-answer, the sentinel names WHICH bounded probe could not
+// establish state — so a classifier that only accepts deadline+sentinel
+// pairs (the lost-restore environmental class) can tell this stall from a
+// session's own hung operation, which wraps a bare deadline (#5295 review).
+var ErrProbeTimedOut = errors.New("filesystem probe did not answer inside its bound")
 
 // writeSpaceProbe is the production probe body (and the test seam): create a
 // file in dir and WRITE a representative payload to it, then Sync before
@@ -137,6 +139,17 @@ func openProbeFile(dir string) (*os.File, error) {
 	return f, nil
 }
 
+// statPath is the test seam under Stat's bounded flight — the metadata
+// syscall that decides whether an existing socket-root or destination dir
+// gets probed itself rather than the parent that hosts its name.
+var statPath = os.Stat
+
+// readDirEntries is the test seam under RemoveDebris — a directory listing
+// that REPORTS I/O errors, unlike filepath.Glob which suppresses them: a
+// transient read failure that hid a leftover would let the sweep claim a
+// tree was clean when it could not prove it (#5295 review).
+var readDirEntries = os.ReadDir
+
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing a single byte, so a
 // leftover .af-add-probe-* only exists when BOTH unlink attempts failed — an
@@ -144,16 +157,22 @@ func openProbeFile(dir string) (*os.File, error) {
 // next `git add -A` snapshot would stage as workspace content after the
 // filesystem recovers (#5295 review). Callers that snapshot a tree sweep
 // before staging so a wedged unlink from an earlier attempt cannot become
-// committed debris. Removal failures are joined and returned — a filesystem
-// that cannot unlink is evidence in its own right.
+// committed debris. Enumeration is fail-closed: a directory that cannot be
+// read returns its error rather than an unproven "clean", and removal
+// failures are joined — a filesystem that cannot unlink is evidence in its
+// own right.
 func RemoveDebris(dir string) error {
-	matches, err := filepath.Glob(filepath.Join(dir, ".af-add-probe-*"))
+	entries, err := readDirEntries(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot enumerate probe debris in %s: %w", dir, err)
 	}
 	var joined []error
-	for _, name := range matches {
-		if rerr := os.Remove(name); rerr != nil && !os.IsNotExist(rerr) {
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ".af-add-probe-") {
+			continue
+		}
+		if rerr := os.Remove(filepath.Join(dir, name)); rerr != nil && !os.IsNotExist(rerr) {
 			joined = append(joined,
 				fmt.Errorf("removing stale probe file %s: %w", name, rerr))
 		}
@@ -170,62 +189,93 @@ func RemoveDebris(dir string) error {
 // the bound reports the filesystem's own verdict, which on a full or wedged
 // mount is the real errno.
 func Write(dir string) error {
-	probeFlights.Lock()
-	if active := probeFlights.byDir[dir]; active != nil {
-		if active.timedOut {
-			probeFlights.Unlock()
-			return fmt.Errorf(
-				"space probe of %s is still running after an earlier deadline: %w: %w",
-				dir, ErrProbeTimedOut, context.DeadlineExceeded,
-			)
-		}
-		probeFlights.Unlock()
-		return waitForProbe(dir, active)
-	}
-	flight := &probeFlight{done: make(chan struct{})}
-	probeFlights.byDir[dir] = flight
-	probeFlights.Unlock()
-	go func() {
-		flight.err = writeSpaceProbe(dir)
-		probeFlights.Lock()
-		if probeFlights.byDir[dir] == flight {
-			delete(probeFlights.byDir, dir)
-		}
-		close(flight.done)
-		probeFlights.Unlock()
-	}()
-	return waitForProbe(dir, flight)
+	_, err := runBounded(dir, writeFlights, "space probe",
+		"the filesystem did not complete the write",
+		func() (any, error) { return nil, writeSpaceProbe(dir) })
+	return err
+}
+
+// Stat runs os.Stat for dir inside the same per-dir bounded flight shape as
+// Write. A caller deciding WHETHER a path exists — does tmux's tmux-<uid>
+// socket root or a worktree's destination dir get probed itself, or the
+// parent that hosts its name — cannot afford an unbounded metadata lookup:
+// on a degraded mount that never answers, the stat would wedge the
+// synchronous restore poll before any probe is reached. The returned
+// non-answer carries the same ErrProbeTimedOut + context.DeadlineExceeded
+// pair the write probe uses, so the lost-restore classifier reads the
+// bounded environmental class rather than charging the structural budget
+// (#5295 review).
+func Stat(dir string) (os.FileInfo, error) {
+	res, err := runBounded(dir, statFlights, "stat probe",
+		"the filesystem did not answer the stat",
+		func() (any, error) { return statPath(dir) })
+	info, _ := res.(os.FileInfo)
+	return info, err
 }
 
 type probeFlight struct {
 	done     chan struct{}
+	res      any
 	err      error
 	timedOut bool
 }
 
-var probeFlights = struct {
+type flightRegistry struct {
 	sync.Mutex
 	byDir map[string]*probeFlight
-}{byDir: map[string]*probeFlight{}}
+}
 
-func waitForProbe(dir string, flight *probeFlight) error {
+var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+
+func runBounded(dir string, flights *flightRegistry, what, detail string,
+	run func() (any, error)) (any, error) {
+	flights.Lock()
+	if active := flights.byDir[dir]; active != nil {
+		if active.timedOut {
+			flights.Unlock()
+			return nil, fmt.Errorf(
+				"%s of %s is still running after an earlier deadline: %w: %w",
+				what, dir, ErrProbeTimedOut, context.DeadlineExceeded,
+			)
+		}
+		flights.Unlock()
+		return waitForFlight(dir, flights, what, detail, active)
+	}
+	flight := &probeFlight{done: make(chan struct{})}
+	flights.byDir[dir] = flight
+	flights.Unlock()
+	go func() {
+		flight.res, flight.err = run()
+		flights.Lock()
+		if flights.byDir[dir] == flight {
+			delete(flights.byDir, dir)
+		}
+		close(flight.done)
+		flights.Unlock()
+	}()
+	return waitForFlight(dir, flights, what, detail, flight)
+}
+
+func waitForFlight(dir string, flights *flightRegistry, what, detail string,
+	flight *probeFlight) (any, error) {
 	timer := time.NewTimer(probeTimeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
-		return flight.err
+		return flight.res, flight.err
 	case <-timer.C:
-		probeFlights.Lock()
-		if probeFlights.byDir[dir] == flight {
+		flights.Lock()
+		if flights.byDir[dir] == flight {
 			flight.timedOut = true
-			probeFlights.Unlock()
-			return fmt.Errorf(
-				"space probe of %s did not answer within %s — the filesystem did not complete the write: %w: %w",
-				dir, probeTimeout, ErrProbeTimedOut, context.DeadlineExceeded,
+			flights.Unlock()
+			return nil, fmt.Errorf(
+				"%s of %s did not answer within %s — %s: %w: %w",
+				what, dir, probeTimeout, detail, ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
-		probeFlights.Unlock()
+		flights.Unlock()
 		<-flight.done
-		return flight.err
+		return flight.res, flight.err
 	}
 }

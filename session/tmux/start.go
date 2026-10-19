@@ -20,6 +20,14 @@ import (
 // internal failure loses into its output text.
 var socketFSProbe = fsprobe.Write
 
+// statSocketDir is the test seam over fsprobe.Stat — the bounded metadata
+// lookup that decides whether the uid socket root exists. It must be
+// bounded: a launch failure reaches this lookup while the daemon's
+// synchronous restore poll holds the instance, and an unbounded os.Stat on
+// an existing-but-wedged bind/NFS mount would block Start forever instead
+// of entering environmental backoff (#5295 review).
+var statSocketDir = fsprobe.Stat
+
 // tmuxSocketFilesystemDir returns the directory whose filesystem must accept
 // tmux's own server-state writes — the socket file and the tmux-<uid>
 // directory the server creates it under — for a launch from THIS process's
@@ -28,10 +36,12 @@ var socketFSProbe = fsprobe.Write
 // directory that hosts it), otherwise the default socket resolves under
 // ${TMUX_TMPDIR:-/tmp}/tmux-<uid> — probe the base, because the uid dir may
 // not exist yet while its parent must be writable for tmux to create it.
-func tmuxSocketFilesystemDir() string {
+// The returned error carries a failed uid-dir stat as evidence; the dir is
+// still the right probe target, so callers join the error and probe anyway.
+func tmuxSocketFilesystemDir() (string, error) {
 	if identity := os.Getenv("TMUX"); identity != "" {
 		if socket, _, ok := strings.Cut(identity, ","); ok && socket != "" {
-			return filepath.Dir(socket)
+			return filepath.Dir(socket), nil
 		}
 	}
 	base := os.Getenv("TMUX_TMPDIR")
@@ -44,12 +54,20 @@ func tmuxSocketFilesystemDir() string {
 	// probing the healthy parent would answer the wrong filesystem's
 	// question while tmux's failure stays an opaque ExitError (#5295
 	// review). Fall back to base only when the uid dir does not exist yet:
-	// then base is where tmux will create it.
+	// then base is where tmux will create it. A stat that FAILS is not a
+	// fallback to base — the uid dir stays the probe target so the write
+	// probe's own bounded verdict lands for the filesystem tmux actually
+	// uses, and the stat error returns as joined evidence.
 	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
-	if st, err := os.Stat(uidDir); err == nil && st.IsDir() {
-		return uidDir
+	st, err := statSocketDir(uidDir)
+	switch {
+	case err == nil && st != nil && st.IsDir():
+		return uidDir, nil
+	case err != nil && !os.IsNotExist(err):
+		return uidDir, err
+	default:
+		return base, nil
 	}
-	return base
 }
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
@@ -289,10 +307,14 @@ func (t *TmuxSession) Start(workDir string) error {
 				// that filesystem from THIS process so a real resource verdict
 				// rides the chain instead of the launch failure charging the
 				// structural retry budget (#5295 review).
-				socketDir := tmuxSocketFilesystemDir()
+				socketDir, statErr := tmuxSocketFilesystemDir()
 				if probeErr := socketFSProbe(socketDir); probeErr != nil {
 					launchErr = errors.Join(launchErr,
 						fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
+				}
+				if statErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("could not inspect tmux socket filesystem %s: %w", socketDir, statErr))
 				}
 
 				// The launch process began. Its exit status, even paired with later

@@ -68,9 +68,9 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 		// before restoring the seams — restoring while the worker's read
 		// is still pending races it (CI -race on #5295).
 		require.Eventually(t, func() bool {
-			probeFlights.Lock()
-			defer probeFlights.Unlock()
-			return probeFlights.byDir[dir] == nil
+			writeFlights.Lock()
+			defer writeFlights.Unlock()
+			return writeFlights.byDir[dir] == nil
 		}, 5*time.Second, time.Millisecond)
 		writeSpaceProbe = old
 		probeTimeout = oldTimeout
@@ -127,4 +127,78 @@ func TestWrite_ConcurrentProbesJoinOneFlight(t *testing.T) {
 	close(gate)
 	require.NoError(t, <-done)
 	require.NoError(t, <-done)
+}
+
+// TestStat_ReportsTheAnswer — a bounded stat on a live filesystem returns the
+// real FileInfo; a missing path surfaces ENOENT unchanged so callers can
+// tell "does not exist yet" from "could not answer".
+func TestStat_ReportsTheAnswer(t *testing.T) {
+	dir := t.TempDir()
+	info, err := Stat(dir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+
+	_, err = Stat(filepath.Join(dir, "absent"))
+	require.True(t, os.IsNotExist(err),
+		"ENOENT must reach the caller unwrapped so IsNotExist works: %v", err)
+}
+
+// TestStat_BoundsAWedgedStat is the #5295-review regression: a mount that
+// never answers a metadata lookup must not wedge the synchronous restore
+// poll — the stat flight surfaces the same ErrProbeTimedOut +
+// context.DeadlineExceeded pair as the write probe, and a retry while the
+// stuck worker is still blocked is refused.
+func TestStat_BoundsAWedgedStat(t *testing.T) {
+	release := make(chan struct{})
+	dir := t.TempDir()
+	old := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		<-release
+		return nil, nil
+	}
+	oldTimeout := probeTimeout
+	probeTimeout = 50 * time.Millisecond
+	defer func() {
+		close(release)
+		require.Eventually(t, func() bool {
+			statFlights.Lock()
+			defer statFlights.Unlock()
+			return statFlights.byDir[dir] == nil
+		}, 5*time.Second, time.Millisecond)
+		statPath = old
+		probeTimeout = oldTimeout
+	}()
+
+	info, err := Stat(dir)
+	require.Error(t, err)
+	require.Nil(t, info)
+	require.True(t, errors.Is(err, context.DeadlineExceeded),
+		"a wedged stat must surface typed deadline evidence: %v", err)
+	require.True(t, errors.Is(err, ErrProbeTimedOut),
+		"the deadline must carry the fsprobe sentinel: %v", err)
+
+	// While the first worker is still stuck, a second stat of the same dir
+	// joins the timed-out flight and is refused immediately.
+	_, err2 := Stat(dir)
+	require.Error(t, err2)
+	require.True(t, errors.Is(err2, context.DeadlineExceeded))
+	require.True(t, errors.Is(err2, ErrProbeTimedOut),
+		"the timed-out refusal must carry the same sentinel pair: %v", err2)
+}
+
+// TestRemoveDebris_EnumerationError is the #5295-review regression: a
+// directory that cannot be READ is not a clean sweep — filepath.Glob would
+// have hidden the I/O failure and let a leftover reach `git add -A` on the
+// next snapshot. The enumeration error must surface so the caller aborts.
+func TestRemoveDebris_EnumerationError(t *testing.T) {
+	old := readDirEntries
+	readDirEntries = func(string) ([]os.DirEntry, error) {
+		return nil, &os.PathError{Op: "open", Path: "dir", Err: syscall.EIO}
+	}
+	defer func() { readDirEntries = old }()
+
+	err := RemoveDebris(t.TempDir())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, syscall.EIO),
+		"the enumeration failure must surface rather than report clean: %v", err)
 }

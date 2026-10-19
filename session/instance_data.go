@@ -560,7 +560,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// a lie, and an explicit restore starts a fresh episode anyway, so each
 	// inert load drops it rather than mirror the stale record.
 	inertReturn := func() *Instance {
-		instance.ClearLostRestoreWait()
+		if instance.ClearLostRestoreWait() {
+			// The wait was persisted, so clearing it only in memory leaves
+			// the stale field in instances.json — a crash before the next
+			// write would let the disk-fallback API re-derive a wait no
+			// retry can consume. Enroll the load-runtime checkpoint so the
+			// clearance is durable before the row installs (#5295 review).
+			instance.markLoadRuntimeReplaced()
+		}
 		return instance
 	}
 

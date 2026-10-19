@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // TestAnnotateWorktreeAddError_DiskFull — the #5295 play-test failure: `git
@@ -200,6 +203,37 @@ func TestAnnotateWorktreeAddError_DestinationAbsentIsSilent(t *testing.T) {
 	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
 	require.False(t, errors.Is(out, syscall.ENOENT),
 		"plain ENOENT is the expected pre-creation state, not evidence: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_DestinationStatTimeout is the #5295-review
+// regression: the destination stat must be BOUNDED — a mount that never
+// answers a metadata lookup would wedge the synchronous restore poll with a
+// plain os.Stat. The bounded probe's typed non-answer (ErrProbeTimedOut +
+// context.DeadlineExceeded) joins as evidence so the classifier reads the
+// bounded environmental class, and the missing answer does NOT add the
+// destination to the probe set.
+func TestAnnotateWorktreeAddError_DestinationStatTimeout(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(string) error { return nil }
+	defer func() { writeSpaceProbe = old }()
+	oldStat := statSpaceProbe
+	statSpaceProbe = func(string) (os.FileInfo, error) {
+		return nil, fmt.Errorf("stat probe of wt did not answer within bound: %w: %w",
+			fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+	}
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+	defer func() { gitCommonDir = oldCommon }()
+
+	g := &GitWorktree{worktreePath: filepath.Join(t.TempDir(), "wt")}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, fsprobe.ErrProbeTimedOut),
+		"the bounded stat non-answer must reach the chain: %v", out)
+	require.True(t, errors.Is(out, context.DeadlineExceeded),
+		"the sentinel must keep its deadline pair for the classifier: %v", out)
+	require.False(t, errors.Is(out, syscall.ENOENT),
+		"a no-answer is not a missing destination: %v", out)
 }
 
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
