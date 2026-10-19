@@ -1124,7 +1124,7 @@ func TestFailedRemoteDefaultKeepsImplicitSubmitGated(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
 	stubRemoteProgramFeed(t, tmux.ProgramClaude)
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 	got := recordStartRequest(t)
 
 	_, cmd := h.startNewInstance()
@@ -1162,7 +1162,7 @@ func TestChosenProgramSubmitsWhileRemoteLookupPending(t *testing.T) {
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
 		return daemon.ListAccountsResponse{}, nil
 	}))
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 	got := recordStartRequest(t)
 
 	_, cmd := h.startNewInstance()
@@ -1199,7 +1199,7 @@ func TestRefusedImplicitSubmitLeavesTheTitleUncommitted(t *testing.T) {
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
 		return daemon.ListAccountsResponse{}, nil
 	}))
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 	got := recordStartRequest(t)
 
 	_, cmd := h.startNewInstance()
@@ -1221,7 +1221,7 @@ func TestRefusedImplicitSubmitLeavesTheTitleUncommitted(t *testing.T) {
 func TestRemoteDefaultDismissesAnOpenProgramPicker(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 
 	_, cmd := h.startNewInstance()
 	_ = drainCmd(t, cmd, 200*time.Millisecond)
@@ -1251,7 +1251,7 @@ func TestRemoteDefaultDismissesAnOpenProgramPicker(t *testing.T) {
 func TestRemoteOnlyProgramResolvesAccountsFromTheDaemonRoster(t *testing.T) {
 	clearDaemonTarget(t)
 	stubRemoteTarget(t)
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
 		return daemon.ListAccountsResponse{
 			Agents:         []string{"codex"},
@@ -1298,7 +1298,7 @@ func TestRemoteChosenDraftRefreshesTheCatalog(t *testing.T) {
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
 		return daemon.ListAccountsResponse{}, nil
 	}))
-	h := activeProjectHome(t)
+	h := configFollowingHome(t)
 
 	inst := newLoadingInstance(t, "demo")
 	inst.Path = h.repoRoot
