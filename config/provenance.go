@@ -398,6 +398,24 @@ func valueFromSchemas(schemas []any, key string) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
+// taggedFieldByKey resolves key to a struct field by matching the key against
+// the struct's toml/json/config tags.
+//
+// Tag matching folds case. encoding/json and go-toml/v2 both match field
+// names case-insensitively, and the in-repo load path's leaf check
+// (inrepo.go) likewise folds case before its allowlist lookup. A
+// case-variant leaf like [docker] Image is therefore admitted by the typed
+// decode and by the load check, so the resolver's struct-tag lookup must
+// fold case too — otherwise the resolver's composite rebuild silently drops
+// a leaf the load path accepted, masking the value at runtime behind a
+// misleading "docker.image must be set" error and a provenance trace that
+// wrongly blames load-time validation (the silent-drop failure mode #4599's
+// unknown-leaf warning was built to prevent). EqualFold over a struct's
+// own fields is safe: tags within one struct are unique by case, so case
+// folding cannot make two distinct fields collide. Map-key lookups
+// (compositeLeaf's reflect.Map branch, value.MapIndex) stay exact on
+// purpose so a map that legitimately carries distinct mixed-case entries
+// (e.g. program_overrides) keeps them distinct.
 func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
 		key = alias.legacy
@@ -418,7 +436,9 @@ func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 		if !field.IsExported() {
 			continue
 		}
-		if structTagName(field.Tag.Get("toml")) == key || structTagName(field.Tag.Get("json")) == key || field.Tag.Get("config") == key {
+		if strings.EqualFold(structTagName(field.Tag.Get("toml")), key) ||
+			strings.EqualFold(structTagName(field.Tag.Get("json")), key) ||
+			strings.EqualFold(field.Tag.Get("config"), key) {
 			return value.Field(i), true
 		}
 	}
