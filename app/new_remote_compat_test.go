@@ -25,7 +25,6 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	require.Equal(t, stateNew, h.state)
 	// Enter may arrive before the async catalog; it must not submit a default
 	// backend and end naming before the promised picker can open.
-	h.pendingProgram = "sh"
 	require.NoError(t, h.namingInstance.SetTitle("choose-backend"))
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Title, "no create request may precede the backend catalog")
@@ -41,9 +40,16 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 		} else {
 			// The open cmd batches the account preselect beside the catalog:
 			// deliver its reply so the owed lookup does not hold the submit.
+			// It must land while pendingProgram still matches the fetch — a
+			// reply for another program is dropped stale without retiring the
+			// markers, and no second answer would ever come (#4893 review).
 			deliver(t, h, []tea.Msg{msg})
 		}
 	}
+	// A non-default program for the compat form — set only after the seeded
+	// program's own preselect reply has settled (a real program change goes
+	// through handleProgramChoice and refires the fetch).
+	h.pendingProgram = "sh"
 	require.Equal(t, 1, *calls, "compatibility binding must request the creation form backend field")
 	require.Equal(t, stateSelectBackend, h.state)
 	assert.Empty(t, h.pendingBackend, "the user chooses the backend")

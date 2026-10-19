@@ -255,7 +255,13 @@ func deliver(t *testing.T, h *home, msgs []tea.Msg) {
 	t.Helper()
 	for _, msg := range msgs {
 		_, cmd := h.Update(msg)
-		for _, reply := range drainCmd(t, cmd, time.Second) {
+		// A handler can answer a delivered reply with a programmatic action —
+		// the verified-ambient auto-submit re-enters the gate here — whose own
+		// cmd may be a lone timer (a refused submit's notice retraction) rather
+		// than a batch. drainCmd would fatal on it; the event loop would not
+		// block, so the cascade drains with batch semantics and skips what the
+		// deadline leaves running (#4893 review).
+		for _, reply := range drainBatch(tea.BatchMsg{cmd}, time.Second) {
 			deliver(t, h, []tea.Msg{reply})
 		}
 	}
@@ -997,7 +1003,12 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	inst.Program = tmux.ProgramGemini
 	inst.Path = h.repoRoot
 	h.sidebar.SelectInstance(inst)
-	msgs := submitVerifiedForm(t, h)
+	// The verify reply lands ambient (empty response), and a verified ambient
+	// submits itself inside the delivery — the refusal then restores the draft
+	// in the same cascade, so one press's replies carry the whole exchange
+	// (#4893 review). submitVerifiedForm cannot drive this: its loop asserts
+	// the form CLOSES, and this stub refuses every create.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	require.Equal(t, tmux.ProgramGemini, captured.Program,
 		"the launch-fixed program goes out concretely")
 	require.True(t, captured.ProgramChosen,
@@ -1005,11 +1016,6 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 
 	// The refusal re-arms the form with the draft intact: the launch program
 	// stays the restored pick rather than being replaced by the default.
-	for _, msg := range msgs {
-		if _, ok := msg.(instanceStartedMsg); ok {
-			_, _ = h.Update(msg)
-		}
-	}
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
 	require.True(t, h.pendingProgramChosen,
 		"the launch-fixed draft restores as a choice, not an implicit field")
