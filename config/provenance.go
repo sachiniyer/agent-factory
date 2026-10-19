@@ -846,23 +846,31 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	for i, candidate := range parent.Candidates {
 		parentReason := candidate.Reason
 		candidate.KeyPath = keyPath
-		// physicalLeaf is the file's physical spelling for the leaf (equal to
-		// leaf on the exact-match path, or the decoder-winning spelling a
-		// struct-backed case-variant origin was keyed by on the fallback path).
-		// Project the candidate's value with physicalLeaf: a non-built-in
-		// candidate's Value is the raw metadata map keyed by the physical
-		// spelling, and when the source supplied conflicting values for two
-		// case-variant spellings (e.g. {"image":"loser","Image":"winner"}) the
-		// decoder kept the last-write-wins value under the spelling the
-		// collapse retained, so the raw map's canonical key may carry the
-		// losing sibling's value. Using leaf (the queried spelling) would
-		// project the losing sibling; using physicalLeaf projects the value the
-		// decoder kept. Built-in candidates carry a typed struct Value, so
-		// configLeafValue already folds case for them via taggedFieldByKey and
-		// physicalLeaf is equivalent to leaf (#5397 review).
-		leafValue, present := configLeafValue(candidate.Value, physicalLeaf)
-		if !present && physicalLeaf != leaf {
-			// The candidate's raw map does not carry the physical spelling
+		// projectionLeaf is the key under which this candidate's raw metadata
+		// map stores the leaf, so the candidate's own value is projected rather
+		// than the winner's. physicalLeaf is the winner's physical spelling
+		// (equal to leaf on the exact-match path, or the decoder-winning
+		// spelling a struct-backed case-variant origin was keyed by on the
+		// fallback path). A non-winner candidate may spell the leaf differently
+		// from the winner (e.g. a global [root_agent] ENABLED = false when the
+		// winner is a personal [root_agent] Enabled = true), and a non-built-in
+		// candidate's Value is the raw metadata map keyed by that candidate's
+		// own physical spelling, so reusing only physicalLeaf would miss its
+		// key and mark an explicitly-configured leaf absent instead of
+		// shadowed. For struct-backed composites, resolve each candidate's own
+		// map key case-insensitively (candidateLeafProjectionKey); map-backed
+		// composites never reach the struct-backed origin fallback above, so
+		// physicalLeaf equals leaf there and the helper is not called. Built-in
+		// candidates carry a typed struct Value, so configLeafValue already
+		// folds case for them via taggedFieldByKey and physicalLeaf is
+		// equivalent to leaf (#5397 review).
+		projectionLeaf := physicalLeaf
+		if isStructBackedValue(parent.Value) {
+			projectionLeaf = candidateLeafProjectionKey(candidate.Value, leaf, physicalLeaf)
+		}
+		leafValue, present := configLeafValue(candidate.Value, projectionLeaf)
+		if !present && projectionLeaf != leaf {
+			// The candidate's raw map does not carry the projection spelling
 			// either (e.g. a built-in source whose typed struct Value is keyed
 			// by the canonical tag, or a non-built-in source that only spells
 			// the leaf one way). Fall back to the queried spelling so the
@@ -908,6 +916,64 @@ func resolutionNormalizationNote(reason string) string {
 		}
 	}
 	return ""
+}
+
+// candidateLeafProjectionKey returns the map key under which a struct-backed
+// candidate stores a case-variant of leaf, so a non-winner candidate that
+// spells the leaf differently from the winner (e.g. a global [root_agent]
+// ENABLED = false when the winner is a personal [root_agent] Enabled = true)
+// projects its own value rather than being marked absent. physicalLeaf is the
+// winner's physical spelling; for the winner and any same-source candidate
+// whose map still carries that spelling, it is the decoder-winning spelling
+// the collapse retained, so it is preferred when present. For a struct-typed
+// candidate Value (built-in sources) configLeafValue's struct branch folds
+// case via taggedFieldByKey regardless of the key used, so physicalLeaf is
+// returned unchanged. Map-backed composites never reach the struct-backed
+// origin fallback in ResolvedValuePath, so this helper is only called for
+// struct-backed parents. Within one struct, tags are unique by case, so the
+// case-insensitive scan is unambiguous (#5397 review).
+func candidateLeafProjectionKey(value any, leaf, physicalLeaf string) string {
+	if value == nil {
+		return physicalLeaf
+	}
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return physicalLeaf
+		}
+		reflected = reflected.Elem()
+	}
+	if reflected.Kind() != reflect.Map {
+		// Struct-typed (built-in) or scalar: configLeafValue's struct branch
+		// folds case via taggedFieldByKey, so the winner's physical spelling
+		// projects the same field as the canonical leaf. Use it to preserve the
+		// physical-spelling KeyPath behaviour on the exact-match path.
+		return physicalLeaf
+	}
+	// The winner's physical spelling is the decoder-winning spelling the
+	// collapse retained, so prefer it when the candidate's map still carries
+	// it (the winner, and any same-source candidate whose raw map has not been
+	// collapsed to a single spelling).
+	if key := reflect.ValueOf(physicalLeaf); key.Type().AssignableTo(reflected.Type().Key()) {
+		if entry := reflected.MapIndex(key); entry.IsValid() {
+			return physicalLeaf
+		}
+	}
+	// A non-winner candidate may spell the leaf differently from the winner;
+	// scan its own keys case-insensitively so it projects its own value and is
+	// reported as shadowed instead of absent. Within one struct, tags are
+	// unique by case, so the scan is unambiguous.
+	for _, key := range reflected.MapKeys() {
+		if s, ok := key.Interface().(string); ok && strings.EqualFold(s, leaf) {
+			return s
+		}
+	}
+	// No case-variant of leaf is present in this candidate's map; the leaf is
+	// genuinely absent here. Fall back to the canonical leaf so configLeafValue's
+	// exact map lookup returns false and the candidate is correctly marked
+	// absent (a candidate that did not configure this leaf should not be
+	// reported as shadowed by the winner).
+	return leaf
 }
 
 func configLeafValue(value any, leaf string) (any, bool) {

@@ -802,3 +802,95 @@ func TestResolveConfigCaseVariantLeavesCollapseKeepsDecoderWinnerSpelling(t *tes
 		})
 	}
 }
+
+// TestResolveConfigCaseVariantLeafProjectionProjectsEachCandidatesOwnSpelling is the
+// regression test for the #5397 review finding that the candidate projection loop
+// reused the winner's physical spelling for every candidate. When a struct-backed
+// composite has multiple sources spelling the same leaf with different case
+// variants (a global [root_agent] ENABLED = false and a winning personal
+// [root_agent] Enabled = true), physicalLeaf carries only the winner's spelling
+// ("Enabled"). A non-winner candidate whose raw metadata map keys the leaf under
+// a different case variant ("ENABLED") matches neither "Enabled" nor the canonical
+// fallback "enabled", so configLeafValue marked that explicitly-configured leaf
+// absent instead of shadowed — an internally contradictory trace (the leaf is
+// configured at that source, just spelled differently). The fix resolves each
+// candidate's own map key case-insensitively for struct-backed composites, so
+// the global ENABLED leaf projects as shadowed (it configured the leaf, the
+// higher-precedence personal Enabled overrode it), and its projected value is its
+// own ENABLED = false rather than nil.
+func TestResolveConfigCaseVariantLeafProjectionProjectsEachCandidatesOwnSpelling(t *testing.T) {
+	builtIn := &Config{RootAgent: RootAgent{Enabled: false, Program: "built-in"}}
+	global := &Config{RootAgent: RootAgent{Enabled: false, Program: "global"}}
+	personal := &ProjectConfig{RootAgent: RootAgent{Enabled: true, Program: "personal"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "root_agent",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceGlobal, SourceProjectPersonal},
+		Merge:      MergeTableByField,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn, &InRepoConfig{}}},
+		{
+			layer:    SourceGlobal,
+			metadata: sourceMetadata{shape: map[string]any{"root_agent": map[string]any{"ENABLED": false, "program": "global"}}},
+			schemas:  []any{global, &InRepoConfig{}},
+		},
+		{
+			layer:    SourceProjectPersonal,
+			metadata: sourceMetadata{shape: map[string]any{"root_agent": map[string]any{"Enabled": true}}},
+			schemas:  []any{personal, &InRepoConfig{}},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	value := requireResolvedValue(t, resolved, "root_agent")
+	rootAgent, ok := value.Value.(RootAgent)
+	require.True(t, ok, "root_agent must resolve to a RootAgent value")
+	assert.True(t, rootAgent.Enabled,
+		"the personal [root_agent] Enabled = true must override the global ENABLED = false and the built-in enabled = false")
+	assert.Equal(t, "global", rootAgent.Program,
+		"the global program wins because the personal source only set Enabled, not Program")
+
+	// Query with the canonical lowercase spelling; the winner is the personal
+	// source's "Enabled" leaf (physicalLeaf = "Enabled"). The global source's
+	// raw map keys the leaf "ENABLED", which is neither "Enabled" nor the
+	// canonical "enabled", so before the fix the global candidate was reported
+	// absent even though it explicitly configured the leaf. The fix resolves
+	// each candidate's map key case-insensitively for struct-backed composites,
+	// so the global candidate projects its own ENABLED value and is reported as
+	// shadowed by the higher-precedence personal Enabled leaf.
+	leaf, ok := resolved.ResolvedValuePath("root_agent.enabled")
+	require.True(t, ok, "the canonical lowercase spelling must project a case-variant leaf")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, SourceProjectPersonal.String(), leaf.Winner.Layer,
+		"the winner is the personal source's Enabled leaf")
+	assert.Equal(t, "root_agent.Enabled", leaf.Winner.KeyPath,
+		"the winner KeyPath retains the personal source's physical spelling")
+
+	globalCandidate := candidateForLayer(t, leaf, SourceGlobal)
+	assert.Equal(t, "shadowed", globalCandidate.Result,
+		"the global ENABLED = false leaf explicitly configured the leaf; it must be shadowed by the higher-precedence personal Enabled, not absent")
+	assert.True(t, globalCandidate.Present,
+		"the global candidate's ENABLED leaf must be present in the projection (its own spelling projects), not absent")
+	assert.Equal(t, false, globalCandidate.Value,
+		"the global candidate's projected value is its own ENABLED = false, not the winner's value or nil")
+
+	personalCandidate := candidateForLayer(t, leaf, SourceProjectPersonal)
+	assert.Equal(t, "winner", personalCandidate.Result,
+		"the personal Enabled leaf is the winner")
+	assert.True(t, personalCandidate.Present)
+	assert.Equal(t, true, personalCandidate.Value,
+		"the personal candidate's projected value is its own Enabled = true")
+
+	// The built-in source's typed struct Value is keyed by the canonical tag,
+	// so taggedFieldByKey's case fold projects it regardless of the winner's
+	// physical spelling; it must be shadowed (it configured enabled = false),
+	// not absent.
+	builtInCandidate := candidateForLayer(t, leaf, SourceBuiltIn)
+	assert.Equal(t, "shadowed", builtInCandidate.Result,
+		"the built-in enabled = false leaf must be shadowed by the higher-precedence personal Enabled, not absent")
+	assert.True(t, builtInCandidate.Present)
+	assert.Equal(t, false, builtInCandidate.Value,
+		"the built-in candidate's projected value is its own enabled = false")
+}
