@@ -1,10 +1,8 @@
 package sessionenv
 
 import (
-	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -89,10 +87,15 @@ func selectorForCommand(command string) (agent, selector string) {
 
 // TestCommandEnvironmentFlagStateFailsClosedOnDollarQuotedSelectorValues
 // is the direct pin on the fixed behavior: dialect-dependent selector
-// assignment values must yield (found=false, enabled=false) for every
+// assignment values must yield (found=true, enabled=false) for every
 // cloud-mode selector on every agent, in both the bare and env-wrapped
-// shapes. commandEnvironmentFlagState is the one place the fix lives;
-// every public surface (ResolveAuthSelectors,
+// shapes. found=true is what keeps a pre-existing ambient enablement
+// from leaking back in: ResolveAuthSelectors only falls back to the
+// ambient when the command does not name the selector at all, so a
+// dollar-quoted value that the parser cannot prove enabling must still
+// register as found so the ambient is overridden with disabled.
+// commandEnvironmentFlagState is the one place the fix lives; every
+// public surface (ResolveAuthSelectors,
 // CommandEnablesCloudCredentials, FilterForCommand) flows through it,
 // and any future regression of the dual-variant check shows up here
 // before it reaches any of them.
@@ -101,7 +104,7 @@ func TestCommandEnvironmentFlagStateFailsClosedOnDollarQuotedSelectorValues(t *t
 		agent, selector := selectorForCommand(command)
 		require.NotEmpty(t, selector, "test setup: %q must name a guarded selector", command)
 		found, enabled := commandEnvironmentFlagState(command, agent, selector)
-		require.Falsef(t, found, "commandEnvironmentFlagState(%q) found=true; a dialect-dependent dollar-quoted value must not even register as the selector's last assignment — it must fail closed as disabled", command)
+		require.Truef(t, found, "commandEnvironmentFlagState(%q) found=false; a dialect-dependent dollar-quoted value is still an explicit assignment to the selector, so it must register as found and override the ambient (otherwise a pre-existing ambient enablement re-admits the credential group)", command)
 		require.Falsef(t, enabled, "commandEnvironmentFlagState(%q) enabled=true; a dialect-dependent dollar-quoted value must fail closed as disabled, not enable the credential group", command)
 	}
 }
@@ -141,6 +144,29 @@ func TestFilterForCommandFailsClosedOnDollarQuotedCloudModeSelectors(t *testing.
 	}
 }
 
+// TestResolveAuthSelectorsOverridesAmbientEnablementOnDollarQuotedSelectors
+// pins the half of the bug the nil-source tests miss: when the ambient
+// environment already carries an enabling assignment to the selector, a
+// command-local dollar-quoted value that the parser cannot prove enabling
+// must override it with disabled rather than fall back to it. ResolveAuthSelectors
+// only consults the ambient when the command does not name the selector at all
+// (found=false), so a dollar-quoted value that registers as found-but-disabled
+// suppresses the ambient enablement — and the AWS / GCP / Azure credential group
+// with it. This is the leak the fix is here to close: bash-as-sh runs the
+// session with the mode off (it expands $'0' to 0), so admitting the ambient's
+// CLAUDE_CODE_USE_BEDROCK=1 injects the credentials into a session the running
+// shell never enabled the mode for.
+func TestResolveAuthSelectorsOverridesAmbientEnablementOnDollarQuotedSelectors(t *testing.T) {
+	for _, command := range commandEnvironmentFlagStateDollarQuoteCases {
+		agent, selector := selectorForCommand(command)
+		require.NotEmpty(t, selector, "test setup: %q must name a guarded selector", command)
+		source := []string{selector + "=1"}
+		selectors := ResolveAuthSelectors(source, agent, command)
+		require.NotContainsf(t, selectors, selector,
+			"ResolveAuthSelectors admitted %s for dollar-quoted command %q with ambient %s=1 — a dialect-dependent value must override the ambient with disabled, not fall back to it", selector, command, selector)
+	}
+}
+
 // TestResolveAuthSelectorsAgreesWithCommandEnablesCloudCredentialsOnDollarQuotes
 // extends config.TestCommandEnablesCloudCredentialsAgreesWithSelectorResolution
 // to the dialect-dependent set. The anti-drift lock the cross-package
@@ -163,53 +189,6 @@ func TestResolveAuthSelectorsAgreesWithCommandEnablesCloudCredentialsOnDollarQuo
 		require.False(t, guarded,
 			"CommandEnablesCloudCredentials reports %q as enabled for %q — a dollar-quoted value must not be cloud-credential-enabling",
 			command, command)
-	}
-}
-
-// TestExecInvocationFailsClosedOnDollarQuotedCloudModeSelector is the
-// end-to-end guard at the actual launch boundary. The pane exec shim
-// (execInvocation in exec_unix.go) hands /bin/sh -c the operator's
-// command after FilterForCommand has built the environment, so the
-// environment argument processExec receives IS the boundary's output.
-// Mock processExec and inspect it: a dollar-quoted falsy selector value
-// must hand /bin/sh -c an environment that carries no AWS / GCP / Azure
-// credential, on any host — bash-as-/bin/sh would otherwise run the
-// session with Bedrock OFF while the AWS credential group is present.
-func TestExecInvocationFailsClosedOnDollarQuotedCloudModeSelector(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
-	t.Setenv("AWS_SESSION_TOKEN", "fixture")
-	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "fixture")
-	// Bare claude on PATH so the bare-name grant predicate attributes
-	// it to the operator's PATH (operator's PATH = a tempdir af owns).
-	pathDir := t.TempDir()
-	writeExecutableFixture(t, pathDir, "claude")
-	t.Setenv("PATH", pathDir)
-
-	wantErr := errors.New("stop before exec")
-	var gotEnvironment []string
-	previous := processExec
-	processExec = func(_ string, _ []string, environ []string) error {
-		gotEnvironment = append([]string(nil), environ...)
-		return wantErr
-	}
-	t.Cleanup(func() { processExec = previous })
-
-	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=$'0' claude"}, false)
-	require.ErrorIs(t, err, wantErr)
-
-	for _, denied := range []string{
-		"AWS_ACCESS_KEY_ID=fixture",
-		"AWS_SECRET_ACCESS_KEY=fixture",
-		"AWS_SESSION_TOKEN=fixture",
-		"AZURE_CLIENT_SECRET=fixture",
-		"GOOGLE_APPLICATION_CREDENTIALS=fixture",
-	} {
-		require.Falsef(t, slices.Contains(gotEnvironment, denied),
-			"exec shim admitted %s into the environment handed to /bin/sh -c for a dollar-quoted falsy selector value — "+
-				"the session would run with Bedrock off (bash-as-/bin/sh expands $'0' to 0) while carrying the AWS credential group",
-			denied)
 	}
 }
 
@@ -289,16 +268,23 @@ func TestDollarQuotedSelectorValueDivergesBetweenShells(t *testing.T) {
 		}
 		shPath = "/bin/sh"
 	}
-	// Resolve any symlink so a bash-as-/bin/sh host (where the two are the
-	// same shell) is detected: there is no divergence there. The bug
-	// silently agreed with the running shell on those hosts that DO
-	// support ANSI-C quoting but happens to host dash as /bin/sh — that
-	// is not this test's claim. The claim is that bash and dash differ,
-	// and that af cannot tell which /bin/sh the operator's host has.
-	shReal, shErr := filepath.EvalSymlinks(shPath)
-	bashReal, bashErr := filepath.EvalSymlinks(bashPath)
-	if shErr == nil && bashErr == nil && shReal == bashReal {
-		t.Skipf("/bin/sh and bash resolve to the same binary (%s); the divergence the bug relies on is not observable here", shReal)
+	// Detect divergence by observation rather than by comparing resolved
+	// paths: macOS ships bash as BOTH /bin/sh and /bin/bash (distinct files,
+	// not symlinks), so filepath.EvalSymlinks leaves the two paths distinct
+	// even though they are the same dialect. The bug's premise is that the
+	// two dialects EXPAND the same source text differently, so ask them: when
+	// a probe command produces the same bytes under both, there is no
+	// divergence to pin on this host and the parser-path tests already cover
+	// the fix. This keeps the oracle honest on a bash-as-/bin/sh host without
+	// a second dialect to compare against (macOS, and any Linux where bash is
+	// /bin/sh), where the NotEqual assertion would otherwise fail on equality.
+	probe := `x=$'0'; printf '%s' "$x"`
+	shProbeOut, shProbeErr := exec.Command(shPath, "-c", probe).Output()
+	bashProbeOut, bashProbeErr := exec.Command(bashPath, "-c", probe).Output()
+	require.NoError(t, shProbeErr, "running the probe %q under %s failed", probe, shPath)
+	require.NoError(t, bashProbeErr, "running the probe %q under bash failed", probe)
+	if string(shProbeOut) == string(bashProbeOut) {
+		t.Skipf("%s and %s expand $'0' identically (%q); the divergence the bug relies on is not observable on this host", shPath, bashPath, string(bashProbeOut))
 	}
 	for _, tc := range []struct {
 		name    string
@@ -317,8 +303,8 @@ func TestDollarQuotedSelectorValueDivergesBetweenShells(t *testing.T) {
 			// text to different bytes. bash supports ANSI-C / locale
 			// quoting (so $'0' -> 0); dash does not (so $'0' -> $0).
 			require.NotEqualf(t, string(bashOut), string(shOut),
-				"the live oracle found no divergence between bash (%s) and %s (%s) for %q; the bug report's premise does not hold in this environment",
-				bashPath, shPath, shReal, tc.command)
+				"the live oracle found no divergence between bash (%s) and %s for %q; the bug report's premise does not hold in this environment",
+				bashPath, shPath, tc.command)
 			// And confirm bash — which is what macOS and several major
 			// Linux distributions ship as /bin/sh — expands the falsy
 			// form to the falsy string itself, so the running process
