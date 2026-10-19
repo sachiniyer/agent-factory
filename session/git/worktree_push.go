@@ -3,6 +3,8 @@ package git
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // archiveSnapshotMessage labels the WIP commit SnapshotAndPushBranch makes for
@@ -65,6 +67,18 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// the name never coexists with content, so `git add -A` can never stage
 	// it (#5295 review).
 	probeDir := g.worktreePath
+
+	// One debris edge survives the unlink-before-write contract: on the
+	// named-fallback path (no O_TMPFILE) a double unlink failure leaves an
+	// empty .af-add-probe-* name in this tree — unstageable at the time, but
+	// the next `git add -A` after the filesystem recovers would commit it as
+	// workspace content. Sweep stale probe names before snapshotting. A
+	// removal failure aborts the push with the evidence: a filesystem that
+	// cannot unlink is likely still answering the question this snapshot
+	// needs answered (#5295 review).
+	if derr := fsprobe.RemoveDebris(g.worktreePath); derr != nil {
+		return "", g.annotateGitWriteError(fmt.Errorf("could not remove stale probe debris before archive push: %w", derr), probeDir)
+	}
 
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to

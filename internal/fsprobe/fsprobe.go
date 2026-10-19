@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -134,6 +135,30 @@ func openProbeFile(dir string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// RemoveDebris removes stale named-fallback probe leftovers from dir. The
+// named fallback unlinks its tempfile before writing a single byte, so a
+// leftover .af-add-probe-* only exists when BOTH unlink attempts failed — an
+// empty file that is nevertheless a name inside the tracked tree, which the
+// next `git add -A` snapshot would stage as workspace content after the
+// filesystem recovers (#5295 review). Callers that snapshot a tree sweep
+// before staging so a wedged unlink from an earlier attempt cannot become
+// committed debris. Removal failures are joined and returned — a filesystem
+// that cannot unlink is evidence in its own right.
+func RemoveDebris(dir string) error {
+	matches, err := filepath.Glob(filepath.Join(dir, ".af-add-probe-*"))
+	if err != nil {
+		return err
+	}
+	var joined []error
+	for _, name := range matches {
+		if rerr := os.Remove(name); rerr != nil && !os.IsNotExist(rerr) {
+			joined = append(joined,
+				fmt.Errorf("removing stale probe file %s: %w", name, rerr))
+		}
+	}
+	return errors.Join(joined...)
 }
 
 // Write runs the space probe for dir inside a per-dir bounded flight: a

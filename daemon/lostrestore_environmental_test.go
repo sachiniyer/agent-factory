@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestLostRestoreEnvironmentalErr pins the #5295 classification: transient
@@ -93,6 +94,16 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"deadline carrying fsprobe sentinel", errors.Join(
 			fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), lostRestoreEnvDeadline},
 		{"fsprobe sentinel bare", fmt.Errorf("space probe: %w", fsprobe.ErrProbeTimedOut), lostRestoreEnvNone},
+		// Start's PRE-spawn has-session gate: a wedged shared tmux server
+		// that cannot answer the probe reports ErrTmuxServerNoAnswer +
+		// deadline — the same bounded environmental class af's other
+		// non-answer sentinels produce. The sentinel alone, and every other
+		// tmux timeout (the post-spawn readiness deadline can mean the pane
+		// command exited instantly), stay structural (#5295 review).
+		{"deadline carrying tmux server no-answer", errors.Join(
+			sessiontmux.ErrTmuxServerNoAnswer, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"tmux server no-answer bare", fmt.Errorf("start: %w", sessiontmux.ErrTmuxServerNoAnswer), lostRestoreEnvNone},
+		{"tmux timeout bare", fmt.Errorf("start: %w", sessiontmux.ErrTmuxTimeout), lostRestoreEnvNone},
 		// The bare sentinel is a definitive verdict — "the recorded worktree
 		// is at no candidate" — not a waiting one; retrying cannot change it.
 		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvNone},

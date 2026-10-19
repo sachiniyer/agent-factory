@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The environmental half of the restore retry policy (#5295).
@@ -98,17 +99,22 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	// ErrSetupRemovalOwnershipUnproven before any mutation can be tried —
 	// a repository-filesystem stall the next retry re-probes from scratch —
 	// or the fsprobe write capacity flight, which marks a wedged filesystem's
-	// non-answer with ErrProbeTimedOut so the diagnostic bound reads as the
-	// same environmental class it exists to protect (#5295 review).
+	// non-answer with ErrProbeTimedOut, or Start's pre-spawn has-session gate,
+	// which marks a wedged shared tmux server with ErrTmuxServerNoAnswer —
+	// each bounded so the diagnostic bound reads as the same environmental
+	// class it exists to protect (#5295 review).
 	// A bare ownership refusal (the sentinel without the deadline) stays a
-	// definitive verdict and remains structural. Every other timeout and
-	// every definitive verdict stays on the structural budget (#5295
-	// review).
+	// definitive verdict and remains structural, and so does every tmux
+	// timeout OTHER than the pre-spawn probe — the post-spawn readiness
+	// timeout can mean the pane command exited instantly. Every other
+	// timeout and every definitive verdict stays on the structural budget
+	// (#5295 review).
 	if errors.Is(err, context.DeadlineExceeded) &&
 		(errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
 			errors.Is(err, sessiongit.ErrWorktreeSetupStalled) ||
 			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven) ||
-			errors.Is(err, fsprobe.ErrProbeTimedOut)) {
+			errors.Is(err, fsprobe.ErrProbeTimedOut) ||
+			errors.Is(err, sessiontmux.ErrTmuxServerNoAnswer)) {
 		return lostRestoreEnvDeadline
 	}
 	return lostRestoreEnvNone

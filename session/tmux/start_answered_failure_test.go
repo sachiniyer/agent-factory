@@ -1,14 +1,19 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/stretchr/testify/require"
 )
 
 type answeredFailurePtyFactory struct {
@@ -127,6 +132,61 @@ func TestStartAnsweredFailureCarriesSocketFSProbeEvidence(t *testing.T) {
 	if !errors.Is(err, syscall.ENOSPC) {
 		t.Fatalf("launch failure on a full socket filesystem must carry ENOSPC in the chain: %v", err)
 	}
+}
+
+// TestStartPrespawnProbeNoAnswerCarriesSentinel is the #5295-review
+// regression: when the shared tmux server is wedged, Start's pre-spawn
+// has-session gate cannot get an answer — an environmental stall that must
+// reach the classifier as the bounded non-answer class
+// (ErrTmuxServerNoAnswer + context.DeadlineExceeded), not bare
+// ErrTmuxTimeout, which the structural budget charges.
+func TestStartPrespawnProbeNoAnswerCarriesSentinel(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+	shortTmuxTimeout(t, 50*time.Millisecond)
+	cmdExec := cmd_test.MockCmdExec{
+		// has-session never answers inside the bounded ctx — the wedged
+		// server case. A slow error return after the deadline trips is what
+		// probeSessionContext reads as !known.
+		RunFunc: func(*exec.Cmd) error {
+			time.Sleep(300 * time.Millisecond)
+			return errors.New("tmux never answered")
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+	ts := NewTmuxSessionWithDeps("prespawn-noanswer", "sh", answeredFailurePtyFactory{t: t}, cmdExec)
+
+	err := ts.Start(t.TempDir())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrTmuxServerNoAnswer),
+		"the pre-spawn no-answer must carry its dedicated sentinel: %v", err)
+	require.True(t, errors.Is(err, context.DeadlineExceeded),
+		"the sentinel must pair with the deadline the classifier requires: %v", err)
+	require.True(t, errors.Is(err, ErrTmuxTimeout),
+		"existing ErrTmuxTimeout consumers must keep matching: %v", err)
+}
+
+// TestTmuxSocketFilesystemDir — the probe answers the filesystem the socket
+// write actually lands on: an EXISTING tmux-<uid> dir (possibly its own
+// mount), or the TMUX_TMPDIR base where tmux creates it, or the $TMUX
+// socket's own directory when the env names one (#5295 review).
+func TestTmuxSocketFilesystemDir(t *testing.T) {
+	t.Setenv("TMUX", "")
+	base := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", base)
+
+	// No uid dir yet → the base is where tmux will create it.
+	require.Equal(t, base, tmuxSocketFilesystemDir())
+
+	// An existing uid dir is the socket write's real filesystem — it may be
+	// a bind mount or its own full fs the base knows nothing about.
+	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
+	require.NoError(t, os.Mkdir(uidDir, 0o700))
+	require.Equal(t, uidDir, tmuxSocketFilesystemDir())
+
+	// $TMUX names a live socket — its own directory is the answer.
+	sock := filepath.Join(t.TempDir(), "sockdir", "default")
+	t.Setenv("TMUX", sock+",123,0")
+	require.Equal(t, filepath.Dir(sock), tmuxSocketFilesystemDir())
 }
 
 // TestStartAnsweredFailure_FreeSocketFSStaysStructural — the same launch

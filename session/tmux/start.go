@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -37,6 +38,17 @@ func tmuxSocketFilesystemDir() string {
 	if base == "" {
 		base = "/tmp"
 	}
+	// The server creates its socket under base/tmux-<uid>, not base itself —
+	// and an EXISTING uid dir is the filesystem the socket write actually
+	// lands on. If that child is a bind mount or its own (full) filesystem,
+	// probing the healthy parent would answer the wrong filesystem's
+	// question while tmux's failure stays an opaque ExitError (#5295
+	// review). Fall back to base only when the uid dir does not exist yet:
+	// then base is where tmux will create it.
+	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
+	if st, err := os.Stat(uidDir); err == nil && st.IsDir() {
+		return uidDir
+	}
 	return base
 }
 
@@ -60,7 +72,16 @@ func (t *TmuxSession) Start(workDir string) error {
 	// caller learns the server never answered rather than that the name collided.
 	exists, known := t.ProbeSession()
 	if !known {
-		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
+		// The pre-spawn gate's non-answer is environmental evidence in its
+		// own right: a wedged or filesystem-stuck server cannot answer
+		// has-session, and every retry would charge the structural budget
+		// for a condition that resolves on its own. Pair a distinct
+		// sentinel with the deadline so the classifier's
+		// deadline+sentinel arm reads the bounded environmental class —
+		// NOT every ErrTmuxTimeout, since the later readiness timeout can
+		// also mean the pane command exited instantly (#5295 review).
+		return fmt.Errorf("%w: has-session probe for session %q did not answer: %w: %w",
+			ErrTmuxTimeout, t.sanitizedName, ErrTmuxServerNoAnswer, context.DeadlineExceeded)
 	}
 	if exists {
 		// A live session af did not just create holds the name, so no teardown
