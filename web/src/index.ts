@@ -2015,7 +2015,10 @@ function refreshConfig(): void {
  *  action, from "af could not look". */
 const accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: listAccounts,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
   commit: (resp) => {
     store.set({
       accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true },
@@ -2269,9 +2272,17 @@ function requestTaskResync(): void {
  *  initial connect): on a resync a transport blip must LEAVE the last-known list up,
  *  exactly as refreshTasks does — blanking it to [] would drop a registered project
  *  out of the switcher on a transient failure. */
+/** Bounds one registry read. fetch carries no deadline, so a daemon that
+ *  accepts and never answers would keep the request — and its per-origin
+ *  connection-pool slot — pending forever, and every conflict timer or settle
+ *  refetch that calls refreshRegisteredProjects would pile up one more (#4888
+ *  review). 30s is far past anything a local registry read should take. */
+const REGISTRY_READ_MS = 30_000;
+
 const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
   commit: commitRegisteredProjects,
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });

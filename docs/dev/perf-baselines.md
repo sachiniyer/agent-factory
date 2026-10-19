@@ -95,8 +95,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1032819.000 | 1032819.000–1032819.000 | 0.000 | 1084959.950 |
-| gzip_bytes | 230910.000 | 230910.000–230910.000 | 0.000 | 242455.500 |
+| raw_bytes | 1033575.000 | 1033575.000–1033575.000 | 0.000 | 1085253.750 |
+| gzip_bytes | 231191.000 | 231191.000–231191.000 | 0.000 | 242750.550 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -127,8 +127,8 @@ reason to move a budget.
 Measured on the PR's final rebased tree by recomputing the identical metric
 locally (`scripts/perf/report.mjs`: raw sum and per-file `gzipSync(level: 9)`
 over `web/dist/**.{js,css}` — the reporter's own compressor, not the `gzip`
-CLI, whose framing emits fewer bytes for the same input) — raw_bytes 1,032,819,
-gzip_bytes 230,910. Bundle bytes are deterministic — `make web-build`
+CLI, whose framing emits fewer bytes for the same input) — raw_bytes 1,033,575,
+gzip_bytes 231,191. Bundle bytes are deterministic — `make web-build`
 reproduces `web/dist` byte-for-byte — so the three samples are the same
 measured value. Only the two bundle entries were updated; every timing and
 layout-shift baseline is unchanged.

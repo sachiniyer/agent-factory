@@ -14888,14 +14888,29 @@ function createFencedRefetcher(spec) {
         return;
       }
       const request = gate.begin();
-      const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      void spec.fetch(tok).then((value) => {
+      let expired = false;
+      const isNewest = () => !expired && request.isCurrent() && spec.readToken() === tok;
+      let controller;
+      let bound;
+      if (spec.timeoutMs !== void 0) {
+        controller = new AbortController();
+        const own = controller;
+        bound = globalThis.setTimeout(() => {
+          expired = true;
+          own.abort();
+        }, spec.timeoutMs);
+      }
+      void spec.fetch(tok, controller?.signal).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
       }).catch((error) => {
         if (isNewest()) {
           spec.onError?.(error);
+        }
+      }).finally(() => {
+        if (bound !== void 0) {
+          globalThis.clearTimeout(bound);
         }
       });
     },
@@ -19317,7 +19332,10 @@ function refreshConfig() {
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: listAccounts,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
   commit: (resp) => {
     store.set({
       accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
@@ -19447,9 +19465,11 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
+var REGISTRY_READ_MS = 3e4;
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
   commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });

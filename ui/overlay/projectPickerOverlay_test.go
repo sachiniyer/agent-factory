@@ -1290,3 +1290,36 @@ func TestMergePreservingSessionRowsDropsASessionRowWhoseRootWasReclaimed(t *test
 		t.Fatalf("a same-repo root claim grafts the registration onto the session row's counts, got %+v", merged)
 	}
 }
+
+// TestMergePreservingSessionRowsReadsTheClaimThroughRegistryRoot pins the
+// follow-on #4888 review finding: the union may give a fresh registry row a
+// higher-priority session workspace in Root while its registration still
+// records the original root in RegistryRoot. A stale session row squatting on
+// THAT path is reclaimed all the same — indexing only Root would keep it
+// pointing at a checkout its repo no longer occupies.
+func TestMergePreservingSessionRowsReadsTheClaimThroughRegistryRoot(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 2},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/worktree-b", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	if len(merged) != 1 {
+		t.Fatalf("the registry's RegistryRoot claims /repo even though the row navigates to /worktree-b, got %+v", merged)
+	}
+	if merged[0].RepoID != "repo-new" || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("the surviving row is the authoritative registration, got %+v", merged)
+	}
+
+	// And the navigable Root still counts as a claim in its own right: a stale
+	// row squatting on the workspace the union promoted must drop too.
+	oldAtWorkspace := []Project{
+		{Name: "old", Root: "/worktree-b", RepoID: "repo-old", SessionCount: 2},
+	}
+	merged = MergePreservingSessionRows(oldAtWorkspace, fresh, false)
+	if len(merged) != 1 || merged[0].RepoID != "repo-new" {
+		t.Fatalf("a stale row on the promoted workspace drops beside the fresh registration, got %+v", merged)
+	}
+}

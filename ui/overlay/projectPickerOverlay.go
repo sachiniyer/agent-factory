@@ -336,11 +336,18 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 	// registry says that path belongs to a DIFFERENT repository, the preserved
 	// row is stale outright — keeping it would shadow the fresh registration's
 	// row and send its Enter to a checkout the old repo no longer occupies
-	// (#4888 review).
+	// (#4888 review). A claim is indexed by BOTH the union row's navigable
+	// Root and its RegistryRoot: buildProjectListFrom may promote a session
+	// workspace into Root while the registration still records its original
+	// root, and either is the path a stale row can be squatting on (#4888
+	// review).
 	freshRootRepo := make(map[string]string, len(projects))
 	for _, row := range projects {
 		if row.RegistryID != "" {
 			freshRootRepo[row.Root] = row.RepoID
+			if row.RegistryRoot != "" {
+				freshRootRepo[row.RegistryRoot] = row.RepoID
+			}
 		}
 	}
 	for _, row := range old {
