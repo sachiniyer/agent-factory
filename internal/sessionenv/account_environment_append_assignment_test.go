@@ -207,11 +207,18 @@ func TestApplyAccountEnvironment_RefusesWrappedAppendAssignment(t *testing.T) {
 
 // TestShellWordAssignmentName_RecognizesAppendForm pins the helper directly.
 // `shellWordAssignmentName` feeds the assignment branch of
-// `declarationMutatesAccountEnvironment` and the post-`exec` assignment scan in
-// `callOverridesName`. Before the fix, `NAME+=value` cut to `NAME+` and failed
-// `validName`, so the word was never classified as an assignment and the
-// declaration-builtin walk fell through to the literal-word branch. After the
-// fix, the append form returns the clean name and `assignment=true`.
+// `declarationMutatesAccountEnvironment`, the post-`exec` assignment scan in
+// `callOverridesName`, and — critically — the `env` operand scan in
+// `envAgentFlagState`/`envArgvWord`. The helper deliberately does NOT strip the
+// bash `NAME+=value` append operator's trailing `+`: env does not honor `+=`,
+// so `env CLAUDE_CODE_USE_BEDROCK+="$MODE"` sets the literal variable
+// `CLAUDE_CODE_USE_BEDROCK+`, NOT `CLAUDE_CODE_USE_BEDROCK`. Treating the
+// append form as an assignment to the clean name here would make
+// `envAgentFlagState` report the inherited selector overridden and strip the
+// account's real credentials (see TestEnvAppendOperatorIsNotAnOverride). The
+// shell/declaration append form is closed by `accountEnvironmentOperandDenied`
+// (which strips the trailing `+` itself) via the literal-word fallback, so the
+// declaration-builtin walk still refuses `command export NAME+=value`.
 func TestShellWordAssignmentName_RecognizesAppendForm(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -222,10 +229,13 @@ func TestShellWordAssignmentName_RecognizesAppendForm(t *testing.T) {
 	}{
 		// Plain set form: a literal `NAME=value`, name is the part before `=`.
 		{"set", "command export CODEX_HOME=/other", 2, "CODEX_HOME", true},
-		// Append form: literal `NAME+=value`, recognized as an assignment to NAME.
-		{"append", "command export CODEX_HOME+=/other", 2, "CODEX_HOME", true},
-		// Allowed-name append form: also recognized as an assignment (to PORT).
-		{"allowed-name-append", "command export PORT+=3000", 2, "PORT", true},
+		// Append form: the helper returns the raw `strings.Cut` target
+		// `NAME+` with assignment=false, because this helper is shared with
+		// the env operand path and env does not honor `+=`. The
+		// declaration-builtin walk closes the append form through
+		// accountEnvironmentOperandDenied's own trailing-`+` strip instead.
+		{"append", "command export CODEX_HOME+=/other", 2, "CODEX_HOME+", false},
+		{"allowed-name-append", "command export PORT+=3000", 2, "PORT+", false},
 		// Bare NAME without an `=` is an argument, not an assignment token.
 		{"bare-name", "command export CODEX_HOME", 2, "CODEX_HOME", false},
 	} {
@@ -240,4 +250,39 @@ func TestShellWordAssignmentName_RecognizesAppendForm(t *testing.T) {
 			require.Equal(t, tc.wantAssign, assignment, "command %q: assignment flag", tc.command)
 		})
 	}
+}
+
+// TestEnvAppendOperatorIsNotAnOverride pins that env's `NAME+=value` operand is
+// NOT treated as an assignment to NAME. env has no append operator: it splits the
+// operand at the first `=`, so `CLAUDE_CODE_USE_BEDROCK+="$MODE"` sets the
+// literal variable `CLAUDE_CODE_USE_BEDROCK+` and leaves an inherited
+// `CLAUDE_CODE_USE_BEDROCK=1` enabled. The auth-selector resolver must therefore
+// still report the inherited selector and keep the account's provider
+// credentials; a shell-declaration `+=` (which bash DOES honor) must not leak
+// into this env path through the shared `shellWordAssignmentName` helper.
+func TestEnvAppendOperatorIsNotAnOverride(t *testing.T) {
+	source := []string{"CLAUDE_CODE_USE_BEDROCK=1", "AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"}
+	for _, command := range []string{
+		// Non-literal append: env parses `NAME+="$MODE"` as a set of the literal
+		// variable `NAME+`, so the inherited selector stays.
+		"env CLAUDE_CODE_USE_BEDROCK+=\"$MODE\" claude",
+		// Literal append: env's SplitAssignment cuts at the first `=`, so the
+		// mutation target is the literal `CLAUDE_CODE_USE_BEDROCK+`, not the
+		// selector, and the inherited selector stays.
+		"env CLAUDE_CODE_USE_BEDROCK+=1 claude",
+	} {
+		selectors := ResolveAuthSelectors(source, "claude", command)
+		require.Equal(t, []string{"CLAUDE_CODE_USE_BEDROCK"}, selectors,
+			"command %q: env's NAME+=value operand must not override the inherited selector", command)
+		filtered, err := FilterWithAuthSelectors(source, "claude", selectors, nil)
+		require.NoError(t, err, "command %q: FilterWithAuthSelectors", command)
+		for _, want := range []string{"AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"} {
+			require.Contains(t, filtered, want,
+				"command %q: inherited provider credential was stripped by the append operand", command)
+		}
+	}
+	// Contrast: the real `=` form on env DOES override the selector.
+	selectors := ResolveAuthSelectors(source, "claude", "env CLAUDE_CODE_USE_BEDROCK=0 claude")
+	require.Empty(t, selectors,
+		"env CLAUDE_CODE_USE_BEDROCK=0 must override the inherited selector")
 }
