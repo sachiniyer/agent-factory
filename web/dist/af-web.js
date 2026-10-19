@@ -8906,7 +8906,7 @@ var TerminalKeybar = class {
     title.textContent = "Paste";
     const hint = document.createElement("p");
     hint.className = "af-modal-hint";
-    hint.textContent = "This browser cannot read the clipboard \u2014 paste or type the text, then tap Send.";
+    hint.textContent = "Couldn't read the clipboard \u2014 paste or type the text, then tap Send.";
     const area = document.createElement("textarea");
     area.className = "af-input af-textarea";
     area.setAttribute("aria-label", "Text to paste");
