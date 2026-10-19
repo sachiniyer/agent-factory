@@ -8526,7 +8526,7 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
 var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
@@ -8678,9 +8678,10 @@ function keybarPointerDown(event, act) {
   act();
 }
 var TerminalKeybar = class {
-  constructor(host, input, refit, applicationCursor) {
+  constructor(host, input, paste, refit, applicationCursor) {
     this.host = host;
     this.input = input;
+    this.paste = paste;
     this.refit = refit;
     this.applicationCursor = applicationCursor;
     this.originalMaxHeight = host.style.maxHeight;
@@ -8701,6 +8702,7 @@ var TerminalKeybar = class {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          else if (key === "Paste") void this.requestPaste();
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
@@ -8758,6 +8760,8 @@ var TerminalKeybar = class {
   deferred229;
   deferred229Generation = 0;
   suppressedKeydowns = /* @__PURE__ */ new WeakSet();
+  pasteSheet;
+  pasteSheetArea;
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
@@ -8840,6 +8844,121 @@ var TerminalKeybar = class {
     this.markUserInput(options.physical, options.keybar);
     this.input(data);
   }
+  /**
+   * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
+   * tap's synchronous stack so the request lands inside the browser's
+   * user-activation window — iOS Safari answers with its own paste bubble and
+   * Android Chrome may ask for clipboard permission once; both are fine.
+   *
+   * Three failure shapes collapse into the one never-silent fallback: no
+   * readText at all (Firefox, an insecure context), a rejection (permission
+   * denied), and an empty read each open the paste sheet — the textarea route
+   * is how paste works on browsers that block readText.
+   */
+  async requestPaste() {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.readText) {
+      this.openPasteSheet();
+      return;
+    }
+    try {
+      const text = await clipboard.readText();
+      if (text) {
+        this.sendPaste(text);
+        return;
+      }
+    } catch {
+    }
+    this.openPasteSheet();
+  }
+  /**
+   * Sends text through xterm's paste path: term.paste wraps the block in
+   * ESC[200~ … ESC[201~ when the application enabled bracketed paste, exactly
+   * as a desktop Ctrl+V does, and the delivery hold reads the wrapper as a
+   * draft. The emission is marked keybar-sourced so transform passes it
+   * through untouched — a paste is not a keystroke, so an armed sticky
+   * Ctrl/Alt neither rewrites the pasted text nor is consumed by it. And like
+   * other positional input it keeps its place behind a just-committed IME
+   * composition (#4151).
+   */
+  sendPaste(text) {
+    if (this.softInput.deferAfterPendingComposition(() => this.emitPaste(text))) return;
+    this.emitPaste(text);
+  }
+  emitPaste(text) {
+    this.markUserInput(void 0, true);
+    this.paste(text);
+  }
+  /**
+   * The never-silent fallback for requestPaste: a small sheet with a focused
+   * textarea. A long press inside opens the OS paste menu (or the user types),
+   * and Send routes the text through the same sendPaste path a direct
+   * clipboard read would. The card reuses the app's modal chrome classes;
+   * Escape, Cancel, and a backdrop tap all dismiss.
+   */
+  openPasteSheet() {
+    if (this.pasteSheet) {
+      this.pasteSheetArea?.focus();
+      return;
+    }
+    const title = document.createElement("h2");
+    title.className = "af-modal-title";
+    title.textContent = "Paste";
+    const hint = document.createElement("p");
+    hint.className = "af-modal-hint";
+    hint.textContent = "This browser cannot read the clipboard \u2014 paste or type the text, then tap Send.";
+    const area = document.createElement("textarea");
+    area.className = "af-input af-textarea";
+    area.setAttribute("aria-label", "Text to paste");
+    area.placeholder = "Paste or type here";
+    const body = document.createElement("div");
+    body.className = "af-modal-body";
+    body.append(hint, area);
+    const send = document.createElement("button");
+    send.type = "button";
+    send.className = "af-primary";
+    send.textContent = "Send";
+    send.disabled = true;
+    area.addEventListener("input", () => {
+      send.disabled = !area.value;
+    });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "af-ghost";
+    cancel.textContent = "Cancel";
+    const foot = document.createElement("div");
+    foot.className = "af-modal-foot";
+    foot.append(cancel, send);
+    const card = document.createElement("div");
+    card.className = "af-modal-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-label", "Paste");
+    card.tabIndex = -1;
+    card.append(title, body, foot);
+    card.addEventListener("click", (event) => event.stopPropagation());
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.closePasteSheet(false);
+    });
+    const backdrop = document.createElement("div");
+    backdrop.className = "af-modal-backdrop";
+    backdrop.append(card);
+    backdrop.addEventListener("click", () => this.closePasteSheet(false));
+    cancel.addEventListener("click", () => this.closePasteSheet(false));
+    send.addEventListener("click", () => this.closePasteSheet(true));
+    this.pasteSheet = backdrop;
+    this.pasteSheetArea = area;
+    document.body.append(backdrop);
+    area.focus();
+  }
+  closePasteSheet(send) {
+    const area = this.pasteSheetArea;
+    this.pasteSheet?.remove();
+    this.pasteSheet = void 0;
+    this.pasteSheetArea = void 0;
+    if (send && area?.value) this.sendPaste(area.value);
+    this.textarea?.focus?.();
+  }
   paint() {
     this.rows.forEach((row, index) => {
       row.hidden = index !== (this.arrows ? 1 : 0);
@@ -8873,6 +8992,9 @@ var TerminalKeybar = class {
     this.refit();
   };
   dispose() {
+    this.pasteSheet?.remove();
+    this.pasteSheet = void 0;
+    this.pasteSheetArea = void 0;
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
     this.softInput.dispose();
@@ -9447,6 +9569,11 @@ var AttachTerminal = class {
     this.keybar = new TerminalKeybar(
       container,
       (data) => (this.stopCoast(), this.term.input(data, true)),
+      // The Paste keybar key (#5380): term.paste, not a bare input write, so an
+      // app that enabled bracketed paste sees the same ESC[200~ … ESC[201~
+      // block a desktop Ctrl+V produces — and the delivery hold reads the
+      // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
+      (data) => (this.stopCoast(), this.term.paste(data)),
       () => this.scheduleVisibleFit(),
       () => this.term.modes.applicationCursorKeysMode
     );

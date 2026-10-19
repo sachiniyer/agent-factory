@@ -619,6 +619,11 @@ export class AttachTerminal {
     this.term.open(container);
     this.keybar = new TerminalKeybar(container,
       (data) => (this.stopCoast(), this.term.input(data, true)),
+      // The Paste keybar key (#5380): term.paste, not a bare input write, so an
+      // app that enabled bracketed paste sees the same ESC[200~ … ESC[201~
+      // block a desktop Ctrl+V produces — and the delivery hold reads the
+      // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
+      (data) => (this.stopCoast(), this.term.paste(data)),
       () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
