@@ -93,19 +93,32 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 		"the timed-out refusal must carry the same sentinel pair: %v", err2)
 }
 
-// TestRemoveDebris — a stale .af-add-probe-* name from a double-unlink
-// failure is swept so the next `git add -A` cannot stage it, and files that
-// are not probe debris are left alone (#5295 review).
+// TestRemoveDebris — a stale zero-length .af-add-probe-<digits> leftover
+// from a double-unlink failure is swept so the next `git add -A` cannot
+// stage it, while every lookalike that is NOT positively-identified probe
+// debris survives (#5295 review): a prefix-sharing user file
+// (.af-add-probe-notes), a non-empty digit-named file, a digit-named
+// directory, and ordinary workspace entries.
 func TestRemoveDebris(t *testing.T) {
 	dir := t.TempDir()
-	stale := filepath.Join(dir, ".af-add-probe-stale")
+	stale := filepath.Join(dir, ".af-add-probe-123456")
 	require.NoError(t, os.WriteFile(stale, nil, 0o600))
+	userFile := filepath.Join(dir, ".af-add-probe-notes")
+	require.NoError(t, os.WriteFile(userFile, []byte("mine"), 0o600))
+	nonempty := filepath.Join(dir, ".af-add-probe-999")
+	require.NoError(t, os.WriteFile(nonempty, []byte("data"), 0o600))
+	userDir := filepath.Join(dir, ".af-add-probe-777")
+	require.NoError(t, os.Mkdir(userDir, 0o700))
 	keep := filepath.Join(dir, "keep.txt")
 	require.NoError(t, os.WriteFile(keep, []byte("x"), 0o600))
+
 	require.NoError(t, RemoveDebris(dir))
 	_, err := os.Stat(stale)
-	require.True(t, os.IsNotExist(err), "stale probe name must be swept: %v", err)
-	require.FileExists(t, keep)
+	require.True(t, os.IsNotExist(err), "stale probe leftover must be swept: %v", err)
+	for _, protected := range []string{userFile, nonempty, userDir, keep} {
+		_, err := os.Stat(protected)
+		require.NoError(t, err, "non-debris entry must survive the sweep: %s", protected)
+	}
 	require.NoError(t, RemoveDebris(dir), "an empty sweep must stay a no-op")
 }
 

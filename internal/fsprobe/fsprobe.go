@@ -152,15 +152,17 @@ var readDirEntries = os.ReadDir
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing a single byte, so a
-// leftover .af-add-probe-* only exists when BOTH unlink attempts failed — an
-// empty file that is nevertheless a name inside the tracked tree, which the
-// next `git add -A` snapshot would stage as workspace content after the
-// filesystem recovers (#5295 review). Callers that snapshot a tree sweep
-// before staging so a wedged unlink from an earlier attempt cannot become
-// committed debris. Enumeration is fail-closed: a directory that cannot be
-// read returns its error rather than an unproven "clean", and removal
-// failures are joined — a filesystem that cannot unlink is evidence in its
-// own right.
+// leftover exists only when BOTH unlink attempts failed — a zero-length
+// regular file named .af-add-probe-<digits>, which the next `git add -A`
+// snapshot would stage as workspace content after the filesystem recovers
+// (#5295 review). Callers that snapshot a tree sweep before staging so a
+// wedged unlink from an earlier attempt cannot become committed debris.
+// Sweeping is positive-ID only — digit suffix AND zero-length regular file —
+// because a user file that merely shares the prefix (.af-add-probe-notes) is
+// workspace content, not ours to delete. Enumeration is fail-closed: a
+// directory that cannot be read returns its error rather than an unproven
+// "clean", and removal failures are joined — a filesystem that cannot
+// unlink is evidence in its own right.
 func RemoveDebris(dir string) error {
 	entries, err := readDirEntries(dir)
 	if err != nil {
@@ -169,7 +171,19 @@ func RemoveDebris(dir string) error {
 	var joined []error
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, ".af-add-probe-") {
+		if !probeDebrisName(name) || !entry.Type().IsRegular() {
+			continue
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			joined = append(joined,
+				fmt.Errorf("inspecting stale probe file %s: %w", name, ierr))
+			continue
+		}
+		// The named fallback never writes a byte while the file still has a
+		// name, so a surviving leftover is always zero-length. A non-empty
+		// match cannot be ours — leave it (#5295 review).
+		if info.Size() != 0 {
 			continue
 		}
 		if rerr := os.Remove(filepath.Join(dir, name)); rerr != nil && !os.IsNotExist(rerr) {
@@ -178,6 +192,24 @@ func RemoveDebris(dir string) error {
 		}
 	}
 	return errors.Join(joined...)
+}
+
+// probeDebrisName reports whether name has CreateTemp's exact shape:
+// the .af-add-probe- prefix plus a digits-only random suffix. os.CreateTemp
+// replaces the trailing * with decimal digits, so a user file such as
+// .af-add-probe-notes shares the prefix but never the shape — name alone is
+// not enough to treat a workspace entry as disposable (#5295 review).
+func probeDebrisName(name string) bool {
+	rest, ok := strings.CutPrefix(name, ".af-add-probe-")
+	if !ok || rest == "" {
+		return false
+	}
+	for _, c := range rest {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Write runs the space probe for dir inside a per-dir bounded flight: a
