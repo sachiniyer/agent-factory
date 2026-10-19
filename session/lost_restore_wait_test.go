@@ -101,6 +101,29 @@ func TestMarkUserKilledRetiresLostRestoreWait(t *testing.T) {
 	require.Equal(t, IdleReasonProcessExited, IdleReasonFor(stale))
 }
 
+// TestTombstonedRowReArmedWaitStaysSuppressed is the #5295-review regression
+// on the mirror side: a delayed pre-kill snapshot still carries the armed
+// wait, and the pre-fix reconcile applied it unconditionally onto the already
+// tombstoned projection. Even when that stale record reaches the live row,
+// the detail snapshot must keep the tombstone guard — UserKilled rides the
+// InstanceData so IdleReasonFor can exclude the wait.
+func TestTombstonedRowReArmedWaitStaysSuppressed(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "tombstoned-stale-wait", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
+
+	inst.MarkUserKilled()
+	// The pre-fix mirror sequence: a delayed snapshot re-installs its armed
+	// wait onto the tombstoned projection.
+	require.True(t, inst.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "no space left on device"}))
+
+	reason, _, _, _ := inst.IdleReasonDetailSnapshot()
+	require.Equal(t, IdleReasonProcessExited, reason,
+		"a stale wait re-armed onto a tombstoned row must not project a restore nothing will run")
+	require.Equal(t, IdleReasonProcessExited, IdleReasonFor(inst.ToInstanceData()))
+}
+
 // The give-up reason is terminal and the wait is not: a record carrying both —
 // possible only across a sanitize/mirror boundary — must read as gave-up, the
 // same precedence IdleReasonFor applies.

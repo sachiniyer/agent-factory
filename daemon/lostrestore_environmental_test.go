@@ -53,6 +53,18 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 			"clear stale worktree path: %w: killed at its deadline: %w",
 			sessiongit.ErrWorktreeSetupStalled, context.DeadlineExceeded), lostRestoreEnvDeadline},
 		{"setup-stalled sentinel bare", fmt.Errorf("cleanup: %w", sessiongit.ErrWorktreeSetupStalled), lostRestoreEnvNone},
+		// requireSetupRemovalOwnership's real producer shape: the bounded
+		// `git worktree list` inside it dies at the local-git deadline on a
+		// stalled repository filesystem, and both the sentinel and the
+		// deadline survive its %w wrap (#5295 review).
+		{"deadline carrying ownership-unproven sentinel", fmt.Errorf(
+			"%w: cannot verify the registered branch at /wt: git worktree list timed out: %w",
+			sessiongit.ErrSetupRemovalOwnershipUnproven, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		// A bare ownership refusal — a detached or differently-branched
+		// occupant — is a definitive verdict no retry changes: structural.
+		{"ownership-unproven sentinel bare", fmt.Errorf(
+			"%w: refusing to remove worktree /wt: git registers branch %q there",
+			sessiongit.ErrSetupRemovalOwnershipUnproven, "refs/heads/other"), lostRestoreEnvNone},
 		// The remote archive RPC's machine-readable class: the sandbox's agent
 		// server verified a resource errno and the client reconstructed the
 		// sentinel — the errno itself cannot cross the wire (#5295 review).

@@ -54,11 +54,12 @@ const (
 	// table or rlimit that never frees) waits forever instead of giving up.
 	lostRestoreEnvErrno
 	// lostRestoreEnvDeadline is a bounded probe that could not answer —
-	// af's relocation probe pair (deadline + relocate-state sentinel), or
-	// the remote preserve push's transport deadline at that call site. The
-	// same verdict shape a permanently stuck condition produces, so the
-	// wait is bounded by lostRestoreMaxAttempts and then charged to the
-	// structural budget.
+	// af's relocation probe pair (deadline + relocate-state sentinel), the
+	// setup-side bounded git calls on the rebuild path (cleanup-stall and
+	// removal-ownership sentinels), or the remote preserve push's transport
+	// deadline at that call site. The same verdict shape a permanently
+	// stuck condition produces, so the wait is bounded by
+	// lostRestoreMaxAttempts and then charged to the structural budget.
 	lostRestoreEnvDeadline
 )
 
@@ -88,13 +89,20 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	// the deadline they are exactly what af's own bounded probes report when
 	// the environment did not answer inside the bound: the deadline names the
 	// non-answer and the sentinel names the bounded probe that could not
-	// establish state — the relocation identity probe, or the setup cleanup
+	// establish state — the relocation identity probe, the setup cleanup
 	// step killed at its deadline by clearStaleWorktreePath on the rebuild
-	// path. Every other timeout and every definitive verdict stays on the
-	// structural budget (#5295 review).
+	// path, or the bounded `git worktree list` behind
+	// requireSetupRemovalOwnership, which wraps its local-git deadline in
+	// ErrSetupRemovalOwnershipUnproven before any mutation can be tried —
+	// a repository-filesystem stall the next retry re-probes from scratch.
+	// A bare ownership refusal (the sentinel without the deadline) stays a
+	// definitive verdict and remains structural. Every other timeout and
+	// every definitive verdict stays on the structural budget (#5295
+	// review).
 	if errors.Is(err, context.DeadlineExceeded) &&
 		(errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
-			errors.Is(err, sessiongit.ErrWorktreeSetupStalled)) {
+			errors.Is(err, sessiongit.ErrWorktreeSetupStalled) ||
+			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven)) {
 		return lostRestoreEnvDeadline
 	}
 	return lostRestoreEnvNone
