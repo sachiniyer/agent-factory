@@ -1,14 +1,44 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// socketFSProbe is the test seam over the shared bounded filesystem probe on
+// the tmux launch path. The fsprobe implementation answers with the
+// filesystem's own errno from THIS process — the verdict a tmux server's
+// internal failure loses into its output text.
+var socketFSProbe = fsprobe.Write
+
+// tmuxSocketFilesystemDir returns the directory whose filesystem must accept
+// tmux's own server-state writes — the socket file and the tmux-<uid>
+// directory the server creates it under — for a launch from THIS process's
+// environment. It mirrors the socket-identity resolution the dedicated-server
+// scope names itself after: $TMUX names a live socket path (probe the
+// directory that hosts it), otherwise the default socket resolves under
+// ${TMUX_TMPDIR:-/tmp}/tmux-<uid> — probe the base, because the uid dir may
+// not exist yet while its parent must be writable for tmux to create it.
+func tmuxSocketFilesystemDir() string {
+	if identity := os.Getenv("TMUX"); identity != "" {
+		if socket, _, ok := strings.Cut(identity, ","); ok && socket != "" {
+			return filepath.Dir(socket)
+		}
+	}
+	base := os.Getenv("TMUX_TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	return base
+}
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
@@ -227,6 +257,21 @@ func (t *TmuxSession) Start(workDir string) error {
 					launchErr = fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
 				} else {
 					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
+				}
+
+				// tmux's own resource failure mode the exit status cannot
+				// carry: the server dying on its socket/state filesystem
+				// (ENOSPC creating the socket or the tmux-<uid> dir) reports
+				// only as "can't create socket"/"no space" text in the
+				// child's output — invisible to errors.Is by design, and the
+				// lost-restore classifier never reads message text. Probe
+				// that filesystem from THIS process so a real resource verdict
+				// rides the chain instead of the launch failure charging the
+				// structural retry budget (#5295 review).
+				socketDir := tmuxSocketFilesystemDir()
+				if probeErr := socketFSProbe(socketDir); probeErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
 				}
 
 				// The launch process began. Its exit status, even paired with later

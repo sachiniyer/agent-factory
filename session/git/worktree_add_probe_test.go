@@ -202,35 +202,5 @@ func TestAnnotateWorktreeAddError_DestinationAbsentIsSilent(t *testing.T) {
 		"plain ENOENT is the expected pre-creation state, not evidence: %v", out)
 }
 
-// TestWriteSpaceProbe_RealWrite — the production probe against a real writable
-// dir writes its payload and cleans up after itself. On Linux this exercises
-// the O_TMPFILE anonymous inode, which never has a name at all; the
-// named-file fallback (covered next) unlinks BEFORE the first byte is
-// written. Either way nothing matching .af-add-probe-* can exist for
-// `git add -A` to stage at any instant (#5295 review).
-func TestWriteSpaceProbe_RealWrite(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeSpaceProbe(dir); err != nil {
-		t.Fatalf("real probe on a writable dir failed: %v", err)
-	}
-	if matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*")); len(matches) != 0 {
-		t.Fatalf("probe file left behind: %v", matches)
-	}
-}
-
-// TestWriteSpaceProbe_NamedFallback forces the O_TMPFILE path off so the
-// named-tempfile fallback runs: the file must be unlinked before the payload
-// writes, leaving nothing stageable.
-func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
-	old := openAnonymousProbeFile
-	openAnonymousProbeFile = func(string) (*os.File, error) { return nil, syscall.EOPNOTSUPP }
-	defer func() { openAnonymousProbeFile = old }()
-
-	dir := t.TempDir()
-	if err := writeSpaceProbe(dir); err != nil {
-		t.Fatalf("named-fallback probe on a writable dir failed: %v", err)
-	}
-	if matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*")); len(matches) != 0 {
-		t.Fatalf("probe file left behind: %v", matches)
-	}
-}
+// The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
+// the named fallback, and the bounded flight) is tested in internal/fsprobe.

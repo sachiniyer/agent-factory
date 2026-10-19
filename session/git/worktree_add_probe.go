@@ -6,101 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
-// writeSpaceProbeSize bounds the probe write below. A single byte is not
-// enough evidence: a filesystem that can still accept stray bytes but not a
-// real worktree write — nearly full, or one whose block accounting git hit
-// first — would pass the probe while every retry keeps failing, and the
-// failure classifies structural until the budget gives up on an environmental
-// outage (#5295 review). The worktree metadata writes this probe stands in
-// for (gitdir registration, HEAD, config, index) sit in the tens-to-hundreds
-// of KB; a real checkout is unbounded, so no fixed size can reproduce git's
-// exact demand. One MiB covers the metadata class while staying noise-level
-// transient allocation on any disk that is not already exhausted.
-const writeSpaceProbeSize = 1 << 20
-
-// writeSpaceProbe is the production probe (and the test seam): create a file
-// in dir and WRITE a representative payload to it, then Sync before close so
-// the bytes must reach the filesystem's accounting. The write is the point —
-// on a tmpfs filled past its size limit a zero-length create still succeeds
-// because dentries and inodes live outside the data budget, so only a real
-// data write sees ENOSPC. The Sync is the second half — on a
-// delayed-allocation filesystem (ext4, xfs) an unsynced write can land in the
-// page cache and report success while the filesystem is already out of
-// blocks, so a write that only looked cheap could pass while git's real write
-// got the ENOSPC the classifier never saw. The file is removed before
-// returning either way.
-var writeSpaceProbe = func(dir string) error {
-	f, err := openProbeFile(dir)
-	if err != nil {
-		return err
-	}
-	// From here on the file has no name — either it never had one (O_TMPFILE)
-	// or it was unlinked before this point. Nothing stageable can exist no
-	// matter how the writes below end.
-	var werr error
-	buf := make([]byte, 64<<10)
-	for written := 0; written < writeSpaceProbeSize; {
-		chunk := buf
-		if writeSpaceProbeSize-written < len(chunk) {
-			chunk = chunk[:writeSpaceProbeSize-written]
-		}
-		n, wErr := f.Write(chunk)
-		written += n
-		if wErr != nil {
-			werr = wErr
-			break
-		}
-	}
-	var serr error
-	if werr == nil {
-		serr = f.Sync()
-	}
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	if serr != nil {
-		return serr
-	}
-	return cerr
-}
-
-// openProbeFile returns a write-capable probe file that can never be staged:
-// an O_TMPFILE anonymous inode where the platform offers one (Linux — tmpfs,
-// ext4, xfs, btrfs, overlayfs all support it), falling back to a named
-// tempfile that is unlinked BEFORE its first byte is written. On the named
-// path an unlink failure is fatal to the probe — never write into a file
-// whose name could not be dropped, because a surviving .af-add-probe-* inside
-// a tracked worktree is exactly what a later `git add -A` would stage as
-// workspace content; the leftover's path is surfaced in the error so an
-// operator can remove it by hand (#5295 review).
-func openProbeFile(dir string) (*os.File, error) {
-	if f, err := openAnonymousProbeFile(dir); err == nil {
-		return f, nil
-	}
-	f, err := os.CreateTemp(dir, ".af-add-probe-*")
-	if err != nil {
-		return nil, err
-	}
-	name := f.Name()
-	if rerr := os.Remove(name); rerr != nil {
-		cerr := f.Close()
-		// Close releases the only state unlink could have depended on — try
-		// once more before reporting.
-		rerr2 := os.Remove(name)
-		err := fmt.Errorf("cannot unlink probe file %s before writing; writing to a named probe file is unsafe: %w", name, rerr)
-		if cerr != nil {
-			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
-		}
-		if rerr2 != nil {
-			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
-		}
-		return nil, err
-	}
-	return f, nil
-}
+// writeSpaceProbe is the test seam over the shared bounded filesystem probe:
+// a Go-side representative write (create + payload + Sync + close) that
+// produces a REAL errno from this process, replacing the verdict a failing
+// subprocess loses into its stderr text. The fsprobe implementation runs it
+// inside a per-dir bounded flight — a filesystem that stops completing
+// writes answers with typed deadline evidence instead of wedging the
+// synchronous restore path that called it (#5295 review).
+var writeSpaceProbe = fsprobe.Write
 
 // gitCommonDir resolves the repository's Git common directory — the place
 // `worktree add` writes its registration (worktrees/<name>/) and `commit`/

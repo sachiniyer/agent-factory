@@ -1,6 +1,6 @@
 //go:build linux
 
-package git
+package fsprobe
 
 import (
 	"os"
