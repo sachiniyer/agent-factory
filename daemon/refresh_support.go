@@ -55,6 +55,16 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // same on-disk row. The local backend is the only one that can commit an account
 // swap (SupportsAutomaticAccountSwap gates on backend.Type() == "local"), so this
 // is the one raw arm the term is needed on.
+//
+// RebuildTeardownPending is the same class of projected fence: ForStorage writes
+// StartupStateUnknown=true to fence an older binary from a row whose stale-pane
+// teardown is still owed (session/rebuild_teardown_storage.go), and the row's
+// materialized form HOLDS the slot — a Lost pending row is revived by the
+// lost-restore loop's own retry (canAutoRestoreLostSession admits the owner) and
+// a limit-parked one classifies ActivityPending — so a local ghost that fails to
+// materialize with the obligation armed must stay counted too, or the watcher
+// admits a replacement run over the very teardown this row still owes (#5371
+// review).
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if item.TaskID == "" || !item.TaskRunActive {
 		return false
@@ -62,7 +72,7 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if session.IsSandboxBackendType(item.BackendType) {
 		return !releasesLostSandboxGhost(item)
 	}
-	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil) && !item.UserKilled &&
+	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || item.RebuildTeardownPending) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 

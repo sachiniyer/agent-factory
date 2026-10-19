@@ -555,6 +555,87 @@ func TestLocalLostGhostStillHoldsTaskRunSlot(t *testing.T) {
 	}
 }
 
+// TestRebuildPendingGhostHoldsTaskRunSlot covers the rebuild-teardown arm of the
+// local ghost rule. ForStorage projects StartupStateUnknown=true onto a
+// rebuild-pending row to fence an older binary (the originals field holds the
+// real value); a raw reader that trusts the projected bit would release the
+// slot while the row's materialized form still HOLDS — its Lost liveness keeps
+// the lost-restore loop retrying (the pending obligation's own retry is the
+// owner), and a limit-parked one classifies ActivityPending. A local ghost
+// that cannot materialize while the obligation is armed must therefore stay
+// counted, or the watcher admits a run over the very teardown the row owes
+// (#5371 review).
+func TestRebuildPendingGhostHoldsTaskRunSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	const title = "rebuild-pending-ghost"
+	originalUnknown := false
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:            "rebuild-pending-id",
+		TaskID:        "task1",
+		Title:         title,
+		Path:          repoPath,
+		Status:        session.Lost,
+		Liveness:      session.LiveLost,
+		TaskRunActive: true,
+		BackendType:   "local",
+		// The ON-DISK shape: the pending flag plus the projected fence an older
+		// binary reads. A current reader restores StartupStateUnknown from the
+		// originals field before deciding; the raw arm must not read the
+		// projected true as terminal evidence.
+		RebuildTeardownPending:                     true,
+		StartupStateUnknown:                        true,
+		RebuildTeardownOriginalStartupStateUnknown: &originalUnknown,
+		Worktree: session.GitWorktreeData{
+			RepoPath:     repoPath,
+			WorktreePath: "/dev/null",
+			SessionName:  title,
+			BranchName:   "af/" + title,
+		},
+	}); err != nil {
+		t.Fatalf("append rebuild-pending row: %v", err)
+	}
+	failLoadFor(t, title)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		t.Fatalf("RestoreInstances: %v", err)
+	}
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+	counted := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	manager.mu.Unlock()
+	if live {
+		t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+	}
+	if !rawTaskRunHoldsSlot(session.InstanceData{
+		TaskID:                 "task1",
+		TaskRunActive:          true,
+		Liveness:               session.LiveLost,
+		BackendType:            "local",
+		RebuildTeardownPending: true,
+		StartupStateUnknown:    true,
+		RebuildTeardownOriginalStartupStateUnknown: &originalUnknown,
+	}) {
+		t.Fatal("rawTaskRunHoldsSlot released a rebuild-pending row on its projected StartupStateUnknown=true; " +
+			"the materialized form holds the slot, so the raw arm must keep the obligation counted")
+	}
+	if counted != 1 {
+		t.Fatalf("rebuild-pending ghost consumed %d task slot(s); the still-owed teardown means the run is in flight and must hold the cap", counted)
+	}
+	if admitErr == nil {
+		t.Fatal("a rebuild-pending ghost must still refuse admission; admitting a replacement runs the task over its cap on the row that owes the teardown")
+	}
+}
+
 // TestSandboxLostGhostWithPendingHandoffHoldsTaskRunSlot is the other half of the
 // sandbox LiveLost release: a LiveLost row whose materialized form does NOT release
 // must not be released by the raw arm either. A durable pending handoff

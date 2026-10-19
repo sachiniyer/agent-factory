@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -203,6 +206,149 @@ func TestRecover_RebuiltTeardownOccupancyGateBlocksDetachedSurvivor(t *testing.T
 	assert.Equal(t, 0, newSessions, "no replacement may spawn while an occupant is unaccounted for")
 	assert.True(t, restored.RebuildTeardownPending(),
 		"the obligation stays armed — the row is retryable, exactly like teardownTabs' ErrPaneMayBeLive")
+}
+
+// The rebuild's startHooks launches the NEW checkout's provisioning run with
+// cwd inside the rebuilt path (RebuildFromExistingBranch retired the
+// predecessor before touching the tree — session/git/worktree_ops.go). That
+// run must NOT be cancelled by the teardown: killing it leaves the rebuilt
+// checkout half-provisioned while recovery launches the agent beside it.
+// Instead the occupancy gate waits for it — the run is the one legitimate
+// occupant of the fresh path — so a gated run refuses the attempt until it is
+// released, and then the same run completes and the respawn proceeds (#5371
+// review).
+func TestRecover_RebuiltTeardownPreservesProvisioningHooks(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the hook run is observed through the /proc cwd occupancy gate")
+	}
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	prevSettle := rebuildHooksSettleTimeout
+	rebuildHooksSettleTimeout = 2 * time.Second
+	t.Cleanup(func() { rebuildHooksSettleTimeout = prevSettle })
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-hooks"
+	gitOut(t, repoRoot, "branch", branch)
+
+	// Gate the provisioning run: it records that it started, blocks until the
+	// test writes the release file, and only then records completion — all at
+	// absolute paths outside the worktree, so a deleted cwd cannot fake them.
+	markers := t.TempDir()
+	startedDir := filepath.Join(markers, "started")
+	doneDir := filepath.Join(markers, "done")
+	releaseFile := filepath.Join(markers, "release")
+	require.NoError(t, os.MkdirAll(startedDir, 0755))
+	require.NoError(t, os.MkdirAll(doneDir, 0755))
+	hook := "touch " + shellquote.Quote(startedDir) + "/$$; " +
+		"_af_gate_i=0; while [ ! -f " + shellquote.Quote(releaseFile) + " ] && " +
+		"[ \"$_af_gate_i\" -lt 300 ]; do sleep 0.1; _af_gate_i=$((_af_gate_i + 1)); done; " +
+		"touch " + shellquote.Quote(doneDir) + "/$$"
+	repoID := config.RepoIDFromRoot(repoRoot)
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	repoCfgDir := filepath.Join(configDir, "repos", repoID)
+	require.NoError(t, os.MkdirAll(repoCfgDir, 0755))
+	cfgData, err := json.Marshal(&config.RepoConfig{PostWorktreeCommands: []string{hook}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(repoCfgDir, config.RepoConfigFileName), cfgData, 0644))
+
+	const agentName = "af_recover_hooks"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a243"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-hooks")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-hooks",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-hooks",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	cmdExec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+
+	// Attempt 1: the gate is closed, so the new provisioning run is in flight
+	// when the teardown reaches the occupancy gate. The attempt must REFUSE —
+	// the run is waited out, never cancelled — and naming it keeps the retry
+	// honest. Under the old code Recover returns nil here because
+	// CancelAndJoinHooks kills the just-launched run outright.
+	err = restored.Recover()
+	require.Error(t, err,
+		"an in-flight provisioning run must refuse the attempt — it is the new checkout's own, not a stale survivor")
+	assert.Contains(t, err.Error(), "post-worktree",
+		"the refusal must name the provisioning run it is waiting on")
+	assert.Equal(t, Lost, restored.GetStatus())
+	assert.True(t, restored.RebuildTeardownPending(), "the obligation stays armed for the retry")
+	assert.Equal(t, 0, newSessions, "no replacement may spawn while provisioning is in flight")
+
+	// The run must have actually started inside the rebuilt checkout — a refuse
+	// that merely pre-empted it would hide the same unprovisioned outcome.
+	require.Eventually(t, func() bool {
+		entries, _ := os.ReadDir(startedDir)
+		return len(entries) >= 1
+	}, 10*time.Second, 20*time.Millisecond, "the rebuild's own provisioning run never started")
+
+	// Release the gate: the SAME run must complete, and the retry then proceeds.
+	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0644))
+	require.Eventually(t, func() bool {
+		entries, _ := os.ReadDir(doneDir)
+		return len(entries) >= 1
+	}, 15*time.Second, 20*time.Millisecond,
+		"the rebuilt checkout's provisioning run was cancelled instead of waited out")
+
+	require.NoError(t, restored.Recover(), "the retry must proceed once provisioning settles")
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Equal(t, 1, newSessions)
+	assert.False(t, restored.RebuildTeardownPending())
+
+	// The retry skipped the rebuild entirely — the worktree exists, so the
+	// missing-dir branch never re-ran Rebuild* and the SAME provisioning run
+	// the first attempt waited on is the one that completed. A second run here
+	// would mean the retry restarted provisioning from scratch.
+	started, _ := os.ReadDir(startedDir)
+	done, _ := os.ReadDir(doneDir)
+	assert.Equal(t, 1, len(started),
+		"the retry must not launch a second provisioning run — it waits on the one the rebuild already started")
+	assert.Equal(t, 1, len(done))
 }
 
 // While the rebuild teardown is owed, user-facing runtime mutations must

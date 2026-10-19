@@ -65,6 +65,15 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	// ambiguous handoff. Current readers understand its mission-scoped evidence
 	// and must classify the real state; an older binary ignores the additive
 	// original field and deliberately remains inert.
+	// The rebuild-teardown fence unwinds first — projection ran swap, then
+	// handoff, then rebuild, so the last projector's saved original holds the
+	// second-to-last value (FromInstanceData restores in the same order). A raw
+	// rebuild-pending row otherwise classifies on its projected
+	// StartupStateUnknown=true while its materialized form decides on the real
+	// value — and for a limit-parked run those two verdicts differ (terminal vs
+	// pending), which is a raw-record slot read disagreeing with the daemon's
+	// own (#5371 review).
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
@@ -381,6 +390,9 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 		return ActivityPending, ""
 	}
 	data = restored
+	// Same unwind order FromInstanceData applies: the rebuild-teardown fence
+	// projected last, so its original restores first (#5371 review).
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()

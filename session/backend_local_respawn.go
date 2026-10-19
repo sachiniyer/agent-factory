@@ -3,11 +3,21 @@ package session
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// rebuildHooksSettleTimeout bounds how long the rebuild teardown waits for the
+// NEW checkout's post-worktree provisioning run before refusing the attempt.
+// The run is legitimate — the rebuild launches it — so the wait must never
+// cancel it; a timeout only hands the obligation back to the retry loop.
+// Provisioning may run for minutes, so the bound paces attempts rather than
+// bounding the run itself: every refusal leaves the row Lost and the teardown
+// pending, and each retry re-waits until the run finishes.
+var rebuildHooksSettleTimeout = 30 * time.Second
 
 // respawn holds the shared re-spawn mechanics for Recover and Respawn: re-spawn
 // the agent program in its worktree with the same resolved-program flag injection
@@ -260,23 +270,19 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 
 		// Every bound tmux name is now closed; what remains is what tmux never
-		// owned. The supervised editor and any post-worktree hook runner hold a
-		// cwd inside this checkout with no tab.tmux and no AF_SESSION marker —
-		// the snapshot above cannot see them, and the supervisor's reuse
-		// identity (instance ID + path string) would happily reattach the
-		// stale editor to the rebuilt path (#5371 review). Stop them before
-		// the occupancy gate, the same two fences archive runs before it moves
-		// the tree (#2770/#3650): a refusal here leaves the row Lost and the
-		// obligation armed for the next attempt.
+		// owned. The supervised editor holds a cwd inside this checkout with no
+		// tab.tmux and no AF_SESSION marker — the snapshot above cannot see it,
+		// and the supervisor's reuse identity (instance ID + path string) would
+		// happily reattach the stale editor to the rebuilt path (#5371 review).
+		// Stop it before the occupancy gate, the same fence archive runs before
+		// it moves the tree (#2770/#3650): a refusal here leaves the row Lost
+		// and the obligation armed for the next attempt. The post-worktree hook
+		// runner is NOT stopped here — the run in flight is the NEW checkout's
+		// own provisioning, launched by the rebuild that just ran; the occupancy
+		// gate waits it out instead (anyBlind branch).
 		if err := stopRuntimes(i); err != nil {
 			return markRecoverRebuilt(committed, fmt.Errorf(
 				"recover: could not confirm the session's supervised runtimes stopped: %w", err))
-		}
-		if worktree, werr := i.GetGitWorktree(); werr == nil && worktree != nil {
-			if err := worktree.CancelAndJoinHooks(); err != nil {
-				return markRecoverRebuilt(committed, fmt.Errorf(
-					"recover: could not confirm the session's post-worktree hooks stopped: %w", err))
-			}
 		}
 
 		// ONE occupancy check, after every name is closed — teardownTabs' own
@@ -286,7 +292,27 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// still shows. Reporting — never killing — is the contract: the match
 		// could be an operator's own shell, so the row stays Lost and retryable
 		// and the decision stays human (#5371 review).
+		//
+		// The rebuilt checkout's OWN provisioning run is the one occupant this
+		// gate must not read as foreign. RebuildFromExistingBranch /
+		// RebuildFreshFromRecordedBase already retire the predecessor run before
+		// touching the tree (stopHooks), then startHooks launches the new
+		// checkout's post-worktree commands with cwd = workDir. Cancelling that
+		// run here would leave the rebuilt tree unprovisioned; waiting for it
+		// (bounded — the refusal retries) keeps an in-flight provisioning run
+		// out of the foreign-occupant verdict below.
 		if anyBlind {
+			if worktree, werr := i.GetGitWorktree(); werr == nil && worktree != nil {
+				if done := worktree.HooksDone(); done != nil {
+					select {
+					case <-done:
+					case <-time.After(rebuildHooksSettleTimeout):
+						return markRecoverRebuilt(committed, fmt.Errorf(
+							"recover: the rebuilt worktree's post-worktree commands are still running; "+
+								"retry when provisioning settles"))
+					}
+				}
+			}
 			if err := CheckWorktreeOccupants(workDir); err != nil {
 				return markRecoverRebuilt(committed, fmt.Errorf(
 					"recover: stale sessions closed blind; %w", err))
