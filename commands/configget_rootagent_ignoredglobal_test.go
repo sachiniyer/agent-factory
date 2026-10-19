@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -44,7 +45,13 @@ func setupUnregisteredRootAgentProject(t *testing.T) (home, repoRoot string) {
 	require.True(t, removed, "fixture: project must deregister so the registry-eligibility check drops the global layer")
 	t.Chdir(repoRoot)
 	setConfigGetReadFlags(t, "", false, false)
-	return home, repoRoot
+	// macOS' TMPDIR lives under /var, a symlink to /private/var; the explain
+	// surface resolves the project root through symlinks, so the fixture's
+	// repoRoot must match that resolved path for callers that compare the
+	// "project:" header verbatim.
+	resolved, err := filepath.EvalSymlinks(repoRoot)
+	require.NoError(t, err)
+	return home, resolved
 }
 
 // TestConfigGetRootAgentExplainDottedPreservesRegistryCause is the load-bearing
