@@ -123,6 +123,12 @@ func openProbeFile(dir string) (*os.File, error) {
 	}
 	name := f.Name()
 	if rerr := os.Remove(name); rerr != nil {
+		// Best-effort ownership marker while the name still exists: a future
+		// sweep can then prove this file is probe debris rather than user
+		// content even across a daemon restart. On a filesystem too full or
+		// too broken for the marker, the process-local registry below is the
+		// only proof — an empty leftover stays, unprovable (#5295 review).
+		_, _ = f.WriteString(probeDebrisMarker)
 		cerr := f.Close()
 		// Close releases the only state unlink could have depended on — try
 		// once more before reporting.
@@ -132,12 +138,26 @@ func openProbeFile(dir string) (*os.File, error) {
 			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
 		}
 		if rerr2 != nil {
+			abandonedProbes.Store(name, struct{}{})
 			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
 		}
 		return nil, err
 	}
 	return f, nil
 }
+
+// probeDebrisMarker is the ownership token written into a named-fallback
+// file that could not be unlinked: its whole-content presence proves the
+// file is probe debris — workspace content never reads exactly this —
+// while ANY other content, including zero bytes, leaves ownership unproven
+// and the file untouchable (#5295 review).
+const probeDebrisMarker = "af probe debris: created by an agent-factory filesystem probe whose unlink failed — safe to delete\n"
+
+// abandonedProbes records the exact paths this process created and could
+// not unlink — the only ownership proof that needs no file content at all.
+// A path is stored only after the SECOND unlink fails; a user's file that
+// happens to share the probe naming pattern is never recorded here.
+var abandonedProbes sync.Map // map[string]struct{} of full probe-file paths
 
 // statPath is the test seam under Stat's bounded flight — the metadata
 // syscall that decides whether an existing socket-root or destination dir
@@ -151,19 +171,35 @@ var statPath = os.Stat
 var readDirEntries = os.ReadDir
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
-// named fallback unlinks its tempfile before writing a single byte, so a
-// leftover exists only when BOTH unlink attempts failed — a zero-length
-// regular file named .af-add-probe-<digits>, which the next `git add -A`
-// snapshot would stage as workspace content after the filesystem recovers
-// (#5295 review). Callers that snapshot a tree sweep before staging so a
-// wedged unlink from an earlier attempt cannot become committed debris.
-// Sweeping is positive-ID only — digit suffix AND zero-length regular file —
-// because a user file that merely shares the prefix (.af-add-probe-notes) is
-// workspace content, not ours to delete. Enumeration is fail-closed: a
-// directory that cannot be read returns its error rather than an unproven
-// "clean", and removal failures are joined — a filesystem that cannot
-// unlink is evidence in its own right.
+// named fallback unlinks its tempfile before writing payload bytes, so a
+// leftover exists only when BOTH unlink attempts failed — a name the next
+// `git add -A` snapshot would stage as workspace content after the
+// filesystem recovers (#5295 review). Callers that snapshot a tree sweep
+// before staging.
+//
+// Deletion requires PROVEN ownership — a filename and a size can never prove
+// a file is ours, because a workspace may legitimately contain an empty
+// .af-add-probe-<digits> file, and deleting it would be data loss the
+// sandbox reap then makes permanent. The only accepted proofs are the
+// abandonedProbes registry (this process created that exact path) and the
+// whole-content ownership marker (written into the file when its first
+// unlink failed). Everything else survives untouched — including empty
+// probe-shaped names this process did not create, which means debris left
+// behind before a restart stays put; committing it is a cosmetic wart,
+// strictly better than deleting unproven content. Enumeration is
+// fail-closed — a directory that cannot be read returns its error rather
+// than an unproven "clean" — and removal failures are joined. The whole
+// sweep runs inside a bounded flight for the same reason Write does: every
+// syscall here can wedge on a dead mount inside the synchronous snapshot
+// path.
 func RemoveDebris(dir string) error {
+	_, err := runBounded(dir, sweepFlights, "debris sweep",
+		"the filesystem did not answer the debris sweep",
+		func() (any, error) { return nil, removeDebrisScan(dir) })
+	return err
+}
+
+func removeDebrisScan(dir string) error {
 	entries, err := readDirEntries(dir)
 	if err != nil {
 		return fmt.Errorf("cannot enumerate probe debris in %s: %w", dir, err)
@@ -174,22 +210,33 @@ func RemoveDebris(dir string) error {
 		if !probeDebrisName(name) || !entry.Type().IsRegular() {
 			continue
 		}
+		path := filepath.Join(dir, name)
+		_, registered := abandonedProbes.Load(path)
 		info, ierr := entry.Info()
 		if ierr != nil {
 			joined = append(joined,
 				fmt.Errorf("inspecting stale probe file %s: %w", name, ierr))
 			continue
 		}
-		// The named fallback never writes a byte while the file still has a
-		// name, so a surviving leftover is always zero-length. A non-empty
-		// match cannot be ours — leave it (#5295 review).
-		if info.Size() != 0 {
+		proven := registered && info.Size() == 0
+		if !proven && info.Size() == int64(len(probeDebrisMarker)) {
+			data, rerr := os.ReadFile(path)
+			if rerr != nil {
+				joined = append(joined,
+					fmt.Errorf("reading probe-marker candidate %s: %w", name, rerr))
+				continue
+			}
+			proven = string(data) == probeDebrisMarker
+		}
+		if !proven {
 			continue
 		}
-		if rerr := os.Remove(filepath.Join(dir, name)); rerr != nil && !os.IsNotExist(rerr) {
+		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
 			joined = append(joined,
 				fmt.Errorf("removing stale probe file %s: %w", name, rerr))
+			continue
 		}
+		abandonedProbes.Delete(path)
 	}
 	return errors.Join(joined...)
 }
@@ -197,8 +244,9 @@ func RemoveDebris(dir string) error {
 // probeDebrisName reports whether name has CreateTemp's exact shape:
 // the .af-add-probe- prefix plus a digits-only random suffix. os.CreateTemp
 // replaces the trailing * with decimal digits, so a user file such as
-// .af-add-probe-notes shares the prefix but never the shape — name alone is
-// not enough to treat a workspace entry as disposable (#5295 review).
+// .af-add-probe-notes shares the prefix but never the shape. The shape only
+// marks a file as a sweep CANDIDATE — removal still requires the ownership
+// proofs above (#5295 review).
 func probeDebrisName(name string) bool {
 	rest, ok := strings.CutPrefix(name, ".af-add-probe-")
 	if !ok || rest == "" {
@@ -225,6 +273,21 @@ func Write(dir string) error {
 		"the filesystem did not complete the write",
 		func() (any, error) { return nil, writeSpaceProbe(dir) })
 	return err
+}
+
+// Full reports whether dir's filesystem has zero free blocks — the statfs
+// answer for a filesystem the caller cannot write-probe (a root-owned
+// daemon data root the process cannot create files in). Zero free blocks
+// is the same verdict an ENOSPC write would report, derived without write
+// access. The syscall runs inside the same per-dir bounded flight shape as
+// Write: a mount that stops answering metadata calls would otherwise wedge
+// the synchronous error path it informs (#5295 review).
+func Full(dir string) (bool, error) {
+	res, err := runBounded(dir, fullnessFlights, "fullness probe",
+		"the filesystem did not answer the statfs",
+		func() (any, error) { return fsFull(dir) })
+	full, _ := res.(bool)
+	return full, err
 }
 
 // Stat runs os.Stat for dir inside the same per-dir bounded flight shape as
@@ -259,6 +322,8 @@ type flightRegistry struct {
 
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var sweepFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
 func runBounded(dir string, flights *flightRegistry, what, detail string,
 	run func() (any, error)) (any, error) {

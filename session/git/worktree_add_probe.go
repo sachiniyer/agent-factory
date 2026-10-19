@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +31,18 @@ var writeSpaceProbe = fsprobe.Write
 // deadline ambiguity.
 var statSpaceProbe = fsprobe.Stat
 
+// ErrCommonDirProbeNoAnswer marks the bounded `rev-parse --git-common-dir`
+// lookup's non-answer: runGitLocalCommand returns a bare
+// context.DeadlineExceeded when its deadline trips, and the lost-restore
+// classifier deliberately accepts deadlines ONLY paired with a recognized
+// bounded-probe sentinel — a bare one reads as a hung session operation, not
+// an outage. The lookup IS a bounded probe of the repository filesystem —
+// a mount that cannot answer rev-parse is a mount stall — so its deadline is
+// paired with this sentinel before it joins the annotated error (#5295
+// review). A bare sentinel never appears: the pairing is applied only at
+// the deadline.
+var ErrCommonDirProbeNoAnswer = errors.New("common-dir probe did not answer inside its bound")
+
 // gitCommonDir resolves the repository's Git common directory — the place
 // `worktree add` writes its registration (worktrees/<name>/) and `commit`/
 // `push` write objects — which may live on a different filesystem than the
@@ -48,6 +61,12 @@ var gitCommonDir = func(g *GitWorktree) (string, error) {
 	}
 	out, err := g.runGitLocalCommand(repoPath, "rev-parse", "--git-common-dir")
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The bounded local-git deadline carries no sentinel on its own —
+			// pair it so the joined evidence reads as the bounded-probe
+			// non-answer class, not a hung session operation (#5295 review).
+			err = fmt.Errorf("%w: %w", ErrCommonDirProbeNoAnswer, err)
+		}
 		return "", err
 	}
 	dir := strings.TrimSpace(out)

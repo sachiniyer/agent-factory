@@ -93,16 +93,30 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 		"the timed-out refusal must carry the same sentinel pair: %v", err2)
 }
 
-// TestRemoveDebris — a stale zero-length .af-add-probe-<digits> leftover
-// from a double-unlink failure is swept so the next `git add -A` cannot
-// stage it, while every lookalike that is NOT positively-identified probe
-// debris survives (#5295 review): a prefix-sharing user file
-// (.af-add-probe-notes), a non-empty digit-named file, a digit-named
-// directory, and ordinary workspace entries.
+// TestRemoveDebris — the sweep removes only files it can PROVE are probe
+// debris (#5295 review): a path in the abandonedProbes registry that is
+// still a zero-length regular file, or a digit-named file whose whole
+// content is the ownership marker. Everything else survives untouched —
+// including an empty .af-add-probe-<digits> file this process did not
+// create, because name+size can never prove ownership and deleting user
+// content is data loss the sandbox reap makes permanent.
 func TestRemoveDebris(t *testing.T) {
 	dir := t.TempDir()
-	stale := filepath.Join(dir, ".af-add-probe-123456")
-	require.NoError(t, os.WriteFile(stale, nil, 0o600))
+
+	// Same-process proof: this path is recorded as abandoned by us and is
+	// still the zero-length file we left.
+	registered := filepath.Join(dir, ".af-add-probe-123456")
+	require.NoError(t, os.WriteFile(registered, nil, 0o600))
+	abandonedProbes.Store(registered, struct{}{})
+	defer abandonedProbes.Delete(registered)
+
+	// Cross-restart proof: the ownership marker as the whole content.
+	marked := filepath.Join(dir, ".af-add-probe-654321")
+	require.NoError(t, os.WriteFile(marked, []byte(probeDebrisMarker), 0o600))
+
+	// Lookalikes that must ALL survive — none carries an ownership proof:
+	foreign := filepath.Join(dir, ".af-add-probe-123") // empty, unregistered — could be a user's file
+	require.NoError(t, os.WriteFile(foreign, nil, 0o600))
 	userFile := filepath.Join(dir, ".af-add-probe-notes")
 	require.NoError(t, os.WriteFile(userFile, []byte("mine"), 0o600))
 	nonempty := filepath.Join(dir, ".af-add-probe-999")
@@ -113,13 +127,31 @@ func TestRemoveDebris(t *testing.T) {
 	require.NoError(t, os.WriteFile(keep, []byte("x"), 0o600))
 
 	require.NoError(t, RemoveDebris(dir))
-	_, err := os.Stat(stale)
-	require.True(t, os.IsNotExist(err), "stale probe leftover must be swept: %v", err)
-	for _, protected := range []string{userFile, nonempty, userDir, keep} {
+	for _, swept := range []string{registered, marked} {
+		_, err := os.Stat(swept)
+		require.True(t, os.IsNotExist(err), "proven probe debris must be swept: %s", err)
+	}
+	for _, protected := range []string{foreign, userFile, nonempty, userDir, keep} {
 		_, err := os.Stat(protected)
-		require.NoError(t, err, "non-debris entry must survive the sweep: %s", protected)
+		require.NoError(t, err, "unproven entry must survive the sweep: %s", protected)
 	}
 	require.NoError(t, RemoveDebris(dir), "an empty sweep must stay a no-op")
+}
+
+// TestRemoveDebris_RegisteredButRepurposed — a registered path a user then
+// wrote content into is THEIR file now: zero-length is part of the proof
+// for the no-marker branch, so content at a registered path survives.
+func TestRemoveDebris_RegisteredButRepurposed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".af-add-probe-424242")
+	require.NoError(t, os.WriteFile(path, []byte("user content"), 0o600))
+	abandonedProbes.Store(path, struct{}{})
+	defer abandonedProbes.Delete(path)
+
+	require.NoError(t, RemoveDebris(dir))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "a repurposed registered path must not be deleted")
+	require.Equal(t, "user content", string(data))
 }
 
 // TestWrite_ConcurrentProbesJoinOneFlight — concurrent probes of the same dir

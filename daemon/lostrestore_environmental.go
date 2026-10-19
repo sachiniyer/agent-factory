@@ -98,7 +98,9 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	// requireSetupRemovalOwnership, which wraps its local-git deadline in
 	// ErrSetupRemovalOwnershipUnproven before any mutation can be tried —
 	// a repository-filesystem stall the next retry re-probes from scratch —
-	// or the fsprobe write capacity flight, which marks a wedged filesystem's
+	// the bounded `rev-parse --git-common-dir` lookup behind gitCommonDir,
+	// which pairs its local-git deadline with ErrCommonDirProbeNoAnswer — or
+	// the fsprobe write capacity flight, which marks a wedged filesystem's
 	// non-answer with ErrProbeTimedOut, or Start's pre-spawn has-session gate,
 	// which marks a wedged shared tmux server with ErrTmuxServerNoAnswer —
 	// each bounded so the diagnostic bound reads as the same environmental
@@ -113,6 +115,7 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 		(errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
 			errors.Is(err, sessiongit.ErrWorktreeSetupStalled) ||
 			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven) ||
+			errors.Is(err, sessiongit.ErrCommonDirProbeNoAnswer) ||
 			errors.Is(err, fsprobe.ErrProbeTimedOut) ||
 			errors.Is(err, sessiontmux.ErrTmuxServerNoAnswer)) {
 		return lostRestoreEnvDeadline

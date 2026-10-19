@@ -69,13 +69,14 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	probeDir := g.worktreePath
 
 	// One debris edge survives the unlink-before-write contract: on the
-	// named-fallback path (no O_TMPFILE) a double unlink failure leaves an
-	// empty .af-add-probe-* name in this tree — unstageable at the time, but
-	// the next `git add -A` after the filesystem recovers would commit it as
-	// workspace content. Sweep stale probe names before snapshotting. A
-	// removal failure aborts the push with the evidence: a filesystem that
-	// cannot unlink is likely still answering the question this snapshot
-	// needs answered (#5295 review).
+	// named-fallback path (no O_TMPFILE) a double unlink failure leaves a
+	// .af-add-probe-* name in this tree — unstageable at the time, but the
+	// next `git add -A` after the filesystem recovers would commit it as
+	// workspace content. Sweep proven probe debris before snapshotting — the
+	// sweep deletes only files ownership-verified by the probe itself, never
+	// a user's lookalike name (#5295 review). A sweep failure aborts the
+	// push with the evidence: a filesystem that cannot answer is still
+	// answering the question this snapshot needs answered (#5295 review).
 	if derr := fsprobe.RemoveDebris(g.worktreePath); derr != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("could not remove stale probe debris before archive push: %w", derr), probeDir)
 	}

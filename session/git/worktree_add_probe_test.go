@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -234,6 +235,46 @@ func TestAnnotateWorktreeAddError_DestinationStatTimeout(t *testing.T) {
 		"the sentinel must keep its deadline pair for the classifier: %v", out)
 	require.False(t, errors.Is(out, syscall.ENOENT),
 		"a no-answer is not a missing destination: %v", out)
+}
+
+// TestGitCommonDir_DeadlinePairsSentinel is the #5295-review regression:
+// the bounded `rev-parse --git-common-dir` lookup's deadline must reach the
+// classifier as the bounded-probe non-answer — ErrCommonDirProbeNoAnswer +
+// context.DeadlineExceeded — because a bare deadline reads as a hung session
+// operation and charges the structural budget for a mount stall.
+func TestGitCommonDir_DeadlinePairsSentinel(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := createGitRepo(t)
+	stallingGitOnPath(t)
+	shortenLocalTimeout(t, 200*time.Millisecond)
+
+	_, err := gitCommonDir(&GitWorktree{repoPath: repoRoot})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrCommonDirProbeNoAnswer),
+		"the bounded lookup's deadline must carry its sentinel: %v", err)
+	require.True(t, errors.Is(err, context.DeadlineExceeded),
+		"the sentinel must pair with the deadline the classifier requires: %v", err)
+}
+
+// TestAnnotateWorktreeAddError_CommonDirProbeNoAnswer — the paired non-answer
+// from a stalled common-dir lookup must ride the joined annotate chain so the
+// restore classifier sees sentinel+deadline, not a bare deadline.
+func TestAnnotateWorktreeAddError_CommonDirProbeNoAnswer(t *testing.T) {
+	old := writeSpaceProbe
+	writeSpaceProbe = func(string) error { return nil }
+	defer func() { writeSpaceProbe = old }()
+	oldCommon := gitCommonDir
+	gitCommonDir = func(*GitWorktree) (string, error) {
+		return "", fmt.Errorf("%w: %w", ErrCommonDirProbeNoAnswer, context.DeadlineExceeded)
+	}
+	defer func() { gitCommonDir = oldCommon }()
+
+	g := &GitWorktree{worktreePath: filepath.Join(t.TempDir(), "wt")}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, ErrCommonDirProbeNoAnswer),
+		"the common-dir non-answer must reach the chain: %v", out)
+	require.True(t, errors.Is(out, context.DeadlineExceeded),
+		"the sentinel must keep its deadline pair: %v", out)
 }
 
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,

@@ -104,6 +104,14 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 			sessiontmux.ErrTmuxServerNoAnswer, context.DeadlineExceeded), lostRestoreEnvDeadline},
 		{"tmux server no-answer bare", fmt.Errorf("start: %w", sessiontmux.ErrTmuxServerNoAnswer), lostRestoreEnvNone},
 		{"tmux timeout bare", fmt.Errorf("start: %w", sessiontmux.ErrTmuxTimeout), lostRestoreEnvNone},
+		// The bounded `rev-parse --git-common-dir` lookup behind gitCommonDir:
+		// a repository mount that cannot answer rev-parse reports
+		// ErrCommonDirProbeNoAnswer + deadline — the same bounded
+		// environmental class. The bare sentinel is a definitive verdict and
+		// stays structural (#5295 review).
+		{"deadline carrying common-dir sentinel", errors.Join(
+			sessiongit.ErrCommonDirProbeNoAnswer, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"common-dir sentinel bare", fmt.Errorf("probe: %w", sessiongit.ErrCommonDirProbeNoAnswer), lostRestoreEnvNone},
 		// The bare sentinel is a definitive verdict — "the recorded worktree
 		// is at no candidate" — not a waiting one; retrying cannot change it.
 		{"relocate state unknown bare", errors.Join(errors.New("cannot resolve"), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvNone},
