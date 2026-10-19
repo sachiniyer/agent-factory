@@ -3004,13 +3004,11 @@ textarea[class] {
     outline-offset: calc(0 - var(--af-space-1) / 2);
   }
 }
-@media (max-width: 347px) {
-  .af-terminal-keybar {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .af-keybar-row button {
-    min-width: calc(var(--af-space-4) + var(--af-space-3));
-  }
+.af-terminal-keybar.af-keybar-narrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
+  min-width: calc(var(--af-space-4) + var(--af-space-3));
 }
 @media (max-width: 768px) {
   .af-session-first .af-appbar {

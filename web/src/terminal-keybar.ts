@@ -366,7 +366,11 @@ export class TerminalKeybar {
   setFocused(focused: boolean): void {
     this.focused = focused;
     if (!focused) {
-      this.modifiers.reset(); this.softInput.reset(); this.physicalInput = false; this.arrows = false;
+      // The paste sheet's focus grab is an owned transition — keep armed sticky
+      // modifiers so an armed Ctrl/Alt survives the fallback and still applies
+      // to the next real key (#5380). A real pane switch still resets them.
+      if (!this.pasteSheet) this.modifiers.reset();
+      this.softInput.reset(); this.physicalInput = false; this.arrows = false;
       this.deferred229 = undefined; this.deferred229Generation += 1;
     }
     this.paint();
@@ -463,15 +467,16 @@ export class TerminalKeybar {
     }
     try {
       const text = await clipboard.readText();
-      // The read outlives the tap: a closed or switched-away terminal must not
-      // get a paste — or a modal — for a session that no longer exists.
-      if (this.disposed) return;
+      // The read outlives the tap: a terminal that was closed or that lost
+      // focus to another split while the read was in flight must not get a
+      // paste — or a modal — for a session it no longer owns.
+      if (this.disposed || !this.focused) return;
       if (text) {
         this.sendPaste(text);
         return;
       }
     } catch { /* readText also rejects on denied permission. */ }
-    if (!this.disposed) this.openPasteSheet();
+    if (!this.disposed && this.focused) this.openPasteSheet();
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -500,11 +505,12 @@ export class TerminalKeybar {
    * Escape, Cancel, and a backdrop tap all dismiss.
    */
   private openPasteSheet(): void {
-    if (this.disposed) return;
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
     }
+    // Never pop the sheet over a pane the user has already left.
+    if (this.disposed || !this.focused) return;
     // Focusing the sheet blurs xterm's helper textarea — and a blur mid-flight
     // drops a just-committed IME composition before its zero-delay finalizer
     // reads it. Open behind that commit instead, the same deferral sendPaste
@@ -520,6 +526,12 @@ export class TerminalKeybar {
     area.className = "af-input af-textarea";
     area.setAttribute("aria-label", "Text to paste");
     area.placeholder = "Paste or type here";
+    // This field carries terminal text — disable the mobile keyboard's
+    // capitalization/correction/spellcheck, the same way xterm's helper
+    // textarea does, so `ls` doesn't arrive as `Ls`.
+    area.setAttribute("autocapitalize", "none");
+    area.setAttribute("autocorrect", "off");
+    area.spellcheck = false;
     const body = document.createElement("div");
     body.className = "af-modal-body";
     body.append(hint, area);
@@ -597,7 +609,12 @@ export class TerminalKeybar {
       if (!this.bar.isConnected) document.body.append(this.bar);
       const bottom = this.viewport ? this.viewport.offsetTop + this.viewport.height : window.innerHeight;
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
-      this.bar.style.width = `${this.viewport?.width ?? window.innerWidth}px`;
+      const width = this.viewport?.width ?? window.innerWidth;
+      this.bar.style.width = `${width}px`;
+      // A media query would read the layout viewport; the bar is sized from the
+      // visual viewport, and the two disagree under pinch zoom — drive the
+      // narrow-keys rule off the width the bar actually gets (#5380).
+      this.bar.classList.toggle("af-keybar-narrow", width < 348);
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;

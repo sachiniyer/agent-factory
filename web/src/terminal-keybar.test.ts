@@ -707,6 +707,7 @@ function pastingKeybar(modifiers = new StickyModifiers()) {
     softInput: {
       transform: (text: string, apply: (value: string) => string) => apply(text),
       deferAfterPendingComposition: () => false,
+      reset: () => {},
     },
     input: (text: string) => { writes.push(keybar.transform(text)); },
     paste: (text: string) => {
@@ -716,6 +717,7 @@ function pastingKeybar(modifiers = new StickyModifiers()) {
     openPasteSheet: () => { sheetOpens.push(1); },
     closePasteSheet: () => {},
     paint: () => {},
+    layout: () => {},
     disposed: false,
   }) as unknown as TerminalKeybar;
   return { keybar, writes, pastes, sheetOpens };
@@ -801,6 +803,45 @@ test("a clipboard read settling after disposal pastes nothing and opens no sheet
     assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after dispose`);
   }
   delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("a clipboard read settling after the terminal lost focus pastes nothing and opens no sheet", async t => {
+  // The tap starts a read that outlives it: focusing another split blurs this
+  // terminal without disposing it, and the late clipboard text must not land
+  // in a shell the user already left.
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    keybar.setFocused(false);
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after focus moved`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after focus moved`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("the paste sheet's focus grab keeps armed sticky modifiers", t => {
+  // Focusing the sheet's textarea blurs xterm's helper, which drives
+  // setFocused(false) — but the fallback must not silently spend the armed
+  // Ctrl/Alt the next real key still expects (#5380). A genuine blur with no
+  // sheet still resets.
+  for (const sheetOpen of [false, true]) {
+    const modifiers = new StickyModifiers();
+    modifiers.tap("Ctrl", 0);
+    const { keybar } = pastingKeybar(modifiers);
+    if (sheetOpen) (keybar as unknown as { pasteSheet: unknown }).pasteSheet = {};
+    keybar.setFocused(false);
+    assert.equal(modifiers.state("Ctrl"), sheetOpen ? "once" : "off",
+      sheetOpen ? "the owned sheet blur keeps the armed modifier" : "a real blur still resets");
+  }
 });
 
 test("a paste waits behind a pending composition commit like other positional input", t => {

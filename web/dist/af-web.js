@@ -8766,7 +8766,7 @@ var TerminalKeybar = class {
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
-      this.modifiers.reset();
+      if (!this.pasteSheet) this.modifiers.reset();
       this.softInput.reset();
       this.physicalInput = false;
       this.arrows = false;
@@ -8864,14 +8864,14 @@ var TerminalKeybar = class {
     }
     try {
       const text = await clipboard.readText();
-      if (this.disposed) return;
+      if (this.disposed || !this.focused) return;
       if (text) {
         this.sendPaste(text);
         return;
       }
     } catch {
     }
-    if (!this.disposed) this.openPasteSheet();
+    if (!this.disposed && this.focused) this.openPasteSheet();
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -8900,11 +8900,11 @@ var TerminalKeybar = class {
    * Escape, Cancel, and a backdrop tap all dismiss.
    */
   openPasteSheet() {
-    if (this.disposed) return;
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
     }
+    if (this.disposed || !this.focused) return;
     if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
@@ -8916,6 +8916,9 @@ var TerminalKeybar = class {
     area.className = "af-input af-textarea";
     area.setAttribute("aria-label", "Text to paste");
     area.placeholder = "Paste or type here";
+    area.setAttribute("autocapitalize", "none");
+    area.setAttribute("autocorrect", "off");
+    area.spellcheck = false;
     const body = document.createElement("div");
     body.className = "af-modal-body";
     body.append(hint, area);
@@ -8995,7 +8998,9 @@ var TerminalKeybar = class {
       if (!this.bar.isConnected) document.body.append(this.bar);
       const bottom = this.viewport ? this.viewport.offsetTop + this.viewport.height : window.innerHeight;
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
-      this.bar.style.width = `${this.viewport?.width ?? window.innerWidth}px`;
+      const width = this.viewport?.width ?? window.innerWidth;
+      this.bar.style.width = `${width}px`;
+      this.bar.classList.toggle("af-keybar-narrow", width < 348);
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
