@@ -228,6 +228,46 @@ func TestSnapshotAndPushBranch_ProbesWorktreeFilesystem(t *testing.T) {
 	assert.Empty(t, matches, "no probe debris inside the tracked worktree")
 }
 
+// TestSnapshotAndPushBranch_ProbeNameNeverStaged pins the two-sided debris
+// contract (#5295 review): an .af-add-probe-* file the sweep cannot prove
+// it created — here, ANY file, since this process abandoned none — is
+// treated as user content: it is NOT deleted, and it must NEVER enter the
+// archive snapshot either, because the status gate and `add -A` both carry
+// the `:(exclude)` pathspec. Deletion requires proof; exclusion requires
+// none.
+func TestSnapshotAndPushBranch_ProbeNameNeverStaged(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/debris")
+	wt := gw.GetWorktreePath()
+
+	// An unproven probe-named file — the shape CreateTemp emits, content a
+	// user could plausibly have. Also real user work, so the snapshot must
+	// still run.
+	debris := filepath.Join(wt, ".af-add-probe-123456")
+	require.NoError(t, os.WriteFile(debris, []byte("looks like probe debris, is not"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(wt, "sub"), 0o755))
+	nestedDebris := filepath.Join(wt, "sub", ".af-add-probe-789")
+	require.NoError(t, os.WriteFile(nestedDebris, []byte("nested lookalike"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "real.txt"), []byte("work"), 0o600))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	// Never staged: the snapshot commit contains real.txt and nothing
+	// probe-named — top level or nested.
+	tree := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/debris")
+	assert.Contains(t, tree, "real.txt")
+	assert.NotContains(t, tree, ".af-add-probe-",
+		"no probe-shaped name may enter an archive snapshot")
+
+	// Never deleted: unproven content is the user's, on disk untouched.
+	for _, path := range []string{debris, nestedDebris} {
+		data, rerr := os.ReadFile(path)
+		require.NoError(t, rerr, "unproven probe-named file must survive the sweep: %s", path)
+		assert.NotEmpty(t, data)
+	}
+}
+
 // TestSnapshotAndPushBranch_RejectsExternalWorktree pins that an in-place/external
 // worktree (the user's own tree) is never pushed by the archive primitive.
 func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {

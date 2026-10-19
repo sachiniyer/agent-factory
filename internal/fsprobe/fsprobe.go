@@ -123,12 +123,6 @@ func openProbeFile(dir string) (*os.File, error) {
 	}
 	name := f.Name()
 	if rerr := os.Remove(name); rerr != nil {
-		// Best-effort ownership marker while the name still exists: a future
-		// sweep can then prove this file is probe debris rather than user
-		// content even across a daemon restart. On a filesystem too full or
-		// too broken for the marker, the process-local registry below is the
-		// only proof — an empty leftover stays, unprovable (#5295 review).
-		_, _ = f.WriteString(probeDebrisMarker)
 		cerr := f.Close()
 		// Close releases the only state unlink could have depended on — try
 		// once more before reporting.
@@ -146,17 +140,13 @@ func openProbeFile(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// probeDebrisMarker is the ownership token written into a named-fallback
-// file that could not be unlinked: its whole-content presence proves the
-// file is probe debris — workspace content never reads exactly this —
-// while ANY other content, including zero bytes, leaves ownership unproven
-// and the file untouchable (#5295 review).
-const probeDebrisMarker = "af probe debris: created by an agent-factory filesystem probe whose unlink failed — safe to delete\n"
-
 // abandonedProbes records the exact paths this process created and could
-// not unlink — the only ownership proof that needs no file content at all.
-// A path is stored only after the SECOND unlink fails; a user's file that
-// happens to share the probe naming pattern is never recorded here.
+// not unlink — the only ownership proof RemoveDebris accepts. A path is
+// stored only after the SECOND unlink fails; a user's file that happens to
+// share the probe naming pattern is never recorded here. No file content
+// is ever trusted as proof: any marker bytes this process writes are
+// readable and reproducible by the workspace owner, so content can mark a
+// file as a candidate but can never prove it is ours (#5295 review).
 var abandonedProbes sync.Map // map[string]struct{} of full probe-file paths
 
 // statPath is the test seam under Stat's bounded flight — the metadata
@@ -172,26 +162,28 @@ var readDirEntries = os.ReadDir
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing payload bytes, so a
-// leftover exists only when BOTH unlink attempts failed — a name the next
-// `git add -A` snapshot would stage as workspace content after the
-// filesystem recovers (#5295 review). Callers that snapshot a tree sweep
-// before staging.
+// leftover exists only when BOTH unlink attempts failed (#5295 review).
+// Snapshotting callers also exclude the .af-add-probe-* name shape from
+// `git add`, so what this sweep leaves behind can never be committed — its
+// job is cleanup, and a failed cleanup is still filesystem evidence worth
+// surfacing.
 //
-// Deletion requires PROVEN ownership — a filename and a size can never prove
-// a file is ours, because a workspace may legitimately contain an empty
-// .af-add-probe-<digits> file, and deleting it would be data loss the
-// sandbox reap then makes permanent. The only accepted proofs are the
-// abandonedProbes registry (this process created that exact path) and the
-// whole-content ownership marker (written into the file when its first
-// unlink failed). Everything else survives untouched — including empty
-// probe-shaped names this process did not create, which means debris left
-// behind before a restart stays put; committing it is a cosmetic wart,
-// strictly better than deleting unproven content. Enumeration is
-// fail-closed — a directory that cannot be read returns its error rather
-// than an unproven "clean" — and removal failures are joined. The whole
-// sweep runs inside a bounded flight for the same reason Write does: every
-// syscall here can wedge on a dead mount inside the synchronous snapshot
-// path.
+// Deletion requires PROVEN ownership — a filename, a size, or file content
+// can never prove a file is ours: the workspace owner may legitimately
+// have an empty .af-add-probe-<digits> file, and any byte string this
+// process writes is equally writable by them, so deleting on either basis
+// is data loss the sandbox reap then makes permanent. The ONLY accepted
+// proof is the abandonedProbes registry — this process created that exact
+// path — re-verified as a still-zero-length regular file (a path the user
+// has since written to is their file again). Everything else survives
+// untouched, including probe debris abandoned before a restart, which the
+// registry no longer covers: it stays on disk, unprovable, and the add
+// exclusion keeps it out of every snapshot — a cosmetic wart, strictly
+// better than deleting unproven content. Enumeration is fail-closed — a
+// directory that cannot be read returns its error rather than an unproven
+// "clean" — and removal failures are joined. The whole sweep runs inside a
+// bounded flight for the same reason Write does: every syscall here can
+// wedge on a dead mount inside the synchronous snapshot path.
 func RemoveDebris(dir string) error {
 	_, err := runBounded(dir, sweepFlights, "debris sweep",
 		"the filesystem did not answer the debris sweep",
@@ -218,17 +210,7 @@ func removeDebrisScan(dir string) error {
 				fmt.Errorf("inspecting stale probe file %s: %w", name, ierr))
 			continue
 		}
-		proven := registered && info.Size() == 0
-		if !proven && info.Size() == int64(len(probeDebrisMarker)) {
-			data, rerr := os.ReadFile(path)
-			if rerr != nil {
-				joined = append(joined,
-					fmt.Errorf("reading probe-marker candidate %s: %w", name, rerr))
-				continue
-			}
-			proven = string(data) == probeDebrisMarker
-		}
-		if !proven {
+		if !registered || info.Size() != 0 {
 			continue
 		}
 		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
