@@ -212,6 +212,10 @@ const (
 	// TabStoppedByAccountSwap: an account swap stopped it with the rest of the
 	// session's panes.
 	TabStoppedByAccountSwap = "account-swap"
+	// TabStoppedByWorktreeRebuild: a worktree rebuild made the pane's cwd a
+	// deleted inode, so recovery stopped it rather than leave a running
+	// command bound to a checkout it can never be inside (#5370).
+	TabStoppedByWorktreeRebuild = "worktree-rebuild"
 )
 
 // tabExitFromData and data convert between Tab.Exit and its wire form; nil

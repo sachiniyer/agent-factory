@@ -285,6 +285,24 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// RebuildTeardownPending records that a recovery rebuilt this session's
+	// worktree at a new identity while sessions bound to it still answered
+	// has-session, and that the teardown of those stale panes has not been
+	// confirmed complete. A rebuild committed before the failure is durable
+	// state; the next attempt cannot re-derive it from os.Stat (the rebuilt
+	// directory exists), so the obligation to remove the pre-rebuild panes —
+	// whose cwd is the deleted inode and can never be inside the new checkout
+	// — must persist too (#5370, #5371 review). Set at rebuild commit, cleared
+	// only after every bound name and cleanup handle is confirmed gone.
+	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
+	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
+	// fence. A current reader removes it before interpreting the row; the
+	// previous release ignores it and sees StartupStateUnknown, which keeps a
+	// row whose rebuild teardown is unconfirmed from being driven — an older
+	// reader would otherwise find the rebuilt worktree present, skip the
+	// rebuild path, reattach the pane bound to the deleted inode, and mark it
+	// Running (#5370 through the rollback door; #5371 review).
+	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -424,6 +442,9 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	// Reverse projection order — see FromInstanceData: the rebuild-teardown
+	// projector runs last in ForStorage, so its restore runs first here.
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
@@ -520,6 +541,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
+	d = d.projectRebuildTeardownForPreviousRelease()
 	// Older binaries ignore ArchiveReport, but the previous release understands
 	// the inert/ownership fields and relocation recovery. Together they refuse
 	// restore and explicit kill instead of publishing an incomplete tree or

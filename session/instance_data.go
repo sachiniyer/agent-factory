@@ -39,6 +39,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
+		RebuildTeardownPending:   i.rebuildTeardownPending,
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
@@ -288,6 +289,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	// Rollback fences unwind in REVERSE projection order — each restore writes
+	// back the original its projector captured, so the LAST projector's restore
+	// must run first or it would overwrite the real value with a projected one.
+	// ForStorage projects account-swap, then handoff, then rebuild-teardown.
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
@@ -377,6 +383,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
+		rebuildTeardownPending:   data.RebuildTeardownPending,
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,
@@ -610,9 +617,26 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if isSandboxBackendType(data.BackendType) {
 		instance.mu.Lock()
 		if instance.liveness != LiveLost {
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.touchLocked()
 		}
+		instance.mu.Unlock()
+		return instance, nil
+	}
+
+	// A rebuild-teardown obligation means every tmux name this row binds was
+	// last observed inside the deleted inode: Start(false) would reattach
+	// them before the teardown owner retries, which is the stale-pane bind
+	// the flag exists to prevent (#5371 review). Load the row materialized
+	// but unrestored — started, so storage keeps it and whichever loop owns
+	// its liveness stays eligible: the lost-restore loop for a Lost row, the
+	// limit-resume scheduler for a limit-parked one (each requires Started),
+	// and the status poll for anything else — a positive observation is held
+	// at Lost by the pending gate until the teardown discharges.
+	if data.RebuildTeardownPending {
+		instance.mu.Lock()
+		instance.started = true
+		instance.touchLocked()
 		instance.mu.Unlock()
 		return instance, nil
 	}
@@ -634,7 +658,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// daemon's lost-restore loop owns the rebuild-then-respawn path,
 			// and it can only reach a row that materialized.
 			instance.mu.Lock()
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.started = true
 			instance.touchLocked()
 			instance.mu.Unlock()

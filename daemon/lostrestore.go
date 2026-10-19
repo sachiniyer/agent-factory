@@ -561,6 +561,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// raises no lifecycle fence of its own — the op-lock above serializes daemon
 	// operations, not the status poll, which skips on the op AXIS — so the fence
 	// has to come from the recovery itself.
+	//
+	// A rebuild teardown obligation must be durable when it is set and again
+	// when it is discharged — before any replacement launches (#5371 review).
+	inst.SetRebuildTeardownNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
+	// The teardown also owes the runtimes tmux cannot see: the supervised VS
+	// Code editor holds a cwd in the checkout with no tab.tmux (#5371 review).
+	inst.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+		return m.stopVSCodeForInstance(key, i.ID)
+	})
 	if err := inst.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)

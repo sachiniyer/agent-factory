@@ -65,6 +65,15 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	// ambiguous handoff. Current readers understand its mission-scoped evidence
 	// and must classify the real state; an older binary ignores the additive
 	// original field and deliberately remains inert.
+	// The rebuild-teardown fence unwinds first — projection ran swap, then
+	// handoff, then rebuild, so the last projector's saved original holds the
+	// second-to-last value (FromInstanceData restores in the same order). A raw
+	// rebuild-pending row otherwise classifies on its projected
+	// StartupStateUnknown=true while its materialized form decides on the real
+	// value — and for a limit-parked run those two verdicts differ (terminal vs
+	// pending), which is a raw-record slot read disagreeing with the daemon's
+	// own (#5371 review).
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
@@ -193,6 +202,14 @@ type LifecycleView struct {
 	// incoming runtime's liveness (#4429) — so this obligation, not the op axis,
 	// is what keeps a SECOND handoff from overwriting the first one's mission.
 	PendingHandoffMission bool
+	// RebuildTeardownPending is a committed stale-pane teardown obligation: a
+	// recovery rebuilt the worktree and still owes the teardown of the sessions
+	// that survived the deletion. Runtime mutations that would create NEW
+	// bindings inside that worktree — a handoff's replacement, a spawned tab —
+	// must refuse on this fence or the owning teardown later kills the fresh
+	// runtime together with the genuinely stale names (#5371 review). The retry
+	// owners (recover/restore/limit-resume) are exempt by construction.
+	RebuildTeardownPending bool
 	// StartupStateUnknown is the retained-create fence: the launch may have
 	// succeeded under an identity af could not confirm, so no runtime or workspace
 	// action may infer ordinary LiveReady semantics from this view.
@@ -225,17 +242,18 @@ func (i *Instance) LifecycleView() LifecycleView {
 // cannot observe different lifecycle states.
 func (i *Instance) lifecycleViewLocked() LifecycleView {
 	return LifecycleView{
-		Title:                 i.Title,
-		TaskID:                i.TaskID,
-		Liveness:              i.liveness,
-		InFlightOp:            i.inFlightOp,
-		Status:                i.statusLocked(),
-		StateEpoch:            i.stateEpoch,
-		Started:               i.started,
-		UserKilled:            i.userKilled,
-		PendingAccountSwap:    i.pendingAccountSwap != nil,
-		PendingHandoffMission: i.pendingHandoffMission != "",
-		StartupStateUnknown:   i.startupStateUnknown,
+		Title:                  i.Title,
+		TaskID:                 i.TaskID,
+		Liveness:               i.liveness,
+		InFlightOp:             i.inFlightOp,
+		Status:                 i.statusLocked(),
+		StateEpoch:             i.stateEpoch,
+		Started:                i.started,
+		UserKilled:             i.userKilled,
+		PendingAccountSwap:     i.pendingAccountSwap != nil,
+		PendingHandoffMission:  i.pendingHandoffMission != "",
+		RebuildTeardownPending: i.rebuildTeardownPending,
+		StartupStateUnknown:    i.startupStateUnknown,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
 		// takes i.mu.RLock itself — and calling it while this snapshot holds the
@@ -372,6 +390,9 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 		return ActivityPending, ""
 	}
 	data = restored
+	// Same unwind order FromInstanceData applies: the rebuild-teardown fence
+	// projected last, so its original restores first (#5371 review).
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()

@@ -71,6 +71,40 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// rebuildTeardownPending records that a recovery rebuilt the worktree at a
+	// new identity but did not finish tearing down the sessions that survived
+	// the deletion. `rebuilt` inside respawnWithConversation is re-derived per
+	// attempt from os.Stat, which sees the rebuilt directory on the retry and
+	// reports false — without this flag a partial teardown would let the next
+	// attempt reattach the stale pane and ConfirmLive it (#5371 review). Set
+	// when the rebuild commits, cleared only after every bound session and
+	// pending-cleanup handle is confirmed gone.
+	rebuildTeardownPending bool
+	// rebuildTeardownPendingOwed marks that the in-memory flag's current value
+	// is NOT durably backed: a transition attempted the persist callback and it
+	// failed, or ran without one installed. A value only skips the checkpoint
+	// when it is the durable one — an owed value must re-fire the notify on the
+	// next matching call rather than letting the rebuild proceed on a flag a
+	// restart would reload differently (#5371 review).
+	rebuildTeardownPendingOwed bool
+	// rebuildTeardownStopRuntimes is the daemon-installed "stop what no tmux
+	// session owns" callback the rebuild teardown must run before it may
+	// believe the worktree is clear: the supervised VS Code editor and any
+	// post-worktree hook runner hold a cwd inside the checkout while carrying
+	// no tab.tmux and no AF_SESSION marker, so the tmux snapshot cannot see
+	// them and the occupancy check would find them as strangers (#5371
+	// review). Same installation contract as rebuildTeardownNotify — nil on a
+	// teardown path means an entry point was missed, and it fails closed.
+	rebuildTeardownStopRuntimes func(*Instance) error
+	// rebuildTeardownNotify is the daemon-installed persist callback fired on
+	// every rebuildTeardownPending transition, so a durable obligation and its
+	// durable discharge both land before the code that depends on them runs —
+	// the clear must be on disk before a replacement pane spawns, or a daemon
+	// exit in that window reloads a stale `true` and tears the FRESH panes
+	// down as though they belonged to the deleted worktree (#5371 review).
+	// In-memory only: the flag matters only inside Recover, and every Recover
+	// entry point installs it anew.
+	rebuildTeardownNotify func(*Instance) error
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT

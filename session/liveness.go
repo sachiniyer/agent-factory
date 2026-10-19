@@ -319,9 +319,26 @@ func (i *Instance) setStatusLocked(s Status) {
 		i.inFlightOp = OpKilling
 	default:
 		i.inFlightOp = OpNone
-		i.liveness = LivenessForStatus(s)
+		i.assignLivenessLocked(LivenessForStatus(s))
 	}
 	i.noteStateChangeLocked(lv, op, resetAt)
+}
+
+// assignLivenessLocked is the ONE write path for i.liveness outside the
+// transition table itself, which routes here too. While a rebuild teardown
+// obligation is owed, every reviving write coerces to LiveLost: a positive
+// answer can be coming from a pane still bound to the DELETED inode — exactly
+// the pane the teardown has not yet proven gone — and leaving Lost is what
+// keeps the owning loop retrying (#5371 review). LiveLost passes through
+// trivially; LiveArchived also passes through, because archive is the row
+// leaving service under its own stop-everything teardown, not an observation
+// that could be lying about the stale pane.
+// Callers hold i.mu.
+func (i *Instance) assignLivenessLocked(l Liveness) {
+	if i.rebuildTeardownPending && l != LiveLost && l != LiveArchived {
+		l = LiveLost
+	}
+	i.liveness = l
 }
 
 // SetStatusForTest sets the status under the instance mutex by decomposing the
@@ -539,6 +556,13 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
+	if i.rebuildTeardownPending {
+		// A spawned tab binds a NEW session inside the worktree while the
+		// committed teardown still owes the old one: it snapshots names, not
+		// vintages, and would kill the fresh tab together with the genuinely
+		// stale sessions (#5371 review).
+		return fmt.Errorf("cannot add a tab to session %q while a worktree-rebuild teardown is pending; let its recovery finish", i.Title)
+	}
 	return nil
 }
 
@@ -591,7 +615,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 		return false
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
+	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
@@ -693,7 +717,7 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 			i.Title, opLabel(i.inFlightOp))
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
+	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
@@ -706,7 +730,7 @@ func (i *Instance) ClearLimitReached() {
 		return
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveRunning
+	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
 	i.limitAgent = ""
 	i.limitAccount = ""

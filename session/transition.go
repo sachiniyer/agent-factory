@@ -586,6 +586,18 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
 		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
 	}
+	if ev.kind == tkObserveLiveness && ev.lv != LiveLost && i.rebuildTeardownPending {
+		// A committed worktree rebuild whose stale-pane teardown has not been
+		// confirmed means a live answer can still come from a pane bound to the
+		// DELETED inode — the observation cannot distinguish that survivor from
+		// a fresh pane, so it must not lift the row out of Lost. Leaving it Lost
+		// is what keeps the restore loop retrying the teardown instead of
+		// exposing the stale-cwd pane as healthy again (#5371 review). The flag
+		// is cleared only after every bound name is confirmed gone, so a
+		// positive claim before then is held as Lost; a LiveLost observation
+		// passes through untouched.
+		ev.lv = LiveLost
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {
@@ -723,7 +735,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		}
 	}
 	prevResetAt := i.limitResetAt
-	i.liveness = to.liveness
+	i.assignLivenessLocked(to.liveness)
 	i.inFlightOp = to.op
 	switch spec.limitReset {
 	case limitResetClear:
