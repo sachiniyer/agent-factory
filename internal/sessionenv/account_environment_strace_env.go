@@ -837,8 +837,8 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// tail does not begin with a modeled wrapper ends the region as
 		// before; its arguments are the traced command's own, not strace's.
 		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
-			shellCommandIsUnproven(words), strace && inOption &&
-			!(strace && inOption && !pending && len(words) >= 2 && straceTracedWrapper(words[1])), false
+				shellCommandIsUnproven(words), strace && inOption &&
+				!(strace && inOption && !pending && len(words) >= 2 && straceTracedWrapper(words[1])), false
 	}
 	// A literal option word. "--" ends strace's option region; any other
 	// option keeps parsing options. boundary reports that boundary so the
