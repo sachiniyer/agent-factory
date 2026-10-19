@@ -292,12 +292,20 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 // is what lets the picker mark the default row and offer it even when it names an
 // account the registry does not list.
 func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea.Cmd {
-	if naming == nil || program == "" {
+	// retire drops the owed-answer markers when no request is going out: a
+	// reply can never arrive to discharge them, so leaving one armed would
+	// hold every later Enter for a fetch that does not exist (#4893 review).
+	retire := func() tea.Cmd {
+		m.accountLookupPending = false
+		m.accountLookupFailed = false
 		return nil
+	}
+	if naming == nil || program == "" {
+		return retire()
 	}
 	agent := sessionenv.AgentForCommand(program)
 	if agent == "" && !isRemoteTarget() {
-		return nil
+		return retire()
 	}
 	// An agent with no credential-root variable can never be scoped to an account,
 	// so `default_accounts` cannot hold an entry for it — the config loader refuses
@@ -312,16 +320,18 @@ func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea
 	// classifier calls accountless (#4893 review).
 	if agent != "" && !isRemoteTarget() {
 		if _, ok := sessionenv.SupportsAccounts(agent); !ok {
-			return nil
+			return retire()
 		}
 	}
 	m.accountDefaultSeq++
 	seq := m.accountDefaultSeq
 	// An answer is now owed to the field: while this is in flight the display
 	// is unsettled, so an implicit submit must hold (#4893 review). A fresh
-	// fetch also supersedes the last read's failure.
+	// fetch also supersedes both the last read's failure and the last
+	// verification — the landed reply may change what the field shows.
 	m.accountLookupPending = true
 	m.accountLookupFailed = false
+	m.accountVerified = false
 	fetch := listAccountsThroughDaemon
 	repoPath := m.repoRoot
 	return func() tea.Msg {
@@ -385,6 +395,13 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	m.accountLookupFailed = msg.err != nil
 	if msg.err != nil || m.pendingAccountChosen {
 		return m, nil
+	}
+	if wasVerify {
+		// Whatever the reply carries — a named default or ambient — this
+		// display was just checked against the live answer for THIS submit.
+		// The flag is what lets a verified ambient display differ from a
+		// never-checked one (#4893 review).
+		m.accountVerified = true
 	}
 	// Read off the response rather than held on the model: the picker builds its
 	// own rows from a fresh ListAccounts answer, so a second copy here would be a
@@ -617,6 +634,7 @@ func (m *home) clearPendingAccount() {
 	m.pendingAccount = ambientAccount
 	m.pendingAccountChosen = false
 	m.accountVerifiedFor = ambientAccount
+	m.accountVerified = false
 	m.accountLookupFailed = false
 	m.menu.SetNamingAccount(false)
 }

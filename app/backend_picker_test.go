@@ -98,6 +98,7 @@ func TestNamingFormBackendReachesSessionStartRequest(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	calls := stubBackends(t, twoUsableBackends(), nil)
 	startNaming(t, h, "in-a-container")
 
@@ -106,7 +107,7 @@ func TestNamingFormBackendReachesSessionStartRequest(t *testing.T) {
 	pickBackend(t, h, "docker")
 	require.Equal(t, stateNew, h.state, "submitting the field returns to naming, not out of the create")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Equal(t, config.BackendDocker, got.Backend,
 		"the picked backend must ride the sessionStartRequest to the daemon")
@@ -125,10 +126,11 @@ func TestNamingFormWithoutBackendSendsEmpty(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	stubBackends(t, twoUsableBackends(), nil)
 	startNaming(t, h, "repo-default")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Empty(t, got.Backend, "an untouched backend field must send no backend")
 	assert.Equal(t, "repo-default", got.Title)
@@ -357,6 +359,9 @@ func TestStaleBackendCatalogNeverOpensAPicker(t *testing.T) {
 		end  func(t *testing.T, h *home)
 	}{
 		{"the form was submitted", func(t *testing.T, h *home) {
+			// A chosen account skips the verify gate, so the single Enter
+			// completes the create and ends the form before the catalog lands.
+			h.pendingAccountChosen = true
 			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 		}},
 		{"the form was cancelled", func(t *testing.T, h *home) {

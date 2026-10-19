@@ -330,6 +330,10 @@ func TestHandleStateNewPreflightErrorKeepsNamingFlow(t *testing.T) {
 	require.NoError(t, err)
 	h.namingInstance = naming
 
+	// The first Enter re-checks the displayed account against the live default
+	// (#4893); the confirming Enter then reaches preflight and keeps the flow.
+	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, h, drainCmd(t, cmd, time.Second))
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateNew, h.state)
@@ -508,6 +512,8 @@ func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
 			h.pendingProgram = "claude"
 
 			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+			deliver(t, h, drainCmd(t, cmd, time.Second))
+			_, cmd = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 			assert.Equal(t, stateDefault, h.state)
 			assert.Nil(t, h.namingInstance, "a non-hook sandbox does not own a hook slug")
@@ -556,6 +562,8 @@ func TestHandleStateNewAllowsNonASCIITitleForNonHookSandbox(t *testing.T) {
 	h.pendingProgram = "claude"
 
 	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, h, drainCmd(t, cmd, time.Second))
+	_, cmd = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateDefault, h.state)
 	assert.Nil(t, h.namingInstance, "a Docker title does not claim the global hook namespace")
@@ -587,7 +595,11 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 	h.namingInstance = inst
 
 	// A second BeginCreate here would panic via the app illegal-transition hook.
+	// The submit-time account check holds the first Enter; the confirming Enter
+	// is the one that must not re-raise the op.
 	assert.NotPanics(t, func() {
+		_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+		deliver(t, h, drainCmd(t, cmd, time.Second))
 		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 	})
 
@@ -603,14 +615,21 @@ func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 	h := activeProjectHome(t)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	_, _ = h.startNewInstance()
+	_, openCmd := h.startNewInstance()
+	// The form-open account preselect's reply lands while the user types;
+	// deliver it so the first Enter re-asks rather than arming a reply that
+	// never comes (#4893).
+	deliver(t, h, drainCmd(t, openCmd, time.Second))
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
 	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance must generate a suggested name")
 	placeholder := h.namingPlaceholder
 
-	// Enter on the untouched field.
+	// Enter on the untouched field: the first press re-checks the displayed
+	// account (#4893); the confirming Enter adopts the placeholder and submits.
+	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, h, drainCmd(t, cmd, time.Second))
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Nil(t, h.namingInstance, "an empty submit with a placeholder submits, it does not error")
@@ -632,13 +651,20 @@ func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
 		return errors.New("Claude Code is not installed or not on PATH")
 	}))
 
-	_, _ = h.startNewInstance()
+	_, openCmd := h.startNewInstance()
+	// Deliver the form-open account preselect's reply so the first Enter
+	// re-asks rather than arming a reply that never comes (#4893).
+	deliver(t, h, drainCmd(t, openCmd, time.Second))
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the field starts empty")
 	require.NotEmpty(t, h.namingPlaceholder)
 
-	// Enter on the untouched field: the placeholder resolves, but preflight FAILS.
+	// Enter on the untouched field: the first press re-checks the displayed
+	// account (#4893); the confirming Enter resolves the placeholder and
+	// preflight FAILS.
+	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, h, drainCmd(t, cmd, time.Second))
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateNew, h.state, "a failed gate keeps the naming flow open")

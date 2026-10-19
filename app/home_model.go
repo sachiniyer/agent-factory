@@ -493,6 +493,12 @@ type home struct {
 	// against the live answer. A later reply applying a different name
 	// un-verifies the display until the next check (#4893 review).
 	accountVerifiedFor string
+	// accountVerified marks that a submit-armed verify reply actually landed
+	// for this form — accountVerifiedFor="" cannot say it, since "" means
+	// both "verified ambient" and "never checked" (#4893 review). Without it
+	// an untouched ambient display would skip re-verification and "" would
+	// resolve a default_accounts value written while the form sat open.
+	accountVerified bool
 	// accountLookupPending marks an account-default request still in flight —
 	// the preselect at form open, the refetch a program correction launches,
 	// or the verify an implicit Enter armed. While it is set the account

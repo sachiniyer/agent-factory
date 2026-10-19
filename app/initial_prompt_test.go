@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -89,6 +90,7 @@ func TestNamingFormPromptReachesSessionStartRequest(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	startNaming(t, h, "fix-flaky-test")
 
 	// Open the initial-prompt field, type a prompt, close it, submit the form.
@@ -102,7 +104,7 @@ func TestNamingFormPromptReachesSessionStartRequest(t *testing.T) {
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateNew, h.state, "tab must close the field back to naming")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Equal(t, prompt, got.Prompt,
 		"the typed prompt must ride the sessionStartRequest to the daemon")
@@ -120,9 +122,10 @@ func TestNamingFormWithoutPromptSendsEmpty(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	startNaming(t, h, "no-prompt")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Empty(t, got.Prompt, "an untouched prompt field must send no prompt")
 	assert.Equal(t, "no-prompt", got.Title)
@@ -145,7 +148,7 @@ func TestInitialPromptFieldKeepsEnterForNewlines(t *testing.T) {
 		"enter inside the prompt field must insert a newline, not close the field")
 	typeRunes(t, h, "second line")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Equal(t, "first line\nsecond line", got.Prompt,
 		"both lines of a multi-line prompt must survive to the request")
@@ -174,7 +177,7 @@ func TestInitialPromptFieldSurvivesAMultiLinePaste(t *testing.T) {
 		"no part of the paste may leak into the title")
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	// Line structure survives; the tabs arrive as four spaces each. That is
 	// bubbles' textarea sanitizing its input (runeutil.NewSanitizer defaults to
@@ -209,7 +212,7 @@ func TestInitialPromptFieldReopensWithItsText(t *testing.T) {
 
 	typeRunes(t, h, " carefully")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
 	assert.Equal(t, "review the diff carefully", got.Prompt)
 }
@@ -236,14 +239,19 @@ func TestInitialPromptDoesNotLeakIntoNextCreate(t *testing.T) {
 			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
 			typeRunes(t, h, "prompt for the first session")
 			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
-			pressFormKey(t, h, tc.end)
+			if tc.end.Type == tea.KeyEnter {
+				// A submit re-checks the displayed account first (#4893).
+				submitVerifiedForm(t, h)
+			} else {
+				pressFormKey(t, h, tc.end)
+			}
 			require.Empty(t, h.pendingPrompt,
 				"leaving the naming form must clear the pending prompt")
 
 			// The next create submits without ever opening the field.
 			*got = sessionStartRequest{}
 			startNaming(t, h, "second")
-			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+			submitVerifiedForm(t, h)
 
 			assert.Empty(t, got.Prompt,
 				"the previous create's prompt must not ride the next session's request")

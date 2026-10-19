@@ -46,7 +46,7 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	pickBackend(t, h, "docker")
 	assert.Equal(t, "docker", h.pendingBackend)
 	assert.Equal(t, stateNew, h.state)
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 	assert.Equal(t, "choose-backend", got.Title)
 	assert.Equal(t, "docker", got.Backend)
 }

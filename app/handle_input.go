@@ -48,6 +48,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -258,68 +259,91 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				localProgramVerified = true
 			}
-			// The displayed account is the same kind of stale cache: the
-			// preselect arrived from a default_accounts read at form open, and
-			// "" sends no account at all — the daemon resolves the LIVE default
-			// at create. Re-check before the submit goes out through the same
-			// async fetch that seeded the field (#4893 review). A display the
-			// last verify reply left unchanged — accountVerifiedFor — was just
-			// reviewed and may submit; a CHOSEN pair never reaches here (it
-			// pinned the program concrete). The in-flight half is the gap the
-			// earlier draft left: a cleared field with a fetch still out is
-			// just as unverified — the reply may carry a named default.
-			if !m.pendingAccountChosen &&
-				(m.accountLookupPending || m.accountLookupFailed ||
-					(m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
-				switch {
-				case m.accountVerifyPending, m.accountLookupFailed:
-					// An earlier verify's answer is still out — or the last
-					// read failed, leaving the display unsettled — so re-fire
-					// and keep holding (#4893 review). handleAccountDefault
-					// clears the flags on the reply.
-					verify := m.fetchAccountDefault(instance, m.pendingProgram)
-					if verify == nil {
-						// The program lost its registry mid-verify — there is
-						// nothing left to check the display against.
-						m.accountVerifyPending = false
-						m.accountLookupFailed = false
-						m.clearPendingAccount()
-						break
-					}
+		}
+		// The displayed account is the same kind of stale cache: the preselect
+		// arrived from a default_accounts read at form open, and "" sends no
+		// account at all — the daemon resolves the LIVE default at create for
+		// EITHER wire program, so this gate runs whenever the account is
+		// unchosen, concrete pick or implicit (#4893 review). accountVerified
+		// marks that a submit-armed verify reply landed for this form —
+		// without it an untouched ambient display is indistinguishable from a
+		// verified one, and "" would resolve a default_accounts value written
+		// while the form sat open. A CHOSEN pair never reaches here (it
+		// pinned the program concrete). The in-flight and failed halves are
+		// the gaps the earlier drafts left: a cleared field with a fetch
+		// still out or dead is just as unverified — the reply may carry a
+		// named default.
+		if !m.pendingAccountChosen &&
+			(m.accountLookupPending || m.accountLookupFailed || !m.accountVerified ||
+				(m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
+			switch {
+			case m.accountVerifyPending, m.accountLookupFailed:
+				// An earlier verify's answer is still out — or the last
+				// read failed, leaving the display unsettled — so re-fire
+				// and keep holding (#4893 review). handleAccountDefault
+				// clears the flags on the reply.
+				verify := m.fetchAccountDefault(instance, m.pendingProgram)
+				if verify == nil {
+					// The program lost its registry mid-verify — there is
+					// nothing left to check the display against.
+					m.accountVerifyPending = false
+					m.accountLookupFailed = false
+					m.clearPendingAccount()
+					break
+				}
+				m.accountVerifyPending = true
+				return m, tea.Batch(
+					m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
+					verify,
+				)
+			case m.accountLookupPending:
+				// A fetch is already owed an answer — the form-open
+				// preselect or a program correction's refetch. Arming it
+				// as the verify makes its landed reply the evidence the
+				// display needs, without a second round trip (#4893
+				// review).
+				m.accountVerifyPending = true
+				return m, m.handleNotice(errors.New("still resolving the displayed account — try again in a moment"))
+			default:
+				verify := m.fetchAccountDefault(instance, m.pendingProgram)
+				if verify == nil {
+					// The resolved program has no account registry to
+					// verify against; a name it cannot have must not keep
+					// displaying.
+					m.clearPendingAccount()
+				} else {
 					m.accountVerifyPending = true
 					return m, tea.Batch(
-						m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
+						m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
 						verify,
 					)
-				case m.accountLookupPending:
-					// A fetch is already owed an answer — the form-open
-					// preselect or a program correction's refetch. Arming it
-					// as the verify makes its landed reply the evidence the
-					// display needs, without a second round trip (#4893
-					// review).
-					m.accountVerifyPending = true
-					return m, m.handleNotice(errors.New("still resolving the displayed account — try again in a moment"))
-				default:
-					verify := m.fetchAccountDefault(instance, m.pendingProgram)
-					if verify == nil {
-						// The resolved program has no account registry to
-						// verify against; a name it cannot have must not keep
-						// displaying.
-						m.clearPendingAccount()
-					} else {
-						m.accountVerifyPending = true
-						return m, tea.Batch(
-							m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
-							verify,
-						)
-					}
 				}
 			}
 		}
 
+		// The wire program is the value the request actually carries: the
+		// verified display when a gate just proved it, "" only when nothing
+		// verified (a remote submit that could not re-check falls back to
+		// the daemon's own resolution — the gates above already refused the
+		// provably-stale cases) — and preflight must see this same value:
+		// re-resolving default_program inside preflight could check a value
+		// that moved AFTER the gate verified the display (#4893 review).
+		wireProgram := sendProgram
+		displayVerified := localProgramVerified ||
+			(isRemoteTarget() && m.remoteDefaultVerifiedFor != "" &&
+				m.pendingProgram == m.remoteDefaultVerifiedFor)
+		if wireProgram == "" && displayVerified {
+			// Either side's verification — the synchronous local re-read or
+			// the remote re-query reply — proved the display; pin it so a
+			// default that moves between the check and the daemon's own
+			// resolution cannot launch an agent the form never showed
+			// (#4893 review).
+			wireProgram = m.pendingProgram
+		}
+
 		// preflightSessionCreate reads only the backend/program, not the title, so it
 		// runs before the title is committed.
-		if err := m.preflightSessionCreate(); err != nil {
+		if err := m.preflightSessionCreate(wireProgram); err != nil {
 			return m, m.handleError(err)
 		}
 
@@ -385,25 +409,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// for whatever the moved default is (#4889 review).
 		programChosen := m.pendingProgramChosen || !m.programFollowsConfig
 		accountChosen := m.pendingAccountChosen
-		// A remote implicit submit whose display just verified carries the
-		// verified program CONCRETELY: between the landed re-query and this
-		// wire, default_program can still move — "" would resolve a value the
-		// form never showed (#4893 review). The verified display is the only
-		// honest program the request can name. ProgramChosen stays false — a
-		// failed create still restores config-following — and an unverified
-		// display can never reach here: the gate above held it.
-		wireProgram := sendProgram
-		displayVerified := localProgramVerified ||
-			(isRemoteTarget() && m.remoteDefaultVerifiedFor != "" &&
-				m.pendingProgram == m.remoteDefaultVerifiedFor)
-		if wireProgram == "" && displayVerified {
-			// Either side's verification — the synchronous local re-read or
-			// the remote re-query reply — proved the display; pin it so a
-			// default that moves between the check and the daemon's own
-			// resolution cannot launch an agent the form never showed
-			// (#4893 review).
-			wireProgram = m.pendingProgram
-		}
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -430,6 +435,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
@@ -590,6 +596,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
 		m.accountLookupFailed = false
+		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -646,6 +653,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.accountVerifiedFor = ""
 	m.accountLookupPending = false
 	m.accountLookupFailed = false
+	m.accountVerified = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {

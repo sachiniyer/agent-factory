@@ -84,6 +84,10 @@ func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 	require.Equal(t, "work", h.pendingAccount,
 		"the project's configured account must be preselected, not applied invisibly by the daemon")
 
+	// The unchosen preselect verifies at submit: the first Enter refires the
+	// lookup, its reply stamps the verified display, and the confirming Enter
+	// sends it (#4893 review).
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	require.True(t, submitNaming(t, h))
 	assert.Equal(t, "work", got.Account,
 		"the preselected account must be SENT, so the daemon's answer can be checked against what the user saw")

@@ -284,6 +284,20 @@ func isActiveStatus(status session.Status) bool {
 	return status == session.Running || status == session.Ready
 }
 
+// confirmNamingSubmit performs the two-stage naming submit: the first Enter
+// re-checks the displayed account against the daemon's live answer (#4893);
+// the real tea loop delivers that reply, and the confirming Enter then
+// releases the wire.
+func (eh *e2eHarness) confirmNamingSubmit() {
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	eh.waitUntil(e2eAsyncTimeout, "submit-time account check answered", func() bool {
+		var verified bool
+		eh.query(func(h *home) { verified = h.accountVerified })
+		return verified
+	})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+}
+
 // ----------------------------------------------------------------------------
 // #310 — instance creation must not interfere with switching.
 //
@@ -319,8 +333,10 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 		return eh.namingTitle() == "fig"
 	})
 
-	// Commit with Enter. This fires startCmd (which blocks on FakeBackend).
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// Commit with Enter: the submit-time account check holds the first press
+	// until its reply lands, then the confirming Enter fires startCmd (which
+	// blocks on FakeBackend).
+	eh.confirmNamingSubmit()
 	eh.waitUntil(e2eAsyncTimeout, "state returns to stateDefault after Enter", func() bool {
 		return eh.homeState() == stateDefault
 	})
@@ -381,7 +397,7 @@ func TestE2E_310_Success_UserStillOnInstance(t *testing.T) {
 	eh.waitUntil(e2eAsyncTimeout, "title typed", func() bool {
 		return eh.namingTitle() == "bee"
 	})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	eh.confirmNamingSubmit()
 	eh.waitUntil(e2eAsyncTimeout, "stateDefault", func() bool { return eh.homeState() == stateDefault })
 
 	fb := eh.latestBackend(e2eAsyncTimeout)
@@ -421,7 +437,7 @@ func TestE2E_310_Failure_DoesNotTouchOtherInstance(t *testing.T) {
 	eh.waitUntil(e2eAsyncTimeout, "title typed", func() bool {
 		return eh.namingTitle() == "bug"
 	})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	eh.confirmNamingSubmit()
 	eh.waitUntil(e2eAsyncTimeout, "stateDefault", func() bool { return eh.homeState() == stateDefault })
 
 	fb := eh.latestBackend(e2eAsyncTimeout)

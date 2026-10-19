@@ -66,6 +66,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	m.accountVerifiedFor = ""
 	m.accountLookupPending = false
 	m.accountLookupFailed = false
+	m.accountVerified = false
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		if isRemoteTarget() {
 			// pendingProgram already holds the placeholder's remote-resolved

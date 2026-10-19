@@ -304,6 +304,9 @@ func TestRemoteUntouchedSubmitSendsTheVerifiedRemoteDefault(t *testing.T) {
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Empty(t, got.Title, "the first Enter re-checks the remote default")
 	deliver(t, h, msgs)
+	// The unchosen account verifies too (#4893 review): another refire+reply
+	// before the confirming Enter.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramClaude, got.Program,
@@ -343,6 +346,7 @@ func TestProgramPickerPickSubmitsTheChosenProgram(t *testing.T) {
 func TestProgramPickerReselectingTheShownValueIsStillAChoice(t *testing.T) {
 	h := configFollowingHome(t)
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 
 	_, _ = h.startNewInstance()
 	naming := h.namingInstance
@@ -358,7 +362,9 @@ func TestProgramPickerReselectingTheShownValueIsStillAChoice(t *testing.T) {
 	require.Equal(t, seed, h.pendingProgram, "the re-pick changes nothing by value")
 	require.True(t, h.pendingProgramChosen, "but it IS an explicit choice")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// A chosen program still owes the unchosen account its verify (#4893
+	// review): refire+reply, then the confirming Enter submits.
+	submitVerifiedForm(t, h)
 	require.Equal(t, "demo", got.Title)
 	assert.Equal(t, seed, got.Program,
 		"a same-value re-pick submits concretely — only untouched fields go implicit")
@@ -412,6 +418,9 @@ func TestUntouchedNamingFormSubmitsAnImplicitProgram(t *testing.T) {
 	naming := h.namingInstance
 	require.NoError(t, naming.SetTitle("demo"))
 
+	// The ambient account display is unverified too — the first Enter clears
+	// the program gate then refires the account lookup (#4893 review).
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramClaude, got.Program,
@@ -759,6 +768,9 @@ func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
 	// second goes out.
 	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	deliver(t, h, msgs)
+	// The remote program is verified now — the unchosen account verifies too
+	// (#4893 review): one more refire+reply before the wire goes out.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, 0, calls,
@@ -897,6 +909,9 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
 		"the first Enter surfaces the moved default before submitting")
 	deliver(t, h, msgs)
+	// The cleared account verifies at submit too (#4893 review): one more
+	// refire+reply before the wire.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, tmux.ProgramCodex, got.Program,
 		"with the account back at ambient, the retry pins the verified config default (#4893 review)")
@@ -957,6 +972,7 @@ func TestStaleAccountDefaultReplyCannotOverwriteTheRefetch(t *testing.T) {
 func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	// The --program shape: a concrete program with no config following.
 	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
 	require.False(t, h.programFollowsConfig, "precondition: --program pins, it does not follow")
@@ -977,7 +993,7 @@ func TestFailedCreateDraftKeepsALaunchFixedProgram(t *testing.T) {
 	inst.Program = tmux.ProgramGemini
 	inst.Path = h.repoRoot
 	h.sidebar.SelectInstance(inst)
-	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	msgs := submitVerifiedForm(t, h)
 	require.Equal(t, tmux.ProgramGemini, captured.Program,
 		"the launch-fixed program goes out concretely")
 	require.True(t, captured.ProgramChosen,
@@ -1209,7 +1225,9 @@ func TestFailedRemoteDefaultKeepsImplicitSubmitGated(t *testing.T) {
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateSelectProgram, h.state)
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The chosen program submits concretely — the unchosen account verifies
+	// first (#4893 review): refire+reply, then the confirming Enter.
+	submitVerifiedForm(t, h)
 	assert.Equal(t, "demo", got.Title)
 	assert.NotEmpty(t, got.Program, "the explicit pick goes out concretely")
 }
@@ -1247,7 +1265,9 @@ func TestChosenProgramSubmitsWhileRemoteLookupPending(t *testing.T) {
 	// --program way: programFollowsConfig=false keeps pendingProgram
 	// concrete.
 	h.programFollowsConfig = false
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The unchosen account verifies at submit too (#4893 review): refire +
+	// reply, then the confirming Enter.
+	submitVerifiedForm(t, h)
 	assert.Equal(t, "demo", got.Title)
 	assert.NotEmpty(t, got.Program, "the chosen program submits without waiting on the remote answer")
 }
@@ -1428,8 +1448,9 @@ func TestMovedLocalDefaultRequiresAReviewEnter(t *testing.T) {
 	// the review Enter, or the in-flight lookup holds the submit again.
 	deliver(t, h, msgs)
 
-	// The review Enter sees the refreshed value match the resolver — the
-	// second press submits the same default the field now shows.
+	// The review Enter clears the program gate — and the unchosen account
+	// verifies too (#4893 review): one more refire+reply before the wire.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
 	assert.Equal(t, tmux.ProgramCodex, got.Program,

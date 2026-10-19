@@ -129,6 +129,24 @@ func submitNaming(t *testing.T, h *home) bool {
 	return false
 }
 
+// submitVerifiedForm performs the Enter dance an unchosen submit needs once
+// the account gate verifies the display (#4893 review): a press can hold
+// while a verify fetch goes out, so each press's produced replies are
+// delivered back before the next. Asserts the form actually leaves stateNew.
+func submitVerifiedForm(t *testing.T, h *home) []tea.Msg {
+	t.Helper()
+	var msgs []tea.Msg
+	for i := 0; i < 4; i++ {
+		msgs = pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+		if h.state == stateDefault {
+			return msgs
+		}
+		deliver(t, h, msgs)
+	}
+	require.Equal(t, stateDefault, h.state, "the verified submit never completed")
+	return msgs
+}
+
 // TestAccountPickerListsOnlyTheProgramsAgent is constraint 1, and it is the one
 // property that makes this a create-time picker rather than a second copy of the
 // config tab's registry view. An account belongs to ONE agent: offering codex's
@@ -203,7 +221,10 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 	// ambient identity, not on the claude account the program change dropped.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateNew, h.state, "esc closes the field back to the form")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The untouched field verifies at submit (#4893 review) — codex's
+	// registry answers ambient here, so the create goes out on the ambient
+	// identity and the dropped claude account stays dropped.
+	submitVerifiedForm(t, h)
 	assert.Empty(t, got.Account,
 		"an account dropped by a program change must not reach the daemon")
 	assert.Equal(t, "codex", got.Program)
@@ -233,10 +254,11 @@ func TestNamingFormAccountReachesSessionStartRequest(t *testing.T) {
 	assert.Equal(t, "claude", got.Program)
 }
 
-// TestNamingFormWithoutAccountSendsNothing pins the unchanged default: a user who
-// never opens the field submits exactly what they submitted before it existed, and
-// the session runs on the ambient identity. This is the half that keeps "populate
-// Account" from becoming "always send an account".
+// TestNamingFormWithoutAccountSendsNothing pins the ambient half of the
+// untouched-field contract (#4893 review): the first Enter verifies rather
+// than submitting, the registry's answer is ambient so the field never
+// shows an account, and the confirming Enter sends exactly the "" it
+// displayed.
 func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
@@ -244,9 +266,9 @@ func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	stubAccounts(t, twoAgentsWithAccounts(), nil)
 	startNaming(t, h, "ambient-create")
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 
-	assert.Empty(t, got.Account, "an untouched account field must send no account")
+	assert.Empty(t, got.Account, "an untouched account field verified ambient still sends no account")
 	assert.Equal(t, "ambient-create", got.Title)
 }
 
@@ -516,7 +538,14 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 	h.errBox.SetSize(300, 1)
 	_, errorLogs := captureHomeMessageLogs(t)
 	got := recordStartRequest(t)
-	stubAccounts(t, daemon.ListAccountsResponse{}, errors.New("daemon-http.sock: connection refused"))
+	listCalls := 0
+	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		listCalls++
+		if listCalls <= 2 {
+			return daemon.ListAccountsResponse{}, errors.New("daemon-http.sock: connection refused")
+		}
+		return daemon.ListAccountsResponse{}, nil
+	}))
 	startNaming(t, h, "daemon-is-out")
 
 	openAccountField(t, h)
@@ -527,6 +556,16 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 		"the failure must lead with what it blocks, then the daemon's own words")
 	assert.Contains(t, errorLogs.String(), "connection refused")
 
+	// The failed registry leaves the display unverified, so Enter retries
+	// rather than submitting blind (#4893 review) — and the retry keeps
+	// failing while the daemon is out, so the submit holds.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	assert.Empty(t, got.Title, "a failed verify cannot release the submit")
+	assert.True(t, h.accountLookupFailed, "the dead lookup stays owed")
+
+	// The daemon comes back on the next retry: ambient verifies, the review
+	// Enter submits on the ambient identity the field showed.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account, "the create still goes through, on the ambient identity")
 	assert.Equal(t, "daemon-is-out", got.Title)

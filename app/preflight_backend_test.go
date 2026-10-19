@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,6 +121,7 @@ func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
 	recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 
 	prevRemote := isRemoteTarget
 	isRemoteTarget = func() bool { return true }
@@ -138,8 +140,9 @@ func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
 	}))
 
 	startNaming(t, h, "remote-early-return")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	submitVerifiedForm(t, h)
 	require.Equal(t, stateDefault, h.state,
 		"a remote create leaves preflight without touching client-local resolution")
-	assert.Empty(t, h.errBox.FullError())
+	assert.NotContains(t, h.errBox.FullError(), "preflight",
+		"the transient verify notices are gate feedback, not client-local checks")
 }

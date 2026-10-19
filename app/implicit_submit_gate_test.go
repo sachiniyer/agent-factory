@@ -34,6 +34,7 @@ func TestFailedLocalRevalidateRefusesImplicitSubmit(t *testing.T) {
 	}
 	t.Cleanup(func() { resolveConfiguredProgramContext = prev })
 	got := recordStartRequest(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 
 	startNaming(t, h, "demo")
 	require.NoError(t, h.namingInstance.SetTitle("demo"))
@@ -47,6 +48,9 @@ func TestFailedLocalRevalidateRefusesImplicitSubmit(t *testing.T) {
 	resolveConfiguredProgramContext = func(context.Context, string) (string, error) {
 		return tmux.ProgramClaude, nil
 	}
+	// The account display verifies at submit too (#4893 review): the good
+	// re-read Enter still owes the account its refire+reply.
+	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
 }
@@ -209,7 +213,9 @@ func TestRemoteImplicitSubmitReverifiesTheDefault(t *testing.T) {
 		"the moved answer corrected the display before the submit")
 	require.False(t, h.remoteDefaultPending)
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The unchosen account verifies at submit too (#4893 review): the helper
+	// presses and delivers until the gate lets the wire out.
+	submitVerifiedForm(t, h)
 	assert.Equal(t, "demo", got.Title, "the verified display submits")
 	assert.Equal(t, tmux.ProgramCodex, got.Program,
 		"the verified display pins the wire — a late remote move cannot substitute an unseen agent (#4893 review)")
@@ -318,4 +324,132 @@ func TestStaleRemoteReplyCannotSettleARestoredLookup(t *testing.T) {
 		program: tmux.ProgramCodex,
 	})
 	require.False(t, h.remoteDefaultPending, "the current reply lifts the gate")
+}
+
+// TestConcreteProgramStillVerifiesTheUnchosenAccount pins the #4893 review
+// gap that let a concrete program skip the account gate entirely: the check
+// lived inside `if sendProgram == ""`, so a chosen program sent Account=""
+// blind while a default_accounts read was still out — the daemon resolved a
+// named default the form never showed.
+func TestConcreteProgramStillVerifiesTheUnchosenAccount(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	_, asked := stubAccounts(t, withDefaults(map[string]string{"claude": "ops"}), nil)
+	got := recordStartRequest(t)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "demo",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.pendingProgram = "claude" // a concrete program — the picker-pinned case
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title,
+		"a concrete program must not slip the unchosen account past the check")
+	require.True(t, h.accountVerifyPending, "the first Enter armed the account verify")
+	require.NotEmpty(t, *asked, "the verify re-asked the daemon")
+	deliver(t, h, msgs)
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title, "the verified account may now ride the wire")
+	assert.Equal(t, "claude", got.Program)
+	assert.Equal(t, "ops", got.Account,
+		"the live answer the reply left displayed is what the wire carries")
+}
+
+// TestPreflightSeesTheVerifiedWireProgram pins the #4893 review ordering: the
+// verified display pins the wire, and preflight must check THAT value — a
+// preflight that re-resolves cfg.DefaultProgram could test a program that
+// moved after the gate proved the display.
+func TestPreflightSeesTheVerifiedWireProgram(t *testing.T) {
+	h := configFollowingHome(t)
+	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
+	got := recordStartRequest(t)
+
+	// The live re-read still reports the program the field displays — the
+	// gate verifies — while the config a re-resolving preflight would read
+	// has already moved on.
+	prev := resolveConfiguredProgramContext
+	resolveConfiguredProgramContext = func(context.Context, string) (string, error) {
+		return tmux.ProgramClaude, nil
+	}
+	t.Cleanup(func() { resolveConfiguredProgramContext = prev })
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramCodex)
+	require.NoError(t, err)
+
+	var checked string
+	t.Cleanup(SetLocalSessionPreflightForTest(func(_ *config.Config, program string) error {
+		checked = program
+		return nil
+	}))
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram,
+		"precondition: the field displays the program the gate will verify")
+
+	submitVerifiedForm(t, h)
+	require.Equal(t, "demo", got.Title)
+	assert.Equal(t, tmux.ProgramClaude, checked,
+		"preflight checks the pinned wire value, not a default that moved after verification")
+}
+
+// TestAmbientAccountDisplayStillVerifies pins the #4893 review gap on the
+// ambient display: an unchosen "" account is not absence-of-evidence — the
+// daemon's default_accounts may name an identity the form never showed, so
+// even the untouched ambient field must round-trip a verify before "" rides
+// the wire.
+func TestAmbientAccountDisplayStillVerifies(t *testing.T) {
+	h := configFollowingHome(t)
+	calls, _ := stubAccounts(t, daemon.ListAccountsResponse{}, nil)
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	// The form-open preselect answered ambient and settled — no lookup is
+	// owed, yet the display has still never been verified for THIS submit.
+	deliverAccountDefault(t, h, h.namingInstance, "claude")
+	require.Empty(t, h.pendingAccount)
+	require.False(t, h.accountLookupPending)
+	require.False(t, h.accountVerified)
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title,
+		"an ambient display must verify too — a moved default_accounts resolves unseen")
+	require.True(t, h.accountVerifyPending)
+	require.NotEmpty(t, *calls, "the verify asked the daemon even with nothing displayed")
+	deliver(t, h, msgs)
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title, "the verified ambient display submits")
+	assert.Empty(t, got.Account, "ambient stays implicit — honestly, not by skip")
+}
+
+// TestAccountlessProgramRetiresTheLookupMarkers pins the #4893 review wedge:
+// a verify re-fire whose program lost its account registry returns nil — no
+// request exists to answer — so the owed markers must retire with it instead
+// of holding every later Enter for a reply that cannot arrive.
+func TestAccountlessProgramRetiresTheLookupMarkers(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	got := recordStartRequest(t)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "demo",
+		Path:    t.TempDir(),
+		Program: "aider",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.pendingProgram = "aider" // an agent with no account registry
+	h.accountVerifyPending = true
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.False(t, h.accountVerifyPending, "a nil re-fire retires the armed verify")
+	assert.False(t, h.accountLookupPending, "the owed marker retires with it")
+	assert.Equal(t, "demo", got.Title,
+		"nothing holds the submit once there is no registry left to verify against")
 }
