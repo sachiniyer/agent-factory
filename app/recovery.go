@@ -65,6 +65,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	m.accountVerifyPending = false
 	m.accountVerifiedFor = ""
 	m.accountLookupPending = false
+	m.accountLookupFailed = false
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		if isRemoteTarget() {
 			// pendingProgram already holds the placeholder's remote-resolved
@@ -110,7 +111,10 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// submit cleared remoteProgramCatalog, so the program picker would
 			// otherwise fall back to the client-local list. The reply cannot
 			// correct the pair — handleRemoteDefault's chosen guards cover
-			// every path that reaches this branch (#4893 review).
+			// every path that reaches this branch (#4893 review). Re-arm the
+			// pending flag too: while the fetch is out the picker's local-enum
+			// fallback must stay closed (#4893 review).
+			m.remoteDefaultPending = true
 			return true, m.fetchRemoteDefaultProgram(instance)
 		}
 		return true, nil
@@ -122,8 +126,10 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// review).
 	if isRemoteTarget() {
 		// Same catalog need as the account-chosen branch: a remote draft with
-		// only its program chosen still re-arms the picker's remote list
-		// (#4893 review).
+		// only its program chosen still re-arms the picker's remote list —
+		// and the pending flag keeps the local-enum fallback closed while the
+		// answer is out (#4893 review).
+		m.remoteDefaultPending = true
 		return true, tea.Batch(
 			m.fetchAccountDefault(instance, m.pendingProgram),
 			m.fetchRemoteDefaultProgram(instance))

@@ -47,6 +47,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
+		m.accountLookupFailed = false
 		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -262,20 +263,24 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// earlier draft left: a cleared field with a fetch still out is
 			// just as unverified — the reply may carry a named default.
 			if !m.pendingAccountChosen &&
-				(m.accountLookupPending || (m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
+				(m.accountLookupPending || m.accountLookupFailed ||
+					(m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
 				switch {
-				case m.accountVerifyPending:
-					// An earlier verify's answer is still out — re-fire in
-					// case it was dropped, and keep holding (#4893 review).
-					// handleAccountDefault clears both flags on the reply.
+				case m.accountVerifyPending, m.accountLookupFailed:
+					// An earlier verify's answer is still out — or the last
+					// read failed, leaving the display unsettled — so re-fire
+					// and keep holding (#4893 review). handleAccountDefault
+					// clears the flags on the reply.
 					verify := m.fetchAccountDefault(instance, m.pendingProgram)
 					if verify == nil {
 						// The program lost its registry mid-verify — there is
 						// nothing left to check the display against.
 						m.accountVerifyPending = false
+						m.accountLookupFailed = false
 						m.clearPendingAccount()
 						break
 					}
+					m.accountVerifyPending = true
 					return m, tea.Batch(
 						m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
 						verify,
@@ -366,6 +371,18 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// for whatever the moved default is (#4889 review).
 		programChosen := m.pendingProgramChosen || !m.programFollowsConfig
 		accountChosen := m.pendingAccountChosen
+		// A remote implicit submit whose display just verified carries the
+		// verified program CONCRETELY: between the landed re-query and this
+		// wire, default_program can still move — "" would resolve a value the
+		// form never showed (#4893 review). The verified display is the only
+		// honest program the request can name. ProgramChosen stays false — a
+		// failed create still restores config-following — and an unverified
+		// display can never reach here: the gate above held it.
+		wireProgram := sendProgram
+		if wireProgram == "" && isRemoteTarget() &&
+			m.remoteDefaultVerifiedFor != "" && m.pendingProgram == m.remoteDefaultVerifiedFor {
+			wireProgram = m.pendingProgram
+		}
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -391,6 +408,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
+		m.accountLookupFailed = false
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
@@ -406,7 +424,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			req := sessionStartRequest{
 				Title:    instance.Title,
 				RepoPath: instance.Path,
-				Program:  sendProgram,
+				Program:  wireProgram,
 				// The initial prompt typed into the naming form's shift+tab
 				// field (#1936). session_control.go forwards it to the daemon,
 				// which delivers it once the agent is ready — the same path
@@ -550,6 +568,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountVerifyPending = false
 		m.accountVerifiedFor = ""
 		m.accountLookupPending = false
+		m.accountLookupFailed = false
 		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -605,6 +624,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.accountVerifyPending = false
 	m.accountVerifiedFor = ""
 	m.accountLookupPending = false
+	m.accountLookupFailed = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {

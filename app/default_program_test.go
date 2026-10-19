@@ -304,8 +304,8 @@ func TestRemoteUntouchedSubmitLeavesTheProgramImplicit(t *testing.T) {
 	deliver(t, h, msgs)
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, "demo", got.Title)
-	assert.Equal(t, "", got.Program,
-		"an untouched remote submit stays implicit — the remote daemon resolves its own default_program")
+	assert.Equal(t, tmux.ProgramClaude, got.Program,
+		"the verified display goes out concretely — a remote default that moved since the re-query cannot launch an unseen agent (#4893 review)")
 }
 
 // TestProgramPickerPickSubmitsTheChosenProgram: a program the user confirmed in
@@ -761,8 +761,8 @@ func TestPreflightSkipsClientLocalChecksForRemoteTarget(t *testing.T) {
 	assert.Equal(t, 0, calls,
 		"a remote target skips client-local prereqs — the daemon's host owns tmux, PATH and default_program")
 	require.Equal(t, "demo", got.Title)
-	assert.Equal(t, "", got.Program,
-		"the remote submit still goes out implicit for the daemon to resolve")
+	assert.Equal(t, tmux.ProgramClaude, got.Program,
+		"the verified remote default goes out concretely (#4893 review)")
 }
 
 // TestFailedCreateRestoreRefetchesTheDefaultAccount pins the account half of
@@ -1384,7 +1384,8 @@ func TestRemoteChosenDraftRefreshesTheCatalog(t *testing.T) {
 	_, cmd := h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
 	require.True(t, h.pendingProgramChosen, "the chosen program stays pinned")
-	require.False(t, h.remoteDefaultPending, "no implicit wire value to gate — the program is concrete")
+	require.True(t, h.remoteDefaultPending,
+		"the catalog refetch re-arms the picker gate — a concrete submit skips it, the picker's local fallback does not (#4893 review)")
 
 	require.NotNil(t, cmd)
 	for _, msg := range drainCmd(t, cmd, time.Second) {

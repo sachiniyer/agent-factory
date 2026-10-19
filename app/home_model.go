@@ -494,6 +494,13 @@ type home struct {
 	// current reply lands, because "" would let the daemon apply a named
 	// default the form never showed (#4893 review).
 	accountLookupPending bool
+	// accountLookupFailed marks an account-default request that came back
+	// with an error. A failed read is not an answer — the display is still
+	// unsettled — so an implicit submit must hold and retry rather than send
+	// "" to a resolver that may apply a named default the form never showed
+	// (#4893 review). An explicit account or program pick remains the way
+	// out while the service is down.
+	accountLookupFailed bool
 	// remoteDefaultVerifyPending marks a remote ListPrograms answer that an
 	// implicit Enter re-requested rather than the routine form-open fetch:
 	// only that submit-armed reply may stamp remoteDefaultVerifiedFor, so the

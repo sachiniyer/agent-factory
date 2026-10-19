@@ -318,8 +318,10 @@ func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea
 	m.accountDefaultSeq++
 	seq := m.accountDefaultSeq
 	// An answer is now owed to the field: while this is in flight the display
-	// is unsettled, so an implicit submit must hold (#4893 review).
+	// is unsettled, so an implicit submit must hold (#4893 review). A fresh
+	// fetch also supersedes the last read's failure.
 	m.accountLookupPending = true
+	m.accountLookupFailed = false
 	fetch := listAccountsThroughDaemon
 	repoPath := m.repoRoot
 	return func() tea.Msg {
@@ -370,12 +372,17 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	// A current reply — whatever it says — ends the verify window an implicit
-	// submit armed and settles the account display. A stale or wrong-program
-	// reply was dropped above and can clear neither; the next Enter re-fires
-	// instead of trapping (#4893 review).
+	// submit armed. A stale or wrong-program reply was dropped above and can
+	// clear neither; the next Enter re-fires instead of trapping (#4893
+	// review). A FAILED read is not an answer: the display is still
+	// unsettled, so the lookup stays owed — accountLookupFailed keeps an
+	// implicit Enter holding and retrying rather than letting "" reach a
+	// resolver that may apply a named default the form never showed. An
+	// explicit account or program pick remains the way out (#4893 review).
 	wasVerify := m.accountVerifyPending
 	m.accountVerifyPending = false
 	m.accountLookupPending = false
+	m.accountLookupFailed = msg.err != nil
 	if msg.err != nil || m.pendingAccountChosen {
 		return m, nil
 	}
@@ -610,6 +617,7 @@ func (m *home) clearPendingAccount() {
 	m.pendingAccount = ambientAccount
 	m.pendingAccountChosen = false
 	m.accountVerifiedFor = ambientAccount
+	m.accountLookupFailed = false
 	m.menu.SetNamingAccount(false)
 }
 

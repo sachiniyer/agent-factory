@@ -211,7 +211,8 @@ func TestRemoteImplicitSubmitReverifiesTheDefault(t *testing.T) {
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title, "the verified display submits")
-	assert.Empty(t, got.Program, "still implicit — now resolving the value the field shows")
+	assert.Equal(t, tmux.ProgramCodex, got.Program,
+		"the verified display pins the wire — a late remote move cannot substitute an unseen agent (#4893 review)")
 }
 
 // TestRemoteProgramPickerWaitsForTheCatalog pins the #4893 review finding on
@@ -237,4 +238,48 @@ func TestRemoteProgramPickerWaitsForTheCatalog(t *testing.T) {
 	assert.Equal(t, stateNew, h.state,
 		"the picker must not open on the local enum while the remote catalog is pending")
 	assert.Nil(t, h.selectionOverlay)
+}
+
+// TestFailedAccountLookupStaysOwed is the error half of the in-flight gate
+// (#4893 review): a FAILED account read is not an answer — it leaves the
+// display unsettled, so the lookup stays owed. The next Enter re-asks, and
+// only a good reply lets the implicit submit through; an explicit pick
+// remains the way out while the service is down.
+func TestFailedAccountLookupStaysOwed(t *testing.T) {
+	h := configFollowingHome(t)
+	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{Defaults: map[string]string{"claude": "ops"}}, nil
+	}))
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	h.namingInstance.Program = ""
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+
+	// A lookup is out and its answer arrives FAILED: the display is still
+	// unsettled — the read settled into a failure the next Enter must retry
+	// rather than a pending flag nothing will ever answer.
+	h.accountLookupPending = true
+	m, _ := h.handleAccountDefault(accountDefaultMsg{
+		naming:  h.namingInstance,
+		seq:     h.accountDefaultSeq,
+		agent:   tmux.ProgramClaude,
+		program: tmux.ProgramClaude,
+		err:     errors.New("daemon unreachable"),
+	})
+	h = m.(*home)
+	require.False(t, h.accountLookupPending, "the dead fetch is not in flight")
+	require.True(t, h.accountLookupFailed, "a failed read leaves the lookup owed")
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "an unverified display cannot submit implicitly")
+	require.True(t, h.accountVerifyPending, "the held Enter refired the lookup")
+
+	// The retry lands a real answer — the verified display then submits.
+	deliver(t, h, msgs)
+	require.Equal(t, "ops", h.pendingAccount, "the retry's answer applied")
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title)
+	assert.Empty(t, got.Account,
+		"the submit stays implicit — an empty wire resolves the same verified default the field shows")
 }
