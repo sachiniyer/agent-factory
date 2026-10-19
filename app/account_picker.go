@@ -177,8 +177,14 @@ func (c accountChoice) item() string {
 type accountRegistryMsg struct {
 	naming *session.Instance
 	agent  string
-	resp   daemon.ListAccountsResponse
-	err    error
+	// program is the form's program when the fetch was issued. It is set
+	// whenever the LOCAL classifier could not resolve an agent for it — a
+	// remote-only program this client's enum lacks — so the handler can take
+	// the agent from the response's resolved_agents, the daemon's own
+	// program→agent map, instead of the local one (#4893 review).
+	program string
+	resp    daemon.ListAccountsResponse
+	err     error
 }
 
 // accountDefaultMsg carries the same fetched registry back for the PRESELECTION
@@ -189,6 +195,11 @@ type accountRegistryMsg struct {
 type accountDefaultMsg struct {
 	naming *session.Instance
 	agent  string
+	// program is the program the fetch was issued for — set whenever the local
+	// classifier could not name its agent (remote-only programs), so the
+	// handler fences on the program and reads the agent from resolved_agents
+	// (#4893 review).
+	program string
 	// seq is the fetch's place in the per-model issuance order: a second fetch
 	// (a program change, a failed-create restore) invalidates every earlier
 	// reply, and the oldest of two in-flight answers must not arrive last and
@@ -249,16 +260,20 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 	// `af sessions create --account` validates against (api/sessions.go), so the
 	// picker and the create cannot disagree about which registry a program uses.
 	agent := sessionenv.AgentForCommand(m.pendingProgram)
-	if agent == "" {
+	if agent == "" && !isRemoteTarget() {
 		return m, m.handleNotice(fmt.Errorf(
 			"af cannot tell which agent %q runs as, so it has no account registry to offer for it",
 			m.pendingProgram))
 	}
+	// agent=="" under a remote target names a program this client's enum lacks:
+	// still ask — the daemon's resolved_agents in the answer says whether the
+	// program carries an account registry (#4893 review).
 	fetch := listAccountsThroughDaemon
 	repoPath := m.repoRoot
+	program := m.pendingProgram
 	return m, func() tea.Msg {
 		resp, err := fetch("", repoPath)
-		return accountRegistryMsg{naming: naming, agent: agent, resp: resp, err: err}
+		return accountRegistryMsg{naming: naming, agent: agent, program: program, resp: resp, err: err}
 	}
 }
 
@@ -275,8 +290,12 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 // extra round trip's worth of new code, and the answer includes the registry — which
 // is what lets the picker mark the default row and offer it even when it names an
 // account the registry does not list.
-func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.Cmd {
-	if naming == nil || agent == "" {
+func (m *home) fetchAccountDefault(naming *session.Instance, program string) tea.Cmd {
+	if naming == nil || program == "" {
+		return nil
+	}
+	agent := sessionenv.AgentForCommand(program)
+	if agent == "" && !isRemoteTarget() {
 		return nil
 	}
 	// An agent with no credential-root variable can never be scoped to an account,
@@ -285,8 +304,15 @@ func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.C
 	// empty. The account FIELD still asks (openAccountPicker), because "this agent
 	// has no account registry" is something a user who pressed ctrl+o has to be
 	// told, and only the daemon's roster can say it.
-	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
-		return nil
+	//
+	// A remote target skips BOTH shortcuts: the roster and resolved_agents in the
+	// answer are the daemon's, and a newer daemon can register an agent this
+	// client's enum does not know — or hold accounts for one this client's
+	// classifier calls accountless (#4893 review).
+	if agent != "" && !isRemoteTarget() {
+		if _, ok := sessionenv.SupportsAccounts(agent); !ok {
+			return nil
+		}
 	}
 	m.accountDefaultSeq++
 	seq := m.accountDefaultSeq
@@ -294,7 +320,7 @@ func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.C
 	repoPath := m.repoRoot
 	return func() tea.Msg {
 		resp, err := fetch("", repoPath)
-		return accountDefaultMsg{naming: naming, agent: agent, seq: seq, resp: resp, err: err}
+		return accountDefaultMsg{naming: naming, agent: agent, program: program, seq: seq, resp: resp, err: err}
 	}
 }
 
@@ -329,7 +355,14 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		// overwrite the fresher preselection (#4889 review).
 		return m, nil
 	}
-	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
+	if msg.program != "" {
+		// Remote-only fetches fence on the program itself: the local enum
+		// cannot classify it, so matching programs is the only proof the
+		// answer still describes the field (#4893 review).
+		if m.pendingProgram != msg.program {
+			return m, nil
+		}
+	} else if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
 		return m, nil
 	}
 	if msg.err != nil || m.pendingAccountChosen {
@@ -339,7 +372,18 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	// own rows from a fresh ListAccounts answer, so a second copy here would be a
 	// second source of truth for the same fact, and the two would drift the first
 	// time one of them was refreshed and the other was not.
-	preselect := msg.resp.Defaults[msg.agent]
+	//
+	// agent=="" means the program resolved to nothing locally; the daemon's
+	// resolved_agents — program_overrides applied on ITS host — names which
+	// registry the Defaults map is keyed by (#4893 review).
+	agent := msg.agent
+	if agent == "" {
+		agent = msg.resp.ResolvedAgents[msg.program]
+	}
+	if agent == "" {
+		return m, nil
+	}
+	preselect := msg.resp.Defaults[agent]
 	if preselect == ambientAccount {
 		// An empty fresh answer must clear an unchosen preselect an earlier
 		// reply (or a restored draft's wire value) left behind — otherwise the
@@ -377,7 +421,11 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
-	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
+	if msg.program != "" {
+		if m.pendingProgram != msg.program {
+			return m, nil
+		}
+	} else if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -386,15 +434,27 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 		// we could not read must not cost the user their half-typed create.
 		return m, m.handleError(fmt.Errorf("cannot list accounts for %s: %w", msg.agent, msg.err))
 	}
+	// A program the local classifier could not name gets its agent from the
+	// daemon's resolved_agents — program_overrides applied on the host that
+	// will actually run it (#4893 review).
+	agent := msg.agent
+	if agent == "" {
+		agent = msg.resp.ResolvedAgents[msg.program]
+	}
+	if agent == "" {
+		return m, m.handleNotice(fmt.Errorf(
+			"the daemon does not run %q as an agent with an account registry, so there is nothing to pick for it",
+			msg.program))
+	}
 	// An agent that is not on the daemon's account roster at all has no registry to
 	// offer, and that is a fact about the agent rather than a failure: say so, name
 	// the agents that do, and leave the form alone. The roster is the daemon's —
 	// ListAccountsResponse.Agents is always the FULL one, deliberately not narrowed
 	// by the request — so this stays true the day a fourth agent is verified.
-	if !accountRosterHas(msg.resp.Agents, msg.agent) {
-		return m, m.handleNotice(accountRosterNotice(msg.agent, msg.resp.Agents))
+	if !accountRosterHas(msg.resp.Agents, agent) {
+		return m, m.handleNotice(accountRosterNotice(agent, msg.resp.Agents))
 	}
-	choices := accountChoicesFrom(msg.resp, msg.agent)
+	choices := accountChoicesFrom(msg.resp, agent)
 	if len(choices) == 1 {
 		// Only the ambient row: this agent supports accounts but none is registered
 		// on the daemon host yet. An empty-but-for-one-row modal answers nothing, so
@@ -402,7 +462,7 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 		return m, m.handleNotice(fmt.Errorf(
 			"no %s accounts are registered on the daemon host yet — register one in the config tab (%s) "+
 				"or with `af accounts add %s <name>`",
-			msg.agent, helpKey(keys.KeyConfigEditor), msg.agent))
+			agent, helpKey(keys.KeyConfigEditor), agent))
 	}
 
 	selected := 0
@@ -420,7 +480,7 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	// The title names the agent, so the one property a create-time picker owes the
 	// user — that this list is scoped to the program on the form — is visible
 	// rather than implied.
-	m.selectionOverlay = overlay.NewSelectionOverlay(fmt.Sprintf("Select %s account", msg.agent), items)
+	m.selectionOverlay = overlay.NewSelectionOverlay(fmt.Sprintf("Select %s account", agent), items)
 	m.selectionOverlay.SetSelectedIndex(selected)
 	m.layoutSelectionOverlay()
 	m.state = stateSelectAccount

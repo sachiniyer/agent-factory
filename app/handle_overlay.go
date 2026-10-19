@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -56,7 +55,7 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// ask again rather than leaving the field on the ambient identity
 				// (#3386). clearPendingAccount above already dropped the old agent's
 				// pick AND its chosen flag, so the answer is free to land.
-				return m, m.fetchAccountDefault(m.namingInstance, sessionenv.AgentForCommand(picked))
+				return m, m.fetchAccountDefault(m.namingInstance, picked)
 			}
 			return m, nil
 		}

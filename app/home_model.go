@@ -464,6 +464,11 @@ type home struct {
 	// daemon's resolved default corrects the field would create a program the
 	// user never saw (#4889 review).
 	remoteDefaultPending bool
+	// remoteDefaultFailed marks a remote lookup that ANSWERED unusably — a
+	// transport error or an empty default — where the gate above can no longer
+	// say "try again in a moment": no retry is coming, so the form must ask the
+	// user for an explicit program instead of sending "" blind (#4893 review).
+	remoteDefaultFailed bool
 	// remoteProgramCatalog is the program list the remote daemon reported,
 	// which the program picker offers instead of the local
 	// tmux.SupportedPrograms — a newer daemon can support agents this client
