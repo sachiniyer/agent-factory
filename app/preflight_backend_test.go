@@ -9,7 +9,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,15 +62,12 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			h.repoRoot = repoDeclaringBackend(t, tc.repoBackend)
 			startNaming(t, h, "repo-declared-backend")
 
-			// The first Enter arms the submit-time account check (#4893); the
-			// confirming press reaches preflight. A refusal ends in a transient
-			// notice whose cmd is a timer, so the refused leg does not wait on
-			// the press's cmd (pressExpectingNotice).
+			// A refusal ends in a transient notice whose cmd is a timer, so the
+			// refused leg does not wait on the press's cmd (pressExpectingNotice).
 			if tc.wantRefused {
-				deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 				pressExpectingNotice(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			} else {
-				submitVerifiedForm(t, h)
+				pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			}
 
 			if tc.wantRefused {
@@ -83,8 +79,7 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			require.Equal(t, stateDefault, h.state,
 				"a repo that declares a sandbox backend must not be refused for a missing local agent")
 			assert.Empty(t, h.errBox.FullError(),
-				"nothing about the local agent applies to a session that runs off-box — "+
-					"the submit retracts the account-check notice it consumed (#4893 review)")
+				"nothing about the local agent applies to a session that runs off-box")
 			assert.Empty(t, got.Backend,
 				"an untouched backend field still sends nothing — the repo key decides, as it always did")
 		})
@@ -108,7 +103,7 @@ func TestNamingPreflightDoesNotRefuseABackendItCannotResolve(t *testing.T) {
 	startNaming(t, h, "future-backend")
 	h.pendingBackend = "moonbase"
 
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	require.Equal(t, stateDefault, h.state,
 		"a backend only the daemon knows about must still submit")
@@ -125,7 +120,6 @@ func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
 	recordStartRequest(t)
-	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 
 	prevRemote := isRemoteTarget
 	isRemoteTarget = func() bool { return true }
@@ -144,9 +138,8 @@ func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
 	}))
 
 	startNaming(t, h, "remote-early-return")
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateDefault, h.state,
 		"a remote create leaves preflight without touching client-local resolution")
-	assert.Empty(t, h.errBox.FullError(),
-		"the submit retracts the verify notice it consumed — nothing is left on the bar")
+	assert.Empty(t, h.errBox.FullError())
 }

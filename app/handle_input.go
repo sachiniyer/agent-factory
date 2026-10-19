@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -9,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/namegen"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -41,19 +41,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
-		m.remoteDefaultFailed = false
-		m.remoteDefaultVerifyPending = false
-		m.remoteDefaultVerifiedFor = ""
-		m.accountVerifyPending = false
-		m.accountVerifiedFor = ""
-		m.accountLookupPending = false
-		m.accountLookupFailed = false
-		m.accountRouteMissing = false
-		m.accountVerified = false
 		m.remoteProgramCatalog = nil
-		// Same retraction as the submit tail: a gate notice still on the bar
-		// asks for an Enter the closed form can no longer take (#4893 review).
-		m.errBox.Clear()
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -79,7 +67,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(""); err != nil {
 			return m, m.handleError(err)
 		}
-		m.namingRev++
 		return m, nil
 	}
 	switch msg.Type {
@@ -173,197 +160,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				))
 			}
 		}
-		sendProgram := m.sendProgramForCreate()
-		// localProgramVerified records that THIS Enter's synchronous re-read
-		// matched the displayed program — the only proof an implicit wire ""
-		// would resolve what the field showed (#4893 review). The verified
-		// display pins the wire below, like the remote half does.
-		localProgramVerified := false
-		// An IMPLICIT wire program ("" — the daemon resolves default_program at
-		// create) carries honesty obligations a concrete program does not: the
-		// field must have shown what "" will resolve to. These gates therefore
-		// apply only to the empty wire value — a launch --program, a picker
-		// choice, or a chosen named account submits its concrete program no
-		// matter what the remote lookup is doing — and all of them run BEFORE
-		// preflight and SetTitle/instance.Program: before SetTitle so a refused
-		// submit leaves the form exactly as the user left it, and before
-		// preflight so a moved default updates the field before any check can
-		// refuse on a program the form never showed (#4893 review).
-		if sendProgram == "" {
-			switch {
-			case m.remoteDefaultPending:
-				// The remote answer is still out. If this Enter is the first
-				// unverified one, arm the in-flight fetch as the submit's
-				// verification so its landed reply stamps the display (#4893
-				// review).
-				if m.pendingProgram != m.remoteDefaultVerifiedFor {
-					m.remoteDefaultVerifyPending = true
-				}
-				return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
-			case m.remoteDefaultFailed:
-				// A failed or empty answer must not send a blind "" — but the
-				// failure may be transient. Each Enter re-asks rather than
-				// trapping on an explicit pick (#4893 review).
-				m.remoteDefaultFailed = false
-				m.remoteDefaultPending = true
-				m.remoteDefaultVerifyPending = true
-				return m, tea.Batch(
-					m.handleNotice(errors.New("the remote daemon did not report a default program — retrying the lookup; pick a program explicitly to skip it")),
-					m.fetchRemoteDefaultProgram(instance),
-				)
-			case isRemoteTarget():
-				// The remote default can move under an open form exactly like
-				// the local one — "" resolves the daemon's LIVE value, so the
-				// cached answer from form-open proves nothing at submit time.
-				// Re-query and hold until the submit-armed reply lands (#4893
-				// review); remoteDefaultVerifiedFor records what it showed.
-				if m.pendingProgram != m.remoteDefaultVerifiedFor {
-					m.remoteDefaultPending = true
-					m.remoteDefaultVerifyPending = true
-					return m, tea.Batch(
-						m.handleNotice(errors.New("re-checking the remote daemon's default program — press Enter to confirm")),
-						m.fetchRemoteDefaultProgram(instance),
-					)
-				}
-			default:
-				// The local default may have moved since the field seeded —
-				// another surface can write default_program while the form sits
-				// open. "" resolves the NEW value, so refresh the field and ask
-				// for one more Enter to review the change instead of launching
-				// an agent the form never showed (#4893 review). A failed
-				// re-read REFUSES rather than passing with the stale display:
-				// "" still resolves the live value daemon-side, and an
-				// unverifiable display cannot prove the user saw it (#4893
-				// review). The retry is cheap — the next Enter re-reads.
-				ctx, cancel := context.WithTimeout(m.ctx, localDefaultProgramTimeout)
-				resolved, err := resolveConfiguredProgramContext(ctx, m.repoRoot)
-				cancel()
-				if err != nil || resolved == "" {
-					return m, m.handleNotice(errors.New("the configured default program could not be re-read — press Enter to retry, or pick a program explicitly"))
-				}
-				if resolved != m.pendingProgram {
-					m.pendingProgram = resolved
-					m.program = resolved
-					m.namingInstance.Program = resolved
-					m.namingRev++
-					// Same correction the remote handler applies: every account
-					// state the OLD agent produced — preselect, pick, an open
-					// account picker — belongs to a registry the resolved agent
-					// does not share, so clear it and re-ask for the new one
-					// (#4893 review).
-					m.clearPendingAccount()
-					if m.state == stateSelectAccount && m.selectionOverlay != nil {
-						m.selectionOverlay = nil
-						m.accountPickerChoices = nil
-						m.state = stateNew
-						m.menu.SetState(ui.StateNewInstance)
-					}
-					return m, tea.Batch(
-						m.handleNotice(fmt.Errorf("the configured default program moved to %s — review it and press Enter again", resolved)),
-						m.fetchAccountDefault(instance, resolved),
-					)
-				}
-				localProgramVerified = true
-			}
-		}
-		// The displayed account is the same kind of stale cache: the preselect
-		// arrived from a default_accounts read at form open, and "" sends no
-		// account at all — the daemon resolves the LIVE default at create for
-		// EITHER wire program, so this gate runs whenever the account is
-		// unchosen, concrete pick or implicit (#4893 review). accountVerified
-		// marks that a submit-armed verify reply landed for this form —
-		// without it an untouched ambient display is indistinguishable from a
-		// verified one, and "" would resolve a default_accounts value written
-		// while the form sat open. A CHOSEN pair never reaches here (it
-		// pinned the program concrete). The in-flight and failed halves are
-		// the gaps the earlier drafts left: a cleared field with a fetch
-		// still out or dead is just as unverified — the reply may carry a
-		// named default.
-		if !m.pendingAccountChosen &&
-			(m.accountLookupPending || m.accountLookupFailed || !m.accountVerified ||
-				(m.pendingAccount != "" && m.pendingAccount != m.accountVerifiedFor)) {
-			switch {
-			case m.accountVerifyPending:
-				// A verify is already in flight — another Enter waits for the
-				// answer that is coming rather than restarting the lookup and
-				// orphaning it: each re-fire bumps the sequence, so the
-				// outstanding reply would land stale and the one allowed to
-				// settle the form would be a request this press just started
-				// — on a slow daemon, key-repeat piles up concurrent lookups
-				// and never lets one answer (#4893 review).
-				return m, m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment"))
-			case m.accountLookupFailed:
-				// The last read failed, leaving the display unsettled — so
-				// re-fire and keep holding (#4893 review).
-				// handleAccountDefault clears the flags on the reply.
-				verify := m.fetchAccountDefault(instance, m.pendingProgram)
-				if verify == nil {
-					// The program lost its registry mid-verify — there is
-					// nothing left to check the display against.
-					m.accountVerifyPending = false
-					m.accountLookupFailed = false
-					m.clearPendingAccount()
-					break
-				}
-				m.accountVerifyPending = true
-				m.accountVerifyRev = m.namingRev
-				return m, tea.Batch(
-					m.handleNotice(errors.New("retrying the account lookup — press Enter to confirm")),
-					verify,
-				)
-			case m.accountLookupPending:
-				// A fetch is already owed an answer — the form-open
-				// preselect or a program correction's refetch. Arming it
-				// as the verify makes its landed reply the evidence the
-				// display needs, without a second round trip (#4893
-				// review).
-				m.accountVerifyPending = true
-				m.accountVerifyRev = m.namingRev
-				return m, m.handleNotice(errors.New("still resolving the displayed account — try again in a moment"))
-			default:
-				verify := m.fetchAccountDefault(instance, m.pendingProgram)
-				if verify == nil {
-					// The resolved program has no account registry to
-					// verify against; a name it cannot have must not keep
-					// displaying.
-					m.clearPendingAccount()
-				} else {
-					m.accountVerifyPending = true
-					m.accountVerifyRev = m.namingRev
-					return m, tea.Batch(
-						m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
-						verify,
-					)
-				}
-			}
-		}
-
-		// The wire program is the value the request actually carries: the
-		// verified display when a gate just proved it, "" only when nothing
-		// verified (a remote submit that could not re-check falls back to
-		// the daemon's own resolution — the gates above already refused the
-		// provably-stale cases) — and preflight must see this same value:
-		// re-resolving default_program inside preflight could check a value
-		// that moved AFTER the gate verified the display (#4893 review).
-		wireProgram := sendProgram
-		displayVerified := localProgramVerified ||
-			(isRemoteTarget() && m.remoteDefaultVerifiedFor != "" &&
-				m.pendingProgram == m.remoteDefaultVerifiedFor)
-		if wireProgram == "" && displayVerified {
-			// Either side's verification — the synchronous local re-read or
-			// the remote re-query reply — proved the display; pin it so a
-			// default that moves between the check and the daemon's own
-			// resolution cannot launch an agent the form never showed
-			// (#4893 review).
-			wireProgram = m.pendingProgram
-		}
-
 		// preflightSessionCreate reads only the backend/program, not the title, so it
 		// runs before the title is committed.
-		if err := m.preflightSessionCreate(wireProgram); err != nil {
+		if err := m.preflightSessionCreate(); err != nil {
 			return m, m.handleError(err)
 		}
-
 		// Every gate passed — commit the resolved title exactly once.
 		//
 		// SetTitle stays on handleError. It performs no input validation: its one
@@ -392,6 +193,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// concrete program. A remote target stays implicit the same way — ""
 		// asks the remote daemon to resolve ITS default_program, the only
 		// default a remote create can honor (#4889 review).
+		// A remote form cannot submit "" while its ListPrograms answer is still
+		// in flight: the daemon would resolve a default the field has not yet
+		// shown (#4889 review).
+		if m.remoteDefaultPending {
+			return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
+		}
+		sendProgram := m.sendProgramForCreate()
 		// The account belongs to one agent's registry, so it must travel with
 		// the program it was chosen or preselected for (#4889 review). When the
 		// program goes out implicitly ("" resolves the live default on the
@@ -405,14 +213,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sendAccount := m.pendingAccount
 		if sendProgram == "" {
 			sendAccount = ""
-			// A named display verified at submit pins the wire exactly like
-			// the verified program: default_accounts can move between the
-			// verify reply and this create, and "" would resolve an identity
-			// the form never showed (#4893 review). A verified-ambient display
-			// has no encoding beyond "", which is honest.
-			if m.pendingAccount == m.accountVerifiedFor {
-				sendAccount = m.accountVerifiedFor
-			}
 		}
 		// The failed-create draft needs the user's CHOICES beside the wire
 		// values the rules above produced: an account-pinned program and a
@@ -445,22 +245,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingAccountChosen = false
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
-		m.remoteDefaultFailed = false
-		m.remoteDefaultVerifyPending = false
-		m.remoteDefaultVerifiedFor = ""
-		m.accountVerifyPending = false
-		m.accountVerifiedFor = ""
-		m.accountLookupPending = false
-		m.accountLookupFailed = false
-		m.accountRouteMissing = false
-		m.accountVerified = false
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
-		// The gate notices all ask for another Enter — retracted rather than
-		// left painted over the sidebar for their remaining timer once the
-		// create actually goes out (#4893 review).
-		m.errBox.Clear()
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
@@ -473,7 +260,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			req := sessionStartRequest{
 				Title:    instance.Title,
 				RepoPath: instance.Path,
-				Program:  wireProgram,
+				Program:  sendProgram,
 				// The initial prompt typed into the naming form's shift+tab
 				// field (#1936). session_control.go forwards it to the daemon,
 				// which delivers it once the agent is ready — the same path
@@ -515,13 +302,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// DAEMON's — it can list agents this client's tmux.SupportedPrograms
 		// lacks, and a resolved default absent from it must still render as the
 		// selected row rather than collapsing the pick onto index 0 (#4889
-		// review). While that answer is still out the local enum is the wrong
-		// menu: a client-only program picked now would be sent concretely to a
-		// daemon that may not support it — hold the picker until the
-		// authoritative catalog lands (#4893 review).
-		if isRemoteTarget() && m.remoteDefaultPending {
-			return m, m.handleNotice(errors.New("still resolving the remote daemon's program catalog — try again in a moment"))
-		}
+		// review).
 		catalog := tmux.SupportedPrograms
 		if isRemoteTarget() && len(m.remoteProgramCatalog) > 0 {
 			catalog = m.remoteProgramCatalog
@@ -581,7 +362,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
-		m.namingRev++
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
 		if len(runes) == 0 {
@@ -590,7 +370,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(string(runes[:len(runes)-1])); err != nil {
 			return m, m.handleError(err)
 		}
-		m.namingRev++
 	case tea.KeySpace:
 		newTitle := instance.Title + " "
 		if runewidth.StringWidth(newTitle) > 32 {
@@ -599,7 +378,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
-		m.namingRev++
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
 		// (#717) — see the ctrl+c branch above for the full rationale.
@@ -614,19 +392,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
-		m.remoteDefaultFailed = false
-		m.remoteDefaultVerifyPending = false
-		m.remoteDefaultVerifiedFor = ""
-		m.accountVerifyPending = false
-		m.accountVerifiedFor = ""
-		m.accountLookupPending = false
-		m.accountLookupFailed = false
-		m.accountRouteMissing = false
-		m.accountVerified = false
 		m.remoteProgramCatalog = nil
-		// Same retraction as the submit tail: a gate notice still on the bar
-		// asks for an Enter the closed form can no longer take (#4893 review).
-		m.errBox.Clear()
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -675,15 +441,6 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingBackend = ""
 	m.pendingProgramChosen = false
 	m.remoteDefaultPending = false
-	m.remoteDefaultFailed = false
-	m.remoteDefaultVerifyPending = false
-	m.remoteDefaultVerifiedFor = ""
-	m.accountVerifyPending = false
-	m.accountVerifiedFor = ""
-	m.accountLookupPending = false
-	m.accountLookupFailed = false
-	m.accountRouteMissing = false
-	m.accountVerified = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {
@@ -741,7 +498,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// create behaves exactly as it did before this key existed — the daemon applies
 	// the same default either way. What the preselection buys is that the user SEES
 	// it and can change it.
-	accountFetch := m.fetchAccountDefault(instance, m.pendingProgram)
+	accountFetch := m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
 	if !isRemoteTarget() {
 		return m, accountFetch
 	}

@@ -13,7 +13,7 @@ var (
 	localPrereqsRequired  = session.LocalPrereqsRequired
 )
 
-func (m *home) preflightSessionCreate(wireProgram string) error {
+func (m *home) preflightSessionCreate() error {
 	// A remote target hosts the session on the daemon's machine — its tmux,
 	// its PATH, its backend resolution, its default_program. Checked FIRST,
 	// before LocalPrereqsRequired resolves the client's repo config: every
@@ -60,15 +60,14 @@ func (m *home) preflightSessionCreate(wireProgram string) error {
 	if err != nil {
 		return err
 	}
-	// Preflight must check the program the wire carries — the caller computes
-	// it once and passes it here (#4893 review). Re-resolving
-	// cfg.DefaultProgram in this second config read could check a value that
-	// moved AFTER the submit gate verified the displayed program: refusing a
-	// valid request or approving a program the wire never sends. The ""
-	// fallback stays only as a safety net — a verified implicit submit pins
-	// its display, so wireProgram is concrete on every path that reaches
-	// here.
-	program := wireProgram
+	// Preflight must check the program the wire carries — the same derivation
+	// the submit path applies (#4889 review). An untouched form sends "" and
+	// the daemon resolves the LIVE default_program at create time, so cfg's
+	// default_program is the program to check; an explicit pick, a launch
+	// --program, or a CHOSEN account instead pins the displayed
+	// pendingProgram, and checking the config value then would refuse a valid
+	// request or approve one whose sent program lacks local prerequisites.
+	program := m.sendProgramForCreate()
 	if program == "" {
 		program = cfg.DefaultProgram
 	}

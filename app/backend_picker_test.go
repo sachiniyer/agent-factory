@@ -98,7 +98,6 @@ func TestNamingFormBackendReachesSessionStartRequest(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
-	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	calls := stubBackends(t, twoUsableBackends(), nil)
 	startNaming(t, h, "in-a-container")
 
@@ -107,7 +106,7 @@ func TestNamingFormBackendReachesSessionStartRequest(t *testing.T) {
 	pickBackend(t, h, "docker")
 	require.Equal(t, stateNew, h.state, "submitting the field returns to naming, not out of the create")
 
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, config.BackendDocker, got.Backend,
 		"the picked backend must ride the sessionStartRequest to the daemon")
@@ -126,11 +125,10 @@ func TestNamingFormWithoutBackendSendsEmpty(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(120, 1)
 	got := recordStartRequest(t)
-	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 	stubBackends(t, twoUsableBackends(), nil)
 	startNaming(t, h, "repo-default")
 
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Empty(t, got.Backend, "an untouched backend field must send no backend")
 	assert.Equal(t, "repo-default", got.Title)
@@ -153,9 +151,8 @@ func TestBackendFieldRepoDefaultRowSendsNoBackend(t *testing.T) {
 	require.Contains(t, h.backendPickerChoices[0].label, "docker",
 		"the repo-default row must name the backend it actually resolves to")
 	pickBackend(t, h, h.backendPickerChoices[0].label)
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
-	require.Equal(t, "explicit-default", got.Title, "the create completed")
 	assert.Empty(t, got.Backend,
 		"the repo-default row must send NO backend, letting the repo config decide")
 }
@@ -188,8 +185,7 @@ func TestBackendPickerRefusesAnUnusableChoice(t *testing.T) {
 	assert.Empty(t, errorLogs.String(),
 		"a designed precondition refusal must not read as an operation failure")
 
-	submitVerifiedForm(t, h)
-	assert.Equal(t, "no-ssh-here", got.Title)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Backend, "a refused choice must not reach the daemon")
 }
 
@@ -317,7 +313,7 @@ func TestBackendPickerOffersWhateverTheDaemonListed(t *testing.T) {
 
 	openBackendField(t, h)
 	pickBackend(t, h, "Moonbase (experimental)")
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, "moonbase", got.Backend,
 		"a backend the TUI has never heard of must still be selectable and sent verbatim")
@@ -339,17 +335,13 @@ func TestBackendPickerSkipsTheLocalAgentPreflight(t *testing.T) {
 	startNaming(t, h, "agentless-host")
 
 	// Precondition: with no backend picked, the local preflight still gates.
-	// The first Enter arms the account check (#4893); the confirming Enter
-	// reaches preflight and its refusal is a timer cmd the press must not
-	// wait on.
-	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
 	pressExpectingNotice(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNew, h.state, "a local create must still fail the local preflight")
 	require.Contains(t, h.errBox.FullError(), "not installed")
 
 	openBackendField(t, h)
 	pickBackend(t, h, "docker")
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateDefault, h.state, "a docker create must not be gated on a local agent binary")
 	assert.Equal(t, config.BackendDocker, got.Backend)
@@ -365,9 +357,6 @@ func TestStaleBackendCatalogNeverOpensAPicker(t *testing.T) {
 		end  func(t *testing.T, h *home)
 	}{
 		{"the form was submitted", func(t *testing.T, h *home) {
-			// A chosen account skips the verify gate, so the single Enter
-			// completes the create and ends the form before the catalog lands.
-			h.pendingAccountChosen = true
 			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 		}},
 		{"the form was cancelled", func(t *testing.T, h *home) {
@@ -443,17 +432,12 @@ func TestBackendDoesNotLeakIntoNextCreate(t *testing.T) {
 			startNaming(t, h, "first")
 			openBackendField(t, h)
 			pickBackend(t, h, "docker")
-			if tc.end.Type == tea.KeyEnter {
-				// A submit re-checks the displayed account first (#4893).
-				submitVerifiedForm(t, h)
-			} else {
-				pressFormKey(t, h, tc.end)
-			}
+			pressFormKey(t, h, tc.end)
 			require.Empty(t, h.pendingBackend, "leaving the naming form must clear the pending backend")
 
 			*got = sessionStartRequest{}
 			startNaming(t, h, "second")
-			submitVerifiedForm(t, h)
+			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 			assert.Empty(t, got.Backend,
 				"the previous create's backend must not ride the next session's request")

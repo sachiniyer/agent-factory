@@ -459,90 +459,16 @@ type home struct {
 	// still pends — and the older reply landing last must not overwrite the
 	// newer answer (#4889 review).
 	accountDefaultSeq int64
-	// remoteDefaultSeq is the issuance counter fetchRemoteDefaultProgram
-	// stamps on each remoteDefaultMsg it launches. A restore re-fires the
-	// lookup for the SAME session.Instance, so the naming pointer alone
-	// cannot fence the earlier reply — it would clear the new lookup's gate
-	// and install its stale catalog (#4893 review).
-	remoteDefaultSeq int64
 	// remoteDefaultPending marks the window between a remote-target form open
 	// (or implicit restore) and the ListPrograms reply: submitting "" before the
 	// daemon's resolved default corrects the field would create a program the
 	// user never saw (#4889 review).
 	remoteDefaultPending bool
-	// remoteDefaultFailed marks a remote lookup that ANSWERED unusably — a
-	// transport error or an empty default — where the gate above can no longer
-	// say "try again in a moment": no retry is coming, so the form must ask the
-	// user for an explicit program instead of sending "" blind (#4893 review).
-	remoteDefaultFailed bool
 	// remoteProgramCatalog is the program list the remote daemon reported,
 	// which the program picker offers instead of the local
 	// tmux.SupportedPrograms — a newer daemon can support agents this client
 	// lacks (#4889 review).
 	remoteProgramCatalog []string
-	// accountVerifyPending marks an implicit submit held back while the
-	// account the field displays is re-checked against the live default. The
-	// preselect arrived asynchronously at form open, so default_accounts may
-	// have moved since; sending "" while the field still shows the stale name
-	// would create an identity the user never saw (#4893 review). Cleared by
-	// the fresh answer's reply, and reset wherever remoteDefaultPending is.
-	accountVerifyPending bool
-	// accountVerifiedFor is the account value the verify reply left on the
-	// field: an implicit Enter may proceed only while the displayed
-	// unchosen account still equals it — a display the user just reviewed
-	// against the live answer. A later reply applying a different name
-	// un-verifies the display until the next check (#4893 review).
-	accountVerifiedFor string
-	// accountVerified marks that a submit-armed verify reply actually landed
-	// for this form — accountVerifiedFor="" cannot say it, since "" means
-	// both "verified ambient" and "never checked" (#4893 review). Without it
-	// an untouched ambient display would skip re-verification and "" would
-	// resolve a default_accounts value written while the form sat open.
-	accountVerified bool
-	// accountLookupPending marks an account-default request still in flight —
-	// the preselect at form open, the refetch a program correction launches,
-	// or the verify an implicit Enter armed. While it is set the account
-	// field's display is unsettled: an implicit submit must hold until a
-	// current reply lands, because "" would let the daemon apply a named
-	// default the form never showed (#4893 review).
-	accountLookupPending bool
-	// accountLookupFailed marks an account-default request that came back
-	// with an error. A failed read is not an answer — the display is still
-	// unsettled — so an implicit submit must hold and retry rather than send
-	// "" to a resolver that may apply a named default the form never showed
-	// (#4893 review). An explicit account or program pick remains the way
-	// out while the service is down.
-	accountLookupFailed bool
-	// accountRouteMissing latches that the daemon predates /v1/ListAccounts:
-	// the lookup can never succeed, so retrying it on every Enter would bar
-	// ALL creates against that daemon — and the picker cannot provide an
-	// escape, it is the same route. The only wire account such a daemon can
-	// produce is ambient, exactly what "" sends, so the verified-ambient
-	// semantics apply without a registry to check (#4893 review).
-	// fetchAccountDefault short-circuits while it is set. Per-form: a daemon
-	// upgrade between creates should be re-probed.
-	accountRouteMissing bool
-	// namingRev counts edits to the values the naming form will submit —
-	// title runes, prompt commits, program/backend/account picks, and
-	// gate-applied program corrections. accountVerifyRev snapshots it when an
-	// implicit Enter arms the account verify; a verified-ambient reply may
-	// auto-submit only while they still match, because that Enter authorized
-	// the form as it then was — an edit in flight means the reply answers
-	// for a form the user already replaced (#4893 review).
-	namingRev        int
-	accountVerifyRev int
-	// remoteDefaultVerifyPending marks a remote ListPrograms answer that an
-	// implicit Enter re-requested rather than the routine form-open fetch:
-	// only that submit-armed reply may stamp remoteDefaultVerifiedFor, so the
-	// verification means "checked at submit", not "checked when the form
-	// opened" (#4893 review).
-	remoteDefaultVerifyPending bool
-	// remoteDefaultVerifiedFor is the remote counterpart of the local re-read
-	// before an implicit wire "": the program the latest submit-armed remote
-	// answer left on the field. A remote default can move under an open form
-	// exactly like the local one, so an implicit Enter may proceed only while
-	// the display still equals it (#4893 review).
-	remoteDefaultVerifiedFor string
 	// programPickerChoices is the option list the open program picker is
 	// showing, held alongside the overlay for the same reason
 	// accountPickerChoices is: a remote catalog cannot be mapped back through

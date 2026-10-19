@@ -98,9 +98,7 @@ func pickAccount(t *testing.T, h *home, label string) {
 
 // selectProgram drives the naming form's program field (tab) to a program by
 // name, which is the only way to change the agent a create runs as mid-form.
-// Returns the pick's produced messages — a program change refires the account
-// fetch, and the caller decides whether that reply lands.
-func selectProgram(t *testing.T, h *home, program string) []tea.Msg {
+func selectProgram(t *testing.T, h *home, program string) {
 	t.Helper()
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateSelectProgram, h.state, "tab during naming must open the program field")
@@ -113,9 +111,8 @@ func selectProgram(t *testing.T, h *home, program string) []tea.Msg {
 	}
 	require.NotEqual(t, -1, idx, "%q is not a supported program", program)
 	h.selectionOverlay.SetSelectedIndex(idx)
-	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNew, h.state, "submitting the program field returns to naming")
-	return msgs
 }
 
 // submitNaming presses Enter and delivers the instanceStartedMsg the create
@@ -130,32 +127,6 @@ func submitNaming(t *testing.T, h *home) bool {
 		}
 	}
 	return false
-}
-
-// submitVerifiedForm performs the Enter dance an unchosen submit needs once
-// the account gate verifies the display (#4893 review): a press can hold
-// while a verify fetch goes out, so each press's produced replies are
-// delivered back before the next. Asserts the form actually closed — the
-// submit clears namingInstance, and the started path can land on either
-// stateDefault or the first-run help overlay, so the field — not the state —
-// is the completion signal.
-func submitVerifiedForm(t *testing.T, h *home) []tea.Msg {
-	t.Helper()
-	var msgs []tea.Msg
-	for i := 0; i < 4; i++ {
-		if h.namingInstance == nil {
-			// A verified ambient reply submits inside deliver (#4893 review):
-			// the create may already have completed before the next press.
-			return msgs
-		}
-		msgs = pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-		if h.namingInstance == nil {
-			return msgs
-		}
-		deliver(t, h, msgs)
-	}
-	require.Nil(t, h.namingInstance, "the verified submit never completed")
-	return msgs
 }
 
 // TestAccountPickerListsOnlyTheProgramsAgent is constraint 1, and it is the one
@@ -216,9 +187,7 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 	pickAccount(t, h, "work")
 	require.Equal(t, "work", h.pendingAccount, "the claude account must attach")
 
-	// The pick refires the account fetch for the new agent — deliver its reply
-	// so the in-flight lookup does not hold the submit (#4893 review).
-	deliver(t, h, selectProgram(t, h, "codex"))
+	selectProgram(t, h, "codex")
 	assert.Empty(t, h.pendingAccount,
 		"changing the program must drop the account: the same name is a different identity in another registry")
 
@@ -234,10 +203,7 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 	// ambient identity, not on the claude account the program change dropped.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateNew, h.state, "esc closes the field back to the form")
-	// The untouched field verifies at submit (#4893 review) — codex's
-	// registry answers ambient here, so the create goes out on the ambient
-	// identity and the dropped claude account stays dropped.
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account,
 		"an account dropped by a program change must not reach the daemon")
 	assert.Equal(t, "codex", got.Program)
@@ -267,11 +233,10 @@ func TestNamingFormAccountReachesSessionStartRequest(t *testing.T) {
 	assert.Equal(t, "claude", got.Program)
 }
 
-// TestNamingFormWithoutAccountSendsNothing pins the ambient half of the
-// untouched-field contract (#4893 review): the first Enter verifies rather
-// than submitting, the registry's answer is ambient so the field never
-// shows an account, and the confirming Enter sends exactly the "" it
-// displayed.
+// TestNamingFormWithoutAccountSendsNothing pins the unchanged default: a user who
+// never opens the field submits exactly what they submitted before it existed, and
+// the session runs on the ambient identity. This is the half that keeps "populate
+// Account" from becoming "always send an account".
 func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
@@ -279,9 +244,9 @@ func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	stubAccounts(t, twoAgentsWithAccounts(), nil)
 	startNaming(t, h, "ambient-create")
 
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
-	assert.Empty(t, got.Account, "an untouched account field verified ambient still sends no account")
+	assert.Empty(t, got.Account, "an untouched account field must send no account")
 	assert.Equal(t, "ambient-create", got.Title)
 }
 
@@ -425,7 +390,7 @@ func TestAccountFieldSaysWhenTheAgentHasNoRegistry(t *testing.T) {
 	info, errorLogs := captureHomeMessageLogs(t)
 	stubAccounts(t, twoAgentsWithAccounts(), nil)
 	startNaming(t, h, "no-registry-here")
-	deliver(t, h, selectProgram(t, h, "aider"))
+	selectProgram(t, h, "aider")
 
 	openAccountField(t, h)
 
@@ -536,7 +501,7 @@ func TestAccountFieldIgnoresARegistryForAnOtherProgram(t *testing.T) {
 	// The answer to a fetch started while the form said "claude"…
 	stale := accountRegistryMsg{naming: naming, agent: "claude", resp: twoAgentsWithAccounts()}
 	// …landing after the user moved the form to codex.
-	deliver(t, h, selectProgram(t, h, "codex"))
+	selectProgram(t, h, "codex")
 	h.handleAccountRegistry(stale)
 
 	assert.Equal(t, stateNew, h.state,
@@ -551,14 +516,7 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 	h.errBox.SetSize(300, 1)
 	_, errorLogs := captureHomeMessageLogs(t)
 	got := recordStartRequest(t)
-	listCalls := 0
-	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
-		listCalls++
-		if listCalls <= 2 {
-			return daemon.ListAccountsResponse{}, errors.New("daemon-http.sock: connection refused")
-		}
-		return daemon.ListAccountsResponse{}, nil
-	}))
+	stubAccounts(t, daemon.ListAccountsResponse{}, errors.New("daemon-http.sock: connection refused"))
 	startNaming(t, h, "daemon-is-out")
 
 	openAccountField(t, h)
@@ -569,17 +527,7 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 		"the failure must lead with what it blocks, then the daemon's own words")
 	assert.Contains(t, errorLogs.String(), "connection refused")
 
-	// The failed registry leaves the display unverified, so Enter retries
-	// rather than submitting blind (#4893 review) — and the retry keeps
-	// failing while the daemon is out, so the submit holds.
-	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
-	assert.Empty(t, got.Title, "a failed verify cannot release the submit")
-	assert.True(t, h.accountLookupFailed, "the dead lookup stays owed")
-
-	// The daemon comes back on the next retry: the ambient answer submits
-	// itself — "" has no reviewable encoding, so a verified ambient reply
-	// leaves while it is still the live one (#4893 review).
-	deliver(t, h, pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter}))
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account, "the create still goes through, on the ambient identity")
 	assert.Equal(t, "daemon-is-out", got.Title)
 }

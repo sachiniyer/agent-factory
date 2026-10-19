@@ -73,14 +73,6 @@ func newTestHome(t *testing.T) *home {
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// The naming form re-checks the displayed account against the daemon's
-	// live default at submit (#4893); the seam dials, so close it the same way
-	// as the other daemon seams — an empty roster answers instantly and tests
-	// exercising account resolution override it.
-	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
-		return daemon.ListAccountsResponse{}, nil
-	}))
-
 	// Tab mutations route through daemon RPCs.
 	// Stub the seams with safe defaults so tests that incidentally trigger them
 	// never dial — or spawn — a real daemon. Tests exercising these paths

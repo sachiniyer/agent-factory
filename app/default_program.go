@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -149,7 +150,6 @@ func (m *home) sendProgramForCreate() string {
 // resolve to (#4889 review).
 type remoteDefaultMsg struct {
 	naming   *session.Instance
-	seq      int64
 	program  string
 	programs []string
 	err      error
@@ -191,8 +191,6 @@ func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
 	if naming == nil {
 		return nil
 	}
-	m.remoteDefaultSeq++
-	seq := m.remoteDefaultSeq
 	repoPath := m.repoRoot
 	fetch := listProgramsThroughDaemon
 	return func() tea.Msg {
@@ -201,7 +199,7 @@ func (m *home) fetchRemoteDefaultProgram(naming *session.Instance) tea.Cmd {
 		for _, p := range resp.Programs {
 			programs = append(programs, p.Name)
 		}
-		return remoteDefaultMsg{naming: naming, seq: seq, program: resp.Default, programs: programs, err: err}
+		return remoteDefaultMsg{naming: naming, program: resp.Default, programs: programs, err: err}
 	}
 }
 
@@ -224,78 +222,29 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 	if m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
-	// The naming pointer alone cannot fence a stale reply: a failed remote
-	// create restores the SAME session.Instance and re-fires the lookup, so
-	// the earlier fetch's answer would pass the pointer guard, clear the new
-	// lookup's gate, and install its stale catalog (#4893 review). The
-	// issuance sequence fences it — only the latest fetch's reply counts.
-	if msg.seq != m.remoteDefaultSeq {
-		return m, nil
-	}
-	// Only a usable answer — no error, and a default to display — lifts the
-	// submit gate the fetch armed. A failed or empty lookup must not free an
-	// implicit submit: "" would still resolve SOMETHING daemon-side, a program
-	// the field has never shown (#4893 review). The gate flips to its failed
-	// form, which asks for an explicit pick rather than another wait.
-	// wasVerify is captured first: only a reply to a fetch an implicit Enter
-	// armed may stamp remoteDefaultVerifiedFor — the submit-time re-read, not
-	// the form-open seed (#4893 review).
-	wasVerify := m.remoteDefaultVerifyPending
-	m.remoteDefaultVerifyPending = false
+	// The answer — success or failure — lifts the submit gate the fetch armed.
 	m.remoteDefaultPending = false
-	m.remoteDefaultFailed = false
 	if len(msg.programs) > 0 {
 		// The remote catalog is what the program picker must offer: a newer
 		// daemon can support agents this client's tmux.SupportedPrograms lacks
 		// (#4889 review).
 		m.remoteProgramCatalog = msg.programs
 	}
-	if msg.err != nil || msg.program == "" {
-		m.remoteDefaultFailed = true
+	if msg.err != nil {
 		return m, nil
-	}
-	if m.state == stateSelectProgram && m.selectionOverlay != nil {
-		// The open picker was built from the catalog this reply just replaced
-		// — client-local when the fetch had not landed, or the daemon's
-		// previous answer. Enter there would commit a program the daemon may
-		// not support, and the rows no longer describe what the picker offers.
-		// The account picker below dismisses for the same reason (#4893
-		// review).
-		m.selectionOverlay = nil
-		m.programPickerChoices = nil
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
 	}
 	// A committed program is not the guess this reply may correct: an explicit
-	// picker choice sets pendingProgramChosen, a launch --program pins via
-	// programFollowsConfig, and a CHOSEN named account commits to the
-	// displayed program through the pair — correcting any of them would put a
-	// program on the wire the user never asked for, or pair the chosen account
-	// with an agent whose registry it is not in (#4889/#4893 review). The
-	// account half asks for a non-EMPTY name: a deliberate ambient pick sends
-	// the same "" an untouched field does, so it does not pin the program
-	// either — sendProgramForCreate agrees (#4893 review).
-	if m.pendingProgramChosen || !m.programFollowsConfig ||
-		(m.pendingAccountChosen && m.pendingAccount != "") {
+	// picker choice sets pendingProgramChosen, and a launch --program pins via
+	// programFollowsConfig — overwriting either would send a program the user
+	// never asked for CONCRETELY (#4889 review).
+	if m.pendingProgramChosen || !m.programFollowsConfig {
 		return m, nil
 	}
-	if m.pendingProgram == msg.program {
-		if wasVerify {
-			// The submit-armed answer matched the display — the field is
-			// verified for this Enter onward (#4893 review).
-			m.remoteDefaultVerifiedFor = msg.program
-		}
+	if msg.program == "" || m.pendingProgram == msg.program {
 		return m, nil
 	}
 	m.pendingProgram = msg.program
 	m.namingInstance.Program = msg.program
-	m.namingRev++
-	if wasVerify {
-		// The submit-armed answer moved the default: the correction below
-		// puts the live value on the field, which is the display the next
-		// Enter reviews (#4893 review).
-		m.remoteDefaultVerifiedFor = msg.program
-	}
 	// Every account state the OLD agent produced must go: a preselect or a
 	// deliberate pick belongs to that agent's registry, and keeping it would
 	// submit a name the resolved agent does not have — or pin a cross-agent
@@ -309,5 +258,5 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 		m.state = stateNew
 		m.menu.SetState(ui.StateNewInstance)
 	}
-	return m, m.fetchAccountDefault(msg.naming, msg.program)
+	return m, m.fetchAccountDefault(msg.naming, sessionenv.AgentForCommand(msg.program))
 }

@@ -63,10 +63,9 @@ func TestRealTUI_CreateThroughKeypresses(t *testing.T) {
 		return eh.namingTitle() == "dig"
 	})
 
-	// Enter → the submit-time account check holds the first press until its
-	// reply lands; the confirming Enter fires startCmd, real LocalBackend runs:
-	// git worktree add, tmux new-session, poll for session existence.
-	eh.confirmNamingSubmit()
+	// Enter → startCmd fires, real LocalBackend runs: git worktree add,
+	// tmux new-session, poll for session existence.
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
 	// Wait for the instance to flip to Running. Real git + tmux usually
 	// take 200-500ms but allow up to 10s for slow CI.

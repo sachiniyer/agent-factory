@@ -25,6 +25,7 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	require.Equal(t, stateNew, h.state)
 	// Enter may arrive before the async catalog; it must not submit a default
 	// backend and end naming before the promised picker can open.
+	h.pendingProgram = "sh"
 	require.NoError(t, h.namingInstance.SetTitle("choose-backend"))
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Title, "no create request may precede the backend catalog")
@@ -37,26 +38,15 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	for _, msg := range drainCmd(t, cmd, time.Second) {
 		if catalog, ok := msg.(backendCatalogMsg); ok {
 			h.handleBackendCatalog(catalog)
-		} else {
-			// The open cmd batches the account preselect beside the catalog:
-			// deliver its reply so the owed lookup does not hold the submit.
-			// It must land while pendingProgram still matches the fetch — a
-			// reply for another program is dropped stale without retiring the
-			// markers, and no second answer would ever come (#4893 review).
-			deliver(t, h, []tea.Msg{msg})
 		}
 	}
-	// A non-default program for the compat form — set only after the seeded
-	// program's own preselect reply has settled (a real program change goes
-	// through handleProgramChoice and refires the fetch).
-	h.pendingProgram = "sh"
 	require.Equal(t, 1, *calls, "compatibility binding must request the creation form backend field")
 	require.Equal(t, stateSelectBackend, h.state)
 	assert.Empty(t, h.pendingBackend, "the user chooses the backend")
 	pickBackend(t, h, "docker")
 	assert.Equal(t, "docker", h.pendingBackend)
 	assert.Equal(t, stateNew, h.state)
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "choose-backend", got.Title)
 	assert.Equal(t, "docker", got.Backend)
 }
@@ -66,22 +56,14 @@ func TestNewRemotePendingCatalogFailureAllowsSubmit(t *testing.T) {
 	h.repoRoot = repoDeclaringBackend(t, "")
 	recordPlaceholderProvision(t)
 	got := recordStartRequest(t)
-	_, cmd := h.startNewInstanceAtBackend()
-	// The open cmd batches the catalog fetch and the account preselect: deliver
-	// the account reply so the owed lookup does not hold the submit; the
-	// crafted catalog failure below supplies the backend answer.
-	for _, msg := range drainCmd(t, cmd, time.Second) {
-		if _, ok := msg.(backendCatalogMsg); !ok {
-			deliver(t, h, []tea.Msg{msg})
-		}
-	}
+	h.startNewInstanceAtBackend()
 	requireNamingFormOpened(t, h, "compatibility form")
 	h.pendingProgram = "sh"
 	require.NoError(t, h.namingInstance.SetTitle("catalog-failed"))
 	h.handleBackendCatalog(backendCatalogMsg{naming: h.namingInstance, err: errors.New("catalog offline")})
 	require.Equal(t, stateNew, h.state)
 	assert.Contains(t, h.errBox.FullError(), "cannot list backends for this repo: catalog offline")
-	submitVerifiedForm(t, h)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "catalog-failed", got.Title, "fetch failure must release the submit guard")
 }
 
@@ -97,16 +79,13 @@ func TestNewRemotePendingCatalogCancelDoesNotBlockNextForm(t *testing.T) {
 			oldNaming := h.namingInstance
 			h.handleStateNew(tea.KeyMsg{Type: key})
 			require.Equal(t, stateDefault, h.state)
-			_, cmd := h.startNewInstance()
-			// The reopened form's account fetch is owed an answer; deliver it
-			// so the owed lookup does not hold the submit.
-			deliver(t, h, drainCmd(t, cmd, time.Second))
+			h.startNewInstance()
 			requireNamingFormOpened(t, h, "ordinary form after cancellation")
 			h.handleBackendCatalog(backendCatalogMsg{naming: oldNaming, catalog: twoUsableBackends()})
 			require.Equal(t, stateNew, h.state, "stale reply must not open a picker")
 			h.pendingProgram = "sh"
 			require.NoError(t, h.namingInstance.SetTitle("ordinary-create"))
-			submitVerifiedForm(t, h)
+			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			assert.Equal(t, "ordinary-create", got.Title)
 		})
 	}

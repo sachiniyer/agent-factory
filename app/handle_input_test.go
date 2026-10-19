@@ -330,10 +330,6 @@ func TestHandleStateNewPreflightErrorKeepsNamingFlow(t *testing.T) {
 	require.NoError(t, err)
 	h.namingInstance = naming
 
-	// The first Enter re-checks the displayed account against the live default
-	// (#4893); the confirming Enter then reaches preflight and keeps the flow.
-	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-	deliver(t, h, drainCmd(t, cmd, time.Second))
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateNew, h.state)
@@ -506,21 +502,12 @@ func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
 			require.NoError(t, err)
 			h.namingInstance = naming
 			h.pendingBackend = "hook"
-			// startNewInstance seeds pendingProgram before Enter reaches it; a
-			// test that sets namingInstance directly must do the same, or the
-			// wire program is "" and the implicit-default gate re-reads config.
-			h.pendingProgram = "claude"
-			got := recordStartRequest(t)
 
-			// The first Enter re-checks the displayed account (#4893); the
-			// ambient answer it lands submits itself — "" has no reviewable
-			// encoding — so the create fires inside deliver.
 			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-			deliver(t, h, drainCmd(t, cmd, time.Second))
 
 			assert.Equal(t, stateDefault, h.state)
 			assert.Nil(t, h.namingInstance, "a non-hook sandbox does not own a hook slug")
-			assert.Equal(t, "my_app", got.Title, "a free hook name should submit the create")
+			assert.NotNil(t, cmd, "a free hook name should submit the create")
 		})
 	}
 }
@@ -560,19 +547,12 @@ func TestHandleStateNewAllowsNonASCIITitleForNonHookSandbox(t *testing.T) {
 	require.NoError(t, err)
 	h.namingInstance = naming
 	h.pendingBackend = string(session.BackendDocker)
-	// Same seed as the hook test: the form's pendingProgram is what production
-	// set when the form opened; "" would make the submit re-read config.
-	h.pendingProgram = "claude"
-	got := recordStartRequest(t)
 
-	// The first Enter re-checks the displayed account (#4893); the ambient
-	// answer it lands submits itself, so the create fires inside deliver.
 	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-	deliver(t, h, drainCmd(t, cmd, time.Second))
 
 	assert.Equal(t, stateDefault, h.state)
 	assert.Nil(t, h.namingInstance, "a Docker title does not claim the global hook namespace")
-	assert.Equal(t, "日本語", got.Title, "an accepted title should submit the create")
+	assert.NotNil(t, cmd, "an accepted title should submit the create")
 }
 
 // TestNamingCreateFlow_NoDoubleTransition guards the #1350 regression: the
@@ -598,19 +578,15 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 	require.NoError(t, inst.Transition(session.BeginCreate()))
 	require.Equal(t, session.OpCreating, inst.GetInFlightOp())
 	h.namingInstance = inst
-	recordStartRequest(t)
 
 	// A second BeginCreate here would panic via the app illegal-transition hook.
-	// The submit-time account check holds the first Enter; the verified ambient
-	// reply then re-enters the gate itself and submits inside deliver.
 	assert.NotPanics(t, func() {
-		_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-		deliver(t, h, drainCmd(t, cmd, time.Second))
+		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 	})
 
-	// Op raised exactly once — and the stubbed start's landed reply confirmed the
-	// row live, closing the optimistic create out without a second BeginCreate.
-	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	// Op raised exactly once — still Creating (the daemon start is deferred to the
+	// returned async cmd, which this test does not run).
+	assert.Equal(t, session.OpCreating, inst.GetInFlightOp())
 }
 
 // TestHandleStateNewEmptySubmitAdoptsPlaceholder pins the #2470 autocreate: with
@@ -619,31 +595,21 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 	h := activeProjectHome(t)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
-	recordStartRequest(t)
 
-	_, openCmd := h.startNewInstance()
-	// The form-open account preselect's reply lands while the user types;
-	// deliver it so the first Enter re-asks rather than arming a reply that
-	// never comes (#4893).
-	deliver(t, h, drainCmd(t, openCmd, time.Second))
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
 	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance must generate a suggested name")
 	placeholder := h.namingPlaceholder
 
-	// Enter on the untouched field: the first press re-checks the displayed
-	// account (#4893); the ambient answer it lands submits itself — "" has no
-	// reviewable encoding — and the placeholder is adopted inside deliver.
-	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-	deliver(t, h, drainCmd(t, cmd, time.Second))
+	// Enter on the untouched field.
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Nil(t, h.namingInstance, "an empty submit with a placeholder submits, it does not error")
 	assert.Equal(t, placeholder, inst.Title, "the empty submit adopted the shadow placeholder as the title")
 	assert.Empty(t, h.namingPlaceholder, "the placeholder is cleared once naming ends")
-	// The completed create's start-help overlay owns the screen — deliver ran
-	// the instanceStartedMsg all the way through.
-	assert.Equal(t, stateHelp, h.state)
+	assert.Equal(t, stateDefault, h.state)
 }
 
 // TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder is the #2470 review P2-a
@@ -659,20 +625,13 @@ func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
 		return errors.New("Claude Code is not installed or not on PATH")
 	}))
 
-	_, openCmd := h.startNewInstance()
-	// Deliver the form-open account preselect's reply so the first Enter
-	// re-asks rather than arming a reply that never comes (#4893).
-	deliver(t, h, drainCmd(t, openCmd, time.Second))
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the field starts empty")
 	require.NotEmpty(t, h.namingPlaceholder)
 
-	// Enter on the untouched field: the first press re-checks the displayed
-	// account (#4893); the confirming Enter resolves the placeholder and
-	// preflight FAILS.
-	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
-	deliver(t, h, drainCmd(t, cmd, time.Second))
+	// Enter on the untouched field: the placeholder resolves, but preflight FAILS.
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateNew, h.state, "a failed gate keeps the naming flow open")

@@ -2,6 +2,7 @@ package app
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -57,16 +58,6 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// still see (#4889 review).
 	m.pendingAccountChosen = req.AccountChosen && req.Account != ""
 	m.pendingProgramChosen = req.ProgramChosen
-	// Whatever lookup state the failed form left behind is stale: a restored
-	// field re-earns its verification from the fetches this restore fires
-	// (#4893 review).
-	m.remoteDefaultVerifyPending = false
-	m.remoteDefaultVerifiedFor = ""
-	m.accountVerifyPending = false
-	m.accountVerifiedFor = ""
-	m.accountLookupPending = false
-	m.accountLookupFailed = false
-	m.accountVerified = false
 	if !m.pendingProgramChosen && !m.pendingAccountChosen {
 		if isRemoteTarget() {
 			// pendingProgram already holds the placeholder's remote-resolved
@@ -75,7 +66,6 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// answer — the same contract a fresh remote form gets (#4889
 			// review).
 			m.remoteDefaultPending = true
-			m.remoteDefaultFailed = false
 			m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 			m.menu.SetNamingBackend(m.pendingBackend != "")
 			m.menu.SetNamingAccount(m.pendingAccount != "")
@@ -83,7 +73,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			m.menu.SetState(ui.StateNewInstance)
 			m.failedCreate = nil
 			return true, tea.Batch(
-				m.fetchAccountDefault(instance, m.pendingProgram),
+				m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram)),
 				m.fetchRemoteDefaultProgram(instance))
 		}
 		// Re-resolve the live default for the restored field's seed: the
@@ -107,17 +97,6 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	m.menu.SetState(ui.StateNewInstance)
 	m.failedCreate = nil
 	if m.pendingAccountChosen {
-		if isRemoteTarget() {
-			// A committed remote draft still needs the catalog refresh: the
-			// submit cleared remoteProgramCatalog, so the program picker would
-			// otherwise fall back to the client-local list. The reply cannot
-			// correct the pair — handleRemoteDefault's chosen guards cover
-			// every path that reaches this branch (#4893 review). Re-arm the
-			// pending flag too: while the fetch is out the picker's local-enum
-			// fallback must stay closed (#4893 review).
-			m.remoteDefaultPending = true
-			return true, m.fetchRemoteDefaultProgram(instance)
-		}
 		return true, nil
 	}
 	// The draft proves only that no account was SENT — an unchosen preselect
@@ -125,15 +104,5 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// restored field would read "no account" while the retry applies the
 	// configured default. Re-fetch it exactly as a fresh form does (#4889
 	// review).
-	if isRemoteTarget() {
-		// Same catalog need as the account-chosen branch: a remote draft with
-		// only its program chosen still re-arms the picker's remote list —
-		// and the pending flag keeps the local-enum fallback closed while the
-		// answer is out (#4893 review).
-		m.remoteDefaultPending = true
-		return true, tea.Batch(
-			m.fetchAccountDefault(instance, m.pendingProgram),
-			m.fetchRemoteDefaultProgram(instance))
-	}
-	return true, m.fetchAccountDefault(instance, m.pendingProgram)
+	return true, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
 }
