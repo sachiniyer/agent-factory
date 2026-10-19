@@ -4,11 +4,13 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // #3386: a project can default to an account, and the naming form must SHOW that
@@ -204,4 +206,94 @@ func TestNoDefaultIsFetchedForAnAgentThatCannotTakeAccounts(t *testing.T) {
 
 	assert.Nil(t, h.fetchAccountDefault(inst, "aider"), "there is nothing to preselect for aider")
 	assert.Equal(t, 0, *calls, "and nothing to ask the daemon")
+}
+
+// TestImplicitSubmitVerifiesTheDisplayedAccount pins the #4893 review finding
+// on the account half of an implicit submit: the displayed preselect is a
+// cache of default_accounts, which can move after the form opened. The first
+// Enter re-asks the daemon and HOLDS the submit; only after the answer lands
+// (unchanged or refreshed under the user's eyes) does the next Enter send "".
+func TestImplicitSubmitVerifiesTheDisplayedAccount(t *testing.T) {
+	h := configFollowingHome(t)
+	calls, _ := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	h.pendingAccount = "work" // the form-open preselect — unverified at submit time
+	require.False(t, h.pendingAccountChosen)
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "an unverified preselect must not ride an implicit submit")
+	require.True(t, h.accountVerifyPending, "the first Enter arms the verify, not the create")
+	assert.Equal(t, 1, *calls, "the verify re-asks the daemon")
+
+	for _, msg := range msgs {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(am)
+		}
+	}
+	require.False(t, h.accountVerifyPending, "the landed reply discharges the verify")
+	require.Equal(t, "work", h.pendingAccount, "the live answer stayed on the field")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title, "the reviewed display may now submit implicitly")
+	assert.Empty(t, got.Program)
+	assert.Empty(t, got.Account, "an unchosen account still leaves the wire to the daemon")
+}
+
+// TestImplicitSubmitShowsTheVerifyAnswer is the moved half of the same
+// finding: when the verify reply names a DIFFERENT default, the field must
+// show that live answer — and that refreshed value is what the next Enter
+// reviews, not the stale preselect the form opened with.
+func TestImplicitSubmitShowsTheVerifyAnswer(t *testing.T) {
+	h := configFollowingHome(t)
+	_, asked := stubAccounts(t, withDefaults(map[string]string{"claude": "ops"}), nil)
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	h.pendingAccount = "work" // a stale preselect — the daemon now defaults to ops
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title)
+	require.True(t, h.accountVerifyPending)
+	require.NotEmpty(t, *asked, "the verify fetch went out")
+
+	for _, msg := range msgs {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(am)
+		}
+	}
+	require.Equal(t, "ops", h.pendingAccount,
+		"the field shows the live default the retry will actually resolve")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title, "the display the user reviewed is the one that submits")
+}
+
+// TestEmptyChosenAccountDoesNotBlockTheRemoteCorrection pins the #4893 review
+// edge on the ambient pick: an account field the user deliberately emptied
+// pins no agent, so it must not freeze the remote default's correction the
+// way a named account does.
+func TestEmptyChosenAccountDoesNotBlockTheRemoteCorrection(t *testing.T) {
+	clearDaemonTarget(t)
+	stubRemoteTarget(t)
+	stubRemoteProgramFeed(t, tmux.ProgramClaude)
+	h := configFollowingHome(t)
+	recordStartRequest(t)
+
+	_, openCmd := h.startNewInstance()
+	require.NotNil(t, openCmd)
+	inst := h.namingInstance
+
+	// The user picked the ambient row — a real decision, but it carries no
+	// agent identity and the wire sends "" either way.
+	h.pendingAccountChosen = true
+	require.Empty(t, h.pendingAccount)
+
+	_, _ = h.Update(remoteDefaultMsg{naming: inst, program: tmux.ProgramCodex, programs: []string{tmux.ProgramCodex}})
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram,
+		"an empty account choice does not freeze the local seed under the remote default")
+	assert.False(t, h.pendingAccountChosen, "the correction still clears the ambient pick")
 }

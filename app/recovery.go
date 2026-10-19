@@ -66,6 +66,8 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// review).
 			m.remoteDefaultPending = true
 			m.remoteDefaultFailed = false
+			m.accountVerifyPending = false
+			m.accountVerifiedFor = ""
 			m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 			m.menu.SetNamingBackend(m.pendingBackend != "")
 			m.menu.SetNamingAccount(m.pendingAccount != "")

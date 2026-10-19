@@ -42,6 +42,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.accountVerifyPending = false
+		m.accountVerifiedFor = ""
 		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -161,12 +163,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				))
 			}
 		}
-		// preflightSessionCreate reads only the backend/program, not the title, so it
-		// runs before the title is committed.
-		if err := m.preflightSessionCreate(); err != nil {
-			return m, m.handleError(err)
-		}
-
 		sendProgram := m.sendProgramForCreate()
 		// An IMPLICIT wire program ("" — the daemon resolves default_program at
 		// create) carries honesty obligations a concrete program does not: the
@@ -174,8 +170,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// apply only to the empty wire value — a launch --program, a picker
 		// choice, or a chosen named account submits its concrete program no
 		// matter what the remote lookup is doing — and all of them run BEFORE
-		// SetTitle/instance.Program so a refused submit leaves the form
-		// exactly as the user left it (#4893 review).
+		// preflight and SetTitle/instance.Program: before SetTitle so a refused
+		// submit leaves the form exactly as the user left it, and before
+		// preflight so a moved default updates the field before any check can
+		// refuse on a program the form never showed (#4893 review).
 		if sendProgram == "" {
 			switch {
 			case m.remoteDefaultPending:
@@ -188,17 +186,76 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// open. "" resolves the NEW value, so refresh the field and ask
 				// for one more Enter to review the change instead of launching
 				// an agent the form never showed (#4893 review). A failed
-				// re-read keeps the displayed value, matching
-				// refreshDefaultProgram's policy.
+				// re-read REFUSES rather than passing with the stale display:
+				// "" still resolves the live value daemon-side, and an
+				// unverifiable display cannot prove the user saw it (#4893
+				// review). The retry is cheap — the next Enter re-reads.
 				ctx, cancel := context.WithTimeout(m.ctx, localDefaultProgramTimeout)
 				resolved, err := resolveConfiguredProgramContext(ctx, m.repoRoot)
 				cancel()
-				if err == nil && resolved != "" && resolved != m.pendingProgram {
+				if err != nil || resolved == "" {
+					return m, m.handleNotice(errors.New("the configured default program could not be re-read — press Enter to retry, or pick a program explicitly"))
+				}
+				if resolved != m.pendingProgram {
 					m.pendingProgram = resolved
 					m.program = resolved
-					return m, m.handleNotice(fmt.Errorf("the configured default program moved to %s — review it and press Enter again", resolved))
+					m.namingInstance.Program = resolved
+					// Same correction the remote handler applies: every account
+					// state the OLD agent produced — preselect, pick, an open
+					// account picker — belongs to a registry the resolved agent
+					// does not share, so clear it and re-ask for the new one
+					// (#4893 review).
+					m.clearPendingAccount()
+					if m.state == stateSelectAccount && m.selectionOverlay != nil {
+						m.selectionOverlay = nil
+						m.accountPickerChoices = nil
+						m.state = stateNew
+						m.menu.SetState(ui.StateNewInstance)
+					}
+					return m, tea.Batch(
+						m.handleNotice(fmt.Errorf("the configured default program moved to %s — review it and press Enter again", resolved)),
+						m.fetchAccountDefault(instance, resolved),
+					)
 				}
 			}
+			// The displayed account is the same kind of stale cache: the
+			// preselect arrived from a default_accounts read at form open, and
+			// "" sends no account at all — the daemon resolves the LIVE default
+			// at create. Re-check before the submit goes out through the same
+			// async fetch that seeded the field (#4893 review). A display the
+			// last verify reply left unchanged — accountVerifiedFor — was just
+			// reviewed and may submit; a CHOSEN pair never reaches here (it
+			// pinned the program concrete).
+			if m.pendingAccount != "" && !m.pendingAccountChosen && m.pendingAccount != m.accountVerifiedFor {
+				if m.accountVerifyPending {
+					// An earlier verify's answer is still out — re-fire in
+					// case it was dropped, and keep holding (#4893 review).
+					// handleAccountDefault clears the flag on the reply.
+					verify := m.fetchAccountDefault(instance, m.pendingProgram)
+					return m, tea.Batch(
+						m.handleNotice(errors.New("still re-checking the displayed account — try again in a moment")),
+						verify,
+					)
+				}
+				verify := m.fetchAccountDefault(instance, m.pendingProgram)
+				if verify == nil {
+					// The resolved program has no account registry to verify
+					// against; a name it cannot have must not keep displaying.
+					m.clearPendingAccount()
+				} else {
+					m.accountVerifyPending = true
+					return m, tea.Batch(
+						m.handleNotice(errors.New("re-checking the displayed account against the live default — press Enter to confirm")),
+						verify,
+					)
+				}
+			}
+		}
+
+		// preflightSessionCreate reads only the backend/program, not the title, so it
+		// runs before the title is committed.
+		if err := m.preflightSessionCreate(); err != nil {
+			return m, m.handleError(err)
 		}
 
 		// Every gate passed — commit the resolved title exactly once.
@@ -275,6 +332,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.accountVerifyPending = false
+		m.accountVerifiedFor = ""
 		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
@@ -423,6 +482,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteDefaultFailed = false
+		m.accountVerifyPending = false
+		m.accountVerifiedFor = ""
 		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -473,6 +534,8 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingProgramChosen = false
 	m.remoteDefaultPending = false
 	m.remoteDefaultFailed = false
+	m.accountVerifyPending = false
+	m.accountVerifiedFor = ""
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {

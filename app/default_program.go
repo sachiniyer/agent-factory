@@ -255,8 +255,12 @@ func (m *home) handleRemoteDefault(msg remoteDefaultMsg) (tea.Model, tea.Cmd) {
 	// programFollowsConfig, and a CHOSEN named account commits to the
 	// displayed program through the pair — correcting any of them would put a
 	// program on the wire the user never asked for, or pair the chosen account
-	// with an agent whose registry it is not in (#4889/#4893 review).
-	if m.pendingProgramChosen || !m.programFollowsConfig || m.pendingAccountChosen {
+	// with an agent whose registry it is not in (#4889/#4893 review). The
+	// account half asks for a non-EMPTY name: a deliberate ambient pick sends
+	// the same "" an untouched field does, so it does not pin the program
+	// either — sendProgramForCreate agrees (#4893 review).
+	if m.pendingProgramChosen || !m.programFollowsConfig ||
+		(m.pendingAccountChosen && m.pendingAccount != "") {
 		return m, nil
 	}
 	if m.pendingProgram == msg.program {

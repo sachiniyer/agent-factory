@@ -474,6 +474,19 @@ type home struct {
 	// tmux.SupportedPrograms — a newer daemon can support agents this client
 	// lacks (#4889 review).
 	remoteProgramCatalog []string
+	// accountVerifyPending marks an implicit submit held back while the
+	// account the field displays is re-checked against the live default. The
+	// preselect arrived asynchronously at form open, so default_accounts may
+	// have moved since; sending "" while the field still shows the stale name
+	// would create an identity the user never saw (#4893 review). Cleared by
+	// the fresh answer's reply, and reset wherever remoteDefaultPending is.
+	accountVerifyPending bool
+	// accountVerifiedFor is the account value the verify reply left on the
+	// field: an implicit Enter may proceed only while the displayed
+	// unchosen account still equals it — a display the user just reviewed
+	// against the live answer. A later reply applying a different name
+	// un-verifies the display until the next check (#4893 review).
+	accountVerifiedFor string
 	// programPickerChoices is the option list the open program picker is
 	// showing, held alongside the overlay for the same reason
 	// accountPickerChoices is: a remote catalog cannot be mapped back through

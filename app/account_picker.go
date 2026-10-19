@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -365,6 +366,12 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	} else if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
 		return m, nil
 	}
+	// A current reply — whatever it says — ends the verify window an implicit
+	// submit armed. A stale or wrong-program reply was dropped above and
+	// cannot clear it; the next Enter re-fires instead of trapping (#4893
+	// review).
+	wasVerify := m.accountVerifyPending
+	m.accountVerifyPending = false
 	if msg.err != nil || m.pendingAccountChosen {
 		return m, nil
 	}
@@ -373,12 +380,15 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	// second source of truth for the same fact, and the two would drift the first
 	// time one of them was refreshed and the other was not.
 	//
-	// agent=="" means the program resolved to nothing locally; the daemon's
-	// resolved_agents — program_overrides applied on ITS host — names which
-	// registry the Defaults map is keyed by (#4893 review).
+	// agent=="" means the program resolved to nothing locally. The namespace
+	// the CREATE validates accounts against is the program LABEL —
+	// AgentForCommand(req.Program) daemon-side — not resolved_agents, which
+	// reports the runtime a program_overrides entry launches. The roster is
+	// the daemon's account-capable agents, so a label on it is a label whose
+	// own registry the create will consult (#4893 review).
 	agent := msg.agent
-	if agent == "" {
-		agent = msg.resp.ResolvedAgents[msg.program]
+	if agent == "" && slices.Contains(msg.resp.Agents, msg.program) {
+		agent = msg.program
 	}
 	if agent == "" {
 		return m, nil
@@ -392,9 +402,18 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 			m.pendingAccount = ambientAccount
 			m.menu.SetNamingAccount(false)
 		}
+		if wasVerify {
+			m.accountVerifiedFor = ambientAccount
+		}
 		return m, nil
 	}
 	m.pendingAccount = preselect
+	if wasVerify {
+		// The verify an implicit Enter armed has answered: whatever the field
+		// now displays is the live answer the user just reviewed (#4893
+		// review).
+		m.accountVerifiedFor = preselect
+	}
 	if m.state == stateSelectAccount && m.selectionOverlay != nil {
 		// A registry response can open this picker before the default arrives.
 		// Keep the visible row in sync with what Enter will submit.
@@ -434,12 +453,15 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 		// we could not read must not cost the user their half-typed create.
 		return m, m.handleError(fmt.Errorf("cannot list accounts for %s: %w", msg.agent, msg.err))
 	}
-	// A program the local classifier could not name gets its agent from the
-	// daemon's resolved_agents — program_overrides applied on the host that
-	// will actually run it (#4893 review).
+	// A program the local classifier could not name resolves to the LABEL's
+	// own registry — the namespace AgentForCommand(req.Program) gives the
+	// create daemon-side — not the runtime resolved_agents reports, which is
+	// the command a program_overrides entry launches (#4893 review). The
+	// roster is the daemon's account-capable agents; a label on it is a
+	// registry the create will honor.
 	agent := msg.agent
-	if agent == "" {
-		agent = msg.resp.ResolvedAgents[msg.program]
+	if agent == "" && slices.Contains(msg.resp.Agents, msg.program) {
+		agent = msg.program
 	}
 	if agent == "" {
 		return m, m.handleNotice(fmt.Errorf(
@@ -583,6 +605,7 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *home) clearPendingAccount() {
 	m.pendingAccount = ambientAccount
 	m.pendingAccountChosen = false
+	m.accountVerifiedFor = ambientAccount
 	m.menu.SetNamingAccount(false)
 }
 

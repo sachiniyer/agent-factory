@@ -512,6 +512,16 @@ func TestImplicitProgramDropsAnUnchosenAccountPreselect(t *testing.T) {
 	require.Equal(t, "work", h.pendingAccount, "the preselect landed on the field")
 	require.False(t, h.pendingAccountChosen, "a preselect is not a user choice")
 
+	// The implicit submit re-checks the displayed account first (#4893
+	// review): the preselect is a cache of default_accounts, which may have
+	// moved since the fetch answered.
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "the verify round-trip runs before the wire goes out")
+	for _, msg := range msgs {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(am)
+		}
+	}
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Program, "the untouched program stays implicit")
 	assert.Empty(t, got.Account,
@@ -598,6 +608,11 @@ func TestPreflightChecksTheProgramTheDaemonWillResolve(t *testing.T) {
 	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramAider)
 	require.NoError(t, err)
 
+	// The first Enter refreshes the field and holds for review (#4893
+	// review); the second submits the implicit "" — and preflight must check
+	// what the daemon resolves, not the stale seed the form opened on.
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, tmux.ProgramAider, h.pendingProgram)
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, tmux.ProgramAider, checked,
 		"preflight validates the program the daemon will resolve, not the stale seed")
@@ -1257,10 +1272,14 @@ func TestRemoteOnlyProgramResolvesAccountsFromTheDaemonRoster(t *testing.T) {
 		return daemon.ListProgramsResponse{}, nil
 	}))
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		// "newagent" sits in the daemon's account roster under its own label.
+		// resolved_agents says the runtime would launch codex — but account
+		// validation uses the LABEL's registry (#4893 review): "newagent"'s
+		// default is "work", not codex's "ops".
 		return daemon.ListAccountsResponse{
-			Agents:         []string{"codex"},
+			Agents:         []string{"codex", "newagent"},
 			ResolvedAgents: map[string]string{"newagent": "codex"},
-			Defaults:       map[string]string{"codex": "work"},
+			Defaults:       map[string]string{"newagent": "work", "codex": "ops"},
 		}, nil
 	}))
 
@@ -1276,14 +1295,13 @@ func TestRemoteOnlyProgramResolvesAccountsFromTheDaemonRoster(t *testing.T) {
 	require.Equal(t, "newagent", h.pendingProgram)
 
 	// The account fetch went out anyway — remote targets skip the local
-	// classifier's skip-list — so deliver its answer: the daemon's
-	// resolved_agents names codex as the registry agent.
+	// classifier's skip-list — so deliver its answer.
 	require.NotNil(t, refetch, "the correction refires the account fetch even for a remote-only program")
 	for _, msg := range drainCmd(t, refetch, time.Second) {
 		_, _ = h.Update(msg)
 	}
 	assert.Equal(t, "work", h.pendingAccount,
-		"the daemon's resolved_agents/Defaults supply the preselect the local classifier could not")
+		"the label's own registry supplies the default — not the runtime agent's")
 }
 
 // TestRemoteChosenDraftRefreshesTheCatalog covers the restore half of the
@@ -1356,4 +1374,108 @@ func TestMovedLocalDefaultRequiresAReviewEnter(t *testing.T) {
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title)
 	assert.Equal(t, "", got.Program, "the submit stays implicit — now showing what it resolves to")
+}
+
+// TestFailedLocalRevalidateRefusesImplicitSubmit pins the #4893 review finding
+// on the re-read failure path: an implicit submit that cannot re-read
+// default_program has no way to know what the wire's "" resolves to, so it
+// must refuse retryably — the earlier draft fell through and sent a blind ""
+// anyway.
+func TestFailedLocalRevalidateRefusesImplicitSubmit(t *testing.T) {
+	h := configFollowingHome(t)
+	prev := resolveConfiguredProgramContext
+	resolveConfiguredProgramContext = func(context.Context, string) (string, error) {
+		return "", errors.New("config read wedged")
+	}
+	t.Cleanup(func() { resolveConfiguredProgramContext = prev })
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "an unverifiable display must not send a blind implicit program")
+	require.Equal(t, stateNew, h.state, "the refusal leaves the form open")
+
+	// Once the read recovers, the same Enter submits — the refusal is a hold,
+	// not a dead end.
+	resolveConfiguredProgramContext = func(context.Context, string) (string, error) {
+		return tmux.ProgramClaude, nil
+	}
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, "demo", got.Title)
+}
+
+// TestMovedDefaultUpdatesTheFieldBeforePreflightRuns pins the ordering the
+// #4893 review asked for: the live re-read must run BEFORE preflight. A
+// default that moved to a program preflight rejects must still land on the
+// field first — otherwise the refusal names a program the form never showed.
+func TestMovedDefaultUpdatesTheFieldBeforePreflightRuns(t *testing.T) {
+	h := configFollowingHome(t)
+	prevRequired := localPrereqsRequired
+	localPrereqsRequired = func(session.InstanceOptions, string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { localPrereqsRequired = prevRequired })
+	t.Cleanup(SetLocalSessionPreflightForTest(func(_ *config.Config, program string) error {
+		if program == tmux.ProgramCodex {
+			return errors.New("codex is not installed")
+		}
+		return nil
+	}))
+	// The real config carries the moved default — the re-read and preflight
+	// resolve the same value, so the field the refusal names is the field the
+	// form showed.
+	_, err := config.SetGlobalConfigValue("default_program", tmux.ProgramCodex)
+	require.NoError(t, err)
+	got := recordStartRequest(t)
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	require.Equal(t, tmux.ProgramClaude, h.pendingProgram, "seeded with the old default")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram,
+		"the re-read runs before preflight — the field now shows the program any refusal will name")
+	assert.Empty(t, got.Title, "the moved default holds the submit for review")
+
+	// The review Enter now reaches preflight — which refuses the program the
+	// form has been showing since the first press.
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, got.Title, "preflight refuses the unrunnable program the field displayed")
+	require.Equal(t, tmux.ProgramCodex, h.pendingProgram)
+}
+
+// TestMovedLocalDefaultClearsAndRefetchesTheAccount pins the #4893 review
+// pairing: a local default that moves agents must drop the old agent's
+// account preselect and re-ask for the new one — leaving "work" on the field
+// while the display says codex advertises a pair the wire cannot honor.
+func TestMovedLocalDefaultClearsAndRefetchesTheAccount(t *testing.T) {
+	h := configFollowingHome(t)
+	defaults := twoAgentsWithAccounts()
+	defaults.Defaults = map[string]string{"claude": "work", "codex": "ci"}
+	calls, _ := stubAccounts(t, defaults, nil)
+	prev := resolveConfiguredProgramContext
+	resolveConfiguredProgramContext = func(context.Context, string) (string, error) {
+		return tmux.ProgramCodex, nil
+	}
+	t.Cleanup(func() { resolveConfiguredProgramContext = prev })
+
+	startNaming(t, h, "demo")
+	require.NoError(t, h.namingInstance.SetTitle("demo"))
+	h.pendingAccount = "work" // the claude preselect the form-open fetch applied
+	require.False(t, h.pendingAccountChosen)
+
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram, "the field refreshes to the moved default")
+	assert.Empty(t, h.pendingAccount, "the old agent's preselect cannot pair with the new program")
+	assert.False(t, h.pendingAccountChosen)
+	assert.Equal(t, 1, *calls, "the correction re-asks for the new program's default")
+
+	for _, msg := range msgs {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.handleAccountDefault(am)
+		}
+	}
+	assert.Equal(t, "ci", h.pendingAccount, "the refetch preselects the LIVE program's default")
 }
