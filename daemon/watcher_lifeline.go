@@ -109,12 +109,16 @@ func (e *watchShellExit) Error() string {
 // — none resolved, or a binary that does not speak the protocol — the shell is
 // started directly, which is the behavior before the lifeline existed.
 // lifeline is then nil.
-func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
+//
+// outputs are the read ends of the pipes configure attaches as stdout and
+// stderr. A binary that ran but did not speak the protocol wrote to them too,
+// so its output is drained from them before the shell gets the same pipes.
+func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd), outputs ...*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
 	var execErr error
 	exe := s.lifelineExe
 	if exe != "" && !s.lifelineUnsupported.Load() {
 		var spoke bool
-		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, configure)
+		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, configure, outputs)
 		if spoke {
 			return cmd, lifeline, err
 		}
@@ -138,7 +142,7 @@ func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure f
 // when the lifeline could not even be exec'd, which the caller judges against
 // its own start; a binary that ran but did not speak the protocol is recorded
 // here.
-func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, configure func(*exec.Cmd)) (cmd *exec.Cmd, lifeline *watchLifeline, err, execErr error, spoke bool) {
+func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, configure func(*exec.Cmd), outputs []*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err, execErr error, spoke bool) {
 	lifelineR, lifelineW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create watch lifeline pipe: %w", err), nil, true
@@ -182,12 +186,43 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		_ = ackR.Close()
 		if !supported {
 			reason := fmt.Sprintf("no ack: %s", describeWatchLifelineAck(line, ackErr, cmd))
+			// What it wrote is not the task's output — an older af's usage
+			// error, typically — and the shell is about to share these pipes.
+			if out := drainProbeOutput(outputs); out != "" {
+				reason += fmt.Sprintf("; it printed %q, kept out of the task's output", out)
+			}
 			s.lifelineUnusable(taskID, exe, reason)
 			return nil, nil, nil, nil, false
 		}
 		return nil, nil, fmt.Errorf("start %s: %v", s.shell, shellErr), nil, true
 	}
 	return cmd, &watchLifeline{keep: lifelineW, ackR: ackR, acks: acks}, nil, nil, true
+}
+
+// drainProbeOutput takes what a failed lifeline probe left in the run's
+// output pipes. The probe's group is dead and reaped by now, so its bytes are
+// all buffered; the deadline only bounds the read if something it started
+// escaped the group and still writes.
+func drainProbeOutput(outputs []*os.File) string {
+	const maxProbeOutput = 4 << 10
+	var b strings.Builder
+	buf := make([]byte, 4<<10)
+	for _, r := range outputs {
+		if r == nil || r.SetReadDeadline(time.Now().Add(50*time.Millisecond)) != nil {
+			continue
+		}
+		for {
+			n, err := r.Read(buf)
+			if room := maxProbeOutput - b.Len(); room > 0 {
+				b.Write(buf[:min(n, room)])
+			}
+			if err != nil {
+				break
+			}
+		}
+		_ = r.SetReadDeadline(time.Time{})
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }
 
 // lifelineUnusable records, once per daemon, that watch commands now start

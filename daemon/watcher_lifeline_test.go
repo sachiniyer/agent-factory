@@ -320,3 +320,39 @@ func TestSkippedGroupKillDoesNotWedgeTheRun(t *testing.T) {
 		t.Fatalf("no warning that the run's output was closed under a leftover process; warnings:\n%s", warnings.String())
 	}
 }
+
+// TestFailedProbeOutputStaysOutOfTheTask: a binary that does not speak the
+// protocol still ran with the run's stdout and stderr, which the shell then
+// inherits. What it printed is not the task's: it must not become an event,
+// land in the task's stderr log or its failure tail — only in the warning.
+func TestFailedProbeOutputStaysOutOfTheTask(t *testing.T) {
+	dir := t.TempDir()
+	oldAF := filepath.Join(dir, "af-old")
+	stub := "#!/bin/sh\necho probe-stdout\necho probe-stderr >&2\nexit 1\n"
+	if err := os.WriteFile(oldAF, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, rec := newTestSupervisor(t, staticTasks())
+	s.lifelineExe = oldAF
+	warnings := captureWarnings(t)
+	tail, err := s.newTaskWatcher(watchTask("probe", "echo shell-stdout; echo shell-stderr >&2; exit 3", dir)).runOnce()
+	if err == nil || err.Error() != "exit status 3" {
+		t.Fatalf("run returned %v, want the shell's exit status 3", err)
+	}
+	logPath, _ := s.logPath("probe")
+	stderrLog, _ := os.ReadFile(logPath)
+	rec.mu.Lock()
+	events := strings.Join(rec.events, "\n")
+	rec.mu.Unlock()
+	for what, got := range map[string]string{"events": events, "stderr log": string(stderrLog), "failure tail": tail.logSuffix()} {
+		if strings.Contains(got, "probe-") {
+			t.Errorf("the failed probe's output reached the task's %s:\n%s", what, got)
+		}
+	}
+	if !strings.Contains(events, "shell-stdout") || !strings.Contains(string(stderrLog), "shell-stderr") {
+		t.Fatalf("the shell's own output is missing: events %q, stderr log %q", events, stderrLog)
+	}
+	if got := warnings.String(); !strings.Contains(got, "probe-stdout") || !strings.Contains(got, "probe-stderr") {
+		t.Fatalf("fallback warning %q does not carry what the probe printed", got)
+	}
+}

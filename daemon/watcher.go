@@ -555,7 +555,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		if stderrFile != nil {
 			cmd.Stderr = stderrFile
 		}
-	})
+	}, r, stderrR)
 	if lifeline != nil {
 		// Held for the whole run: closing it is what tells the lifeline its
 		// daemon is gone. It closes after the group is reaped below.
