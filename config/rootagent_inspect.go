@@ -550,6 +550,23 @@ func RootAgentValueHasIgnoredGlobal(rv ResolvedValue) bool {
 	return false
 }
 
+// ignoredGlobalCandidateHadLeaf reports whether the ignored-global candidate
+// (the present global [root_agent] row the daemon dropped) actually carried
+// the requested leaf. The candidate's Value is the per-leaf map
+// rootAgentCandidateLeaves builds, so a leaf the global table never set (e.g.
+// `program` when the table sets only `enabled`) is absent from that map and
+// reports false here — distinguishing "the leaf was configured but its origin
+// was dropped" from "the leaf was never configured at all".
+func ignoredGlobalCandidateHadLeaf(parent ResolvedValue, leaf string) bool {
+	for _, candidate := range parent.Candidates {
+		if candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Present && candidate.Result == "ignored" {
+			_, present := configLeafValue(candidate.Value, leaf)
+			return present
+		}
+	}
+	return false
+}
+
 // ProjectIgnoredGlobalRootAgentLeaf projects one leaf of an ignored-global
 // root_agent table for a dotted read (`af config get root_agent.enabled` on
 // an unregistered project). Mirrors ProjectFailClosedRootAgentLeaf in the way
@@ -571,12 +588,17 @@ func RootAgentValueHasIgnoredGlobal(rv ResolvedValue) bool {
 // per-leaf Origins — otherwise the surviving built-in `enabled` origin would
 // leak into an unrelated `root_agent.program` dotted read — and surfaces
 // the projected leaf's own origin as the single-leaf Winner when one
-// survives. The projector does NOT gate on Origins (cf. ResolvedValuePath's
-// `parent.Origins[leaf]` lookup that reports an unknown key when the leaf's
-// origin did not survive), so `root_agent.program`, whose origin the
-// global-layer drop removed, still answers with the cause and an empty
-// program rather than "unknown config key". ProjectFailClosedRootAgentLeaf
-// established the same no-fail contract for the fail-closed shape.
+// survives. The projector does NOT gate on Origins alone (cf.
+// ResolvedValuePath's `parent.Origins[leaf]` lookup that reports an unknown
+// key when the leaf's origin did not survive), so `root_agent.program`, whose
+// origin the global-layer drop removed, still answers with the cause and an
+// empty program rather than "unknown config key" — but only when the ignored
+// global candidate actually carried the leaf. When the global table never set
+// the leaf at all (e.g. a table that sets only `enabled`, queried for
+// `root_agent.program`), there is no cause to surface for that leaf and the
+// projector returns false, matching the registered-project and generic
+// `unknown config key` lookup. ProjectFailClosedRootAgentLeaf established the
+// same no-fail contract for the fail-closed shape.
 func ProjectIgnoredGlobalRootAgentLeaf(parent ResolvedValue, keyPath string) (ResolvedValue, bool) {
 	leaf, ok := strings.CutPrefix(keyPath, "root_agent.")
 	if !ok || leaf == "" {
@@ -606,6 +628,19 @@ func ProjectIgnoredGlobalRootAgentLeaf(parent ResolvedValue, keyPath string) (Re
 	if origin, present := parent.Origins[leaf]; present {
 		origin.KeyPath = keyPath
 		projected.Winner = &origin
+	} else if !ignoredGlobalCandidateHadLeaf(parent, leaf) {
+		// No surviving origin for this leaf, and the ignored global candidate
+		// never carried it either (e.g. a global [root_agent] that sets only
+		// `enabled`, queried for `root_agent.program`). The generic
+		// ResolvedValuePath path — and the same lookup for a registered project
+		// whose global layer was not dropped — reports `unknown config key` for
+		// such an absent optional field, because its zero value has no real
+		// source. Only bypass the origin requirement when the ignored global
+		// candidate actually contained the requested leaf (the cause this
+		// rendering exists to surface); otherwise return false so the
+		// ignored-global dotted read does not present an absent optional field
+		// as an effective configured value.
+		return ResolvedValue{}, false
 	}
 	projected.Candidates = make([]CandidateTrace, len(parent.Candidates))
 	for i, candidate := range parent.Candidates {

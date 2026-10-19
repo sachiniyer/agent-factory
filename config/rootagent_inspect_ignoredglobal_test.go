@@ -263,3 +263,39 @@ func TestProjectIgnoredGlobalRootAgentLeafUnknownLeaf(t *testing.T) {
 	_, ok := ProjectIgnoredGlobalRootAgentLeaf(parent, "root_agent.not_a_real_leaf")
 	assert.False(t, ok, "an unknown leaf of the root_agent table must not project")
 }
+
+// TestProjectIgnoredGlobalRootAgentLeafAbsentOptionalLeafIsUnknown pins the
+// contract the ignored-global projector shares with the generic
+// ResolvedValuePath and the registered-project lookup: a leaf no layer
+// actually configured (e.g. `program` when the global [root_agent] sets only
+// `enabled`) reports `unknown config key`, not an empty effective value. The
+// global-layer drop removed the program origin, and the ignored global
+// candidate never carried a program leaf either, so there is no cause to
+// surface for that leaf — presenting the zero value as effective would be a
+// configured-value fabrication the registered-project and generic lookups do
+// not make.
+func TestProjectIgnoredGlobalRootAgentLeafAbsentOptionalLeafIsUnknown(t *testing.T) {
+	home, repoRoot, _ := registeredTestProject(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName),
+		[]byte("schema_version = 1\n\n[root_agent]\nenabled = true\n"), 0o644))
+	removed, err := DeregisterProject(repoRoot)
+	require.NoError(t, err)
+	require.True(t, removed, "fixture: project must deregister so the registry-eligibility check drops the global layer")
+
+	rv, err := ResolveRootAgentForInspection(repoRoot, false)
+	require.NoError(t, err)
+	require.True(t, RootAgentValueHasIgnoredGlobal(rv),
+		"fixture must trip the ignored-global detection helper or the test is vacuous")
+
+	// The global table set only `enabled`; the program leaf has no surviving
+	// origin and the ignored global candidate never carried it.
+	_, ok := ProjectIgnoredGlobalRootAgentLeaf(rv, "root_agent.program")
+	assert.False(t, ok, "an optional leaf no layer configured must report unknown, not an empty effective value")
+
+	// `enabled` is the leaf the global table actually set, so it still
+	// projects with the registry cause — the gate is per-leaf, not
+	// whole-table.
+	enabled, ok := ProjectIgnoredGlobalRootAgentLeaf(rv, "root_agent.enabled")
+	require.True(t, ok, "root_agent.enabled must still project — the global table set it")
+	assert.Equal(t, false, enabled.Value, "the effective enabled is the built-in disabled default — the global layer was dropped")
+}
