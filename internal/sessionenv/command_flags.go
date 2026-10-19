@@ -414,10 +414,17 @@ func supportedAgent(command string) string {
 // SglQuoted{Dollar:true} (rejected by the Dollar guard in
 // appendLiteralShellPart). The /bin/sh -c that finally runs the command expands
 // such a word differently per host: bash-as-sh turns $'0' into 0 (falsy — mode
-// OFF), while dash leaves it as the literal "$0" (truthy). Admitting the
-// credential group on the POSIX-only read injects a cloud provider's entire
-// credential group into a session that may run with the mode off, so a
-// dialect-dependent word is unprovable and fails closed as disabled — the
+// OFF), while dash leaves it as the literal "$0" (truthy).
+//
+// The operator DID write an explicit assignment to the selector, so the
+// command-local value must override whatever the ambient environment carries —
+// otherwise `ResolveAuthSelectors` falls back to the ambient value and a
+// pre-existing `CLAUDE_CODE_USE_BEDROCK=1` in the environment would re-admit
+// the AWS credential group to a session the running shell started with the mode
+// off (bash-as-sh expands $'0' to 0). A dialect-dependent word is therefore
+// unprovable and fails closed as found-but-disabled (found=true, enabled=false):
+// the selector was set on the command, so the ambient no longer speaks for it,
+// but the value cannot be proven enabling, so it reads as disabled. This is the
 // documented invariant ("a dynamic value is an explicit but unprovable override
 // and therefore fails closed as disabled"), applied with the same dual-variant
 // treatment commandMutatesAccountEnvironment already uses for the package's
@@ -437,7 +444,12 @@ func commandEnvironmentFlagState(command, agent, name string) (found, enabled bo
 	posixFound, posixEnabled := directAgentFlagState(posix, agent, name)
 	bashFound, bashEnabled := directAgentFlagState(bash, agent, name)
 	if posixFound != bashFound || posixEnabled != bashEnabled {
-		return false, false
+		// The selector IS assigned on the command, but its value is dialect-
+		// dependent and cannot be proven enabling. Report it as found-but-disabled
+		// so the ambient does not leak back in: ResolveAuthSelectors overrides the
+		// ambient with disabled, and CommandEnablesCloudCredentials (found &&
+		// enabled) still reports disabled.
+		return true, false
 	}
 	return posixFound, posixEnabled
 }
