@@ -203,6 +203,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
+		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	p.remotePID = w.RemotePID
@@ -514,6 +515,13 @@ func (p *sandboxProvisioner) reap() error {
 	if p.sessionDir == "" {
 		p.reaped = true
 		return nil
+	}
+
+	if p.remotePID != "" && !positivePID(p.remotePID) {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q with invalid remote PID %q — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir, p.remotePID)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
