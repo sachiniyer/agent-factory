@@ -116,8 +116,15 @@ func killedByOwnGroup(t *testing.T, state *os.ProcessState) {
 	}
 }
 
+// gone reports that pid is no longer running. A zombie counts: a killed
+// grandchild is reparented, and until its new parent reaps it — slowly, on a
+// host whose PID 1 does not reap promptly — it still answers signal 0.
 func gone(pid int) bool {
-	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 func waitGone(t *testing.T, pid int, within time.Duration, what string) {

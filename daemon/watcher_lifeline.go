@@ -177,7 +177,7 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		// a binary that neither acked nor exited would otherwise be waited on
 		// forever.
 		_ = watchGroupKill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = reapWatchGroupLeader(cmd)
+		_, _ = reapWatchGroupLeader(cmd)
 		_ = lifelineW.Close()
 		_ = ackR.Close()
 		if !supported {
@@ -258,8 +258,10 @@ var (
 //
 // beforeKill, when non-nil, runs after the leader has exited and before the
 // group kill; the stop watchdog uses it to finish any signal it is sending
-// while the number is still pinned.
-func reapWatchGroupLeader(cmd *exec.Cmd, beforeKill ...func()) error {
+// while the number is still pinned. groupKilled reports whether the cleanup
+// kill was sent; when it was not, leftovers may still hold the run's pipes
+// (awaitWatchReaders).
+func reapWatchGroupLeader(cmd *exec.Cmd, beforeKill ...func()) (groupKilled bool, err error) {
 	pid := cmd.Process.Pid
 	if err := watchLeaderExited(pid); err != nil {
 		// No unreaped exit to wait on, so no pinned number to kill under.
@@ -273,11 +275,43 @@ func reapWatchGroupLeader(cmd *exec.Cmd, beforeKill ...func()) error {
 		for _, f := range beforeKill {
 			f()
 		}
-		return waitErr
+		return false, waitErr
 	}
 	for _, f := range beforeKill {
 		f()
 	}
 	_ = watchGroupKill(-pid, syscall.SIGKILL)
-	return cmd.Wait()
+	return true, cmd.Wait()
+}
+
+// awaitWatchReaders waits for the run's stdout and stderr readers to reach
+// EOF. After the group cleanup kill every write end is gone, so that wait is
+// short. When the kill was skipped, a leftover the script backgrounded may
+// still hold an inherited write end, and waiting for its EOF would wedge stop,
+// reload and graceful shutdown on it. So it waits only up to grace, then closes
+// the read ends itself, loudly: the leftover's later writes fail with EPIPE
+// instead.
+func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, readEnds []*os.File, done ...<-chan struct{}) {
+	if !groupKilled {
+		timeout := time.After(grace)
+		for _, ch := range done {
+			select {
+			case <-ch:
+				continue
+			case <-timeout:
+			}
+			log.WarningLog.Printf("watch task %s: a process the watch command started still holds its output "+
+				"%s after the command exited, and the group cleanup kill was skipped; closing the output so "+
+				"the task can stop (that process may still be running)", taskID, grace)
+			for _, f := range readEnds {
+				if f != nil {
+					_ = f.Close()
+				}
+			}
+			break
+		}
+	}
+	for _, ch := range done {
+		<-ch
+	}
 }

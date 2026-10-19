@@ -18,18 +18,34 @@ func waitExitedUnreaped(pid int) error {
 	change.Fflags = unix.NOTE_EXIT
 	events := make([]unix.Kevent_t, 1)
 	for {
-		_, err := unix.Kevent(kq, []unix.Kevent_t{change}, events, nil)
-		switch err {
-		case nil:
-			return nil
-		case unix.EINTR:
-			continue
-		case unix.ESRCH:
-			// The registration found no live process: our child has already
-			// exited, and since only we reap it, it is still unreaped.
-			return nil
-		default:
+		n, err := unix.Kevent(kq, []unix.Kevent_t{change}, events, nil)
+		if exited, err := kqueueExitResult(n, &events[0], err); exited || err != nil {
 			return err
 		}
 	}
+}
+
+// kqueueExitResult reads one kevent call of waitExitedUnreaped. exited means
+// the child has exited; err means its exit cannot be awaited this way; neither
+// means call again. A registration that fails can come back as an EV_ERROR
+// event with the errno in Data while kevent itself succeeds, so the event is
+// checked for that before it counts as the exit.
+func kqueueExitResult(n int, ev *unix.Kevent_t, err error) (exited bool, _ error) {
+	if err == nil && n > 0 && ev.Flags&unix.EV_ERROR != 0 {
+		if ev.Data == 0 {
+			return false, nil
+		}
+		err = unix.Errno(ev.Data)
+	}
+	switch {
+	case err == unix.EINTR:
+		return false, nil
+	case err == unix.ESRCH:
+		// The registration found no live process: our child has already
+		// exited, and since only we reap it, it is still unreaped.
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return n > 0 && ev.Filter == unix.EVFILT_PROC && ev.Fflags&unix.NOTE_EXIT != 0, nil
 }

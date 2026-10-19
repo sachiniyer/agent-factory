@@ -68,8 +68,18 @@ func readPIDFile(path string) (int, bool) {
 	return pid, err == nil && pid > 1
 }
 
+// processGone reports that pid is no longer running. A zombie counts: a
+// killed process whose new parent has not reaped it yet still answers signal
+// 0, and on a host whose PID 1 reaps slowly it can stay that way for a while.
 func processGone(pid int) bool {
-	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) || isZombie(pid)
+}
+
+// isZombie reports a process that has exited but not yet been reaped by its
+// new parent; it is no longer running.
+func isZombie(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 // TestWatchCommandDiesWithItsDaemon is #5329: a daemon SIGKILLed while its

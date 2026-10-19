@@ -625,7 +625,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// write ends, so both reader goroutines are guaranteed to reach EOF. The
 	// watchdog is joined, and the kill sent, while the leader is still
 	// unreaped, so neither can name a reused group (reapWatchGroupLeader).
-	waitErr := reapWatchGroupLeader(cmd, func() {
+	groupKilled, waitErr := reapWatchGroupLeader(cmd, func() {
 		close(leaderExited)
 		<-watchdogDone
 	})
@@ -633,8 +633,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		waitErr = lifeline.shellResult(waitErr)
 	}
 	close(stdoutWritersStopped)
-	<-readerDone
-	<-stderrDone
+	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, readerDone, stderrDone)
 
 	return tail, waitErr
 }

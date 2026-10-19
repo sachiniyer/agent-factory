@@ -92,20 +92,13 @@ func TestWatchTaskRemoveAndUpdateEndPromptly(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitUntil(t, s.stopGrace+3*time.Second, "the TERM-ignoring watch command to be killed", func() bool {
-				return processGone(shell) || isZombie(shell)
+				return processGone(shell)
 			})
 			if elapsed := time.Since(start); elapsed > s.stopGrace+3*time.Second {
 				t.Fatalf("task %s took %s to end its watch command", change, elapsed)
 			}
 		})
 	}
-}
-
-// isZombie reports a process that has exited but not yet been reaped by its
-// new parent; it is no longer running.
-func isZombie(pid int) bool {
-	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
-	return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 // TestGroupKillPrecedesLeaderReap pins the order reapWatchGroupLeader exists
@@ -131,7 +124,7 @@ func TestGroupKillPrecedesLeaderReap(t *testing.T) {
 		return kill(target, sig)
 	}
 
-	if err := reapWatchGroupLeader(cmd); err != nil {
+	if _, err := reapWatchGroupLeader(cmd); err != nil {
 		t.Fatal(err)
 	}
 	want := strconv.Itoa(-pid) + "/" + syscall.SIGKILL.String() + "/unreaped=true"
@@ -282,10 +275,48 @@ func TestReapFallbackKeepsTheWatchdogUntilExit(t *testing.T) {
 	}
 	pid := cmd.Process.Pid
 	var leaderRunning bool
-	if err := reapWatchGroupLeader(cmd, func() { leaderRunning = !processGone(pid) }); err != nil {
+	if _, err := reapWatchGroupLeader(cmd, func() { leaderRunning = !processGone(pid) }); err != nil {
 		t.Fatal(err)
 	}
 	if leaderRunning {
 		t.Fatal("the stop watchdog was ended while the watch command was still running")
+	}
+}
+
+// TestSkippedGroupKillDoesNotWedgeTheRun: when the group cleanup kill is
+// skipped, something the script backgrounded can still hold the run's stdout
+// after the shell exits. The run must end anyway, within the stop grace, and
+// say why — otherwise stop, reload and shutdown wait on that process forever.
+func TestSkippedGroupKillDoesNotWedgeTheRun(t *testing.T) {
+	exited := watchLeaderExited
+	t.Cleanup(func() { watchLeaderExited = exited })
+	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
+
+	s, _ := newTestSupervisor(t, staticTasks())
+	s.lifelineExe = "" // a lifeline would kill the leftover itself on the shell's exit
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "leftover.pid")
+	warnings := captureWarnings(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.newTaskWatcher(watchTask("leftover", "sleep 30 & echo $! > "+pidFile+"; exit 0", dir)).runOnce()
+		done <- err
+	}()
+	t.Cleanup(func() {
+		if pid, ok := readPIDFile(pidFile); ok {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v, want the shell's clean exit", err)
+		}
+	case <-time.After(s.stopGrace + 3*time.Second):
+		t.Fatal("the run is still waiting on the output a leftover process holds")
+	}
+	if !strings.Contains(warnings.String(), "still holds its output") {
+		t.Fatalf("no warning that the run's output was closed under a leftover process; warnings:\n%s", warnings.String())
 	}
 }
