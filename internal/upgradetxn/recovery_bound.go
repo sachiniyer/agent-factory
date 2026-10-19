@@ -194,6 +194,24 @@ func ensureRecoveryRetryCounterDir(home, txnID string) error {
 		if err := validateDirectoryNoSymlink(filepath.Dir(dir)); err != nil {
 			return fmt.Errorf("validate transactions root for recovery retry counter: %w", err)
 		}
+		// The upgrade root itself might be a symlink whose external target
+		// already contains a real transactions/<id> hierarchy, in which case
+		// both checks above succeeded because validateDirectoryNoSymlink
+		// inspects only each path's final component (os.Lstat follows the
+		// intermediate symlink). This early return would otherwise skip the
+		// upgrade-root validation below, and durableAtomicWriteFile again
+		// validates only the transaction leaf, so the pre-record would follow
+		// the symlink and replace recovery.attempts outside the AF home even
+		// though normal journal loading rejects the symlinked storage root.
+		// Validate the upgrade root the same way the create path does so a
+		// symlinked upgrade root is rejected here rather than accepted by
+		// the fast path.
+		if err := validateDirectoryNoSymlink(upgradeRoot(home)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errAFHomeRemoved
+			}
+			return fmt.Errorf("validate upgrade storage root for recovery retry counter: %w", err)
+		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("recovery retry counter directory is not a real directory: %w", err)
@@ -527,24 +545,31 @@ func boundLaunchdRecovery(
 		// counter, persists the marker defensively, and fires launchctl
 		// disable.
 		_ = standDownLaunchdRecoveryIfExhausted(ctx, invocation, controller, nowTime)
-		// launchd opened (creating when absent) the per-transaction recovery
-		// log at upgrade/recovery-<id>.log before it spawned this invocation,
-		// so a RunAtLoad that reaches the exhausted pre-check after the
-		// transaction was removed or superseded leaves an orphaned log the
-		// stale-transaction branch's cleanup (lines 568-571) never reaches:
-		// this earlier return bypasses it, and no remaining transaction will
-		// clean it up. The upgrade root exists (the counter at
-		// transactions/<id>/recovery.attempts is the budget the exhausted
-		// pre-check read), so the log removal is the same best-effort cleanup
-		// the gone-transaction branch performs; a missing log is a clean
-		// no-op, and a missing upgrade root (no log to remove) is skipped the
-		// same way the gone-transaction branch skips it.
-		logPath := launchdRecoveryLogPath(invocation.HomeDir, invocation.TransactionID)
-		if _, statErr := os.Stat(upgradeRoot(invocation.HomeDir)); statErr == nil {
-			if logErr := removeDurableFile(logPath); logErr != nil {
-				log.WarningLog.Printf(
-					"upgrade recovery: could not remove the stale launchd recovery log for transaction %s while standing down the exhausted budget (%v); the job is already disabled, so the orphaned log does not re-arm the relaunch loop",
-					invocation.TransactionID, logErr)
+		// The per-transaction recovery log at upgrade/recovery-<id>.log is
+		// orphaned only when the invocation is stale (the transaction was
+		// removed or superseded): launchd opened it before spawning this
+		// invocation, the gone-transaction branch's cleanup never reaches
+		// this earlier return, and no remaining transaction will clean it
+		// up. An ordinary active transaction that just exhausted its budget
+		// still needs the log — launchd has the file open, the stand-down
+		// messages are still being written to it, and removing it now would
+		// unlink the inode mid-write and lose the operator's primary
+		// diagnostics for the transaction that still needs attention. Only
+		// remove the log when the invocation is stale, the same condition
+		// the gone-transaction branch uses; an active exhausted transaction
+		// keeps its log so the operator can read the failure output. The
+		// upgrade-root guard is the same as the gone-transaction branch: a
+		// missing upgrade root has no log to unlink, and removeDurableFile
+		// would otherwise log a WARNING for the absent parent and break the
+		// clean exit-0 invariant (#1749) on the no-active-transaction path.
+		if !activeTransactionStillNamesInvocation(invocation) {
+			logPath := launchdRecoveryLogPath(invocation.HomeDir, invocation.TransactionID)
+			if _, statErr := os.Stat(upgradeRoot(invocation.HomeDir)); statErr == nil {
+				if logErr := removeDurableFile(logPath); logErr != nil {
+					log.WarningLog.Printf(
+						"upgrade recovery: could not remove the stale launchd recovery log for transaction %s while standing down the exhausted budget (%v); the job is already disabled, so the orphaned log does not re-arm the relaunch loop",
+						invocation.TransactionID, logErr)
+				}
 			}
 		}
 		return nil

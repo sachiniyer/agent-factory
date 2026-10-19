@@ -1352,3 +1352,135 @@ func TestBoundLaunchdRecoveryStandsDownForNonterminalMissingStorage(t *testing.T
 	require.ErrorIs(t, statErr, os.ErrNotExist,
 		"the missing nonterminal transaction directory must not be recreated by the stand-down")
 }
+
+// TestEnsureRecoveryRetryCounterDirRejectsSymlinkedUpgradeRootOnExistingLeaf pins
+// the P2 fix for the existing-leaf fast path: when <home>/upgrade is replaced by a
+// symlink to a moved or external upgrade tree that already contains real
+// transactions/<id> directories, validateDirectoryNoSymlink on the leaf and the
+// transactions parent both succeed (os.Lstat follows the intermediate symlink),
+// so the fast path would accept the leaf and the subsequent durableAtomicWriteFile
+// would replace recovery.attempts outside the AF home even though normal journal
+// loading rejects the symlinked storage root. The upgrade root must be validated
+// before accepting the existing leaf, the same way the create path validates it.
+func TestEnsureRecoveryRetryCounterDirRejectsSymlinkedUpgradeRootOnExistingLeaf(t *testing.T) {
+	invocation := launchdBoundFixture(t)
+	txnDir := transactionDir(invocation.HomeDir, invocation.TransactionID)
+	require.NoError(t, os.MkdirAll(txnDir, 0o700))
+
+	// Replace <home>/upgrade with a symlink to an external upgrade tree whose
+	// transactions/<id> is a real directory. The leaf and the transactions
+	// parent both validate (os.Lstat follows the intermediate symlink), so the
+	// fast path would accept the leaf without the upgrade-root check.
+	upgradeDir := filepath.Join(invocation.HomeDir, "upgrade")
+	outsideHome := t.TempDir()
+	outsideUpgrade := filepath.Join(outsideHome, "evil-upgrade")
+	require.NoError(t, os.MkdirAll(filepath.Join(outsideUpgrade, "transactions", invocation.TransactionID), 0o700))
+	// Copy active.json so the external tree looks like a real upgrade root.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outsideUpgrade, "active.json"),
+		mustReadFile(t, activeJournalPath(invocation.HomeDir)), 0o600))
+	require.NoError(t, os.RemoveAll(upgradeDir))
+	require.NoError(t, os.Symlink(outsideUpgrade, upgradeDir))
+
+	// The leaf under the symlinked upgrade root still validates as a real
+	// directory, so without the upgrade-root check the fast path would accept
+	// it and the durable atomic write would land outside the AF home.
+	err := ensureRecoveryRetryCounterDir(invocation.HomeDir, invocation.TransactionID)
+	require.Error(t, err, "a symlinked upgrade root must be rejected on the existing-leaf fast path")
+	require.ErrorContains(t, err, "validate upgrade storage root",
+		"the rejection must come from the upgrade-root validation, not the transactions parent or the leaf")
+
+	// The counter must not be written outside the AF home.
+	_, statErr := os.Stat(filepath.Join(outsideUpgrade, "transactions", invocation.TransactionID, "recovery.attempts"))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"a symlinked upgrade root must not let the counter be written outside the AF home")
+}
+
+// mustReadFile is a test helper that reads a file and aborts on error.
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
+}
+
+// TestBoundLaunchdRecoveryExhaustedBudgetPreservesLogForActiveTransaction pins
+// the P2 fix for the active-transaction shape: when an ordinary active
+// transaction reaches the retry limit, the exhausted-budget pre-check must not
+// remove the per-transaction recovery log. launchd has the file open, the
+// stand-down messages are still being written to it, and unlinking it mid-write
+// loses the operator's primary diagnostics for the transaction that still needs
+// attention. Only a stale invocation (the transaction removed or superseded)
+// removes the orphaned log launchd recreated — the gone-transaction shape the
+// cleanup is for. An active exhausted transaction keeps its log so the operator
+// can read the failure output.
+func TestBoundLaunchdRecoveryExhaustedBudgetPreservesLogForActiveTransaction(t *testing.T) {
+	// Force the Darwin fallback so the stale-transaction part of the test (a
+	// gone active.json) runs the launchd budget path on a Linux CI runner the
+	// way it runs on the macOS cell.
+	origFallback := launchdFallbackOnCorruptJournal
+	launchdFallbackOnCorruptJournal = func() bool { return true }
+	t.Cleanup(func() { launchdFallbackOnCorruptJournal = origFallback })
+
+	invocation := launchdBoundFixture(t)
+	runtime := &fakeRecoveryJobRuntime{launchdUserID: 501}
+	controller := runtime.controller()
+	start := time.Now()
+
+	// Pre-record the exhausting attempt (the counter is at the limit but not
+	// yet Exhausted, the way a panic on the third attempt leaves it).
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start))
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(time.Second)))
+	require.NoError(t, recordLaunchdRecoveryAttempt(invocation, start.Add(2*time.Second)))
+	counter, ok := readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.Equal(t, launchdRecoveryBurstLimit, counter.Attempts)
+	require.False(t, counter.Exhausted)
+
+	// launchd opened the per-transaction recovery log before spawning this
+	// invocation. The transaction is still active (active.json names it), so
+	// the operator needs the log to read the stand-down output and the prior
+	// failure diagnostics; the exhausted pre-check must not unlink it.
+	logPath := launchdRecoveryLogPath(invocation.HomeDir, invocation.TransactionID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logPath), 0o700))
+	require.NoError(t, os.WriteFile(logPath, []byte("launchd recovery log for an active exhausted transaction"), 0o600))
+
+	ran := false
+	err := boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start.Add(3 * time.Second) }, func() error {
+			ran = true
+			return nil
+		})
+	require.NoError(t, err, "an exhausted budget must stand the actor down (exit 0)")
+	require.False(t, ran, "the pre-check must stand down without re-entering the supervisor")
+	require.Equal(t, []recoveryCommandCall{{
+		name: "launchctl",
+		args: []string{"disable", "gui/501/" + launchdRecoveryJobName(invocation.TransactionID)},
+	}}, runtime.commands, "the pre-check must disable the job")
+
+	// The log must be preserved for an active exhausted transaction — the
+	// operator's primary diagnostics for the transaction that still needs
+	// attention. The job is disabled, but the log stays.
+	require.FileExists(t, logPath,
+		"the recovery log for an active exhausted transaction must not be removed; the operator needs the failure output")
+	counter, ok = readRecoveryRetryCounter(invocation.HomeDir, invocation.TransactionID)
+	require.True(t, ok)
+	require.True(t, counter.Exhausted, "the pre-check stand-down persists the exhausted marker")
+
+	// A stale invocation (active.json removed, the transaction gone) reaches
+	// the exhausted pre-check with an at-limit counter; the log launchd
+	// recreated is an orphan no remaining transaction will clean up, so the
+	// exhausted pre-check must still remove it. This is the gone-transaction
+	// shape the orphaned-log cleanup is for.
+	require.NoError(t, os.Remove(activeJournalPath(invocation.HomeDir)))
+	require.NoError(t, os.WriteFile(logPath, []byte("launchd recreated stale recovery log"), 0o600))
+	err = boundLaunchdRecovery(context.Background(), invocation, controller,
+		func() time.Time { return start.Add(4 * time.Second) }, func() error {
+			t.Fatal("a stale exhausted invocation must not run the actor")
+			return nil
+		})
+	require.NoError(t, err, "a stale exhausted invocation must stand down (exit 0)")
+	_, statErr := os.Stat(logPath)
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"the orphaned recovery log for a stale exhausted invocation must be removed by the stand-down")
+}
