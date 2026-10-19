@@ -522,6 +522,104 @@ func ProjectFailClosedRootAgentLeaf(parent ResolvedValue, keyPath string) (Resol
 	return projected, true
 }
 
+// RootAgentValueHasIgnoredGlobal reports whether rv is the ignored-global
+// rendering of `af config get root_agent --explain`: a present global
+// [root_agent] that the daemon drops because the inspected project is not
+// registered and has no legacy root_agents entry (markRootAgentGlobalIneligible).
+// The recognizing marker is a global candidate carrying Allowed:false — the
+// only path that sets Allowed:false on a root_agent candidate, because the
+// root_agent manifest entry DOES admit the global layer, so a normal
+// resolution never marks it disallowed.
+//
+// The marker that asks for the cause-preserving dotted-leaf projector
+// (ProjectIgnoredGlobalRootAgentLeaf) is distinct from
+// RootAgentValueFailsClosed: a fail-closed parent carries no Origins (no
+// config source decided the verdict) and routes through
+// ProjectFailClosedRootAgentLeaf; an ignored-global parent carries Origins
+// (the surviving built-in base supplied `enabled`) and routes through its
+// own projector. The two shapes are disjoint.
+func RootAgentValueHasIgnoredGlobal(rv ResolvedValue) bool {
+	if rv.Key != "root_agent" || RootAgentValueFailsClosed(rv) {
+		return false
+	}
+	for _, candidate := range rv.Candidates {
+		if candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Present && candidate.Result == "ignored" {
+			return true
+		}
+	}
+	return false
+}
+
+// ProjectIgnoredGlobalRootAgentLeaf projects one leaf of an ignored-global
+// root_agent table for a dotted read (`af config get root_agent.enabled` on
+// an unregistered project). Mirrors ProjectFailClosedRootAgentLeaf in the way
+// that matters for --explain: each candidate row keeps its Result/Reason
+// verbatim with only the leaf value substituted. The generic ResolvedValuePath
+// path relabels every Allowed:false candidate as
+// "disallowed · manifest policy does not allow this key at this source", and
+// markRootAgentGlobalIneligible sets Allowed:false to encode the registry
+// cause — so routing this shape through the generic projector clobbers the
+// true cause ("project is not registered and has no legacy root_agents entry")
+// with a factually false one, since the root_agent manifest DOES admit the
+// global layer. Same shape class as the fail-closed projector's #3264
+// precedent: the cause this rendering exists to surface must survive the
+// dotted read, so the two reads of the same repository cannot disagree.
+//
+// Unlike a fail-closed parent (which carries no Origins), an ignored-global
+// parent carries Origins (the surviving built-in base supplied `enabled`).
+// A dotted read projects ONE leaf, so the projector drops the parent table's
+// per-leaf Origins — otherwise the surviving built-in `enabled` origin would
+// leak into an unrelated `root_agent.program` dotted read — and surfaces
+// the projected leaf's own origin as the single-leaf Winner when one
+// survives. The projector does NOT gate on Origins (cf. ResolvedValuePath's
+// `parent.Origins[leaf]` lookup that reports an unknown key when the leaf's
+// origin did not survive), so `root_agent.program`, whose origin the
+// global-layer drop removed, still answers with the cause and an empty
+// program rather than "unknown config key". ProjectFailClosedRootAgentLeaf
+// established the same no-fail contract for the fail-closed shape.
+func ProjectIgnoredGlobalRootAgentLeaf(parent ResolvedValue, keyPath string) (ResolvedValue, bool) {
+	leaf, ok := strings.CutPrefix(keyPath, "root_agent.")
+	if !ok || leaf == "" {
+		return ResolvedValue{}, false
+	}
+	effective, ok := configLeafValue(parent.Value, leaf)
+	if !ok {
+		return ResolvedValue{}, false
+	}
+	projected := parent
+	projected.Key = keyPath
+	projected.Value = effective
+	projected.Default = ""
+	// Drop the parent table's per-leaf Origins: a dotted read projects ONE
+	// leaf, and the same-host full-table trace carries Origins for fields
+	// other than the projected one (e.g. the built-in `enabled` survives a
+	// `root_agent.program` read) — leaking them into a single-leaf dotted
+	// read would contradict every other dotted read, which clears Origins.
+	// Surface the projected leaf's own surviving origin as the single-leaf
+	// Winner, matching the generic dotted-read shape. Never fail just
+	// because the global-layer drop removed the leaf's origin: the cause is
+	// what this rendering exists to surface, so a now-unknown leaf still
+	// answers (mirrors ProjectFailClosedRootAgentLeaf's no-Origin-gate
+	// contract).
+	projected.Origins = nil
+	projected.Winner = nil
+	if origin, present := parent.Origins[leaf]; present {
+		origin.KeyPath = keyPath
+		projected.Winner = &origin
+	}
+	projected.Candidates = make([]CandidateTrace, len(parent.Candidates))
+	for i, candidate := range parent.Candidates {
+		candidate.KeyPath = keyPath
+		if leafValue, present := configLeafValue(candidate.Value, leaf); present && candidate.Present {
+			candidate.Value = leafValue
+		} else {
+			candidate.Value = nil
+		}
+		projected.Candidates[i] = candidate
+	}
+	return projected, true
+}
+
 // LegacyRootAgentForRepo returns the root_agents entry whose path resolves to
 // repoID (and the matched key), or nil. Keys are checked in sorted order so the
 // inspection surface, daemon lookup, and sorted ensure pass share one stable
