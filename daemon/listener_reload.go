@@ -273,13 +273,19 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	// pin value is the config those generations were admitted under, so a
 	// drain can never evaluate a posture weaker than the one that let it in.
 	if authPostureRelaxed(wl.postureBeforeSwap, newCfg) {
-		// `through` stops before the bound generation: it stays on the live
-		// read so the posture it was just written picks up normally. Nothing
-		// bound means every issued generation is retired or never-served, so
-		// the pin reaches the newest seq — a still-draining opt-out or rebind
-		// leftover is exactly who needs it.
+		// `through` stops before the bound generation ONLY while that
+		// generation stays in service: an apply relaxing auth without moving
+		// listen_addr must reach the socket it was written for, so the bound
+		// listener keeps the live read. When the same apply retires it — the
+		// address is moving or the "" opt-out tears it down — the bound
+		// generation drains like any other retired one and is frozen with
+		// them: publish would otherwise hand it the relaxed posture across
+		// the whole bind gap, and a FAILED rebind would then retain it in the
+		// weakened posture indefinitely (#5137 review — keep the replaced
+		// generation on its admitting posture until a successor adopts).
 		through := wl.postureSeq
-		if wl.webHandle != nil && wl.boundSeq > 0 {
+		if wl.webHandle != nil && wl.boundSeq > 0 &&
+			newCfg.ListenAddr != "" && newCfg.ListenAddr == wl.webConfigAddr {
 			through = wl.boundSeq - 1
 		}
 		wl.webFreeze.pin(wl.postureBeforeSwap, through)
@@ -340,22 +346,28 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 
 // authPostureRelaxed reports whether the incoming config admits a peer old
 // would have rejected: the token requirement dropping, or the loopback-token
-// requirement dropping. The loopback switch is NEVER inert — under
-// require_token it is exactly what exempts loopback peers from the token — so
-// its true→false transition relaxes the gate for loopback traffic whether or
-// not require_token also moved (#5137 review). It is the kind-freeze trigger
-// for NON-refusal applies: a generation retired by a rebind or opt-out is
-// invisible to the serving-socket refusal check — webHandle names only the
-// newest generation — yet its draining handlers still read the live posture,
-// which the publish is about to weaken beneath them. Tightening deliberately
-// does not match: a stronger posture must reach drains live (#2480), so only
-// the weakening direction freezes.
+// requirement dropping while require_token held. The loopback switch is only
+// a gate when require_token enforces something — under tokenDisabled it is
+// inert (a tokenless posture already admits everyone), so a combined apply
+// that enables require_token AND flips require_loopback_token off is a
+// TIGHTENING from all-free to tokened-with-loopback-exempt, not a relaxation
+// (#5137 review — judging either boolean in isolation misclassifies it, and a
+// mistaken pin would hide the strengthen from draining generations). While
+// require_token holds, though, the flag is exactly what exempts loopback
+// peers from the token, so its true→false transition relaxes the gate for
+// loopback traffic whether or not require_token also moved. It is the
+// kind-freeze trigger for NON-refusal applies: a generation retired by a
+// rebind or opt-out is invisible to the serving-socket refusal check —
+// webHandle names only the newest generation — yet its draining handlers
+// still read the live posture, which the publish is about to weaken beneath
+// them. Tightening deliberately does not match: a stronger posture must reach
+// drains live (#2480), so only the weakening direction freezes.
 func authPostureRelaxed(old, incoming *config.Config) bool {
 	if old == nil || incoming == nil {
 		return false
 	}
 	return (old.RequireToken && !incoming.RequireToken) ||
-		(old.RequireLoopbackToken && !incoming.RequireLoopbackToken)
+		(old.RequireToken && old.RequireLoopbackToken && !incoming.RequireLoopbackToken)
 }
 
 // bindWebLocked (re)binds the control-plane web listener to the config address

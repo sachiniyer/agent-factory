@@ -262,10 +262,11 @@ type frozenRange struct {
 // refusal without a serving config has nothing to preserve), a cfg that is
 // ITSELF refused (a refused posture was never legitimately served — pinning
 // it would hand draining sockets the very gate the freeze exists to keep
-// out), and a through that adds no coverage (every generation it names is
-// already frozen under an earlier pin, and first coverage wins).
+// out), and a through that adds no coverage (through==0 covers nothing —
+// generations number from 1 — and a through at or below the last pin's names
+// only already-frozen generations, whose first coverage wins).
 func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
-	if cfg == nil || config.ListenerBindRefusal(cfg) != "" {
+	if cfg == nil || through == 0 || config.ListenerBindRefusal(cfg) != "" {
 		return
 	}
 	f.mu.Lock()
@@ -276,21 +277,47 @@ func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 }
 
 // current returns the config this listener evaluates requests under — the
-// serving config of the first pin that covered this generation, or the live
-// snapshot when no pin reaches it.
+// serving config of the first pin that covered this generation, OVERLAID with
+// the live config's token requirements where those are stricter, or the live
+// snapshot when no pin reaches it. The overlay keeps the #2480 direction
+// honest through a freeze: a tightening apply still reaches draining conns on
+// a frozen generation — only relaxations are pinned out.
 func (l *livePosture) current() *config.Config {
+	live := l.snapshot()
 	if f := l.freeze; f != nil {
 		f.mu.Lock()
 		for _, r := range f.pins {
 			if l.seq <= r.through {
-				cfg := r.cfg
+				cfg := tightenFrozenPosture(r.cfg, live)
 				f.mu.Unlock()
 				return cfg
 			}
 		}
 		f.mu.Unlock()
 	}
-	return l.snapshot()
+	return live
+}
+
+// tightenFrozenPosture merges a pinned config with the live one field-wise so
+// a later apply that TIGHTENS auth still reaches frozen generations (#5137
+// review — first coverage preserves the pin's posture, but a pin is a floor,
+// not a ceiling). RequireToken and RequireLoopbackToken are the gate's only
+// posture fields and true is the stricter direction for both, so the merge is
+// a plain OR: live can only raise a frozen gate, never lower it. The merge
+// allocation is skipped when nothing tightened — the pinned object itself is
+// returned so the common frozen path allocates nothing per request.
+func tightenFrozenPosture(pinned, live *config.Config) *config.Config {
+	if pinned == nil {
+		return live
+	}
+	if live == nil || (pinned.RequireToken == live.RequireToken &&
+		pinned.RequireLoopbackToken == live.RequireLoopbackToken) {
+		return pinned
+	}
+	merged := *pinned
+	merged.RequireToken = merged.RequireToken || live.RequireToken
+	merged.RequireLoopbackToken = merged.RequireLoopbackToken || live.RequireLoopbackToken
+	return &merged
 }
 
 // connTracker tracks the HIJACKED connections — WebSocket upgrades — of one

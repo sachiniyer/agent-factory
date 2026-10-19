@@ -560,8 +560,10 @@ func TestPostureFreezePreservesEachGenerationsOwnPin(t *testing.T) {
 
 	live := func() *config.Config { return &optInTokenless }
 	older := &livePosture{snapshot: live, freeze: &f, seq: 2}
-	require.Same(t, tokened, older.current(),
+	got := older.current()
+	require.True(t, got.RequireToken,
 		"the earlier generation keeps the pin that first covered it — never re-pinned weaker")
+	require.False(t, got.AllowUnauthenticatedNetwork)
 	newer := &livePosture{snapshot: live, freeze: &f, seq: 5}
 	require.Same(t, &optInTokenless, newer.current(),
 		"the newer generation froze onto the posture it was actually serving")
@@ -589,6 +591,19 @@ func TestAuthPostureRelaxedCatchesLoopbackTokenDrop(t *testing.T) {
 		"dropping require_token relaxes even when the loopback switch tightens")
 	require.False(t, authPostureRelaxed(&incoming, old),
 		"the reverse direction is a tightening, not a relaxation")
+
+	// The mixed transition from the review finding: require_loopback_token
+	// was INERT under the old tokenless posture (tokenDisabled already
+	// admitted everyone), so turning require_token on while flipping the
+	// loopback switch off tightens the effective gate — pinning drains to the
+	// old tokenless config would hide the strengthen.
+	oldTokenless := *old
+	oldTokenless.RequireToken = false
+	incomingMixed := oldTokenless
+	incomingMixed.RequireToken = true
+	incomingMixed.RequireLoopbackToken = false
+	require.False(t, authPostureRelaxed(&oldTokenless, &incomingMixed),
+		"require_token false→true is never a relaxation, whatever the inert loopback flag does")
 }
 
 // TestAuthRelaxationFreezesDrainingGenerations pins the shape from the review
@@ -639,6 +654,80 @@ func TestAuthRelaxationFreezesDrainingGenerations(t *testing.T) {
 	draining := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
 	require.True(t, draining.current().RequireToken,
 		"the retired network generation keeps gating on the config that admitted it")
+}
+
+// TestRelaxationRebindFreezesBoundGeneration pins the other half of the
+// relaxation drain window (#5137 review): when the relaxing apply also MOVES
+// listen_addr, the bound generation is being retired too — publish would
+// otherwise hand it the relaxed posture for the whole bind gap, and a failed
+// rebind would retain it weakened indefinitely. The pin covers it, so the
+// retained loopback socket keeps requiring the token it admitted with until a
+// successor is adopted.
+func TestRelaxationRebindFreezesBoundGeneration(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.RequireToken = true
+	cfg.RequireLoopbackToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	// Move to a network address while dropping the loopback-token switch:
+	// allowed (require_token still holds), but generation 1 — a loopback
+	// socket that admitted peers under "everyone tokens" — is being retired
+	// by this same apply.
+	next := *cfg
+	next.ListenAddr = "0.0.0.0:0"
+	next.RequireLoopbackToken = false
+	require.Empty(t, config.ListenerBindRefusal(&next))
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	wl.webFreeze.mu.Lock()
+	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
+	wl.webFreeze.mu.Unlock()
+	require.Len(t, pins, 1, "the relaxing rebind must freeze the generation it retires")
+	require.Equal(t, uint64(1), pins[0].through,
+		"the pin reaches the bound generation itself — it does not keep the live read across the bind gap")
+	require.True(t, pins[0].cfg.RequireLoopbackToken)
+
+	retained := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
+	got := retained.current()
+	require.True(t, got.RequireToken)
+	require.True(t, got.RequireLoopbackToken,
+		"a retained socket after a failed rebind keeps its admitting posture, not the relaxed one")
+}
+
+// TestFrozenPostureStillTightensFromLive pins the overlay the other direction
+// (#5137 review): a pin is a floor, not a ceiling — a later apply that
+// TIGHTENS auth must reach generations frozen under a weaker posture, or a
+// drain pinned to a loopback-exempt config would keep bypassing the bearer
+// token after the operator turned it on.
+func TestFrozenPostureStillTightensFromLive(t *testing.T) {
+	pinned := config.DefaultConfig()
+	pinned.RequireToken = true
+	pinned.RequireLoopbackToken = false // loopback peers exempt — the weaker pin
+	live := *pinned
+	live.RequireLoopbackToken = true // the later tighten
+
+	var f postureFreeze
+	f.pin(pinned, 1)
+	frozen := &livePosture{snapshot: func() *config.Config { return &live }, freeze: &f, seq: 1}
+	require.True(t, frozen.current().RequireLoopbackToken,
+		"a tightening apply must reach the frozen generation — the pin is a floor, not a ceiling")
+
+	// And the converse, already pinned elsewhere: a live RELAXATION never
+	// lowers a frozen gate.
+	liveRelaxed := *pinned
+	liveRelaxed.RequireToken = false
+	strictPin := config.DefaultConfig()
+	strictPin.RequireToken = true
+	strictPin.RequireLoopbackToken = true
+	var f2 postureFreeze
+	f2.pin(strictPin, 1)
+	frozen2 := &livePosture{snapshot: func() *config.Config { return &liveRelaxed }, freeze: &f2, seq: 1}
+	got := frozen2.current()
+	require.True(t, got.RequireToken)
+	require.True(t, got.RequireLoopbackToken,
+		"a live relaxation must not lower the gate a generation was pinned with")
 }
 
 // TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side
