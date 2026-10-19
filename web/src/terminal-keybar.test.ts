@@ -609,10 +609,16 @@ test("pointerdown prevents focus transfer before acting", () => {
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
 });
 
-test("one-row keybar uses seven primary targets and a replacement arrows row at 360px", async () => {
+test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {
   const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
   assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→"]]);
-  for (const row of KEYBAR_ROWS) assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+  // ≥348px of room: 44px targets + 4px gaps + padding. Below that the keybar's
+  // narrow rule lets keys shrink to a 40px floor (#5380), so at 320px the same
+  // model must still close.
+  for (const row of KEYBAR_ROWS) {
+    assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+    assert.ok(row.length * 40 + (row.length - 1) * 4 + 16 <= 320);
+  }
 });
 
 test("keyBytes drops ctrl/alt for arrows and specials", () => {
@@ -710,6 +716,7 @@ function pastingKeybar(modifiers = new StickyModifiers()) {
     openPasteSheet: () => { sheetOpens.push(1); },
     closePasteSheet: () => {},
     paint: () => {},
+    disposed: false,
   }) as unknown as TerminalKeybar;
   return { keybar, writes, pastes, sheetOpens };
 }
@@ -774,6 +781,26 @@ test("sticky modifiers neither rewrite a paste nor are consumed by it", () => {
   keybar.markUserInput();
   assert.equal(keybar.transform("c"), "\x03");
   assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("a clipboard read settling after disposal pastes nothing and opens no sheet", async t => {
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    (keybar as unknown as { disposed: boolean }).disposed = true;
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after dispose`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after dispose`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
 });
 
 test("a paste waits behind a pending composition commit like other positional input", t => {

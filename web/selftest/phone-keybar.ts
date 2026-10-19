@@ -36,7 +36,11 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
     return { fits: rect.left >= 0 && rect.right <= innerWidth,
       lastFits: [...el.querySelectorAll("button")].filter(b => b.offsetHeight > 0).at(-1)!.getBoundingClientRect().right <= innerWidth,
       oneRow: rect.height === 44,
-      targets: [...el.querySelectorAll("button")].filter(b => b.offsetHeight > 0).every(b => b.offsetWidth >= 44 && b.offsetHeight >= 44),
+      // #5380: height is always >=44px; width is >=44px at >=348px of room, and
+      // may narrow to >=40px below it so the seven-key primary row still fits a
+      // 320px phone.
+      targets: [...el.querySelectorAll("button")].filter(b => b.offsetHeight > 0)
+        .every(b => b.offsetHeight >= 44 && b.offsetWidth >= (innerWidth >= 348 ? 44 : 40)),
       aboveKeyboard: Math.abs(rect.bottom - (visualViewport!.offsetTop + visualViewport!.height)) < 2 };
   });
   expect(geometry).toEqual({ fits: true, lastFits: true, oneRow: true, targets: true, aboveKeyboard: true });

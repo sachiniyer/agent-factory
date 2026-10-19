@@ -3510,6 +3510,19 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
 }
 
+/* Seven primary keys need 348px (7×44px targets + 4px gaps + padding). Below
+   that — the 320px phones the keybar still serves — the keys narrow to a 40px
+   floor so the whole row stays inside the viewport; the 44px height never
+   changes (#5380). The bar's auto grid column sizes to the row's max-content,
+   so it is also pinned to the track width for flex-shrink to engage. At 348px
+   and up this rule is inert. */
+@media (max-width: 347px) {
+  .af-terminal-keybar { grid-template-columns: minmax(0, 1fr); }
+  .af-keybar-row button {
+    min-width: calc(var(--af-space-4) + var(--af-space-3));
+  }
+}
+
 /* Focused phone sessions reserve one 48px chrome row and one 44px key row. */
 @media (max-width: 768px) {
   .af-session-first .af-appbar {

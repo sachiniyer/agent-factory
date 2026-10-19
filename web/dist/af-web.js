@@ -8762,6 +8762,7 @@ var TerminalKeybar = class {
   suppressedKeydowns = /* @__PURE__ */ new WeakSet();
   pasteSheet;
   pasteSheetArea;
+  disposed = false;
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
@@ -8863,13 +8864,14 @@ var TerminalKeybar = class {
     }
     try {
       const text = await clipboard.readText();
+      if (this.disposed) return;
       if (text) {
         this.sendPaste(text);
         return;
       }
     } catch {
     }
-    this.openPasteSheet();
+    if (!this.disposed) this.openPasteSheet();
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -8882,6 +8884,7 @@ var TerminalKeybar = class {
    * composition (#4151).
    */
   sendPaste(text) {
+    if (this.disposed) return;
     if (this.softInput.deferAfterPendingComposition(() => this.emitPaste(text))) return;
     this.emitPaste(text);
   }
@@ -8897,10 +8900,12 @@ var TerminalKeybar = class {
    * Escape, Cancel, and a backdrop tap all dismiss.
    */
   openPasteSheet() {
+    if (this.disposed) return;
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
     }
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
     title.textContent = "Paste";
@@ -8939,6 +8944,12 @@ var TerminalKeybar = class {
     card.addEventListener("click", (event) => event.stopPropagation());
     card.addEventListener("keydown", (event) => {
       if (event.key === "Escape") this.closePasteSheet(false);
+      if (event.key === "Tab") {
+        const ring = [area, cancel, send].filter((el2) => !el2.disabled);
+        const at = ring.indexOf(document.activeElement);
+        event.preventDefault();
+        ring[(at + (event.shiftKey ? -1 : 1) + ring.length) % ring.length]?.focus();
+      }
     });
     const backdrop = document.createElement("div");
     backdrop.className = "af-modal-backdrop";
@@ -8992,6 +9003,7 @@ var TerminalKeybar = class {
     this.refit();
   };
   dispose() {
+    this.disposed = true;
     this.pasteSheet?.remove();
     this.pasteSheet = void 0;
     this.pasteSheetArea = void 0;

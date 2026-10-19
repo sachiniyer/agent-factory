@@ -309,6 +309,7 @@ export class TerminalKeybar {
   private readonly suppressedKeydowns = new WeakSet<Event>();
   private pasteSheet: HTMLElement | undefined;
   private pasteSheetArea: HTMLTextAreaElement | undefined;
+  private disposed = false;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly paste: (data: string) => void,
@@ -462,12 +463,15 @@ export class TerminalKeybar {
     }
     try {
       const text = await clipboard.readText();
+      // The read outlives the tap: a closed or switched-away terminal must not
+      // get a paste — or a modal — for a session that no longer exists.
+      if (this.disposed) return;
       if (text) {
         this.sendPaste(text);
         return;
       }
     } catch { /* readText also rejects on denied permission. */ }
-    this.openPasteSheet();
+    if (!this.disposed) this.openPasteSheet();
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -480,6 +484,7 @@ export class TerminalKeybar {
    * composition (#4151).
    */
   sendPaste(text: string): void {
+    if (this.disposed) return;
     if (this.softInput.deferAfterPendingComposition(() => this.emitPaste(text))) return;
     this.emitPaste(text);
   }
@@ -495,10 +500,16 @@ export class TerminalKeybar {
    * Escape, Cancel, and a backdrop tap all dismiss.
    */
   private openPasteSheet(): void {
+    if (this.disposed) return;
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
     }
+    // Focusing the sheet blurs xterm's helper textarea — and a blur mid-flight
+    // drops a just-committed IME composition before its zero-delay finalizer
+    // reads it. Open behind that commit instead, the same deferral sendPaste
+    // takes, so the text the user finished lands before the sheet takes focus.
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
     title.textContent = "Paste";
@@ -534,7 +545,17 @@ export class TerminalKeybar {
     card.append(title, body, foot);
     // A tap inside the card must not reach the backdrop's dismiss.
     card.addEventListener("click", event => event.stopPropagation());
-    card.addEventListener("keydown", event => { if (event.key === "Escape") this.closePasteSheet(false); });
+    card.addEventListener("keydown", event => {
+      if (event.key === "Escape") this.closePasteSheet(false);
+      if (event.key === "Tab") {
+        // aria-modal says the rest of the page is inert — keep Tab inside the
+        // ring so focus cannot escape to controls behind the sheet.
+        const ring = [area, cancel, send].filter(el => !(el as HTMLButtonElement).disabled);
+        const at = ring.indexOf(document.activeElement as HTMLTextAreaElement | HTMLButtonElement);
+        event.preventDefault();
+        ring[(at + (event.shiftKey ? -1 : 1) + ring.length) % ring.length]?.focus();
+      }
+    });
     const backdrop = document.createElement("div");
     backdrop.className = "af-modal-backdrop";
     backdrop.append(card);
@@ -584,6 +605,7 @@ export class TerminalKeybar {
     this.refit();
   };
   dispose(): void {
+    this.disposed = true;
     this.pasteSheet?.remove();
     this.pasteSheet = undefined;
     this.pasteSheetArea = undefined;
