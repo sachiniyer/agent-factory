@@ -349,7 +349,10 @@ func TestProgramPickerReselectingTheShownValueIsStillAChoice(t *testing.T) {
 	got := recordStartRequest(t)
 	stubAccounts(t, daemon.ListAccountsResponse{}, nil)
 
-	_, _ = h.startNewInstance()
+	_, cmd := h.startNewInstance()
+	// The form-open account fetch is owed an answer; deliver it so the
+	// in-flight lookup does not hold the submit (#4893 review).
+	deliver(t, h, drainCmd(t, cmd, time.Second))
 	naming := h.namingInstance
 	require.NoError(t, naming.SetTitle("demo"))
 	seed := h.pendingProgram
@@ -1204,7 +1207,14 @@ func TestFailedRemoteDefaultKeepsImplicitSubmitGated(t *testing.T) {
 	got := recordStartRequest(t)
 
 	_, cmd := h.startNewInstance()
-	_ = drainCmd(t, cmd, 200*time.Millisecond)
+	// The open cmd batches the remote-default fetch and the account preselect:
+	// deliver the account reply so its lookup is not owed at submit, but keep
+	// the remote answer pending — the crafted failure below takes its place.
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if _, ok := msg.(remoteDefaultMsg); !ok {
+			deliver(t, h, []tea.Msg{msg})
+		}
+	}
 	require.True(t, h.remoteDefaultPending, "the remote fetch armed the gate")
 	require.NoError(t, h.namingInstance.SetTitle("demo"))
 

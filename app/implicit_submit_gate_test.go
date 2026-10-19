@@ -460,9 +460,11 @@ func TestInFlightVerifyDoesNotRefire(t *testing.T) {
 }
 
 // TestAccountlessProgramRetiresTheLookupMarkers pins the #4893 review wedge:
-// a verify re-fire whose program lost its account registry returns nil — no
-// request exists to answer — so the owed markers must retire with it instead
-// of holding every later Enter for a reply that cannot arrive.
+// a fetch that cannot go out — the program lost its account registry between
+// the armed verify and the re-fire — returns nil, so the owed markers must
+// retire with it instead of holding every later Enter for a reply that cannot
+// arrive. The in-flight verify holds without re-firing (#4893 review), which
+// makes this retirement the only way that state unwedges.
 func TestAccountlessProgramRetiresTheLookupMarkers(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateNew
@@ -471,16 +473,28 @@ func TestAccountlessProgramRetiresTheLookupMarkers(t *testing.T) {
 	naming, err := session.NewInstance(session.InstanceOptions{
 		Title:   "demo",
 		Path:    t.TempDir(),
-		Program: "aider",
+		Program: "claude",
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
-	h.pendingProgram = "aider" // an agent with no account registry
+	h.pendingProgram = "claude"
+	h.pendingProgramChosen = true
+
+	// A real verify goes out on the account-capable program — its reply is
+	// owed, so the markers arm.
+	require.NotNil(t, h.fetchAccountDefault(naming, "claude"))
 	h.accountVerifyPending = true
 
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	// The program then loses its account registry — a pick, a correction, or
+	// a restore can all land here. The re-fire cannot fire, so nothing is
+	// owed and the armed verify retires with it.
+	h.pendingProgram = "aider"
+	require.Nil(t, h.fetchAccountDefault(naming, "aider"))
 	assert.False(t, h.accountVerifyPending, "a nil re-fire retires the armed verify")
 	assert.False(t, h.accountLookupPending, "the owed marker retires with it")
+
+	// And the submit is free to go: no registry exists to verify against.
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "demo", got.Title,
 		"nothing holds the submit once there is no registry left to verify against")
 }

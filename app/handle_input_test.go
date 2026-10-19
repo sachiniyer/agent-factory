@@ -641,7 +641,9 @@ func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 	assert.Nil(t, h.namingInstance, "an empty submit with a placeholder submits, it does not error")
 	assert.Equal(t, placeholder, inst.Title, "the empty submit adopted the shadow placeholder as the title")
 	assert.Empty(t, h.namingPlaceholder, "the placeholder is cleared once naming ends")
-	assert.Equal(t, stateDefault, h.state)
+	// The completed create's start-help overlay owns the screen — deliver ran
+	// the instanceStartedMsg all the way through.
+	assert.Equal(t, stateHelp, h.state)
 }
 
 // TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder is the #2470 review P2-a

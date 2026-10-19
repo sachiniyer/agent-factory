@@ -440,12 +440,15 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 			// default at create — a review press would send that same ""
 			// against a default_accounts that may already have moved again.
 			// The only honest submit is the one leaving while this answer is
-			// still current, so a verified ambient reply re-enters the submit
-			// gate itself rather than waiting on a press that can say no more
-			// (#4893 review). stateNew only: a synthetic Enter inside an open
-			// picker would select a row.
+			// still current, so a verified ambient reply runs Enter's action
+			// directly rather than waiting on a press that can say no more
+			// (#4893 review). It is a programmatic submit, not a key:
+			// re-injecting a KeyMsg would ride the Update path where the
+			// backend-catalog and recovery screens consume keys as user input
+			// and silently eat the submit. stateNew only: inside an open
+			// picker Enter would select a row.
 			if m.state == stateNew {
-				return m, func() tea.Msg { return tea.KeyMsg{Type: tea.KeyEnter} }
+				return m.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 			}
 		}
 		return m, nil

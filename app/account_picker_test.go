@@ -98,7 +98,9 @@ func pickAccount(t *testing.T, h *home, label string) {
 
 // selectProgram drives the naming form's program field (tab) to a program by
 // name, which is the only way to change the agent a create runs as mid-form.
-func selectProgram(t *testing.T, h *home, program string) {
+// Returns the pick's produced messages — a program change refires the account
+// fetch, and the caller decides whether that reply lands.
+func selectProgram(t *testing.T, h *home, program string) []tea.Msg {
 	t.Helper()
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
 	require.Equal(t, stateSelectProgram, h.state, "tab during naming must open the program field")
@@ -111,8 +113,9 @@ func selectProgram(t *testing.T, h *home, program string) {
 	}
 	require.NotEqual(t, -1, idx, "%q is not a supported program", program)
 	h.selectionOverlay.SetSelectedIndex(idx)
-	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	msgs := pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNew, h.state, "submitting the program field returns to naming")
+	return msgs
 }
 
 // submitNaming presses Enter and delivers the instanceStartedMsg the create
@@ -132,23 +135,26 @@ func submitNaming(t *testing.T, h *home) bool {
 // submitVerifiedForm performs the Enter dance an unchosen submit needs once
 // the account gate verifies the display (#4893 review): a press can hold
 // while a verify fetch goes out, so each press's produced replies are
-// delivered back before the next. Asserts the form actually leaves stateNew.
+// delivered back before the next. Asserts the form actually closed — the
+// submit clears namingInstance, and the started path can land on either
+// stateDefault or the first-run help overlay, so the field — not the state —
+// is the completion signal.
 func submitVerifiedForm(t *testing.T, h *home) []tea.Msg {
 	t.Helper()
 	var msgs []tea.Msg
 	for i := 0; i < 4; i++ {
-		if h.state == stateDefault {
-			// A verified ambient reply re-enters the gate itself (#4893
-			// review): the submit may already have completed inside deliver.
+		if h.namingInstance == nil {
+			// A verified ambient reply submits inside deliver (#4893 review):
+			// the create may already have completed before the next press.
 			return msgs
 		}
 		msgs = pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-		if h.state == stateDefault {
+		if h.namingInstance == nil {
 			return msgs
 		}
 		deliver(t, h, msgs)
 	}
-	require.Equal(t, stateDefault, h.state, "the verified submit never completed")
+	require.Nil(t, h.namingInstance, "the verified submit never completed")
 	return msgs
 }
 
@@ -210,7 +216,9 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 	pickAccount(t, h, "work")
 	require.Equal(t, "work", h.pendingAccount, "the claude account must attach")
 
-	selectProgram(t, h, "codex")
+	// The pick refires the account fetch for the new agent — deliver its reply
+	// so the in-flight lookup does not hold the submit (#4893 review).
+	deliver(t, h, selectProgram(t, h, "codex"))
 	assert.Empty(t, h.pendingAccount,
 		"changing the program must drop the account: the same name is a different identity in another registry")
 
@@ -417,7 +425,7 @@ func TestAccountFieldSaysWhenTheAgentHasNoRegistry(t *testing.T) {
 	info, errorLogs := captureHomeMessageLogs(t)
 	stubAccounts(t, twoAgentsWithAccounts(), nil)
 	startNaming(t, h, "no-registry-here")
-	selectProgram(t, h, "aider")
+	deliver(t, h, selectProgram(t, h, "aider"))
 
 	openAccountField(t, h)
 
@@ -528,7 +536,7 @@ func TestAccountFieldIgnoresARegistryForAnOtherProgram(t *testing.T) {
 	// The answer to a fetch started while the form said "claude"…
 	stale := accountRegistryMsg{naming: naming, agent: "claude", resp: twoAgentsWithAccounts()}
 	// …landing after the user moved the form to codex.
-	selectProgram(t, h, "codex")
+	deliver(t, h, selectProgram(t, h, "codex"))
 	h.handleAccountRegistry(stale)
 
 	assert.Equal(t, stateNew, h.state,
