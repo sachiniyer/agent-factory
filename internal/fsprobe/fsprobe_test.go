@@ -109,10 +109,12 @@ func TestRemoveDebris(t *testing.T) {
 	dir := t.TempDir()
 
 	// Same-process proof: this path is recorded as abandoned by us and is
-	// still the zero-length file we left.
+	// still the same zero-length object we left.
 	registered := filepath.Join(dir, ".af-add-probe-123456")
 	require.NoError(t, os.WriteFile(registered, nil, 0o600))
-	abandonedProbes.Store(registered, struct{}{})
+	regInfo, err := os.Stat(registered)
+	require.NoError(t, err)
+	abandonedProbes.Store(registered, regInfo)
 	defer abandonedProbes.Delete(registered)
 
 	// Lookalikes that must ALL survive — none carries the registry proof:
@@ -133,7 +135,7 @@ func TestRemoveDebris(t *testing.T) {
 	require.NoError(t, os.WriteFile(keep, []byte("x"), 0o600))
 
 	require.NoError(t, RemoveDebris(dir))
-	_, err := os.Stat(registered)
+	_, err = os.Stat(registered)
 	require.True(t, os.IsNotExist(err), "proven probe debris must be swept: %s", err)
 	for _, protected := range []string{foreign, pretender, userFile, nonempty, userDir, keep} {
 		_, err := os.Stat(protected)
@@ -150,7 +152,9 @@ func TestRemoveDebris_RegisteredButRepurposed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".af-add-probe-424242")
 	require.NoError(t, os.WriteFile(path, []byte("user content"), 0o600))
-	abandonedProbes.Store(path, struct{}{})
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	abandonedProbes.Store(path, info)
 	defer abandonedProbes.Delete(path)
 
 	require.NoError(t, RemoveDebris(dir))
@@ -246,19 +250,55 @@ func TestStat_BoundsAWedgedStat(t *testing.T) {
 		"the timed-out refusal must carry the same sentinel pair: %v", err2)
 }
 
-// TestRemoveDebris_EnumerationError is the #5295-review regression: a
-// directory that cannot be READ is not a clean sweep — filepath.Glob would
-// have hidden the I/O failure and let a leftover reach `git add -A` on the
-// next snapshot. The enumeration error must surface so the caller aborts.
-func TestRemoveDebris_EnumerationError(t *testing.T) {
-	old := readDirEntries
-	readDirEntries = func(string) ([]os.DirEntry, error) {
-		return nil, &os.PathError{Op: "open", Path: "dir", Err: syscall.EIO}
-	}
-	defer func() { readDirEntries = old }()
+// TestRemoveDebris_ReplacedObjectIsNotOurs is the #5295-review regression:
+// the workspace owner atomically replaces our leftover with their own
+// empty regular file at the same path. The registry's pathname matches,
+// but os.SameFile does not — the replacement is a different filesystem
+// object — so the file is preserved and the stale claim retired.
+func TestRemoveDebris_ReplacedObjectIsNotOurs(t *testing.T) {
+	dir := t.TempDir()
+	// The identity recorded at abandonment: some OTHER file's inode.
+	realDebris := filepath.Join(t.TempDir(), ".af-add-probe-111111")
+	require.NoError(t, os.WriteFile(realDebris, nil, 0o600))
+	origInfo, err := os.Stat(realDebris)
+	require.NoError(t, err)
+	// The victim: the user's replacement, a different object at the
+	// registered path.
+	victim := filepath.Join(dir, ".af-add-probe-222222")
+	require.NoError(t, os.WriteFile(victim, nil, 0o600))
+	abandonedProbes.Store(victim, origInfo)
+	defer abandonedProbes.Delete(victim)
 
-	err := RemoveDebris(t.TempDir())
+	require.NoError(t, RemoveDebris(dir))
+	_, err = os.Stat(victim)
+	require.NoError(t, err, "a replaced object at a registered path must survive — inode identity fails")
+	_, stillRegistered := abandonedProbes.Load(victim)
+	require.False(t, stillRegistered, "the mismatched claim must be retired")
+}
+
+// TestRemoveDebris_InspectionError is the #5295-review fail-closed pin: a
+// registered path whose metadata cannot be read is not a clean sweep —
+// the I/O failure surfaces so the caller aborts, and nothing is unlinked
+// on unproven evidence.
+func TestRemoveDebris_InspectionError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".af-add-probe-333333")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	abandonedProbes.Store(path, info)
+	defer abandonedProbes.Delete(path)
+
+	old := lstatPath
+	lstatPath = func(string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+	}
+	defer func() { lstatPath = old }()
+
+	err = RemoveDebris(dir)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, syscall.EIO),
-		"the enumeration failure must surface rather than report clean: %v", err)
+		"an inspection failure must surface rather than report clean: %v", err)
+	_, serr := os.Stat(path)
+	require.NoError(t, serr, "nothing may be unlinked on unproven evidence")
 }

@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -145,7 +144,13 @@ func openProbeFile(dir string) (*os.File, error) {
 			err = errors.Join(err, fmt.Errorf("closing probe file %s: %w", name, cerr))
 		}
 		if rerr2 != nil {
-			abandonedProbes.Store(name, struct{}{})
+			// Record the abandoned object's identity, not just its name:
+			// os.SameFile is the only proof a future sweep needs, and a
+			// path the owner later replaces or recreates at the same name
+			// can never inherit our claim (#5295 review).
+			if info, serr := f.Stat(); serr == nil {
+				abandonedProbes.Store(name, info)
+			}
 			err = errors.Join(err, fmt.Errorf("leftover probe file %s could not be removed (remove it by hand): %w", name, rerr2))
 		}
 		return nil, err
@@ -153,25 +158,25 @@ func openProbeFile(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// abandonedProbes records the exact paths this process created and could
-// not unlink — the only ownership proof RemoveDebris accepts. A path is
-// stored only after the SECOND unlink fails; a user's file that happens to
-// share the probe naming pattern is never recorded here. No file content
-// is ever trusted as proof: any marker bytes this process writes are
-// readable and reproducible by the workspace owner, so content can mark a
-// file as a candidate but can never prove it is ours (#5295 review).
-var abandonedProbes sync.Map // map[string]struct{} of full probe-file paths
+// abandonedProbes maps each probe path this process created and could not
+// unlink to the os.FileInfo captured at creation — the only ownership
+// proof RemoveDebris accepts. A path is stored only after the SECOND
+// unlink fails, and only with a captured identity: a user's file that
+// happens to share the probe naming pattern is never recorded, a pathname
+// reused after replacement can never match, and no file content is ever
+// trusted as proof — any bytes this process writes are equally writable by
+// the workspace owner (#5295 review).
+var abandonedProbes sync.Map // map[string]os.FileInfo — path → identity at creation
 
 // statPath is the test seam under Stat's bounded flight — the metadata
 // syscall that decides whether an existing socket-root or destination dir
 // gets probed itself rather than the parent that hosts its name.
 var statPath = os.Stat
 
-// readDirEntries is the test seam under RemoveDebris — a directory listing
-// that REPORTS I/O errors, unlike filepath.Glob which suppresses them: a
-// transient read failure that hid a leftover would let the sweep claim a
-// tree was clean when it could not prove it (#5295 review).
-var readDirEntries = os.ReadDir
+// lstatPath is the test seam under RemoveDebris — the per-candidate
+// metadata lookup that verifies the registered identity still sits at the
+// path before anything is unlinked.
+var lstatPath = os.Lstat
 
 // RemoveDebris removes stale named-fallback probe leftovers from dir. The
 // named fallback unlinks its tempfile before writing payload bytes, so a
@@ -185,17 +190,19 @@ var readDirEntries = os.ReadDir
 // process writes is equally writable by them, so deleting on either basis
 // is data loss the sandbox reap then makes permanent. The ONLY accepted
 // proof is the abandonedProbes registry — this process created that exact
-// path — re-verified as a still-zero-length regular file (a path the user
-// has since written to is their file again). Everything else survives
-// untouched, including probe debris abandoned before a restart, which the
-// registry no longer covers: it stays on disk and is snapshotted exactly
-// like user content, because no name filter can tell it from a user's
-// file — a committed stray file is a cosmetic wart, strictly better than
-// dropping work the filter cannot distinguish. Enumeration is fail-closed
-// — a directory that cannot be read returns its error rather than an
-// unproven "clean" — and removal failures are joined. The whole sweep runs
-// inside a bounded flight for the same reason Write does: every syscall
-// here can wedge on a dead mount inside the synchronous snapshot path.
+// path — re-verified as the SAME filesystem object via os.SameFile (a
+// replaced or recreated lookalike at the same name fails the comparison
+// and retires the claim) and still a zero-length regular file (an object
+// the user has since written into is theirs — the claim is retired, not
+// exercised). Only registered paths are ever inspected: a directory with
+// nothing registered is a no-op, so a slow or huge workspace costs one
+// stat per abandoned probe, never a full enumeration. Unproven leftovers —
+// including debris abandoned before a restart — are snapshotted exactly
+// like user content: a committed stray file is a cosmetic wart, strictly
+// better than dropping work the filter cannot distinguish. The whole sweep
+// runs inside a bounded flight for the same reason Write does: every
+// syscall here can wedge on a dead mount inside the synchronous snapshot
+// path.
 func RemoveDebris(dir string) error {
 	_, err := runBounded(dir, sweepFlights, "debris sweep",
 		"the filesystem did not answer the debris sweep",
@@ -204,62 +211,47 @@ func RemoveDebris(dir string) error {
 }
 
 func removeDebrisScan(dir string) error {
-	entries, err := readDirEntries(dir)
-	if err != nil {
-		return fmt.Errorf("cannot enumerate probe debris in %s: %w", dir, err)
-	}
+	var candidates []string
+	abandonedProbes.Range(func(k, _ any) bool {
+		if path, ok := k.(string); ok && filepath.Dir(path) == dir {
+			candidates = append(candidates, path)
+		}
+		return true
+	})
 	var joined []error
-	for _, entry := range entries {
-		name := entry.Name()
-		if !probeDebrisName(name) || !entry.Type().IsRegular() {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		_, registered := abandonedProbes.Load(path)
-		info, ierr := entry.Info()
-		if ierr != nil {
+	for _, path := range candidates {
+		v, _ := abandonedProbes.Load(path)
+		orig, _ := v.(os.FileInfo)
+		info, lerr := lstatPath(path)
+		if lerr != nil {
+			if os.IsNotExist(lerr) {
+				abandonedProbes.Delete(path) // already gone — nothing to prove
+				continue
+			}
 			joined = append(joined,
-				fmt.Errorf("inspecting stale probe file %s: %w", name, ierr))
+				fmt.Errorf("inspecting registered probe file %s: %w", path, lerr))
 			continue
 		}
-		if !registered {
+		if orig == nil || !info.Mode().IsRegular() || !os.SameFile(orig, info) {
+			// The object at this path is not the one we abandoned — a
+			// replaced or recreated lookalike never inherits the claim.
+			abandonedProbes.Delete(path)
 			continue
 		}
 		if info.Size() != 0 {
-			// The object at this path is no longer the zero-length file we
-			// abandoned — the workspace owner repurposed it. Retire the
-			// claim so a later truncate-back-to-zero cannot resurface a
-			// stale "ownership" over their file (#5295 review).
+			// Our object, but the workspace owner has written into it —
+			// their file now; retire the claim (#5295 review).
 			abandonedProbes.Delete(path)
 			continue
 		}
 		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
 			joined = append(joined,
-				fmt.Errorf("removing stale probe file %s: %w", name, rerr))
+				fmt.Errorf("removing stale probe file %s: %w", path, rerr))
 			continue
 		}
 		abandonedProbes.Delete(path)
 	}
 	return errors.Join(joined...)
-}
-
-// probeDebrisName reports whether name has CreateTemp's exact shape:
-// the .af-add-probe- prefix plus a digits-only random suffix. os.CreateTemp
-// replaces the trailing * with decimal digits, so a user file such as
-// .af-add-probe-notes shares the prefix but never the shape. The shape only
-// marks a file as a sweep CANDIDATE — removal still requires the ownership
-// proofs above (#5295 review).
-func probeDebrisName(name string) bool {
-	rest, ok := strings.CutPrefix(name, ".af-add-probe-")
-	if !ok || rest == "" {
-		return false
-	}
-	for _, c := range rest {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // Write runs the space probe for dir inside a per-dir bounded flight: a
