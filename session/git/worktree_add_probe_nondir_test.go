@@ -893,3 +893,68 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalDotSymlinkedNonemptyD
 		"the symlink target's filesystem must not be probed for a `.` after a symlink to a "+
 			"nonempty directory — git never writes there")
 }
+
+// TestAnnotateGitWriteError_BoundsAggregateWaitAcrossSemaphoreBatches pins the contract the
+// #5421 review added for the aggregate write-probe wait: acquiring the writeProbeConcurrency
+// semaphore synchronously serializes the probes into batches of writeProbeConcurrency, so on a
+// degraded filesystem where each writeSpaceProbe consumes its full per-dir bound a hand-edited
+// path with many distinct creatable parents would otherwise block the synchronous restore poll
+// for roughly ceil(len(dirs)/writeProbeConcurrency) × probeTimeout on every retry. A shared
+// deadline stops launching new probes once it elapses; the in-flight probes each drain on their
+// own per-dir bound, so the aggregate stays within one probeTimeout of the deadline rather than
+// N batches of it.
+//
+// Deterministic in both directions: against the form that started one goroutine per parent
+// with no aggregate deadline, every dir was probed across ceil(len(dirs)/writeProbeConcurrency)
+// batches and the count reached len(dirs); with the bound only the first batch (plus the one
+// probe that acquires the semaphore after the deadline elapses) runs, so the count stays at or
+// below writeProbeConcurrency+1 rather than the full set.
+func TestAnnotateGitWriteError_BoundsAggregateWaitAcrossSemaphoreBatches(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// More dirs than writeProbeConcurrency so the bound is the limiter, not
+	// the number of dirs. Each probe blocks for just past one
+	// symlinkResolveTimeout so a degraded filesystem's per-dir bound is the
+	// time a batch consumes, and the shared deadline elapses during the first
+	// batch. Without the aggregate bound the loop would launch
+	// ceil(len(dirs)/writeProbeConcurrency) batches and probe every dir.
+	dirs := make([]string, writeProbeConcurrency*4)
+	base := t.TempDir()
+	for i := range dirs {
+		dirs[i] = filepath.Join(base, fmt.Sprintf("d%d", i))
+	}
+
+	var probedMu sync.Mutex
+	var probedCount int
+	blockRelease := make(chan struct{})
+	time.AfterFunc(symlinkResolveTimeout+200*time.Millisecond, func() { close(blockRelease) })
+	writeSpaceProbe = func(dir string) error {
+		probedMu.Lock()
+		probedCount++
+		probedMu.Unlock()
+		<-blockRelease
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{}
+	_ = g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
+
+	probedMu.Lock()
+	count := probedCount
+	probedMu.Unlock()
+
+	// The shared deadline stops the loop after the first batch acquires the
+	// semaphore and the deadline elapses; only that batch (plus the one
+	// probe that acquires the semaphore after the deadline) runs, not the
+	// full ceil(len(dirs)/writeProbeConcurrency) batches an unbounded loop
+	// would launch.
+	require.LessOrEqual(t, count, writeProbeConcurrency+1,
+		"the aggregate write-probe wait must be bounded by a shared deadline so a hand-edited "+
+			"path with many creatable parents cannot block for "+
+			"ceil(len(dirs)/writeProbeConcurrency) × probeTimeout: saw %d of %d probes probed",
+		count, len(dirs))
+}

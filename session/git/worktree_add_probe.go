@@ -206,12 +206,27 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	// letting probes on distinct filesystems run in parallel so a timed-out
 	// probe on one mount does not consume the budget a probe on a separate
 	// mount needs.
+	// Bound the aggregate wait across semaphore batches the way
+	// resolveSymlinkPrefixBounded and the existing-ancestor search bound their
+	// walks: acquiring the writeProbeConcurrency semaphore synchronously
+	// serializes the probes into batches of writeProbeConcurrency, so on a
+	// degraded filesystem where each writeSpaceProbe consumes its full per-dir
+	// bound a hand-edited path with many distinct creatable parents would
+	// otherwise block for roughly ceil(len(dirs)/writeProbeConcurrency) ×
+	// probeTimeout on every retry. A shared deadline stops launching new probes
+	// once it elapses; the in-flight probes each drain on their own per-dir
+	// bound, so the aggregate stays within one probeTimeout of the deadline
+	// rather than N batches of it.
+	probeDeadline := time.Now().Add(symlinkResolveTimeout)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, writeProbeConcurrency)
 	for _, dir := range dirs {
 		if dir == "" || probed[dir] {
 			continue
+		}
+		if time.Now().After(probeDeadline) {
+			break
 		}
 		probed[dir] = true
 		wg.Add(1)
@@ -287,7 +302,15 @@ func isWindowsDriveRooted(path string) bool {
 		return false
 	}
 	if filepath.VolumeName(path) != "" {
-		return filepath.IsAbs(path)
+		// A path with a volume is either absolute (C:\wt, \\server\share) or
+		// drive-relative (D:wt), neither of which is rooted at the *current*
+		// drive. Returning IsAbs here classified every absolute destination
+		// such as C:\wt as current-drive-rooted, so the caller prefixed the
+		// repository volume and turned it into an invalid path like D:C:\wt
+		// (#5421 review); a drive-relative path is handled by its own branch
+		// below. Paths that already carry a volume are not current-drive-rooted
+		// and must not be rebased onto the repository volume here.
+		return false
 	}
 	return len(path) > 0 && (path[0] == '\\' || path[0] == '/')
 }
@@ -372,6 +395,21 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// child writes to, instead of the daemon's current drive which the
 		// unchanged path would resolve against.
 		worktreePath = filepath.VolumeName(repoPath) + worktreePath
+	} else if runtime.GOOS == "windows" && filepath.VolumeName(worktreePath) != "" && !filepath.IsAbs(worktreePath) {
+		// A Windows drive-relative path such as D:wt has a volume but is not
+		// absolute: the git child running with cmd.Dir = repoPath (D:\repo)
+		// resolves D:wt to D:\repo\wt on that drive, but a raw concatenation
+		// beneath repoPath would probe D:\repo\D:wt — an invalid path whose
+		// probes miss the filesystem git actually wrote to, so a full
+		// filesystem on D: would be charged to the structural retry budget
+		// instead of surfacing ENOSPC (#5421 review). Rebase the relative part
+		// onto the repo's directory on the same drive the way git's chdir does.
+		// A path whose drive differs from the repo's resolves against the
+		// daemon's cwd on that drive, which the parent process cannot observe,
+		// so it is left unchanged the same way an un-rebased absolute path is.
+		if vol := filepath.VolumeName(worktreePath); vol == filepath.VolumeName(repoPath) {
+			worktreePath = filepath.Join(repoPath, strings.TrimPrefix(worktreePath, vol))
+		}
 	} else if !filepath.IsAbs(worktreePath) {
 		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
 		// Trim trailing separators (but preserve a filesystem root) so a
