@@ -1473,3 +1473,84 @@ func TestAnnotateWorktreeAddError_SymlinkResolutionTimeoutDoesNotProbeLexicalDes
 	require.True(t, errors.Is(out, context.DeadlineExceeded),
 		"the sentinel must keep its deadline pair for the classifier: %v", out)
 }
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathProbesExistingAncestorForNestedDestination
+// pins the contract the #5421 review added: when a relative worktreePath has a
+// nested destination like wt/dest, git creates the missing leading directory wt
+// via safe_create_leading_directories, so an ENOSPC creating it surfaces on the
+// filesystem of the existing ancestor (the repo), not on the non-existent wt.
+// Before the fix the write probe of the non-existent wt returned ENOENT rather
+// than the ENOSPC git encountered, and a common dir on another writable
+// filesystem left the opaque git failure structural — the lost-restore loop
+// exhausted its retry budget on a full filesystem freeing it could not fix. The
+// probe now walks up to the nearest existing ancestor and probes it too, so the
+// resource errno reaches the chain the way a write probe of an existing parent
+// does.
+//
+// Deterministic in both directions: against the form that probed only the
+// non-existent parent the existing ancestor was never probed, a write probe
+// mocked to fail only there returned nil, so errors.Is(out, syscall.ENOSPC)
+// was false and the test failed; with the walk-up the ancestor is probed and
+// the ENOSPC reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesExistingAncestorForNestedDestination(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The repo exists but the nested worktree parent wt/dest does not — git
+	// creates the missing leading directory wt via safe_create_leading
+	// directories, so the ENOSPC git encounters creating it is on the repo's
+	// filesystem (the existing ancestor), not on the non-existent wt. The
+	// write probe of wt returns ENOENT, not ENOSPC, so the ancestor is the
+	// only probe that can catch the resource errno.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the launch cwd the way the production code does so the expected
+	// paths match across hosts (macOS /var/folders -> /private/var/folders).
+	resolvedLaunchCwd, err := filepath.EvalSymlinks(launchCwd)
+	require.NoError(t, err)
+	resolvedRepo := filepath.Join(resolvedLaunchCwd, "repo")
+
+	// Use the real stat so the walk-up finds the existing ancestor the way
+	// production does: the non-existent wt returns ENOENT and the walk
+	// ascends to the existing repo.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		// A full filesystem on the existing ancestor (the repo) is the bug:
+		// git creates wt there via safe_create_leading_directories, so the
+		// ENOSPC is on this filesystem. A non-existent wt returns ENOENT
+		// from the write probe, not ENOSPC, so the ancestor is the only
+		// probe that can catch it.
+		if dir == resolvedRepo {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a nested relative destination whose leading directory does not exist "+
+			"must probe the nearest existing ancestor so a full filesystem there "+
+			"(where git creates the missing parent) surfaces the resource errno "+
+			"the subprocess's opaque ExitError drops: %v", out)
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the nearest existing ancestor of the non-existent worktree parent must "+
+			"be probed so the ENOSPC git encounters creating it reaches the chain")
+}

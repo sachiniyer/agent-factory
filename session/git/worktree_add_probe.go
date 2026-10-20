@@ -337,20 +337,21 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 		if resolveErr == nil {
-			// A final `..` held in base never reaches resolveSymlinkTail's
+			// A final `..` or `.` held in base never reaches resolveSymlinkTail's
 			// non-directory check: filepath.Join collapses resolvedParent/.. to
-			// its lexical parent, but the kernel does not traverse `..` through a
-			// non-directory — `cd file/..` (or a symlink that resolved to a
-			// regular file followed by `..`) fails with ENOTDIR before writing
-			// anywhere. When resolvedParent is a symlink that resolved to a
-			// regular file (or a regular file component), filepath.Join would
-			// back out to the parent and the subsequent probe would target a
-			// filesystem git never reaches, so a coincidental ENOSPC there would
-			// stall the lost-restore loop indefinitely on a structural ENOTDIR
-			// failure. Surface ENOTDIR the way the tail walk does so the caller
-			// probes only the independently known locations and joins the
-			// structural error.
-			if base == ".." {
+			// its lexical parent (or resolvedParent/. to resolvedParent itself),
+			// but the kernel does not traverse `..` or `.` through a
+			// non-directory — `cd file/..` and `cd file/.` (or a symlink that
+			// resolved to a regular file followed by `..` or `.`) fail with
+			// ENOTDIR before writing anywhere. When resolvedParent is a symlink
+			// that resolved to a regular file (or a regular file component),
+			// filepath.Join would back out to the parent (or keep the file) and
+			// the subsequent probe would target a filesystem git never reaches,
+			// so a coincidental ENOSPC there would stall the lost-restore loop
+			// indefinitely on a structural ENOTDIR failure. Surface ENOTDIR the
+			// way the tail walk does so the caller probes only the independently
+			// known locations and joins the structural error.
+			if base == ".." || base == "." {
 				isDir, dErr := tailIsDir(resolvedParent)
 				if dErr != nil {
 					lexical := filepath.Join(repoPath, g.worktreePath)
@@ -395,6 +396,37 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		}
 	}
 	dirs := []string{filepath.Dir(worktreePath)}
+	// When the destination's parent does not exist yet (a nested relative
+	// worktreePath such as wt/dest, where git creates the missing leading
+	// directory via safe_create_leading_directories), a write probe of the
+	// parent returns ENOENT rather than the ENOSPC git can encounter creating
+	// it. Walk up to the nearest existing ancestor and probe it too, so a
+	// full filesystem on the ancestor that git writes the missing parent into
+	// surfaces the resource errno the subprocess's opaque ExitError drops. The
+	// common dir is probed separately below, but a common dir on another
+	// writable filesystem leaves this ancestor as the only probe that can
+	// catch the ENOSPC.
+	parentDir := filepath.Dir(worktreePath)
+	for {
+		if st, sErr := statSpaceProbe(parentDir); sErr == nil && st != nil {
+			if parentDir != filepath.Dir(worktreePath) {
+				dirs = append(dirs, parentDir)
+			}
+			break
+		} else if !os.IsNotExist(sErr) {
+			// A non-ENOENT stat error on the ancestor is environmental evidence
+			// about the filesystem the missing parent would be created on; the
+			// write probe of the parent already in dirs surfaces the same kind
+			// of error, and the common dir probe below covers the rest, so stop
+			// walking and let the existing probes handle it.
+			break
+		}
+		next := filepath.Dir(parentDir)
+		if next == parentDir {
+			break
+		}
+		parentDir = next
+	}
 	var statErr error
 	var lstatErr error
 	var readDirErr error
