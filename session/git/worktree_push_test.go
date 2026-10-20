@@ -693,3 +693,144 @@ func TestSnapshotAndPushBranch_BehindDirtyPreservesOutOfConePaths(t *testing.T) 
 	assert.Contains(t, pushedIn, "user-edit",
 		"in-cone user change must be carried by the behind-dirty snapshot")
 }
+
+// TestSnapshotAndPushBranch_BehindDirtyPreservesUpstreamInConeChanges pins the
+// in-cone half of the dirty reconciliation: when a behind worktree is dirty in
+// one path and origin advanced a DIFFERENT in-cone file the user did not
+// touch, the index-only read-tree (without -u) left the stale HEAD bytes in
+// the working tree, so `add -A` restaged them and the snapshot silently
+// reverted origin's advance. With `read-tree -m -u`, the working tree is
+// updated for non-modified files, so `add -A` stages FETCH_HEAD's version and
+// the push preserves origin's change.
+func TestSnapshotAndPushBranch_BehindDirtyPreservesUpstreamInConeChanges(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-dirty-incone")
+
+	wt := gw.GetWorktreePath()
+	// Two in-cone files on origin's tip.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a-v1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b-v1\n"), 0o644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "add a.txt and b.txt")
+	runGit(t, wt, "push", "origin", "root/behind-dirty-incone")
+	originTip := branchTip(t, bare, "refs/heads/root/behind-dirty-incone")
+
+	// Advance origin's a.txt from a separate clone (the worktree stays at
+	// the commit that has a.txt=v1, so it is behind origin after the push).
+	advanceClone := filepath.Join(t.TempDir(), "advance")
+	runGit(t, "", "clone", bare, advanceClone)
+	runGit(t, advanceClone, "config", "user.email", "af@agent-factory.local")
+	runGit(t, advanceClone, "config", "user.name", "Agent Factory")
+	runGit(t, advanceClone, "checkout", "root/behind-dirty-incone")
+	require.NoError(t, os.WriteFile(filepath.Join(advanceClone, "a.txt"), []byte("a-v2-origin\n"), 0o644))
+	runGit(t, advanceClone, "add", "-A")
+	runGit(t, advanceClone, "commit", "-m", "advance a.txt on origin")
+	runGit(t, advanceClone, "push", "origin", "root/behind-dirty-incone")
+	originTip = branchTip(t, bare, "refs/heads/root/behind-dirty-incone")
+	ancestorHead := branchTip(t, wt, "HEAD")
+	require.NotEqual(t, ancestorHead, originTip, "precondition: HEAD must be behind origin")
+	// a.txt is at v1 in the worktree (the ancestor's version, not origin's).
+	require.Equal(t, "a-v1\n", readFile(t, filepath.Join(wt, "a.txt")),
+		"precondition: a.txt at the ancestor's version in the worktree")
+
+	// Leave dirty work in a DIFFERENT file (b.txt), not the file origin
+	// advanced (a.txt). Without -u, read-tree updates the index to
+	// FETCH_HEAD's a.txt=v2-origin but leaves the working tree at a.txt=v1;
+	// `add -A` then restages the stale v1, reverting origin's advance.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b-user-edit\n"), 0o644))
+	require.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: b.txt is dirty")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-dirty-incone", got)
+
+	// The push must carry the user's b.txt edit AND preserve origin's a.txt
+	// advance — not revert a.txt to the stale HEAD blob.
+	pushedA := runGitOut(t, bare, "show", "refs/heads/root/behind-dirty-incone:a.txt")
+	assert.Contains(t, pushedA, "a-v2-origin",
+		"in-cone file advanced by origin must NOT be reverted by the behind-dirty snapshot (read-tree -u updates the working tree)")
+	pushedB := runGitOut(t, bare, "show", "refs/heads/root/behind-dirty-incone:b.txt")
+	assert.Contains(t, pushedB, "b-user-edit",
+		"the user's in-cone edit must be carried by the behind-dirty snapshot")
+}
+
+// TestSnapshotAndPushBranch_BehindCleanPreservesConcurrentEditDuringFetch pins
+// the concurrent-edit regression: a clean, behind worktree whose agent edits a
+// tracked file DURING the reconciliation (after the initial status check but
+// before the clean-tree fast-forward). The dirty classification is computed
+// before the fetch, so without the post-fetch re-check, `reset --hard
+// FETCH_HEAD` would unconditionally overwrite the concurrent edit and the push
+// would succeed (clean tree on origin's tip), permanently losing the work when
+// the sandbox is reaped. The re-check detects the dirty tree after the fetch
+// and routes to the dirty reconciliation path, which preserves the edit.
+//
+// The edit is simulated with a core.fsmonitor hook: on the first git status
+// call (the initial classification) the hook appends to a tracked file but
+// returns an empty list, so git does not lstat the file and the initial status
+// reads clean. On the second call (the post-fetch re-check) the hook reports
+// the file, so git lstats it and the re-check sees the modification — exactly
+// as if the agent had written the file between the two status calls.
+func TestSnapshotAndPushBranch_BehindCleanPreservesConcurrentEditDuringFetch(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-concurrent")
+	wt := gw.GetWorktreePath()
+
+	// A tracked file the fsmonitor hook will modify on the first status
+	// call, simulating a concurrent edit the initial classification does
+	// not see.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "tracked.txt"), []byte("base\n"), 0o644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "add tracked.txt")
+	runGit(t, wt, "push", "origin", "root/behind-concurrent")
+
+	originTip, _ := advanceOriginAndResetHeadBehind(t, gw, bare, "root/behind-concurrent")
+	require.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: tree must be clean after reset --hard")
+	require.Equal(t, "base\n", readFile(t, filepath.Join(wt, "tracked.txt")),
+		"precondition: tracked.txt is at the base version")
+
+	// Install a core.fsmonitor hook that simulates the concurrent edit.
+	// On the first call (the initial status classification), it appends to
+	// tracked.txt and returns empty — git skips lstat, so the initial
+	// status reads clean (dirty == false). On the second call (the
+	// post-fetch re-check), it reports tracked.txt — git lstats the file,
+	// sees the modification, and the re-check classifies the tree as dirty.
+	counterPath := filepath.Join(t.TempDir(), "fsmonitor-count")
+	hookScript := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	script := `#!/bin/sh
+count=0
+if [ -f '__COUNTER__' ]; then
+    count=$(cat '__COUNTER__')
+fi
+count=$((count + 1))
+echo $count > '__COUNTER__'
+if [ $count -eq 1 ]; then
+    # First call (initial status): modify the file but return empty
+    # so git does not lstat it and the initial status reads clean.
+    printf 'concurrent edit\n' >> "$(pwd)/tracked.txt"
+else
+    # Second call (re-check): report the file so git lstats it
+    # and sees the modification the first call made.
+    echo "tracked.txt"
+fi
+`
+	script = strings.ReplaceAll(script, "__COUNTER__", counterPath)
+	require.NoError(t, os.WriteFile(hookScript, []byte(script), 0o755))
+	runGit(t, wt, "config", "core.fsmonitor", hookScript)
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err, "SnapshotAndPushBranch must not fail on a concurrent edit during the fetch")
+	assert.Equal(t, "root/behind-concurrent", got)
+
+	// The concurrent edit must survive on origin's session branch. Without
+	// the re-check, reset --hard would have overwritten it and the push
+	// would have been a no-op (origin at its tip), losing the edit.
+	pushed := runGitOut(t, bare, "show", "refs/heads/root/behind-concurrent:tracked.txt")
+	assert.Contains(t, pushed, "concurrent edit",
+		"a concurrent edit made during the fetch must not be lost to reset --hard")
+	// Origin's tip must have advanced (the snapshot commit was pushed),
+	// proving the dirty path ran rather than the clean no-op fast-forward.
+	assert.NotEqual(t, originTip, branchTip(t, bare, "refs/heads/root/behind-concurrent"),
+		"the concurrent edit must produce a snapshot commit that advances origin's tip")
+}

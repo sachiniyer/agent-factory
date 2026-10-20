@@ -166,6 +166,24 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		}
 		behind := isAncestor("HEAD", "FETCH_HEAD")
 		if behind {
+			// Re-check the worktree status AFTER the network fetch, before
+			// the destructive clean-tree fast-forward. The fetch is bounded
+			// by networkGitTimeout (not zero), and the still-running agent can
+			// edit a tracked file during it — ArchiveSandbox invokes this
+			// push before tearing down the sandbox, so the agent is live while
+			// the fetch runs. `dirty` was computed before the fetch, so
+			// trusting it would let `reset --hard` overwrite a fresh edit and
+			// the push would lose it when the sandbox is reaped. If the tree is
+			// no longer clean, take the dirty reconciliation path instead — it
+			// preserves the working-tree bytes (read-tree -m -u + add -A)
+			// rather than overwriting them.
+			if !dirty {
+				status, err = g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
+				if err != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to re-check worktree status before reconciling with origin: %w", err), probeDir)
+				}
+				dirty = strings.TrimSpace(status) != ""
+			}
 			if !dirty {
 				// Clean tree: fast-forward HEAD and the working tree to
 				// origin's tip. No snapshot commit is needed — origin
@@ -219,29 +237,39 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 				// decided, so a failure here strands nothing.
 				//
 				// Before staging, update the index to FETCH_HEAD's tree with
-				// `read-tree -m HEAD FETCH_HEAD` so paths the user did NOT
-				// touch — in particular out-of-cone paths under a sparse
-				// checkout, whose stale HEAD blobs `add -A` cannot update
-				// (skip-worktree) — reflect origin's tip rather than the
-				// behind HEAD. Without this, `write-tree` would attach the
-				// entire stale index tree to FETCH_HEAD, and a push carrying
-				// an unrelated visible edit would silently revert origin's
-				// out-of-cone change. The two-way merge is a fast-forward in
-				// the index only (no -u, so the dirty working tree is
-				// untouched): for a behind HEAD it cleanly advances every
-				// index entry, and it preserves skip-worktree bits for
-				// out-of-cone paths so `add -A` stages only the user's in-cone
-				// changes and `write-tree` produces a tree with FETCH_HEAD's
-				// out-of-cone blobs. If the merge fails (an in-cone file the
-				// user modified was also advanced by origin — a conflict the
-				// fast-forward index merge refuses to overwrite), fall back to
-				// staging on the behind index: the push reverts that one
-				// file's origin change (the user's edit takes precedence) but
-				// out-of-cone paths are no worse than the current code.
-				if _, rtErr := g.runGitCommand(g.worktreePath, "read-tree", "-m", "HEAD", "FETCH_HEAD"); rtErr != nil {
-					// read-tree -m is atomic on failure (the index is
-					// unchanged), so the fallback below stages on the
-					// original behind index.
+				// `read-tree -m -u HEAD FETCH_HEAD` so paths the user did NOT
+				// touch reflect origin's tip, not the behind HEAD. The two-way
+				// merge advances both the index AND the working tree for files
+				// the user did not modify: for a behind HEAD, files unchanged by
+				// the user are fast-forwarded to FETCH_HEAD's version in the
+				// working tree (git read-tree -h documents -u as the flag that
+				// updates the working tree). Without -u, the index-only merge
+				// would advance the index but leave the stale HEAD bytes in the
+				// working tree, and the following `add -A` would restage those
+				// stale bytes — silently reverting an upstream change to an
+				// in-cone file the user did not touch. With -u, `add -A` stages
+				// FETCH_HEAD's version for those files (no change) and the
+				// user's version for modified files, so the snapshot carries
+				// the user's delta onto origin's tip.
+				//
+				// The two-way merge preserves the user's modifications: for a
+				// file the user changed but origin did not, the merge sees the
+				// working tree already differs from HEAD (the user's edit) and
+				// leaves the working tree untouched (same content in both trees
+				// from the merge's perspective — the merge only updates files
+				// where FETCH_HEAD differs from HEAD). skip-worktree bits for
+				// out-of-cone paths are preserved, so `add -A` stages only the
+				// user's in-cone changes and `write-tree` produces a tree with
+				// FETCH_HEAD's out-of-cone blobs. If the merge fails (an in-cone
+				// file the user modified was also advanced by origin — a conflict
+				// the two-way merge refuses to overwrite), fall back to staging
+				// on the behind index: the push reverts that one file's origin
+				// change (the user's edit takes precedence) but out-of-cone paths
+				// are no worse than the current code.
+				if _, rtErr := g.runGitCommand(g.worktreePath, "read-tree", "-m", "-u", "HEAD", "FETCH_HEAD"); rtErr != nil {
+					// read-tree -m -u is atomic on failure (the index and
+					// working tree are unchanged), so the fallback below stages
+					// on the original behind index.
 				}
 				if _, e := g.runGitCommand(g.worktreePath, "add", "-A"); e != nil {
 					return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", e), probeDir)
