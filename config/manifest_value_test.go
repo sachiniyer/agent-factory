@@ -382,6 +382,62 @@ func TestCurrentValueRendersRootAgentByOnDiskPresence(t *testing.T) {
 	}
 }
 
+// TestCurrentValueRendersRootAgentCaseVariantByOnDiskPresence is the regression
+// test for the #5397 review finding that rootAgentLayerFromShape folds case for
+// the daemon's presence check while CurrentValue still tested table["enabled"]
+// exactly, so a global [root_agent] Enabled = true (case variant) decoded onto
+// RootAgent.Enabled via taggedFieldByKey's case fold but left the shape keyed by
+// "Enabled". The exact table["enabled"] lookup missed it and the editor form
+// rendered {} (or omitted enabled), and saving that displayed value could
+// disable the agent — the daemon treated enabled as set while the editor showed
+// it unset. CurrentValue now folds the enabled/program presence lookup the same
+// way rootAgentLayerFromShape does, so the case-variant key renders the decoded
+// value the daemon resolves.
+func TestCurrentValueRendersRootAgentCaseVariantByOnDiskPresence(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want string
+	}{
+		{
+			name: "case-variant Enabled = true with program renders both fields",
+			toml: "default_program = 'claude'\n\n[root_agent]\nEnabled = true\nProgram = 'codex'\n",
+			want: `{"enabled":true,"program":"codex"}`,
+		},
+		{
+			name: "case-variant Enabled = false is preserved (no-omitempty design)",
+			toml: "default_program = 'claude'\n\n[root_agent]\nEnabled = false\n",
+			want: `{"enabled":false}`,
+		},
+		{
+			name: "case-variant Enabled present without program renders only enabled",
+			toml: "default_program = 'claude'\n\n[root_agent]\nENABLED = true\n",
+			want: `{"enabled":true}`,
+		},
+		{
+			name: "case-variant Program present without enabled renders only program",
+			toml: "default_program = 'claude'\n\n[root_agent]\nProgram = 'codex'\n",
+			want: `{"program":"codex"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTempConfig(t, tc.toml)
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			got, ok := CurrentValue(cfg, "root_agent")
+			if !ok {
+				t.Fatalf("CurrentValue(root_agent) returned !ok")
+			}
+			if got != tc.want {
+				t.Fatalf("CurrentValue(root_agent) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCurrentValueStructuredKeysRenderEmptyAggregatesWhenAbsent is the cross-key
 // consistency lock behind the root_agent fix: on a fresh config with no
 // structured tables, EVERY structured global manifest key renders its empty

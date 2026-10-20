@@ -873,8 +873,14 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	// so overwriting is a no-op; for the case-variant fallback the origin's
 	// physical KeyPath is the spelling the operator wrote, which is what the
 	// trace should report, so keep it instead of replacing it with the queried
-	// spelling.
-	if winner.KeyPath == "" {
+	// spelling — but only when the origin is already a leaf-specific path (a
+	// case-variant spelling like "docker.Image", always "<key>.<leaf>"). The
+	// specialized root-agent flow builds table-level origins whose KeyPath is
+	// just the parent key (rootAgentOrigin returns "root_agent"), so preserving
+	// that would leave the winner reporting the table instead of the requested
+	// scalar; table-level origins still need the queried keyPath projected onto
+	// them (#5397 review).
+	if winner.KeyPath == "" || !strings.HasPrefix(winner.KeyPath, key+".") {
 		winner.KeyPath = keyPath
 	}
 	projected.Winner = &winner

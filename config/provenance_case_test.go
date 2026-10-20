@@ -1113,3 +1113,51 @@ func TestResolveConfigCaseVariantLeafProjectionCanonicalizesCollapsedSpellingLoo
 	assert.Equal(t, true, globalCandidate.Value,
 		"the global candidate's projected value is its decoder-winning value (true), not the losing raw value under the winner's spelling (false)")
 }
+
+// TestResolveConfigCaseVariantRootAgentTableOriginProjectsLeafPath is the
+// regression test for the #5397 review finding that the specialized root-agent
+// flow (rootAgentResolvedValue/rootAgentOrigin) builds leaf origins whose
+// SourceRef.KeyPath is only the table key "root_agent" (the per-source location
+// the --explain LOCATION column shows, not a leaf path). The generic
+// ResolvedValuePath kept a nonempty KeyPath verbatim to preserve a case-variant
+// leaf's physical spelling (e.g. "docker.Image"), so a table-level "root_agent"
+// origin survived unchanged and af config get root_agent.enabled --explain
+// reported the winner's KeyPath as the table instead of the requested scalar.
+// The fix projects the queried leaf path onto table-level origins (a KeyPath that
+// does not extend the parent key with a leaf) while still preserving leaf-specific
+// case-variant spellings, so the JSON winner identifies root_agent.enabled.
+func TestResolveConfigCaseVariantRootAgentTableOriginProjectsLeafPath(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RootAgent = RootAgent{Enabled: true, Program: "global"}
+	cfg.source = sourceMetadata{shape: map[string]any{
+		"root_agent": map[string]any{"Enabled": true, "program": "global"},
+	}}
+	assembly, err := assembleRootAgentInspectionInputsFromConfig(cfg, "", false)
+	require.NoError(t, err)
+	rv := resolveRootAgentInspectionAssembly(assembly, false)
+
+	// The winner of root_agent is the global layer's Enabled = true.
+	enabledOrigin, ok := rv.Origins["enabled"]
+	require.True(t, ok, "the enabled leaf must have an origin")
+	assert.Equal(t, "root_agent", enabledOrigin.KeyPath,
+		"the specialized root-agent flow builds table-level origins (KeyPath = root_agent), not leaf-specific paths")
+
+	// A dotted read projects the leaf through the generic ResolvedValuePath the
+	// --explain surface uses. Before the fix the table-level origin KeyPath
+	// survived unchanged, so the winner reported the table instead of root_agent.enabled.
+	synthetic := &ResolvedConfig{Resolution: []ResolvedValue{rv}}
+	leaf, ok := synthetic.ResolvedValuePath("root_agent.enabled")
+	require.True(t, ok, "root_agent.enabled must project")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, string(RootAgentSourceGlobal), leaf.Winner.Layer,
+		"the winner is the global Enabled = true the daemon resolves")
+	assert.Equal(t, "root_agent.enabled", leaf.Winner.KeyPath,
+		"the winner KeyPath must project to the requested leaf, not the table-level root_agent origin")
+
+	// Every candidate row projects the leaf path too, so the --explain LOCATION
+	// column identifies the scalar each layer contributed, not the table.
+	for _, c := range leaf.Candidates {
+		assert.Equal(t, "root_agent.enabled", c.KeyPath,
+			"candidate %s KeyPath must project to the leaf path, got %q", c.Layer, c.KeyPath)
+	}
+}
