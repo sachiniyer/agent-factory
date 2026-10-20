@@ -409,6 +409,7 @@ func init() {
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
 	rootCmd.AddCommand(api.ProjectsCmd)
+	rootCmd.AddCommand(api.ProposalCmd)
 	rootCmd.AddCommand(api.APICmd)
 }
 
