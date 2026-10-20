@@ -16867,7 +16867,7 @@ var AppShell = class {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     const skipped = state.skippedRepos ?? [];
-    const skippedRoots = state.registeredProjects.filter((p) => p.id && skipped.some((s) => s.repo_id === p.id)).map((p) => [p.id, p.root]);
+    const skippedRoots = state.registeredProjects.filter((p) => p.repo_id && skipped.some((s) => s.repo_id === p.repo_id)).map((p) => [p.repo_id, p.root]);
     const skippedSig = JSON.stringify([skipped, skippedRoots]);
     if (skippedSig !== this.lastSkippedNoticeSignature) {
       this.lastSkippedNoticeSignature = skippedSig;
@@ -17050,7 +17050,7 @@ var AppShell = class {
     if (skipped.length === 0) return null;
     const knownRoot = /* @__PURE__ */ new Map();
     for (const p of state.registeredProjects) {
-      if (p.id && !knownRoot.has(p.id)) knownRoot.set(p.id, p.root);
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
     }
     const body = h("div", { class: "af-rail-skipped-body" });
     for (const s of skipped) {

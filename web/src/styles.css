@@ -877,7 +877,14 @@ button:disabled,
  * is rebuilt only when the skip set changes and stays put across project/filter
  * switches — the missing sessions are a property of the snapshot, not the view. */
 .af-rail-skipped {
-  flex: 0 0 auto;
+  /* flex: 0 1 (not 0 0) so a tall notice with several skipped repos, or a short
+   * mobile/landscape viewport, cannot crowd the sessions list to zero height:
+   * the notice shrinks before the list does, and min-height: 0 + overflow-y: auto
+   * makes the overflow scrollable inside the notice instead of spilling the rail
+   * (the rail itself is not a scroll container; only .af-rail-list is). */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: var(--af-space-2);
   margin: 0 0 var(--af-space-1) 0;
   border-left: calc(var(--af-space-1) * 0.5) solid var(--af-dead);

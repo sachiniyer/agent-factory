@@ -1763,9 +1763,14 @@ export class AppShell {
     // Prepended before the rail notice so a project that IS the skipped one still
     // sees WHY its sessions vanished.
     const skipped = state.skippedRepos ?? [];
+    // Key on RegisteredProject.repo_id (the RepoIDFromRoot hash the snapshot's
+    // skipped_repos[].repo_id carries), not RegisteredProject.id (the `prj_...`
+    // registry identity, which never matches a repo hash). Without this the
+    // notice can never resolve a skipped repo to its root and falls back to the
+    // bare hash even on the initial render.
     const skippedRoots = state.registeredProjects
-      .filter(p => p.id && skipped.some(s => s.repo_id === p.id))
-      .map(p => [p.id, p.root] as [string, string]);
+      .filter(p => p.repo_id && skipped.some(s => s.repo_id === p.repo_id))
+      .map(p => [p.repo_id, p.root] as [string, string]);
     const skippedSig = JSON.stringify([skipped, skippedRoots]);
     if (skippedSig !== this.lastSkippedNoticeSignature) {
       this.lastSkippedNoticeSignature = skippedSig;
@@ -1976,9 +1981,15 @@ export class AppShell {
   private skippedReposNotice(state: AppState): HTMLElement | null {
     const skipped = state.skippedRepos ?? [];
     if (skipped.length === 0) return null;
+    // Map the snapshot's skipped_repos[].repo_id (a RepoIDFromRoot hash) to the
+    // registered project root through RegisteredProject.repo_id — the SAME identity
+    // space — not the project's `id` (a `prj_...` registry key, which never matches
+    // a repo hash). An unresolved registered project (no repo_id) cannot resolve a
+    // skipped repo this way and falls back to the bare hash, which is correct: the
+    // registry has no known root for it either.
     const knownRoot = new Map<string, string>();
     for (const p of state.registeredProjects) {
-      if (p.id && !knownRoot.has(p.id)) knownRoot.set(p.id, p.root);
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
     }
     const body = h("div", { class: "af-rail-skipped-body" });
     for (const s of skipped) {

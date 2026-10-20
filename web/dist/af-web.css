@@ -677,7 +677,9 @@ button:disabled,
   background: var(--af-surface-raised);
 }
 .af-rail-skipped {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: var(--af-space-2);
   margin: 0 0 var(--af-space-1) 0;
   border-left: calc(var(--af-space-1) * 0.5) solid var(--af-dead);

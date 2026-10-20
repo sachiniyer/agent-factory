@@ -688,6 +688,14 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The repository identity this project RESOLVED to (config.Project.RepoID,
+   *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
+   *  registry `id` (`prj_...`). Empty for a record written before this field
+   *  existed; the daemon backfills it on the first successful resolution. This is
+   *  the key the snapshot's `skipped_repos[].repo_id` carries, so the rail maps a
+   *  skipped repo to its registered root through it (not through `id`, which is the
+   *  registry identity and never matches a repo hash). */
+  repo_id?: string;
 }
 
 /** Registers a git checkout as a durable, sessionless project (mirrors
