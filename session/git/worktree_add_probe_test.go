@@ -467,17 +467,25 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkedRepo(t *te
 
 	// "../wt" relative to a symlinked repo: git follows the link, so the real
 	// destination is <realRepo>/../wt = parent(realRepo)/wt, not the lexical
-	// <launchCwd>/repo/../wt = <launchCwd>/wt.
+	// <launchCwd>/repo/../wt = <launchCwd>/wt. Resolve linkRepo the same way the
+	// production code does — on macOS t.TempDir() lives under /var/folders,
+	// itself a symlink to /private/var/folders, so EvalSymlinks lands under
+	// /private/var/... and the expected destination must follow it there.
+	resolvedRepo, err := filepath.EvalSymlinks(linkRepo)
+	require.NoError(t, err)
+	resolvedDest := filepath.Join(filepath.Dir(resolvedRepo), "wt")
+	lexicalDest := filepath.Join(launchCwd, "wt")
+	require.NotEqual(t, lexicalDest, resolvedDest,
+		"the symlinked-repo case must diverge from the lexical join, otherwise the test cannot distinguish the fix from the bug")
 	g := &GitWorktree{repoPath: "repo", worktreePath: "../wt"}
 	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
 
-	resolvedDest := filepath.Join(filepath.Dir(realRepo), "wt")
 	require.Equal(t, resolvedDest, statTarget,
 		"the probe must target the symlink-resolved destination git's child writes to "+
-			"(%s), not the lexical filepath.Join of the un-resolved repoPath (%s)", resolvedDest, filepath.Join(launchCwd, "wt"))
+			"(%s), not the lexical filepath.Join of the un-resolved repoPath (%s)", resolvedDest, lexicalDest)
 	require.Contains(t, probedDirs, filepath.Dir(resolvedDest),
 		"the worktree parent dir probed must be the symlink-resolved parent (%s), not the lexical %s",
-		filepath.Dir(resolvedDest), filepath.Join(launchCwd))
+		filepath.Dir(resolvedDest), lexicalDest)
 	for _, d := range probedDirs {
 		require.True(t, filepath.IsAbs(d),
 			"a probed dir must be absolute (resolved through the symlink), not a raw relative path: %q", d)
