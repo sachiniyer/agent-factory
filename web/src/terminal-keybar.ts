@@ -659,7 +659,7 @@ export class TerminalKeybar {
       // open past its own tap (#5428). Consumed either way; a later, separate
       // interaction always dismisses.
       const opening = this.pasteSheetGesture;
-      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+      if (keybarSheetClickIsOpeningGesture(event as PointerEvent, opening)) {
         this.pasteSheetGesture = undefined;
         return;
       }
