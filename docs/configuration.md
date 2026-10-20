@@ -740,14 +740,14 @@ Inspect exactly which layer wins, and why, with `af config get <key> --repo <pat
 
 ### Project colors
 
-Give a registered project a color so you can find its browser tab or window quickly. The web client paints the frame around the session and the tab's favicon with the selected project's color:
+Give a registered project a color so you can find its browser tab or window quickly. The web client uses the selected project's color in place of the default accent, fills the top bar with it, and paints the tab's favicon with it:
 
 ```bash
-af projects color ~/work/myrepo '#e11d48'   # a prj_ id or any path inside the project
+af projects color ~/work/myrepo '#bd93f9'   # a prj_ id or any path inside the project
 af projects color ~/work/myrepo ''          # clear it
 ```
 
-In the web client, open the project menu and pick a swatch, a custom color, or **No color**. Picking a color for a project that is known only from its sessions registers it first. The color is stored beside the project record in `appearance.json`, so it is machine-local like the rest of this layer.
+In the web client, open the project menu and pick a swatch (the Dracula palette), a custom color, or **No color**. Picking a color for a project that is known only from its sessions registers it first. The color is stored beside the project record in `appearance.json`, so it is machine-local like the rest of this layer.
 
 ## Migrating from JSON
 

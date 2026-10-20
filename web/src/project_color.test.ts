@@ -9,6 +9,7 @@ import {
   PROJECT_COLOR_PALETTE,
   applyProjectFavicon,
   markInk,
+  projectAccent,
   projectColor,
   projectColorRow,
   projectFaviconDataUrl,
@@ -113,4 +114,13 @@ test("the PNG favicon renders without roundRect and resets to the static icon", 
     g.document = saved.document;
     g.Path2D = saved.Path2D;
   }
+});
+
+test("projectAccent keeps 4.5:1 contrast against each theme surface", () => {
+  assert.equal(projectAccent("#ff79c6", "#1f1f1f"), "#ff79c6");
+  const light = projectAccent("#f1fa8c", "#f8f9fc");
+  assert.notEqual(light, "#f1fa8c");
+  assert.match(light, /^#[0-9a-f]{6}$/);
+  assert.equal(markInk(light), "#ffffff");
+  assert.equal(markInk("#bd93f9"), "#1f1f1f");
 });
