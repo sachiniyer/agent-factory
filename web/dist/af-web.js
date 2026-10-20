@@ -7260,6 +7260,23 @@ function actionsDisclosure(label = "Session actions", enabled = () => true, onDi
   });
   return { el: el2, panel, trigger, open, close, dismiss, dispose: close };
 }
+function placeMenu(trigger, panel) {
+  panel.classList.remove("af-menu-up");
+  const anchor = trigger.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = trigger.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "") continue;
+    const box = node.getBoundingClientRect();
+    top = Math.max(top, box.top);
+    bottom = Math.min(bottom, box.bottom);
+  }
+  const needed = panel.getBoundingClientRect().height;
+  const below = bottom - anchor.bottom;
+  const above = anchor.top - top;
+  if (needed > below && above > below) panel.classList.add("af-menu-up");
+}
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
 }) {
@@ -16912,6 +16929,9 @@ var AppShell = class {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("\u2026");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
