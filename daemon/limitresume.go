@@ -479,3 +479,29 @@ var testHookResumeBeforeAccountSwapRespawn = func() {}
 // thing that can keep the commit from tearing down a runtime a TUI just
 // attached to. No-op in production.
 var testHookResumeBeforeAccountSwapTeardown = func() {}
+
+// testHookResumeBeforeManualMissionSend fires inside deliverManualAccountMission's
+// readiness wait, after the durable settlement write and ClearLimitReached, immediately
+// before the attach-lease recheck that gates the nested manual-mission submission. The
+// send-boundary recheck in resumeFromLimitLockedOutcome ran before this function, but the
+// durable settlement write and the readiness wait inside WaitForReadyAndSubmitPrompt can
+// both outlast it; a test substitutes this hook to attach the lease in that window so the
+// pre-submission recheck is the only thing that can keep the mission out of an attached
+// pane. No-op in production.
+var testHookResumeBeforeManualMissionSend = func() {}
+
+// testHookResumeAfterRepairValidation fires in resumeFromLimitLockedOutcome after
+// the committed-swap repair path's ValidateAccountSwap (which re-runs the full
+// identity preflight) and before the attach-lease recheck that gates the
+// stopForAccountSwap pane teardown in the probeAlive arm. A test substitutes it to
+// attach the lease in that window so the post-validation recheck is the only thing
+// that can keep the repair from tearing down a runtime a TUI just attached to. No-op.
+var testHookResumeAfterRepairValidation = func() {}
+
+// testHookResumeAfterGoneRevalidation fires in resumeFromLimitLockedOutcome after
+// revalidateGoneAccountSwap (which calls ValidateAccountSwap) and before the
+// attach-lease recheck that gates the StopRemainingPanesForAccountSwap teardown in
+// the probeAbsent arm. A test substitutes it to attach the lease in that window so the
+// post-revalidation recheck is the only thing that can keep the recovery from
+// tearing down a runtime a TUI just attached to. No-op in production.
+var testHookResumeAfterGoneRevalidation = func() {}

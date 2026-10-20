@@ -459,6 +459,15 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	// send).
 	testHookResumeBeforeAccountSwapTeardown()
 	if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+		// Admission recorded the account-swap launch plan (ValidateAccountSwap
+		// stores it) but no identity was committed (SelectAccountForHandoff/
+		// SelectAccountAutomatically is below), so pendingAccountSwap is still
+		// nil. EndLimitResume clears accountSwapLaunch in that case, but the
+		// explicit clear here does not depend on the fence's conditional
+		// release: tabSpawnBlockedLocked refuses tab spawns while the plan is
+		// set, and a deferral that left it staged would block an attached TUI
+		// from adding or attaching tabs until the next swap attempt.
+		instance.ClearUncommittedAccountSwapLaunch()
 		return false, errAttachPauseDeferred
 	}
 

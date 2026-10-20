@@ -442,3 +442,203 @@ func TestResumeLimitedSessions_AttachPauseAfterRemotePreserveDefers(t *testing.T
 		t.Fatal("the attach lease must still be held after the deferral")
 	}
 }
+
+// TestResumeLimitedSessions_AttachPauseBeforeAccountSwapTeardownClearsLaunch pins the
+// in-commit teardown recheck's ClearUncommittedAccountSwapLaunch (#5422 review): the
+// admission (ValidateAccountSwap) stores accountSwapLaunch before the recheck, and
+// tabSpawnBlockedLocked refuses tab spawns while it is set. The explicit clear on the
+// deferral (in addition to EndLimitResume's conditional clear) ensures an attached TUI
+// is not blocked from adding or attaching tabs after the deferral.
+func TestResumeLimitedSessions_AttachPauseBeforeAccountSwapTeardownClearsLaunch(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	configureLimitAccountCandidate(t, manager, "work")
+
+	advance(time.Second)
+
+	prevHook := testHookResumeBeforeAccountSwapTeardown
+	testHookResumeBeforeAccountSwapTeardown = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapTeardown = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler tore down the runtime after a TUI attached inside the identity commit (pre-teardown recheck missed): respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a pre-teardown deferral must leave the session parked at the limit wall")
+	}
+	// accountSwapLaunch was staged by the admission (ValidateAccountSwap) before the
+	// recheck deferred. The explicit ClearUncommittedAccountSwapLaunch on the deferral
+	// (and EndLimitResume's conditional clear) must retire it so tab spawns are not
+	// blocked while the lease is held.
+	if err := inst.TabSpawnBlocked(); err != nil {
+		t.Fatalf("a pre-teardown deferral must clear the staged account-swap launch plan so an attached TUI is not blocked: %v", err)
+	}
+}
+
+// TestResumeLimitedSessions_AttachPauseAfterRepairValidationDefers pins the
+// post-validation attach-lease recheck in the probeAlive arm (#5422 review): a
+// committed-swap recovery (alreadySet) with an incomplete pane set re-runs
+// ValidateAccountSwap before StopForAccountSwap, and a TUI can attach during that
+// validation. The recheck after ValidateAccountSwap (gated on !operatorInitiated)
+// defers the repair so the stop cannot tear down a runtime a TUI just attached to.
+func TestResumeLimitedSessions_AttachPauseAfterRepairValidationDefers(t *testing.T) {
+	m, repo, inst, backend := wedgedCommittedSwapFixture(t, true)
+	// The handoff replaced the instance in m.instances; resolve the current one.
+	inst2, _, _, _, _, err := m.resolveActionSession("", inst.Title, repo)
+	if err != nil || inst2 == nil {
+		t.Fatalf("resolve current instance: %v", err)
+	}
+	inst2.SetAccountSwapReplacementPanesStartedForTest(false)
+	key := daemonInstanceKey(repo, inst2.Title)
+	swap := committedAccountSwap(inst2)
+
+	prevHook := testHookResumeAfterRepairValidation
+	testHookResumeAfterRepairValidation = func() {
+		m.PauseStatusPoll(repo, inst2.Title, inst2.ID)
+	}
+	t.Cleanup(func() { testHookResumeAfterRepairValidation = prevHook })
+
+	_, respawnsBefore, _ := backend.snapshot()
+	outcome, err := m.resumeFromLimitLockedWithAccount(repo, key, inst2, inst2.Title, swap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome != resumeNotPerformed {
+		t.Fatalf("BUG: the scheduler resumed after a TUI attached during the repair validation (post-validation recheck missed): outcome=%v", outcome)
+	}
+	_, respawns, prompts := backend.snapshot()
+	if respawns != respawnsBefore || len(prompts) != 0 {
+		t.Fatalf("BUG: the scheduler repaired and respawned after a TUI attached during the repair validation: respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !m.isPollPaused(repo, inst2.Title, inst2.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeLimitedSessions_AttachPauseAfterGoneRevalidationDefers pins the
+// post-validation attach-lease recheck in the probeAbsent arm (#5422 review): a
+// committed-swap recovery with an absent agent re-runs revalidateGoneAccountSwap
+// (which calls ValidateAccountSwap) before StopRemainingPanesForAccountSwap, and a
+// TUI can attach during that validation. The recheck after revalidateGoneAccountSwap
+// (gated on !operatorInitiated) defers the recovery so the stop cannot tear down a
+// runtime a TUI just attached to.
+func TestResumeLimitedSessions_AttachPauseAfterGoneRevalidationDefers(t *testing.T) {
+	m, repo, inst, backend := wedgedCommittedSwapFixture(t, false)
+	inst2, _, _, _, _, err := m.resolveActionSession("", inst.Title, repo)
+	if err != nil || inst2 == nil {
+		t.Fatalf("resolve current instance: %v", err)
+	}
+	key := daemonInstanceKey(repo, inst2.Title)
+	swap := committedAccountSwap(inst2)
+
+	prevHook := testHookResumeAfterGoneRevalidation
+	testHookResumeAfterGoneRevalidation = func() {
+		m.PauseStatusPoll(repo, inst2.Title, inst2.ID)
+	}
+	t.Cleanup(func() { testHookResumeAfterGoneRevalidation = prevHook })
+
+	_, respawnsBefore, _ := backend.snapshot()
+	outcome, err := m.resumeFromLimitLockedWithAccount(repo, key, inst2, inst2.Title, swap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome != resumeNotPerformed {
+		t.Fatalf("BUG: the scheduler resumed after a TUI attached during the gone revalidation (post-validation recheck missed): outcome=%v", outcome)
+	}
+	_, respawns, prompts := backend.snapshot()
+	if respawns != respawnsBefore || len(prompts) != 0 {
+		t.Fatalf("BUG: the scheduler respawned or delivered after a TUI attached during the gone revalidation: respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !m.isPollPaused(repo, inst2.Title, inst2.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefers pins the
+// pre-submission attach-lease recheck inside deliverManualAccountMission (#5422
+// review): the send-boundary recheck in resumeFromLimitLockedOutcome runs before
+// deliverManualAccountMission, but the durable settlement write and the readiness
+// wait inside WaitForReadyAndSubmitPrompt can both outlast it. A TUI can attach
+// during either, and the mission would be submitted without another attach check.
+// The pre-submission recheck (via WaitForReadyAndSubmitPrompt's beforeSubmit, gated
+// on !operatorInitiated) defers the mission so the prompt is not pasted into an
+// attached pane. The limit is re-parked and the pending mission delivery state is
+// restored, so the scheduler re-fires on the next tick.
+func TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefers(t *testing.T) {
+	m, repo, inst, backend := wedgedCommittedSwapFixture(t, false)
+	inst2, _, _, _, _, err := m.resolveActionSession("", inst.Title, repo)
+	if err != nil || inst2 == nil {
+		t.Fatalf("resolve current instance: %v", err)
+	}
+	key := daemonInstanceKey(repo, inst2.Title)
+	swap := committedAccountSwap(inst2)
+
+	prevHook := testHookResumeBeforeManualMissionSend
+	testHookResumeBeforeManualMissionSend = func() {
+		m.PauseStatusPoll(repo, inst2.Title, inst2.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeManualMissionSend = prevHook })
+
+	_, respawnsBefore, _ := backend.snapshot()
+	outcome, err := m.resumeFromLimitLockedWithAccount(repo, key, inst2, inst2.Title, swap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome != resumeNotPerformed {
+		t.Fatalf("BUG: the scheduler delivered the manual mission after a TUI attached during the readiness wait (pre-submission recheck missed): outcome=%v", outcome)
+	}
+	_, respawns, prompts := backend.snapshot()
+	// The respawn happens before the pre-submission recheck (the recheck is inside
+	// deliverManualAccountMission, after the settlement write and the readiness wait),
+	// so respawns may increase; the recheck defers the mission delivery, not the respawn.
+	if len(prompts) != 0 {
+		t.Fatalf("BUG: the scheduler delivered a prompt after a TUI attached during the readiness wait (pre-submission recheck missed): prompts=%v", prompts)
+	}
+	if respawns != respawnsBefore {
+		// A repair-path respawn may have happened before the recheck; only the prompt
+		// delivery is gated. Assert no NEW prompt was delivered.
+		if len(prompts) != 0 {
+			t.Fatalf("the pre-submission recheck must defer the mission delivery: prompts=%v", prompts)
+		}
+	}
+	if !inst2.LimitReached() {
+		t.Fatal("a pre-submission deferral must re-park the limit so the scheduler re-fires on the next tick")
+	}
+	if !m.isPollPaused(repo, inst2.Title, inst2.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeFromLimit_ManualRPCExemptFromManualMissionSendAttachPause pins the
+// operator-initiated exemption at the pre-submission recheck: the explicit
+// ResumeFromLimit RPC reaches deliverManualAccountMission with operatorInitiated=true,
+// so the pre-submission recheck is skipped and the manual retry delivers despite the
+// lease being acquired in the readiness window.
+func TestResumeFromLimit_ManualRPCExemptFromManualMissionSendAttachPause(t *testing.T) {
+	m, repo, inst, backend := wedgedCommittedSwapFixture(t, false)
+
+	prevHook := testHookResumeBeforeManualMissionSend
+	testHookResumeBeforeManualMissionSend = func() {
+		m.PauseStatusPoll(repo, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeManualMissionSend = prevHook })
+
+	_, respawnsBefore, _ := backend.snapshot()
+	if _, err := m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}); err != nil {
+		t.Fatalf("manual ResumeFromLimit RPC must succeed even when the lease is acquired at the pre-submission boundary (operator action): %v", err)
+	}
+	_, respawns, prompts := backend.snapshot()
+	if respawns != respawnsBefore+1 {
+		t.Fatalf("an exited-agent manual retry must respawn despite the attach lease, got %d", respawns)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("the manual retry must deliver immediately despite the pre-submission lease: prompts=%v", prompts)
+	}
+}
