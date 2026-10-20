@@ -661,11 +661,20 @@ var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Secon
 // carries the sentinel across to undo. Under the shared 30s remoteAgentCallTimeout
 // a stalled setup/common-dir/ownership probe (60s localGitTimeout) hit the
 // client's own deadline first, so the new code never crossed the wire and the
-// classifier still treated the failure as structural. Sized with transport slack
-// over localGitTimeout so a stalled probe trips its own bound, the server emits
-// bounded_probe_no_answer, and the code crosses before this budget elapses.
-// A var (not const) so a test can shrink it; production never reassigns.
-var launchCallTimeout = 90 * time.Second
+// classifier still treated the failure as structural.
+//
+// The inner probes are SEQUENTIAL, not alternatives: clearStaleWorktreePath runs
+// the ownership, remove, and prune commands one after another (each under its own
+// localGitTimeout), and the new-branch path's deleteStaleSetupBranch adds a
+// fourth bounded git command after that. A budget sized for a SINGLE
+// localGitTimeout trips the client's own deadline before a later probe in the
+// sequence can stall and emit the sentinel — e.g. ownership answering after 40s
+// and the remove then reaching its own 60s deadline already exceeds 90s. Sized for
+// the CUMULATIVE sequence — 4 localGitTimeout-bounded git commands plus the tmux
+// pre-spawn gate — plus transport slack, so every probe in the sequence can trip
+// its own bound and the server emits bounded_probe_no_answer before this budget
+// elapses. A var (not const) so a test can shrink it; production never reassigns.
+var launchCallTimeout = 5 * time.Minute
 
 // provisionCallTimeout is the provision route's own budget, sized ABOVE the
 // shared 30s remoteAgentCallTimeout. A sandbox restore runs Provision then
