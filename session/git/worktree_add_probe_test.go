@@ -756,5 +756,154 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalComponentSymlinkPrese
 		"the parent that hosts the destination's name must be probed")
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathRootRepoPathPreservesRootParent pins the
+// contract the #5421 review added for a filesystem-root repoPath: when repoPath resolves to
+// "/" (Unix) or a Windows volume root and worktreePath is a relative name like "wt", Split
+// returns a root parent ("//") that TrimRight would empty, making the join produce a
+// relative "wt" and the stat/write probes run beneath the daemon's AF-home cwd while Git
+// creates "/wt". The parent-trim must preserve the root so the probes target the root
+// Git actually writes into.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathRootRepoPathPreservesRootParent(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+	oldEval := evalSymlinksSpaceProbe
+	defer func() { evalSymlinksSpaceProbe = oldEval }()
+
+	// Existing prefixes (the root, in this case) resolve to themselves so the
+	// bounded walk does not depend on a real root's symlink structure.
+	evalSymlinksSpaceProbe = func(p string) (string, error) { return p, nil }
+
+	// The daemon's post-chdir AF home is a distinct temp dir so a raw relative
+	// path would resolve there (the bug) while the root-joined path lands at
+	// "/wt" (the fix). Without this divergence the two could not be told
+	// apart.
+	afHome := t.TempDir()
+	t.Chdir(afHome)
+
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		return nil, os.ErrNotExist // pre-creation normal answer — stays silent
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// repoPath is the filesystem root; the relative worktreePath joined onto it
+	// produces "//wt", whose Split parent ("//") TrimRight would empty into a
+	// relative path.
+	g := &GitWorktree{repoPath: "/", worktreePath: "wt"}
+	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+
+	require.Equal(t, "/wt", statTarget,
+		"the probe must stat the root-joined destination (/wt), not a relative "+
+			"\"wt\" that resolves against the daemon's AF-home cwd")
+	require.Contains(t, probedDirs, "/",
+		"the worktree parent probed must be the filesystem root (/), not the "+
+			"daemon's cwd")
+	for _, d := range probedDirs {
+		require.True(t, filepath.IsAbs(d),
+			"a probed dir must be absolute (root-joined), not a raw relative path: %q", d)
+	}
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathTrailingSlashPreservesFinalSymlink pins the
+// contract the #5421 review added for a trailing separator on the destination: when the
+// restored relative worktreePath ends in a separator ("dest/"), filepath.Split returns an
+// empty base, folding the final component into the parent resolution so the "parent-only"
+// walk follows a final symlink the existing-destination check must see un-resolved. A `dest`
+// symlink to a nonempty directory makes git reject the add without writing to the symlink
+// target's parent, but resolving it would let a coincidental ENOSPC there stall the
+// lost-restore loop indefinitely. Trimming the trailing separator before Split keeps the
+// final component out of the parent walk the same way the non-trailing-slash case already
+// defends.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathTrailingSlashPreservesFinalSymlink(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The relative worktree path's final component is a symlink to a real
+	// directory on a distinct location. Git rejects the add because the
+	// destination already exists; the probe must not resolve through the
+	// symlink and probe the symlink target's parent, which sits on a
+	// filesystem git never writes to. The trailing slash on "dest/" must
+	// not bypass that final-component preservation.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the symlinked prefix the way the production code does, so the
+	// expected parent matches across hosts (macOS /var/folders ->
+	// /private/var/folders).
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	symlinkTargetParent := filepath.Dir(resolvedRealTarget)
+	require.NotEqual(t, symlinkTargetParent, resolvedRepo,
+		"the symlink target's parent must differ from the repo dir, otherwise the test cannot distinguish the fix from the bug")
+
+	// Only the symlink target's parent is full. The parent that hosts the
+	// destination's name is writable, so a probe of the correct parent sees
+	// no ENOSPC and the git failure stays structural; a probe of the symlink
+	// target's parent (the bug) adds ENOSPC and the lost-restore loop would
+	// wait indefinitely on a filesystem freeing it cannot fix.
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		// The destination already exists (the symlink resolves to a real
+		// directory), so the existing-destination check sees it as a dir.
+		return os.Stat(p)
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == symlinkTargetParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// worktreePath ends in a separator so filepath.Split yields an empty base
+	// and the final "dest" symlink would be folded into the parent resolution
+	// without the trailing-separator trim.
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest/"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem at the symlink target's parent must not add ENOSPC — git rejected the add "+
+			"because the destination already exists, so freeing that filesystem cannot fix the structural "+
+			"failure and the parent that hosts the destination's name is writable: %v", out)
+	require.NotContains(t, probedDirs, symlinkTargetParent,
+		"the parent probe must target the directory that hosts the destination's name (%s), not the "+
+			"symlink target's parent (%s)", resolvedRepo, symlinkTargetParent)
+	require.Equal(t, filepath.Join(resolvedRepo, "dest"), statTarget,
+		"the existing-destination check must see the preserved final component (%s), not the resolved "+
+			"symlink target (%s), even with a trailing slash", filepath.Join(resolvedRepo, "dest"), resolvedRealTarget)
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the parent that hosts the destination's name must be probed")
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.

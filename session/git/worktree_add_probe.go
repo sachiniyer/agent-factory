@@ -234,8 +234,36 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	worktreePath := g.worktreePath
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
+		// Trim trailing separators (but preserve a filesystem root) so a
+		// trailing slash on the destination does not fold the final
+		// component into the parent resolution: filepath.Split("/repo/dest/")
+		// returns an empty base, which would make the "parent-only"
+		// resolution follow a final symlink the existing-destination check
+		// must see un-resolved. A `dest/` whose `dest` is a symlink to a
+		// nonempty directory makes git reject the add because the destination
+		// already exists without writing to the symlink target's parent;
+		// resolving it would let a coincidental ENOSPC there stall the
+		// lost-restore loop indefinitely. The guard keeps at least the
+		// volume name plus one separator so a root path is not turned into
+		// a relative one.
+		vol := filepath.VolumeName(worktreePath)
+		for len(worktreePath) > len(vol)+1 && strings.HasSuffix(worktreePath, string(filepath.Separator)) {
+			worktreePath = strings.TrimSuffix(worktreePath, string(filepath.Separator))
+		}
 		parent, base := filepath.Split(worktreePath)
-		resolvedParent, timedOut, resolveErr := resolveSymlinkPrefixBounded(strings.TrimRight(parent, string(filepath.Separator)))
+		// Trim the parent's trailing separator for the prefix walk, but
+		// preserve a filesystem root: when repoPath resolves to "/"
+		// (Unix) or "C:\" (Windows) and worktreePath is a relative name,
+		// Split returns a root parent ("//") and TrimRight would empty it
+		// (Unix) or drop the separator from a volume root (Windows, "C:\"
+		// -> "C:", the current directory on that drive rather than its
+		// root), making the join relative and probing the daemon's cwd
+		// instead of the root Git writes into.
+		parent = strings.TrimRight(parent, string(filepath.Separator))
+		if parent == "" || parent == vol {
+			parent = vol + string(filepath.Separator)
+		}
+		resolvedParent, timedOut, resolveErr := resolveSymlinkPrefixBounded(parent)
 		if timedOut {
 			// A bounded non-answer from the symlink resolution is evidence in
 			// its own right: the mount the probe is about to write to did not
