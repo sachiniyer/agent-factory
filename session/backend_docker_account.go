@@ -812,6 +812,70 @@ func parseContainerOwner(out string) (string, error) {
 	return owner, nil
 }
 
+// prepareContainerUser prepares a writable HOME and /workspace for the uid the
+// container will run provisioning and the agent-server as, then records that
+// uid so every subsequent exec (configureGit, cloneWorkspace, the agent-server,
+// readBanner) runs as it via sessionExecOptions. The account path probes the
+// mounted account directory's owner; the non-account path probes the image's
+// default USER. Both chown as root (0:0) and set containerUser, so the two paths
+// share the same contract — a non-root BYO image is in scope for an account
+// session, and after this fix it is in scope for a non-account session too
+// (previously the non-account path forced HOME=/root while running every exec
+// as a non-root default user, so provisioning failed at the first
+// `git config --global`).
+func (p *dockerProvisioner) prepareContainerUser() error {
+	if p.spec.Account.Dir != "" {
+		return p.prepareAccountUser()
+	}
+	return p.prepareNonAccountUser()
+}
+
+// prepareNonAccountUser mirrors prepareAccountUser for a session with no
+// credential account. A BYO image may set a non-root `USER` directive (a common
+// hardening practice), and the container is launched with HOME=dockerContainerHome
+// (/root). Without this step every provisioning exec runs as that non-root
+// default user while HOME is root-owned (mode 0700), so the first
+// `git config --global` fails with "could not lock config file
+// /root/.gitconfig: Permission denied" and the session is rejected at create
+// time with a diagnostic that points at git, not at the forced /root HOME
+// against the image's non-root USER.
+//
+// It probes the image's default user by running `id -u`/`id -g` with no --user
+// override, so the image's USER directive resolves via the image's own
+// /etc/passwd (a name like `dev`, a bare uid, or a uid:gid pair all resolve to a
+// numeric uid:gid this way). It then chowns HOME and creates+chowns /workspace
+// as root (0:0) to that uid. Subsequent provisioning execs (configureGit,
+// cloneWorkspace) and the agent-server itself run as that user via
+// sessionExecOptions, with a HOME it can now write to. For a root-default image
+// the probe reports 0:0 and the chowns are no-ops, so the root-default path is
+// byte-for-byte unchanged (HOME stays /root, the agent-server runs as 0:0, and
+// the credential-mount targets under /root remain where agents expect them).
+func (p *dockerProvisioner) prepareNonAccountUser() error {
+	if p.spec.Account.Dir != "" {
+		return nil
+	}
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", p.containerID, "sh", "-c", `echo "$(id -u):$(id -g)"`)
+	if err != nil {
+		return fmt.Errorf("backend=docker: cannot identify the image's default user: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	owner, err := parseContainerOwner(string(out))
+	if err != nil {
+		return fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err)
+	}
+	script := fmt.Sprintf("mkdir -p %s && chown %s %s %s",
+		shellQuote(dockerWorkspaceDir), owner,
+		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir))
+	out, err = p.docker(dockerShortStepTimeout,
+		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
+	if err != nil {
+		return fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
+			owner, strings.TrimSpace(string(out)), err)
+	}
+	p.containerUser = owner
+	return nil
+}
+
 // prepareAccountUser asks the mounted directory who owns it in the container's
 // user namespace, then prepares a writable HOME/workspace for that same uid.
 // Rootful Docker reports the host af uid; rootless Docker commonly reports 0,
