@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
@@ -632,7 +633,48 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 // never reaches. The walk surfaces it as a resolution error so the caller
 // preserves the structural failure rather than write-probing a guessed lexical
 // destination.
+// tailIsDir reports whether the resolved component the tail walk is about to
+// back out of with `..` is a directory, using the bounded lstat flight the walk
+// already uses for tail components. The kernel does not traverse `..` through a
+// non-directory — `cd file/..` (or a symlink that resolved to a regular file
+// followed by `..`) fails with ENOTDIR before writing anywhere — so the tail
+// walk must not apply filepath.Dir to a non-directory `cur` and probe the
+// unrelated filesystem it would back out to. A coincidental ENOSPC on that
+// filesystem would be joined to a structural ENOTDIR git failure and stall the
+// lost-restore loop indefinitely on a filesystem freeing it cannot fix. The
+// bound and non-answer shape match the other tail lookups so a stalled mount
+// surfaces the typed non-answer rather than wedging the synchronous restore
+// poll.
+func tailIsDir(path string) (bool, error) {
+	info, err := lstatSpaceProbe(path)
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
 func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (string, bool, error) {
+	// Track whether the current resolved component is a directory. The
+	// kernel's chdir does not traverse `..` through a non-directory — a
+	// symlink that resolved to a regular file (or a regular file component)
+	// followed by `..` fails with ENOTDIR before writing there — so the tail
+	// walk surfaces ENOTDIR instead of applying filepath.Dir and probing an
+	// unrelated filesystem git never reaches. A coincidental ENOSPC on that
+	// filesystem would otherwise be joined to a structural ENOTDIR git failure
+	// and stall the lost-restore loop indefinitely on a filesystem freeing
+	// it cannot fix.
+	curIsDir, err := tailIsDir(cur)
+	if err != nil {
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return "", true, err
+		}
+		// A non-timeout lstat error (EACCES, EIO, ...) on the resolved prefix
+		// is environmental evidence about the filesystem the probe is about to
+		// write to; return it the way a non-ENOENT lstat on a tail component is
+		// returned so the caller joins it rather than probing a guessed
+		// lexical destination.
+		return "", false, err
+	}
 	for _, part := range tailParts {
 		select {
 		case <-ctx.Done():
@@ -647,7 +689,22 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			continue
 		}
 		if part == ".." {
+			if !curIsDir {
+				// The current resolved component is a regular file (for
+				// example, a symlink that resolved to a regular file), and the
+				// kernel does not traverse `..` through a non-directory —
+				// `git worktree add link/../wt` fails with "Not a directory"
+				// before writing there. filepath.Dir would lexically back out
+				// to the parent and the subsequent probe would target a
+				// filesystem git never reaches, so a coincidental ENOSPC there
+				// would stall the lost-restore loop indefinitely on a structural
+				// ENOTDIR failure. Surface ENOTDIR the way the kernel does so
+				// the caller probes only the independently known locations and
+				// joins the structural error.
+				return "", false, &os.PathError{Op: "stat", Path: cur, Err: syscall.ENOTDIR}
+			}
 			cur = filepath.Dir(cur)
+			curIsDir = true
 			continue
 		}
 		next := filepath.Join(cur, part)
@@ -663,6 +720,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 				// dangling symlink, and the `..` after it backs out the way
 				// chdir does once git has made the entry.
 				cur = next
+				curIsDir = true
 				continue
 			}
 			// A non-ENOENT, non-timeout lstat error (EACCES, EIO, ...) is
@@ -673,7 +731,11 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			// A regular component — continue through it the way chdir does.
+			// A regular file is not a directory, so a `..` after it surfaces
+			// ENOTDIR the way the kernel does rather than backing out
+			// lexically.
 			cur = next
+			curIsDir = info.IsDir()
 			continue
 		}
 		// A symlink. Resolve it the way the kernel's chdir does: EvalSymlinks
@@ -698,6 +760,21 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			// sits on; return it the way the prefix walk returns a non-ENOENT
 			// EvalSymlinks error.
 			return "", false, rErr
+		}
+		// Track whether the resolved symlink target is a directory: a `..`
+		// after a symlink to a regular file must surface ENOTDIR the way the
+		// kernel does, rather than backing out lexically and probing the
+		// target's parent filesystem.
+		curIsDir, err = tailIsDir(resolved)
+		if err != nil {
+			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+				return "", true, err
+			}
+			// A non-timeout lstat on the resolved target is environmental
+			// evidence about the filesystem git's child is about to write to;
+			// return it the way a non-ENOENT tail lstat is returned so the
+			// caller joins it rather than probing a guessed lexical destination.
+			return "", false, err
 		}
 		cur = resolved
 	}
