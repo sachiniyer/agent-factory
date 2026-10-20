@@ -367,6 +367,25 @@ func TestRemoteAgentCallWithin_BoundedProbeNoAnswerCode(t *testing.T) {
 	}
 }
 
+// TestProvisionCallBudgetCoversTheInSandboxGitProbe pins the provision route
+// budget to the in-sandbox bounded git probe's own bound (#5295 review). The
+// headless agent-server handler does not observe the request context, so an
+// outer call that expires before the inner probe's deadline returns the
+// client's own bare context.DeadlineExceeded and disconnects — before the
+// server can emit the bounded_probe_no_answer envelope code the lost-restore
+// classifier's deadline+sentinel arm needs. The 60s here mirrors
+// session/git.localGitTimeout, which bounds the worktree
+// setup/common-dir/ownership probes that run during a sandbox restore; the
+// provision budget must outlive it with transport slack to spare, and this
+// test keeps anyone from decoupling the two again.
+func TestProvisionCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
+	const inSandboxBoundedProbeBound = 60 * time.Second
+	if slack := provisionCallTimeout - inSandboxBoundedProbeBound; slack < 10*time.Second {
+		t.Fatalf("provisionCallTimeout (%s) must exceed the in-sandbox bounded git probe bound (%s) with transport slack; got %s slack",
+			provisionCallTimeout, inSandboxBoundedProbeBound, slack)
+	}
+}
+
 // TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
 // contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
 // URL fails at validation with an actionable message rather than at dial time. The

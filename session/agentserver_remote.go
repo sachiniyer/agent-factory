@@ -127,7 +127,7 @@ func (s *remoteAgentServer) noteAdoption() error {
 }
 
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	return s.rc.callWithin("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil, provisionCallTimeout)
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
@@ -648,6 +648,23 @@ const AgentArchiveCallTimeout = 3 * time.Minute
 // a retimed delivery cannot silently outgrow it; the pairing is pinned by
 // TestSendPromptCallBudgetCoversTheInSandboxRetry.
 var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Second
+
+// provisionCallTimeout is the provision route's own budget, sized ABOVE the
+// in-sandbox bounded git probes (session/git.localGitTimeout, 60s) that run
+// during a sandbox restore. The outer call must OUTLIVE the inner probe: the
+// headless agent-server handler does not observe the request context, so a
+// daemon that gives up first returns its own bare context.DeadlineExceeded and
+// disconnects before the server can emit the bounded_probe_no_answer envelope
+// code the lost-restore classifier's deadline+sentinel arm needs — the exact
+// wire-hop flattening the #5295 fix carries the sentinel across to undo. Under
+// the shared 30s remoteAgentCallTimeout a stalled worktree
+// setup/common-dir/ownership probe (60s localGitTimeout) hit the client's own
+// deadline first, so the new code never crossed the wire and the classifier
+// still treated the failure as structural. Sized with transport slack over
+// localGitTimeout so a stalled probe trips its own bound, the server emits
+// bounded_probe_no_answer, and the code crosses before this budget elapses.
+// A var (not const) so a test can shrink it; production never reassigns.
+var provisionCallTimeout = 90 * time.Second
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
 	return c.callWithin(path, req, resp, remoteAgentCallTimeout)
