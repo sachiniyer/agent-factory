@@ -625,5 +625,50 @@ func TestAnnotateWorktreeAddError_SymlinkResolutionIsBounded(t *testing.T) {
 		"the bounded symlink resolution must be attempted, not skipped")
 }
 
+// TestAnnotateWorktreeAddError_SymlinkResolutionNonEnoentErrorPreserved pins the contract that
+// a non-ENOENT resolution error — an environmental errno the kernel returns from Lstat/Readlink
+// on a path git's child is about to write to — is preserved and joined into the annotation rather
+// than discarded. Before the fix the walk treated every non-timeout error as a missing path and
+// walked up to the next prefix, rejoining the tail lexically; for `link/../wt` with a symlinked
+// `link` whose target returns ETIMEDOUT, that lexical rejoin removes `link/..` and the subsequent
+// probes can all succeed, misclassifying the original git failure as structural. The fix returns
+// the environmental error and joins it so the lost-restore classifier reads it.
+func TestAnnotateWorktreeAddError_SymlinkResolutionNonEnoentErrorPreserved(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+	oldEval := evalSymlinksSpaceProbe
+	defer func() { evalSymlinksSpaceProbe = oldEval }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// An environmental errno (ETIMEDOUT) from the first prefix resolution is
+	// not a missing path and must not be discarded — it joins the chain the
+	// way a timed-out resolution does.
+	pathErr := &os.PathError{Op: "lstat", Path: filepath.Join(launchCwd, "repo"), Err: syscall.ETIMEDOUT}
+	evalSymlinksSpaceProbe = func(p string) (string, error) {
+		return "", pathErr
+	}
+	writeSpaceProbe = func(string) error { return nil }
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/../wt"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ETIMEDOUT),
+		"the non-ENOENT resolution error must reach the chain: %v", out)
+	require.Contains(t, out.Error(), "symlink resolution of",
+		"the resolution failure must be named as a symlink resolution error, not dropped: %v", out)
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.

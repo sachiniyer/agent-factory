@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
@@ -233,11 +234,19 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		if resolveErr == nil {
 			worktreePath = resolved
 		} else {
-			// No prefix resolved through symlinks and the resolution did not
-			// time out — fall back to the lexical join, the honest answer when
-			// nothing on the path exists yet (the probe then reports the same
-			// errno git's child surfaces from the missing path).
-			worktreePath = filepath.Join(repoPath, g.worktreePath)
+			// A non-timeout, non-ENOENT resolution error (EACCES, ETIMEDOUT,
+			// EIO, ...) is environmental evidence about the filesystem the
+			// probe is about to write to, not a missing path. Rejoining the
+			// tail lexically would remove a symlinked component like `link/..`
+			// and let the subsequent write/stat probes all succeed, so the
+			// original git failure would misclassify as structural. Fall back
+			// to the lexical join (the bounded probes below still run and add
+			// evidence if they answer) and join the resolution error so the
+			// lost-restore classifier reads it alongside the git failure
+			// rather than dropping it.
+			lexical := filepath.Join(repoPath, g.worktreePath)
+			out := g.annotateGitWriteError(err, filepath.Dir(lexical))
+			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 	}
 	dirs := []string{filepath.Dir(worktreePath)}
@@ -253,6 +262,15 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	}
 	return out
 }
+
+// symlinkResolveTimeout bounds the complete symlink-prefix walk the way
+// probeTimeout bounds a single fsprobe flight. Without a shared budget a path
+// with N components past the first nonexistent entry on a slow filesystem
+// could block the synchronous restore poll for N × probeTimeout, because each
+// prefix EvalSymlinks invocation restarts the per-dir bound. The whole walk
+// shares one deadline instead, so the total time the poll spends here is
+// bounded the same way a single lookup is.
+const symlinkResolveTimeout = 2 * time.Second
 
 // resolveSymlinkPrefixBounded resolves the longest existing prefix of path
 // through symlinks the way the kernel's chdir resolves a relative worktree
@@ -272,15 +290,62 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 // Each prefix lookup runs through the bounded fsprobe.EvalSymlinks, the same
 // per-dir flight shape statSpaceProbe uses — a stalled network/FUSE mount that
 // never answers a Readlink or Stat would otherwise wedge the synchronous
-// restore poll the probe informs (#5295 review). A timed-out lookup returns the
-// bounded non-answer (ErrProbeTimedOut + context.DeadlineExceeded) so the
-// caller joins it into the annotation rather than silently falling back to
-// the lexical path; a non-timeout error (ENOENT on the final component,
-// EACCES on a parent) walks up to the next shorter prefix.
+// restore poll the probe informs (#5295 review). The whole walk shares a
+// single deadline (symlinkResolveTimeout) rather than restarting the per-dir
+// bound for every prefix, so a path with many components past the first
+// nonexistent entry cannot block for N × probeTimeout. A timed-out lookup
+// returns the bounded non-answer (ErrProbeTimedOut + context.DeadlineExceeded)
+// so the caller joins it into the annotation rather than silently falling back
+// to the lexical path; a non-timeout ENOENT (the normal pre-creation answer)
+// walks up to the next shorter prefix, while any other resolution error
+// (EACCES, ETIMEDOUT, EIO, ...) is returned — it is environmental evidence
+// about the filesystem git's child is about to write to, and rejoining the
+// tail lexically would remove a symlinked component like `link/..` and let the
+// subsequent probes succeed, misclassifying the original git failure as
+// structural.
 func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, err error) {
 	if path == "" {
 		return path, false, nil
 	}
+	// Run the whole prefix walk under one deadline so a slow filesystem
+	// cannot block the restore poll for N × probeTimeout — each prefix
+	// EvalSymlinks invocation already runs in its own per-dir bounded flight,
+	// but without a shared budget a path with many components past the first
+	// nonexistent entry could restart the deadline for every prefix. The
+	// goroutine keeps running after the deadline fires (the per-dir flights
+	// latch their own timeouts and drain), but the caller returns at the
+	// shared bound the way a single timed-out flight does.
+	type walkResult struct {
+		resolved string
+		timedOut bool
+		err      error
+	}
+	done := make(chan walkResult, 1)
+	go func() {
+		r, to, e := resolveSymlinkPrefixWalk(path)
+		done <- walkResult{r, to, e}
+	}()
+	timer := time.NewTimer(symlinkResolveTimeout)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.resolved, res.timedOut, res.err
+	case <-timer.C:
+		// The whole walk did not answer within the shared budget — surface
+		// the typed non-answer the same way a single timed-out flight does,
+		// so the classifier reads the bounded environmental class rather than
+		// bare structural silence.
+		return "", true, fmt.Errorf("symlink prefix walk of %s did not answer within %s: %w: %w",
+			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+	}
+}
+
+// resolveSymlinkPrefixWalk is the unbounded component walk
+// resolveSymlinkPrefixBounded runs under a single shared deadline. It walks
+// the un-joined path from the longest prefix down, resolving the longest
+// existing prefix through symlinks and rejoining the non-existent tail
+// lexically.
+func resolveSymlinkPrefixWalk(path string) (resolved string, timedOut bool, err error) {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts); i > 0; i-- {
 		prefix := strings.Join(parts[:i], string(filepath.Separator))
@@ -298,8 +363,18 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 		if errors.Is(e, fsprobe.ErrProbeTimedOut) {
 			return "", true, e
 		}
-		// Non-timeout error (ENOENT on the final component, EACCES on a
-		// parent, ...) — walk up to the next shorter prefix.
+		// A missing path (ENOENT) is the normal pre-creation answer — walk
+		// up to the next shorter prefix to find the longest existing one.
+		// Any other resolution error (EACCES, ETIMEDOUT, EIO, ...) is
+		// environmental evidence about the filesystem git's child is about to
+		// write to; rejoining the tail lexically would remove a symlinked
+		// component like `link/..` and let the subsequent probes succeed,
+		// misclassifying the original git failure as structural. Return it so
+		// the caller joins it into the annotation.
+		if os.IsNotExist(e) {
+			continue
+		}
+		return "", false, e
 	}
 	// No prefix resolved through symlinks. The lexical path is the honest
 	// answer: the probe reports the same errno git's child surfaces from the
