@@ -23,6 +23,7 @@ import (
 	crypto_rand "crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -246,6 +247,49 @@ func Lstat(path string) (os.FileInfo, error) {
 	return info, err
 }
 
+// readDirNamesPath is the test seam under IsEmptyDir's bounded flight — the
+// metadata syscall that lists a directory's entries. It follows a symlink in
+// path (os.Open follows it) to read the target the worktree probe already
+// confirmed is a directory via Stat, so an empty vs. nonempty target is the
+// distinction between a destination `git worktree add` populates (an empty
+// directory, even one reached through a symlink) and one it rejects because
+// it already exists (a nonempty directory). It follows a symlink in path
+// the way os.Stat does, so the target the worktree probe already confirmed is
+// a directory via Stat is the directory whose entries are counted.
+var readDirNamesPath = func(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return names, nil
+}
+
+// IsEmptyDir reports whether dir has no entries, following a symlink in dir the
+// way os.Stat does. The worktree probe uses it to distinguish a final symlink
+// whose target is an empty directory — `git worktree add` populates an empty
+// destination even through a symlink, so its filesystem can fail with ENOSPC
+// that the lost-restore classifier must read as environmental — from a symlink
+// whose target already holds content, which `git worktree add` rejects without
+// writing (a coincidental ENOSPC there would stall the loop on a filesystem
+// freeing it cannot fix). The read runs inside the same per-dir bounded flight
+// shape as the other probes: an unbounded readdir on a mount that never
+// answers would wedge the synchronous restore poll the probe informs. The
+// returned non-answer carries the same ErrProbeTimedOut + context.DeadlineExceeded
+// pair the other probes use, so a stalled mount classifies as the bounded
+// environmental non-answer rather than charging the structural budget.
+func IsEmptyDir(dir string) (bool, error) {
+	res, err := runBounded(dir, readDirFlights, "readdir probe",
+		"the filesystem did not answer the readdir",
+		func() (any, error) { return readDirNamesPath(dir) })
+	names, _ := res.([]string)
+	return len(names) == 0, err
+}
+
 // EvalSymlinks runs filepath.EvalSymlinks for path inside the same per-dir
 // bounded flight shape as Stat. A caller resolving a path through symlinks —
 // to mirror the kernel's chdir for a worktree probe, or to find the real
@@ -279,6 +323,7 @@ type flightRegistry struct {
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var lstatFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var readDirFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var evalSymlinksFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 

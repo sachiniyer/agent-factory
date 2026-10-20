@@ -49,6 +49,22 @@ var statSpaceProbe = fsprobe.Stat
 // ambiguity.
 var lstatSpaceProbe = fsprobe.Lstat
 
+// isEmptyDirSpaceProbe is the test seam over fsprobe.IsEmptyDir — the bounded
+// directory-listing lookup that decides whether a symlinked destination's
+// target already holds content. statSpaceProbe follows a final symlink and
+// reports the target as a directory, but `git worktree add` populates an
+// empty destination (even one reached through a symlink) while rejecting a
+// nonempty one because it already exists; the lstat gate that skips a
+// symlinked destination would otherwise drop the empty case — where git does
+// write and whose filesystem can therefore fail with ENOSPC the lost-restore
+// classifier must read as environmental. The read follows the symlink the way
+// Stat does and counts the target's entries. It is bounded for the same
+// reason statSpaceProbe is, and its non-answer carries the fsprobe
+// ErrProbeTimedOut + context.DeadlineExceeded pair so a stalled mount
+// classifies as the bounded environmental non-answer, not bare deadline
+// ambiguity.
+var isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
 // evalSymlinksSpaceProbe is the test seam over fsprobe.EvalSymlinks — the
 // bounded symlink-resolution walk the worktree probe uses to follow symlinks
 // in the destination the way the kernel's chdir does. It is bounded for the
@@ -177,12 +193,14 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 // Probing inside it is safe for the same reason as the push path: the probe
 // unlinks its file before writing, so nothing stageable ever exists. A
 // destination whose final component is a symlink to an existing directory is
-// NOT probed, though: `git worktree add` rejects a destination that already
-// exists without writing through the symlink, so probing the symlink's target
-// would target an unrelated filesystem and a coincidental ENOSPC there would
-// stall the lost-restore loop indefinitely on a filesystem freeing it cannot
-// fix. The lstat check below excludes a symlinked destination the same way a
-// missing one is skipped.
+// probed only when the target is empty: `git worktree add` populates an empty
+// destination (even through a symlink) but rejects a nonempty one because it
+// already exists, so probing a nonempty symlink target's filesystem would
+// target an unrelated filesystem and a coincidental ENOSPC there would stall
+// the lost-restore loop indefinitely on a filesystem freeing it cannot fix.
+// The lstat check below splits the two cases, and the empty-dir read that
+// follows it counts the target's entries. A FAILED stat, lstat, or read-dir
+// on the destination is evidence in its own right rather than a skip.
 //
 // A FAILED stat on the destination is evidence in its own right, not a skip:
 // on a dead mount it returns environmental errnos such as ETIMEDOUT that the
@@ -322,22 +340,52 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	}
 	dirs := []string{filepath.Dir(worktreePath)}
 	var statErr error
+	var lstatErr error
+	var readDirErr error
 	if st, sErr := statSpaceProbe(worktreePath); sErr == nil && st != nil && st.IsDir() {
 		// Stat follows a final symlink, so a destination whose final name is a
-		// symlink to an existing nonempty directory looks like a directory here.
-		// But `git worktree add` rejects a destination that already exists
-		// without writing through the symlink, so probing the symlink's target
-		// filesystem would target an unrelated filesystem — a coincidental
-		// ENOSPC there would stall the lost-restore loop indefinitely on a
-		// filesystem freeing it cannot fix. Lstat the final component the way
-		// the existing-destination check sees it (the un-resolved name) and
-		// skip the destination probe when it is a symlink, the same way a
-		// missing destination is skipped; a regular directory is still probed
-		// in its own right because a pre-created mount point or partial-attempt
-		// debris can sit on a different filesystem than the parent that hosts
-		// its name.
-		if lst, lErr := lstatSpaceProbe(worktreePath); lErr == nil && lst.Mode()&os.ModeSymlink == 0 {
-			dirs = append(dirs, worktreePath)
+		// symlink to an existing directory looks like a directory here. `git
+		// worktree add` rejects a destination that already exists when the
+		// target is nonempty (writing through the symlink into a nonempty
+		// directory) but populates an empty one — even through a symlink, an
+		// empty directory is a usable destination git writes into, so a full
+		// filesystem there is evidence the lost-restore classifier must read
+		// as environmental. Lstat the final component the way the
+		// existing-destination check sees it (the un-resolved name) so the
+		// probe can split the two cases: a regular (non-symlink) directory is
+		// always probed in its own right (a pre-created mount point or
+		// partial-attempt debris can sit on a different filesystem than the
+		// parent that hosts its name), a symlinked destination whose target is
+		// empty is probed (git writes there), and a symlinked destination whose
+		// target already holds content is skipped the way a missing one is —
+		// freeing that filesystem cannot fix a structural "already exists"
+		// rejection. A non-ENOENT lstat error (EIO, ETIMEDOUT, the bounded
+		// ErrProbeTimedOut) is environmental evidence about the filesystem
+		// the probe is about to write to, not a missing path: a missing
+		// destination is the normal pre-creation answer and stays silent, but
+		// discarding any other lstat error would leave the opaque git failure
+		// with no environmental evidence when the parent/common-directory
+		// write probes succeed, charging the structural budget for a mount the
+		// lstat did not answer. The same is true of a non-ENOENT read-dir error
+		// on a symlinked destination whose target the open could not list.
+		if lst, lErr := lstatSpaceProbe(worktreePath); lErr == nil {
+			if lst.Mode()&os.ModeSymlink == 0 {
+				dirs = append(dirs, worktreePath)
+			} else if empty, dErr := isEmptyDirSpaceProbe(worktreePath); dErr == nil {
+				// The symlink target is empty — git populates it, so probe the
+				// destination the way a regular directory is probed. A
+				// nonempty target is skipped: git rejects the add without
+				// writing, so a coincidental ENOSPC on the target's filesystem
+				// would stall the lost-restore loop indefinitely on a
+				// filesystem freeing it cannot fix.
+				if empty {
+					dirs = append(dirs, worktreePath)
+				}
+			} else if !os.IsNotExist(dErr) {
+				readDirErr = dErr
+			}
+		} else if !os.IsNotExist(lErr) {
+			lstatErr = lErr
 		}
 	} else if sErr != nil && !os.IsNotExist(sErr) {
 		statErr = sErr
@@ -345,6 +393,12 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	out := g.annotateGitWriteError(err, dirs...)
 	if statErr != nil {
 		out = errors.Join(out, fmt.Errorf("stat probe destination %s: %w", worktreePath, statErr))
+	}
+	if lstatErr != nil {
+		out = errors.Join(out, fmt.Errorf("lstat probe destination %s: %w", worktreePath, lstatErr))
+	}
+	if readDirErr != nil {
+		out = errors.Join(out, fmt.Errorf("readdir probe destination %s: %w", worktreePath, readDirErr))
 	}
 	return out
 }

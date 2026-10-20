@@ -940,11 +940,17 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkSkipsDestinati
 	// because the destination already exists, without writing through the
 	// symlink; the destination-directory probe must not follow the symlink
 	// and write-probe the target's filesystem, where a coincidental ENOSPC
-	// would stall the lost-restore loop indefinitely.
+	// would stall the lost-restore loop indefinitely. The target is nonempty
+	// so the empty-dir read does not re-enable the probe for an empty target
+	// (an empty target is a usable destination git would populate).
 	repo := filepath.Join(launchCwd, "repo")
 	require.NoError(t, os.Mkdir(repo, 0o755))
 	realTarget := t.TempDir()
 	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	// A nonempty target: git rejects the add because the destination already
+	// exists, and the empty-dir check must keep the probe off the target's
+	// filesystem.
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "occupied"), []byte("x"), 0o644))
 	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
 
 	afHome := t.TempDir()
@@ -1031,6 +1037,195 @@ func TestAnnotateWorktreeAddError_DestinationRegularDirIsProbed(t *testing.T) {
 			"reaches the chain: %v", out)
 	require.Contains(t, probedDirs, dest,
 		"a regular (non-symlink) destination directory must still be probed in its own right")
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkEmptyTargetIsProbed pins the
+// contract the #5421 review added for a final-component symlink to an EMPTY directory: `git
+// worktree add` through a symlink to an empty directory succeeds (it populates the empty
+// target), unlike the nonempty-target case the skip probe defends against. The destination-
+// directory probe must therefore still target the symlink's filesystem so a full filesystem
+// there reaches the chain as environmental evidence; the empty-dir read re-enables the probe
+// the lstat gate would otherwise drop.
+//
+// Deterministic in both directions: against the form that skipped every final symlink the
+// write probe never targets the symlinked destination and errors.Is(out, syscall.ENOSPC) is
+// false, so the test fails; with the empty-target re-enable the probe targets the destination
+// and ENOSPC reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkEmptyTargetIsProbed(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The relative worktree path's final component is a symlink to an empty
+	// directory on a distinct filesystem. `git worktree add` through a symlink
+	// to an empty directory succeeds (it populates the empty target), so the
+	// destination-directory probe must still target the symlink's filesystem —
+	// a full filesystem there is the real ENOSPC git's write would hit.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	destPath := filepath.Join(resolvedRepo, "dest")
+
+	// Stat follows the symlink and reports a directory (the empty target);
+	// Lstat reports the symlink itself so the gate reads the target's entries
+	// rather than blindly probing every symlinked directory.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	// The target is empty, so the production empty-dir read re-enables the
+	// probe the lstat gate deferred on it.
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == destPath {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a final-component symlink to an empty directory must be probed through to its target — "+
+			"git populates an empty destination even through a symlink, so a full target filesystem "+
+			"is the real ENOSPC git's write would hit and must reach the chain: %v", out)
+	require.Contains(t, probedDirs, destPath,
+		"the write probe must target the symlinked destination (%s) — its target's filesystem "+
+			"is one git writes into when the target is empty", destPath)
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the parent that hosts the destination's name must still be probed")
+}
+
+// TestAnnotateWorktreeAddError_LstatErrorPreserved pins the contract the #5421 review added:
+// when the destination Stat succeeds (a directory) but the bounded Lstat returns a
+// non-ENOENT error (EIO, ETIMEDOUT, the bounded ErrProbeTimedOut), the gate must not silently
+// discard it. The opaque git failure would otherwise be charged to the structural retry
+// budget despite the metadata probe having failed; a non-ENOENT lstat error is environmental
+// evidence about the filesystem the probe is about to write to and joins the chain the way a
+// non-ENOENT stat error does.
+//
+// Deterministic in both directions: against the form that discarded lErr the chain carries no
+// lstat error, so errors.Is(out, syscall.EIO) is false and the test fails; with the lstat
+// error preserved the joined evidence reaches the chain.
+func TestAnnotateWorktreeAddError_LstatErrorPreserved(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// The destination Stat succeeds as a directory, but the bounded Lstat
+	// returns EIO — a metadata failure the gate must join as environmental
+	// evidence rather than silently dropping.
+	dest := t.TempDir()
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		// Report a directory so the lstat gate runs; Stat follows symlinks
+		// but the real directory is a regular (non-symlink) directory here.
+		info, err := os.Stat(p)
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
+		return info, nil
+	}
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.EIO}
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{worktreePath: dest}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.EIO),
+		"a non-ENOENT lstat error (EIO) must be joined into the annotation so the lost-restore "+
+			"classifier reads it as environmental evidence rather than silently dropping it: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_SymlinkedDestinationReadDirErrorPreserved pins the contract
+// the #5421 review added: when the destination Stat succeeds as a directory and the lstat shows
+// a symlink (so the empty-dir read runs), a non-ENOENT read-dir error (EIO, ETIMEDOUT, the
+// bounded ErrProbeTimedOut) must be preserved. Discarding it would let the parent/common-
+// directory write probes succeed and leave the opaque git failure with no environmental
+// evidence from the filesystem the probe is about to write to.
+//
+// Deterministic in both directions: against the form that discarded dErr the chain carries no
+// read-dir error, so errors.Is(out, syscall.EIO) is false and the test fails; with the
+// read-dir error preserved the joined evidence reaches the chain.
+func TestAnnotateWorktreeAddError_SymlinkedDestinationReadDirErrorPreserved(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	// The bounded empty-dir read fails with EIO on a stalled mount rather than
+	// returning an empty/nonempty verdict; the gate must preserve that error
+	// instead of silently skipping the destination probe.
+	isEmptyDirSpaceProbe = func(dir string) (bool, error) {
+		return false, &os.PathError{Op: "readdir", Path: dir, Err: syscall.EIO}
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.EIO),
+		"a non-ENOENT read-dir error on a symlinked destination (EIO) must be joined into the "+
+			"annotation so the lost-restore classifier reads it as environmental evidence rather "+
+			"than silently dropping it: %v", out)
 }
 
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
