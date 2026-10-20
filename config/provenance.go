@@ -917,7 +917,17 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 			// when the collapsed spelling is unavailable (map-backed composites
 			// and non-struct values never set collapsedLeafSpellings) (#5397
 			// review).
-			if spelling, ok := candidate.collapsedLeafSpellings[leaf]; ok {
+			//
+			// collapsedLeafSpellings is keyed by the canonical struct-leaf name,
+			// but a caller may pass a case-variant leaf (e.g. root_agent.Enabled,
+			// whose canonical spelling is enabled); a direct leaves[leaf] lookup
+			// misses and falls through to candidateLeafProjectionKey, which
+			// would pick the winner's physical spelling and, when the
+			// candidate's raw map carries both spellings, project the losing
+			// sibling. Fold the queried leaf to its canonical spelling before
+			// indexing so the retained decoder-winning spelling for this
+			// candidate projects (#5397 review).
+			if spelling, ok := collapsedSpellingForLeaf(candidate.collapsedLeafSpellings, leaf); ok {
 				projectionLeaf = spelling
 			} else {
 				projectionLeaf = candidateLeafProjectionKey(candidate.Value, leaf, physicalLeaf)

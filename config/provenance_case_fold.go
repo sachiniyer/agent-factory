@@ -63,6 +63,28 @@ func candidateLeafProjectionKey(value any, leaf, physicalLeaf string) string {
 	return leaf
 }
 
+// collapsedSpellingForLeaf looks up the decoder-winning physical spelling a
+// candidate retained for leaf in collapseStructLeaves' output. The map is keyed
+// by the canonical struct-leaf name (canonicalStructLeafName), but a caller may
+// pass a case-variant leaf (e.g. root_agent.Enabled, whose canonical spelling is
+// enabled), so the lookup folds case; within one struct, tags are unique by
+// case, so the match is unambiguous. Returns the physical spelling and whether a
+// spelling was retained for this leaf. The empty map (map-backed composites and
+// non-struct values, which never set collapsedLeafSpellings) returns (""; false)
+// so the caller falls back to candidateLeafProjectionKey's raw-map scan (#5397
+// review).
+func collapsedSpellingForLeaf(spellings map[string]string, leaf string) (string, bool) {
+	if spelling, ok := spellings[leaf]; ok {
+		return spelling, true
+	}
+	for canonical, physical := range spellings {
+		if strings.EqualFold(canonical, leaf) {
+			return physical, true
+		}
+	}
+	return "", false
+}
+
 // collapseStructLeaves folds case-variant spellings of the same struct field
 // within one candidate's leaf set to a single entry. encoding/json and
 // go-toml/v2 both decode case-variant keys onto the same struct field
