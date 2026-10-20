@@ -143,8 +143,20 @@ func opIsTeardown(op InFlightOp) bool {
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
+//
+// A reserved-title row — the daemon-managed root agent — admits no lifecycle
+// verb at all, and the refusal lives HERE rather than at a caller for the same
+// reason #2436 moved the parallel handoff refusal into ValidateRuntimeAction:
+// ArchiveSession/RestoreSession refuse reserved titles unconditionally
+// ("cannot archive the reserved %q session", "cannot manually restore reserved
+// session %q"), so projecting archive/restore for one is an affordance whose
+// every press is guaranteed to fail. A rule each caller has to remember
+// separately is one a caller will forget; this is the question they already
+// share. The `reserved` parameter is IsReservedTitle(title) at the call sites, so
+// the projection and the IsRoot flag it sits beside cannot drift on the
+// case-folded/trimmed spelling.
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, reserved bool) LifecycleAction {
+	if reserved || id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
 		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
 		return LifecycleActionNone
 	}
@@ -203,7 +215,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, IsReservedTitle(i.Title))
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

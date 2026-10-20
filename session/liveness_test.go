@@ -127,10 +127,18 @@ func TestSnapshotInFlightOpRoundTrips(t *testing.T) {
 // contract. The TUI reads Instance.LifecycleAction while the web reads the value
 // serialized by ToInstanceData; both must be the same domain decision, including
 // the two non-actionable rows that triggered the regression.
+//
+// Reserved-title rows (the daemon-managed root agent) are pinned here so the
+// projection/admission drift from #2234's first revision — which projected
+// archive/restore for a row the daemon unconditionally refuses — cannot recur.
+// The daemon's ArchiveSession/RestoreSession refuse reserved titles outright
+// ("cannot archive the reserved %q session", "cannot manually restore reserved
+// session %q"), so both arms of lifecycleActionFor must return None for them.
 func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		id     string
+		title  string
 		live   Liveness
 		op     InFlightOp
 		killed bool
@@ -146,9 +154,20 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "restoring admits no competing lifecycle action", id: "restoring-id", live: LiveLost, op: OpRestoring, want: LifecycleActionNone},
 		{name: "tombstone admits no lifecycle action", id: "killed-id", live: LiveLost, killed: true, want: LifecycleActionNone},
 		{name: "id-less has no lifecycle action", live: LiveReady, want: LifecycleActionNone},
+		// Reserved-title rows: the daemon's ArchiveSession/RestoreSession refuse
+		// these unconditionally, so neither archive (a live root) nor restore (a
+		// lost/dead/archived root) may be projected. Every reserved spelling is
+		// covered, matching IsReservedTitle's case-folded/trimmed matching.
+		{name: "reserved root ready admits no archive", id: "root-ready", title: "root", live: LiveReady, want: LifecycleActionNone},
+		{name: "reserved root running admits no archive", id: "root-running", title: "root", live: LiveRunning, want: LifecycleActionNone},
+		{name: "reserved root lost admits no restore", id: "root-lost", title: "root", live: LiveLost, want: LifecycleActionNone},
+		{name: "reserved root dead admits no restore", id: "root-dead", title: "root", live: LiveDead, want: LifecycleActionNone},
+		{name: "reserved root archived admits no restore", id: "root-archived", title: "root", live: LiveArchived, want: LifecycleActionNone},
+		{name: "reserved root uppercase admits no archive", id: "root-upper", title: "Root", live: LiveReady, want: LifecycleActionNone},
+		{name: "reserved root padded admits no archive", id: "root-pad", title: "  root  ", live: LiveReady, want: LifecycleActionNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inst := &Instance{ID: tc.id, liveness: tc.live, inFlightOp: tc.op, userKilled: tc.killed}
+			inst := &Instance{ID: tc.id, Title: tc.title, liveness: tc.live, inFlightOp: tc.op, userKilled: tc.killed}
 			require.Equal(t, tc.want, inst.LifecycleAction(), "TUI domain decision")
 			require.Equal(t, tc.want, inst.ToInstanceData().LifecycleAction, "web projection decision")
 		})
