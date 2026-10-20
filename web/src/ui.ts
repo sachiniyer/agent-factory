@@ -70,10 +70,55 @@ import {
   type ConfigEntry,
   type LifecycleAction,
   type SessionData,
+  type SkippedRepo,
   type TabKindAllowance,
   type TaskData,
   TabKind,
 } from "./types.js";
+
+/** The daemon's stable reason codes for a skipped repo (daemon/snapshot.go). Mirror
+ *  the exact strings the Go side stamps so the web never reclassifies a reason the
+ *  daemon owns — an unknown value renders as corrupted, which is all an older daemon
+ *  ever sent. */
+export const SKIPPED_REPO_REASON = {
+  corrupted: "corrupted-instances-json",
+  unreadable: "unreadable-instances-json",
+  newerSchema: "newer-schema-instances-json",
+  rowsFailed: "rows-failed-to-load",
+} as const;
+
+/** A short, human-readable label for a skipped repo's reason. Mirrors the
+ *  classification in api/skipped_repos.go (splitSkippedRepos) so the web and the CLI
+ *  name the same failure. Unknown/empty → corrupted (the older-daemon default). */
+export function skippedRepoReasonLabel(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "instances.json could not be read";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "instances.json written by a newer af";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "some sessions could not be loaded (worktree or tmux gone)";
+    default:
+      return "instances.json is corrupted";
+  }
+}
+
+/** The one-line repair hint for a skipped repo's reason. Mirrors the constant hints
+ *  in api/skipped_repos.go verbatim so the web sends the operator to the SAME remedy
+ *  the CLI does — the daemon is the contract, and a different remedy here would drift
+ *  the moment the CLI's hint is refined. Unknown/empty → corrupted. */
+export function skippedRepoRepairHint(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "Upgrade af to a version that understands the newer state file, then restart the daemon; do not edit or delete these files, they hold sessions this binary cannot read.";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem.";
+    default:
+      return "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files.";
+  }
+}
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -189,6 +234,13 @@ export interface AppState {
   projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
+  /** Repos the daemon dropped at startup (SnapshotResponse.skipped_repos, #4742),
+   *  so the rail can surface their missing sessions as a persistent incompleteness
+   *  notice instead of presenting the truncated projection as a complete list.
+   *  Empty in the healthy steady state. Replaced wholesale on every snapshot
+   *  commit (applySessions carries it on the snapshot evidence); event deltas do
+   *  not touch it, since the skip set changes only when a snapshot refresh runs. */
+  skippedRepos: SkippedRepo[];
   /** the selected row's STABLE id (session.id), or null when nothing is selected.
    *  Selection keys off the id, not the title: the attach terminal dials
    *  /v1/sessions/{id}/stream and titles can collide across repos (design §4). */
@@ -1694,7 +1746,20 @@ export class AppShell {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    // The skipped-repos notice is independent of the project scope and the status
+    // filter: it reports snapshot incompleteness the daemon carried alongside the
+    // rows, not a per-project empty/filter state, so it is rebuilt only when the
+    // skip set itself changes. Prepended before the rail notice so a project that
+    // IS the skipped one still sees WHY its sessions vanished.
+    const skippedSig = JSON.stringify(state.skippedRepos ?? []);
+    if (skippedSig !== this.lastSkippedNoticeSignature) {
+      this.lastSkippedNoticeSignature = skippedSig;
+      this.cachedSkippedNotice = this.skippedReposNotice(state);
+    }
+    const head: HTMLElement[] = [];
+    if (this.cachedSkippedNotice) head.push(this.cachedSkippedNotice);
+    if (this.cachedRailNotice) head.push(this.cachedRailNotice);
+    orderChildren(this.railList, [...head, ...rows]);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -1708,6 +1773,8 @@ export class AppShell {
   private lastFilterSignature = "";
   private lastRailNoticeSignature = "";
   private cachedRailNotice: HTMLElement | null = null;
+  private lastSkippedNoticeSignature = "";
+  private cachedSkippedNotice: HTMLElement | null = null;
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
@@ -1856,6 +1923,49 @@ export class AppShell {
       );
     }
     return null;
+  }
+
+  /** A persistent incompleteness notice for the rail, naming the repos the daemon
+   *  dropped at startup and the daemon's reason for each (#4742). This is the web's
+   *  half of the contract the CLI's list/get/whoami honor by refusing or caveating:
+   *  rather than presenting the truncated `instances` as a complete roster, the rail
+   *  shows WHAT is missing and WHY so a user can tell "repo has no sessions" from
+   *  "the daemon dropped this repo's sessions at startup". Returns null when no repo
+   *  was skipped — the healthy steady state — so the rail renders nothing extra.
+   *
+   *  Each skipped repo is named by its project root when the registry knows it (the
+   *  repo_id is a short hash, not a path), falling back to the bare id; the reason
+   *  renders the daemon's stable code plus a one-line repair hint mirroring
+   *  api/skipped_repos.go verbatim so the web and the CLI send the operator to the
+   *  same remedy. An unknown/empty reason is treated as corrupted, which is all an
+   *  older daemon ever sent. */
+  private skippedReposNotice(state: AppState): HTMLElement | null {
+    const skipped = state.skippedRepos ?? [];
+    if (skipped.length === 0) return null;
+    const knownRoot = new Map<string, string>();
+    for (const p of state.registeredProjects) {
+      if (p.id && !knownRoot.has(p.id)) knownRoot.set(p.id, p.root);
+    }
+    const body = h("div", { class: "af-rail-skipped-body" });
+    for (const s of skipped) {
+      const label = knownRoot.get(s.repo_id) ?? s.repo_id;
+      const reason = skippedRepoReasonLabel(s.reason);
+      const hint = skippedRepoRepairHint(s.reason);
+      const line = h("p", { class: "af-rail-skipped-row" },
+        h("strong", {}, label),
+        ` — ${reason}. `,
+        hint,
+      );
+      if (s.failed_rows && s.failed_rows > 0) {
+        line.append(` (${s.failed_rows} session(s) hidden)`);
+      }
+      body.append(line);
+    }
+    return h("li", { class: "af-rail-skipped", role: "alert" },
+      h("div", { class: "af-rail-skipped-head" },
+        "Some sessions are hidden — a daemon repo could not be loaded."),
+      body,
+    );
   }
 
   /** (Re)builds the filter menu: one checkbox per session state with its scoped

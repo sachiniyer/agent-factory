@@ -36,6 +36,7 @@ import type {
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
+  SkippedRepo,
   SnapshotResponse,
   TaskData,
   TaskMutationRef,
@@ -282,14 +283,25 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * is the read side of the single-writer model (#960): the daemon owns the state
  * and the web mirrors this Snapshot exactly like the TUI does, seeding the rail on
  * login and re-seeding it after an events-stream reconnect. Returns the instances
- * (never null — an empty daemon yields []); throws ApiError on transport/auth
+ * (never null — an empty daemon yields []) and the daemon's startup-skipped repo
+ * set (omitted/empty when nothing was dropped); throws ApiError on transport/auth
  * failure so callers share one error path.
+ *
+ * `skippedRepos` is the incompleteness channel the daemon fills when it dropped a
+ * repo's instances.json at startup (#4742). The rail surfaces it as a persistent
+ * notice rather than presenting the truncated `instances` as complete — the same
+ * contract the CLI's list/get/whoami honor by refusing or caveating. Empty in the
+ * healthy steady state, so a clean daemon renders no notice.
  */
 export interface SessionSnapshot {
   sessions: SessionData[];
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
   daemonBootId?: string;
+  /** Repos the daemon dropped at startup (daemon SnapshotResponse.skipped_repos),
+   *  so the rail can name them rather than silently hiding their sessions. Empty
+   *  when no repo was skipped. */
+  skippedRepos?: SkippedRepo[];
 }
 
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
@@ -299,6 +311,7 @@ export async function fetchSessionSnapshot(token: string): Promise<SessionSnapsh
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
+    skippedRepos: resp.skipped_repos,
   };
 }
 
