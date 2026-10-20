@@ -699,6 +699,24 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 			// "the push itself is broken" on exactly this (#5295 review).
 			err = fmt.Errorf("%s: %w", env.Error.Message, apiproto.ErrRemoteResourceExhausted)
 		}
+		if env.Error.Code == apiproto.ErrorCodeBoundedProbeNoAnswer {
+			// The server verified an in-sandbox bounded probe did not
+			// answer inside its bound — the pre-spawn has-session gate,
+			// the fsprobe write-capacity flight, or a bounded git
+			// worktree setup/common-dir/ownership probe — and paired
+			// the deadline with a sentinel that names the probe. Neither
+			// the sentinel nor the deadline's errors.Is identity can
+			// cross the wire, so the code reconstructs the class as a
+			// sentinel joined with the deadline — the exact
+			// deadline+sentinel signature the lost-restore classifier's
+			// bounded-environmental arm requires. The bare-deadline arm
+			// below stays for the preserve push's own network deadline,
+			// which has no sentinel half and is intentionally structural
+			// on the Recover path (a permanently hung user launch_cmd
+			// wraps the same bare deadline) (#5295 review).
+			err = fmt.Errorf("%s: %w: %w", env.Error.Message,
+				apiproto.ErrRemoteBoundedProbeNoAnswer, context.DeadlineExceeded)
+		}
 		if env.Error.Code == apiproto.ErrorCodeDeadlineExceeded {
 			// Same class, different deadline: the operation hit a bounded
 			// wait INSIDE the sandbox — the git push's own network deadline —

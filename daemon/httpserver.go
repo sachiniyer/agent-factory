@@ -502,6 +502,25 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeResourceExhausted))
 		return
 	}
+	// A bounded probe that did not answer inside its bound — the pre-spawn
+	// has-session gate, the fsprobe write-capacity flight, or a bounded git
+	// worktree setup/common-dir/ownership probe — pairs
+	// context.DeadlineExceeded with a sentinel that names the probe. The
+	// sentinel's errors.Is identity dies in serialization the same way the
+	// deadline's does, so the code carries the class: a client reconstructs
+	// the sentinel joined with the deadline and the lost-restore
+	// classifier's deadline+sentinel arm reads the bounded environmental
+	// non-answer the in-sandbox probe established (#5295 review). The
+	// resource-exhausted check above deliberately wins when both hold — a
+	// resource verdict is the stronger environmental signal — and this check
+	// itself wins over the bare-deadline one below, so a sentinel-bearing
+	// deadline never collapses back into the bare deadline the preserve
+	// push's own network deadline legitimately produces.
+	if lostRestoreDeadlineProbeNoAnswer(err) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeBoundedProbeNoAnswer))
+		return
+	}
 	// A deadline inside the operation — the archive RPC's inner git push
 	// deadline, not this transport's — serializes just as lossy: the client
 	// receives an uncoded message string its bounded-deadline arm cannot

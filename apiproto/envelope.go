@@ -74,6 +74,35 @@ var ErrRemoteResourceExhausted = errors.New("remote reported kernel resource exh
 // review).
 const ErrorCodeDeadlineExceeded = "deadline_exceeded"
 
+// ErrorCodeBoundedProbeNoAnswer says the operation died on a bounded probe
+// that did not answer inside its bound — a wedged shared tmux server's
+// pre-spawn has-session gate, a stalled filesystem's write-capacity fsprobe
+// flight, or a bounded git worktree setup/common-dir/ownership probe — and
+// the in-sandbox failure chain paired context.DeadlineExceeded with one of
+// af's bounded-probe sentinels. The sentinel's errors.Is identity cannot
+// cross the wire as an error identity any more than the deadline can, so the
+// code carries the class: a client that reconstructs
+// ErrRemoteBoundedProbeNoAnswer joined with context.DeadlineExceeded lets
+// the lost-restore classifier's deadline+sentinel arm read the bounded
+// environmental non-answer the in-sandbox probe established — instead of the
+// bare deadline the bare ErrorCodeDeadlineExceeded arm rebuilds, which the
+// classifier's Recover path correctly refuses (a permanently hung user
+// launch_cmd wraps the same bare deadline). Mirrors the errno sibling:
+// ErrorCodeResourceExhausted carries the errno class for the same reason
+// (#5295 review).
+const ErrorCodeBoundedProbeNoAnswer = "bounded_probe_no_answer"
+
+// ErrRemoteBoundedProbeNoAnswer is the client-side sentinel joined into an
+// error decoded from a failure envelope carrying
+// ErrorCodeBoundedProbeNoAnswer. The server only emits that code after
+// verifying the deadline+sentinel signature in the real failure chain, so
+// errors.Is(err, ErrRemoteBoundedProbeNoAnswer) on the client means exactly
+// what the verified non-answer meant on the server — a bounded probe that
+// did not answer inside its bound, the environmental-class signal the
+// in-sandbox probe established. Reconstructed alongside the deadline so the
+// classifier's deadline+sentinel arm matches across the wire (#5295 review).
+var ErrRemoteBoundedProbeNoAnswer = errors.New("remote reported a bounded probe did not answer inside its bound")
+
 // Success wraps a payload as a successful Envelope (Error nil).
 func Success(data any) Envelope {
 	return Envelope{Data: data, Error: nil}

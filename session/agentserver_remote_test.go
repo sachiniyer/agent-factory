@@ -296,6 +296,77 @@ func TestRemoteAgentCallWithin_DeadlineExceededCode(t *testing.T) {
 	}
 }
 
+// TestRemoteAgentCallWithin_BoundedProbeNoAnswerCode pins the wire-carrying
+// half of the #5295 wire contract the lost-restore classifier's
+// deadline+sentinel arm needs for SANDBOX sessions: a failure envelope
+// carrying ErrorCodeBoundedProbeNoAnswer is reconstructed on the client side
+// as BOTH the sentinel (apiproto.ErrRemoteBoundedProbeNoAnswer) AND
+// context.DeadlineExceeded joined into the error chain — the exact
+// deadline+sentinel signature the in-process classifier already accepts, so
+// the classifier's verdict survives the wire hop. The bare-deadline code
+// (ErrorCodeDeadlineExceeded) reconstructs ONLY context.DeadlineExceeded —
+// the preserve push's own network deadline legitimately has no sentinel half,
+// and stays structural on the Recover path — so the two codes must NOT cross
+// contaminate. The resource-exhausted code stays sentinel-free for both.
+// Other codes and no code stay pair-free. Mirrors the existing
+// TestRemoteAgentCallWithin_ResourceExhaustedCode and _DeadlineExceededCode
+// tests (#5295 review).
+func TestRemoteAgentCallWithin_BoundedProbeNoAnswerCode(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		code             string
+		wantSentinel     bool
+		wantDeadline     bool
+		wantResourceSntl bool
+	}{
+		{name: "bounded_probe_no_answer reconstructs sentinel+deadline pair",
+			code: apiproto.ErrorCodeBoundedProbeNoAnswer, wantSentinel: true, wantDeadline: true},
+		{name: "bare deadline_exceeded reconstructs only the deadline",
+			code: apiproto.ErrorCodeDeadlineExceeded, wantSentinel: false, wantDeadline: true},
+		{name: "resource_exhausted reconstructs only its own sentinel",
+			code: apiproto.ErrorCodeResourceExhausted, wantSentinel: false, wantDeadline: false, wantResourceSntl: true},
+		{name: "plain failure reconstructs neither half",
+			code: "", wantSentinel: false, wantDeadline: false},
+		{name: "unrelated code reconstructs neither half",
+			code: "some_other_code", wantSentinel: false, wantDeadline: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				errObj := map[string]any{"message": "sandbox: has-session probe did not answer"}
+				if tc.code != "" {
+					errObj["code"] = tc.code
+				}
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  nil,
+					"error": errObj,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			c, err := newRemoteAgentClient(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("newRemoteAgentClient: %v", err)
+			}
+			err = c.callWithin("/v1/agent/snapshot", map[string]any{}, nil, time.Second)
+			if err == nil {
+				t.Fatal("callWithin: want error, got nil")
+			}
+			if got := errors.Is(err, apiproto.ErrRemoteBoundedProbeNoAnswer); got != tc.wantSentinel {
+				t.Fatalf("errors.Is(err, ErrRemoteBoundedProbeNoAnswer) = %v, want %v (err: %v)", got, tc.wantSentinel, err)
+			}
+			if got := errors.Is(err, context.DeadlineExceeded); got != tc.wantDeadline {
+				t.Fatalf("errors.Is(err, context.DeadlineExceeded) = %v, want %v (err: %v)", got, tc.wantDeadline, err)
+			}
+			if got := errors.Is(err, apiproto.ErrRemoteResourceExhausted); got != tc.wantResourceSntl {
+				t.Fatalf("errors.Is(err, ErrRemoteResourceExhausted) = %v, want %v (err: %v)", got, tc.wantResourceSntl, err)
+			}
+		})
+	}
+}
+
 // TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
 // contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
 // URL fails at validation with an actionable message rather than at dial time. The
