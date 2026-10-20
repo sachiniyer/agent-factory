@@ -45,7 +45,14 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	var result *UnsetResult
 	writeErr := WithFileLock(path, func() error {
 		var err error
-		result, err = applyProjectUnset(path, prettyPath, section, leaf, key, spec.structured && section == "")
+		// A fixed struct-field subkey (root_agent.enabled, root_agent.program)
+		// decodes onto its struct field case-insensitively (taggedFieldByKey),
+		// so a case-variant on-disk spelling (Enabled = true) is the same leaf as
+		// the canonical enabled but deleteTOMLScalar's exact-key line match would
+		// miss it. A dynamic family (program_overrides.<name>) is a map key and is
+		// case-sensitive, so it is NOT folded (#5397 review).
+		caseFoldLeaf := spec.parent != "" && !spec.dynamic
+		result, err = applyProjectUnset(path, prettyPath, section, leaf, key, spec.structured && section == "", caseFoldLeaf)
 		return err
 	})
 	if writeErr != nil {
@@ -61,7 +68,12 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 
 // applyProjectUnset removes the target key line from a project's config.toml
 // under the caller-held lock. A missing file or absent key is a clean no-op.
-func applyProjectUnset(path, prettyPath, section, leaf, key string, structured bool) (*UnsetResult, error) {
+// caseFoldLeaf reports whether leaf is a fixed struct-field subkey whose on-disk
+// spelling may be a case variant of the canonical key the decoder matches (e.g.
+// root_agent.Enabled for root_agent.enabled); deleteTOMLScalar must target the
+// physical spelling on disk, or a case-variant [root_agent] Enabled = true would
+// survive an unset that the loader treats as effective (#5397 review).
+func applyProjectUnset(path, prettyPath, section, leaf, key string, structured, caseFoldLeaf bool) (*UnsetResult, error) {
 	current, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -79,7 +91,11 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 		}
 		removed = updated != string(current)
 	} else {
-		updated, removed = deleteTOMLScalar(updated, section, leaf)
+		leafToDelete := leaf
+		if caseFoldLeaf {
+			leafToDelete = physicalLeafSpellingForUnset(updated, section, leaf)
+		}
+		updated, removed = deleteTOMLScalar(updated, section, leafToDelete)
 	}
 	if !removed {
 		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
@@ -248,4 +264,39 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	// Same rule as scalarWrite.apply: hashed from the committed bytes, never
 	// from a re-read.
 	return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: true, RequiresRestart: true}, digestConfigBytes([]byte(updated)), nil
+}
+
+// physicalLeafSpellingForUnset returns the on-disk spelling of leaf under
+// [section] in content, folding case to match the typed decoder's
+// case-insensitive struct-field matching for a fixed subkey (root_agent.enabled,
+// root_agent.program). A case-variant [root_agent] Enabled = true decodes onto
+// RootAgent.Enabled via taggedFieldByKey's case fold, but deleteTOMLScalar's
+// exact-key line match would miss it and report Removed: false, leaving the
+// root agent enabled instead of restoring inheritance. The unset path must
+// locate and remove the physical spelling the operator wrote, the same way
+// resolution locates it (#5397 review). Returns leaf unchanged when content
+// has no such section, the leaf is present under its canonical spelling, or no
+// case-variant of the leaf is present, so callers that already use the
+// canonical spelling are unaffected.
+func physicalLeafSpellingForUnset(content, section, leaf string) string {
+	if section == "" {
+		return leaf
+	}
+	var root map[string]any
+	if err := toml.Unmarshal([]byte(content), &root); err != nil {
+		return leaf
+	}
+	sub, ok := root[section].(map[string]any)
+	if !ok {
+		return leaf
+	}
+	if _, p := sub[leaf]; p {
+		return leaf
+	}
+	for k := range sub {
+		if strings.EqualFold(k, leaf) {
+			return k
+		}
+	}
+	return leaf
 }

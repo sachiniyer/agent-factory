@@ -517,12 +517,21 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 	if !ok {
 		return "", false
 	}
+	// The shape map keys are the physical spellings the operator wrote
+	// (encoding/json and go-toml/v2 preserve key case in a shapeless decode),
+	// so a case-variant [root_agent] Enabled = true decodes onto RootAgent.Enabled
+	// via taggedFieldByKey's case fold but leaves the shape keyed by "Enabled".
+	// An exact shape["enabled"] lookup misses it and the readback renders {} (or
+	// omits enabled), so a whole-table set that preserved the active Enabled
+	// member on disk returns only the supplied program — mirroring CurrentValue's
+	// fold via shapeKeyPresentFolded keeps the personal-project readback consistent
+	// with the daemon's resolution (#5397 review).
 	var value rootAgentConfigJSON
-	if _, present := shape["enabled"]; present {
+	if shapeKeyPresentFolded(shape, "enabled") {
 		enabled := cfg.RootAgent.Enabled
 		value.Enabled = &enabled
 	}
-	if _, present := shape["program"]; present {
+	if shapeKeyPresentFolded(shape, "program") {
 		program := cfg.RootAgent.Program
 		value.Program = &program
 	}

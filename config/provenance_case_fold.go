@@ -112,9 +112,15 @@ func collapsedSpellingForLeaf(spellings map[string]string, leaf string) (string,
 // map by the retained spelling projects the losing sibling ("loser") and
 // reports an internally inconsistent trace. configured is the candidate's raw
 // metadata (a map[string]any for non-built-in sources); when it is unavailable
-// or the decoder winner is ambiguous (multiple spellings share the decoded
-// value, or none do), the spelling selection falls back to the canonical-then
-// lexicographic preference above so the collapse stays deterministic.
+// or NO spelling's raw value matches the decoded value, the spelling selection
+// falls back to the canonical-then-lexicographic preference above so the
+// collapse stays deterministic. When two or more spellings share the decoded
+// value (the decoder is last-write-wins but the raw map keeps each spelling's
+// original value, so duplicates of the decoded value can collide — e.g.
+// {"enabled":true,"Enabled":false,"ENABLED":false} keeps false under both
+// Enabled and ENABLED), the selection picks deterministically from the matching
+// spellings (canonical first, then lexicographic), so the retained entry's raw
+// value still agrees with the decoded value.
 func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Value, configured any) map[string]reflect.Value {
 	if len(leaves) <= 1 {
 		return leaves
@@ -156,16 +162,37 @@ func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Val
 		decoderWinnerKnown := false
 		if configuredMap != nil {
 			decoded := clonedInterface(entries[0].value)
-			var matched leafEntry
-			matchedCount := 0
+			var matched []leafEntry
 			for _, e := range entries {
 				if raw, ok := configuredMap[e.physical]; ok && jsonEquivalent(raw, decoded) {
-					matched = e
-					matchedCount++
+					matched = append(matched, e)
 				}
 			}
-			if matchedCount == 1 {
-				chosen = matched
+			if len(matched) >= 1 {
+				// When several spellings share the decoded value (e.g.
+				// {"enabled":true,"Enabled":false,"ENABLED":false} decodes to
+				// false; both Enabled and ENABLED match), choose deterministically
+				// from the matching entries rather than falling back to the
+				// canonical entry over all entries, whose raw value may not match
+				// the decoded value (the canonical `enabled` above holds true
+				// while the decoder kept false). Prefer the canonical spelling
+				// among the matches, otherwise the lexicographically smallest
+				// match, so the retained entry's raw value always agrees with the
+				// decoded value (#5397 review).
+				chosen = matched[0]
+				for _, e := range matched {
+					if e.physical == canonical {
+						chosen = e
+						break
+					}
+				}
+				if chosen.physical != canonical {
+					for _, e := range matched {
+						if e.physical < chosen.physical {
+							chosen = e
+						}
+					}
+				}
 				decoderWinnerKnown = true
 			}
 		}

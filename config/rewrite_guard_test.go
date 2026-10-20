@@ -61,7 +61,7 @@ func TestUnsetProjectRefusesARemovalOfTheWrongLine(t *testing.T) {
 	require.NoError(t, err)
 	original := readFile(t, path)
 
-	_, err = applyProjectUnset(path, prettyHomePath(path), "", "branch_prefix", "default_program", false)
+	_, err = applyProjectUnset(path, prettyHomePath(path), "", "branch_prefix", "default_program", false, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "branch_prefix")

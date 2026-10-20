@@ -212,6 +212,64 @@ func TestUnsetProjectConfigStructuredTable(t *testing.T) {
 	assert.Contains(t, string(data), "branch_prefix = \"feat/\"", "unrelated personal keys survive")
 }
 
+// TestUnsetProjectConfigRootAgentCaseVariantLeafFoldsSpelling is the regression
+// test for the #5397 review finding that UnsetProjectConfigValue(...,
+// "root_agent.enabled") delegated to the case-sensitive deleteTOMLScalar, so a
+// personal project file containing [root_agent] Enabled = true (a case variant
+// the decoder folds onto RootAgent.Enabled) survived the unset: the exact
+// "enabled" line match missed "Enabled" and the command reported Removed: false,
+// leaving the root agent enabled instead of restoring inheritance. The unset
+// path now locates the physical case-variant spelling the operator wrote, the
+// same way resolution locates it, so the case-variant leaf is removed.
+func TestUnsetProjectConfigRootAgentCaseVariantLeafFoldsSpelling(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nEnabled = true\nprogram = \"custom\"\n")
+
+	// Before the fix, deleteTOMLScalar matched the canonical "enabled" exactly
+	// and missed the case-variant "Enabled", so the unset was a no-op.
+	res, err := UnsetProjectConfigValue(project.ID, "root_agent.enabled")
+	require.NoError(t, err)
+	require.True(t, res.Removed, "the case-variant Enabled leaf must be removed, not missed by an exact-key match")
+
+	path, _ := ProjectConfigTomlPath(project.ID)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "Enabled", "the case-variant enabled line must be gone")
+	assert.Contains(t, string(data), `program = "custom"`, "the sibling program field survives")
+
+	// The personal root_agent no longer sets enabled, so it falls back to the
+	// lower layer (the built-in default, which is disabled).
+	cfg, err := LoadProjectConfig(project.ID)
+	require.NoError(t, err)
+	layer := cfg.RootAgentLayer()
+	require.NotNil(t, layer)
+	assert.False(t, layer.EnabledSet, "unsetting the case-variant enabled leaf must clear EnabledSet")
+	// ResolveRootAgent with no global layer falls back to the built-in default (disabled).
+	resolved := ResolveRootAgent(RootAgentInputs{Personal: layer})
+	assert.False(t, resolved.Enabled, "the unset must restore inheritance: the root agent is no longer enabled")
+}
+
+// TestUnsetProjectConfigDynamicLeafStaysCaseSensitive pins the design boundary
+// the #5397 unset fix draws: a dynamic map key (program_overrides.<name>) is a
+// case-sensitive map entry, not a struct field the decoder folds, so unsetting
+// a canonical-spelled leaf must not remove a differently-cased map entry.
+func TestUnsetProjectConfigDynamicLeafStaysCaseSensitive(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[program_overrides]\nClaude = \"/a/claude\"\n")
+
+	// The on-disk key is the case-variant "Claude"; unsetting the canonical
+	// "claude" must NOT fold case and remove it, because program_overrides is a
+	// map whose keys are case-sensitive (distinct entries), not a struct field.
+	res, err := UnsetProjectConfigValue(project.ID, "program_overrides.claude")
+	require.NoError(t, err)
+	require.False(t, res.Removed, "a dynamic map key is case-sensitive: unsetting claude must not remove Claude")
+
+	path, _ := ProjectConfigTomlPath(project.ID)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `Claude = "/a/claude"`, "the case-variant Claude map entry survives (map keys are case-sensitive)")
+}
+
 func TestSetProjectConfigValueRootAgentPreservesOmittedEnabled(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 
@@ -248,6 +306,24 @@ func TestSetProjectConfigValueRootAgentReportsMergedProfile(t *testing.T) {
 	res, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":false,"program":"next"}`)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"enabled":false,"program":"next"}`, res.Value)
+}
+
+func TestSetProjectConfigValueRootAgentReadbackFoldsCaseVariantEnabled(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	// A personal project file already spells the leaf with a case variant
+	// (Enabled = true). taggedFieldByKey's case fold makes the daemon treat the
+	// setting as active, but projectStructuredCurrentValue's exact
+	// shape["enabled"] lookup missed it and the whole-table set readback returned
+	// only the supplied program, dropping the active Enabled member from the
+	// merged profile the JSON caller receives. The readback now folds the
+	// enabled/program presence lookup the same way CurrentValue does, so the
+	// case-variant Enabled renders in the merged value (#5397 review).
+	writePersonalConfig(t, project.ID, "[root_agent]\nEnabled = true\nprogram = \"custom\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"program":"codex"}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"codex"}`, res.Value,
+		"a case-variant Enabled on disk must render in the merged readback, not be dropped by an exact shape lookup")
 }
 
 func TestSetProjectConfigValueRootAgentReadbackOmitsUnknownMembers(t *testing.T) {
