@@ -36,14 +36,18 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	}
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
-	// Capture the liveness and reset time before ClearLimitReached so a lease
-	// deferral inside the readiness wait can restore the row a TUI attached to
-	// (#5422 review). accountSwapScheduledResumeEligible admits a committed manual
-	// swap whose row is LiveRunning/LiveReady rather than limit-blocked, so
-	// ClearLimitReached is a no-op there and LimitResetAt returns no reset; an
-	// unconditional re-park would mislabel that healthy row as quota-blocked.
+	// Capture the liveness, reset window, and limit identity before ClearLimitReached
+	// so a lease deferral inside the readiness wait can restore the row a TUI
+	// attached to (#5422 review). accountSwapScheduledResumeEligible admits a
+	// committed manual swap whose row is LiveRunning/LiveReady rather than
+	// limit-blocked, so ClearLimitReached is a no-op there and LimitResetAt returns
+	// no reset; an unconditional re-park would mislabel that healthy row as
+	// quota-blocked. ClearLimitReached also erases limitAgent/limitAccount, so a
+	// re-park that restored only the liveness and reset time would lose the
+	// incoming-wall attribution ParkManualAccountSwapAtLimit recorded (#5422 review).
 	originalLiveness := instance.GetLiveness()
 	resetAt, _ := instance.LimitResetAt()
+	limitAgent, limitAccount, limitIdentityOK := instance.LimitIdentity()
 	instance.ClearLimitReached()
 	status, err := task.WaitForReadyAndSubmitPrompt(context.Background(), instance, mission, func() error {
 		// Recheck the attach lease immediately before the composer is touched (#5422
@@ -78,9 +82,26 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 			_ = instance.Transition(session.ObserveLiveness(originalLiveness))
 		} else {
 			_ = instance.ReparkLimitUnderResumeFence(resetAt)
+			// ReparkLimitUnderResumeFence restores the liveness and reset window
+			// ClearLimitReached cleared, but not the limitAgent/limitAccount it also
+			// erased. Restore the snapshot taken before ClearLimitReached so the
+			// re-parked row keeps the incoming-wall attribution
+			// ParkManualAccountSwapAtLimit recorded (#5422 review).
+			if limitIdentityOK {
+				instance.RestoreLimitIdentityUnderResumeFence(limitAgent, limitAccount)
+			}
 		}
+		// Persist the restored verdict and re-parked/healthy row so a daemon
+		// restart does not reload the PromptCouldNotConfirm marker the durable
+		// settlement write staged before the deferral: without it,
+		// accountSwapScheduledResumeEligible classifies the row as a possibly
+		// delivered mission and automatic recovery stays disabled (#5422 review).
+		// Propagate the settlement error instead of reporting a successfully
+		// restored deferral: if the write fails, disk still holds the
+		// PromptCouldNotConfirm marker, so restart disables automatic recovery
+		// even though the callback proved nothing was submitted (#5422 review).
 		if persistErr := m.persistSettlement(repoID, key, instance); persistErr != nil {
-			m.warn().Printf("limit resume for %q: could not checkpoint the restored manual mission delivery deferral: %v", instance.Title, persistErr)
+			return false, false, fmt.Errorf("limit resume for %q: could not checkpoint the restored manual mission delivery deferral: %w", instance.Title, persistErr)
 		}
 		return false, false, errAttachPauseDeferred
 	}

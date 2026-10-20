@@ -710,3 +710,84 @@ func TestResumeFromLimit_ManualRPCExemptFromManualMissionSendAttachPause(t *test
 		t.Fatalf("the manual retry must deliver immediately despite the pre-submission lease: prompts=%v", prompts)
 	}
 }
+
+// TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefersLimitBlocked pins
+// the limit-identity restoration on a limit-blocked manual swap's attach-pause
+// deferral (#5422 review): when the committed swap was parked at the limit by
+// ParkManualAccountSwapAtLimit, ClearLimitReached in deliverManualAccountMission
+// erases limitAgent/limitAccount, and the re-park (ReparkLimitUnderResumeFence)
+// restored only the liveness and reset window. Without RestoreLimitIdentityUnderResumeFence
+// the re-parked row persisted LiveLimitReached with no incoming-account attribution,
+// so LimitIdentity and the reloaded session no longer identified which account
+// produced the current wall. The deferral must restore the identity alongside the
+// re-park so the durable row keeps the incoming-wall attribution.
+func TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefersLimitBlocked(t *testing.T) {
+	m, repo, inst, backend := wedgedCommittedSwapFixture(t, true)
+	inst2, _, _, _, _, err := m.resolveActionSession("", inst.Title, repo)
+	if err != nil || inst2 == nil {
+		t.Fatalf("resolve current instance: %v", err)
+	}
+	key := daemonInstanceKey(repo, inst2.Title)
+	swap := committedAccountSwap(inst2)
+
+	// Park the committed swap at the limit so the row is LiveLimitReached with the
+	// incoming account's identity, the state ParkManualAccountSwapAtLimit records.
+	// BeginManualAccountSwap raises the OpRespawning fence ParkManualAccountSwapAtLimit
+	// requires; EndLimitResume releases it so the resume can re-acquire it.
+	resetAt := time.Now().Add(time.Hour)
+	if err := inst2.BeginManualAccountSwap(); err != nil {
+		t.Fatalf("BeginManualAccountSwap: %v", err)
+	}
+	if err := inst2.ParkManualAccountSwapAtLimit(resetAt); err != nil {
+		t.Fatalf("ParkManualAccountSwapAtLimit: %v", err)
+	}
+	inst2.EndLimitResume()
+	if !inst2.LimitReached() {
+		t.Fatal("the committed swap must be parked at the limit before the resume")
+	}
+	parkedAgent, parkedAccount, parkedOK := inst2.LimitIdentity()
+	if !parkedOK || parkedAgent == "" || parkedAccount == "" {
+		t.Fatalf("ParkManualAccountSwapAtLimit must attribute the limit identity: agent=%q account=%q", parkedAgent, parkedAccount)
+	}
+
+	prevHook := testHookResumeBeforeManualMissionSend
+	testHookResumeBeforeManualMissionSend = func() {
+		m.PauseStatusPoll(repo, inst2.Title, inst2.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeManualMissionSend = prevHook })
+
+	outcome, err := m.resumeFromLimitLockedWithAccount(repo, key, inst2, inst2.Title, swap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome != resumeDeferredByAttachPause {
+		t.Fatalf("BUG: the scheduler delivered the manual mission after a TUI attached during the readiness wait (pre-submission recheck missed): outcome=%v", outcome)
+	}
+	_, _, prompts := backend.snapshot()
+	if len(prompts) != 0 {
+		t.Fatalf("BUG: the scheduler delivered a prompt after a TUI attached during the readiness wait (pre-submission recheck missed): prompts=%v", prompts)
+	}
+	if !m.isPollPaused(repo, inst2.Title, inst2.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+	// The re-park must restore the limit identity ClearLimitReached erased, not just
+	// the liveness and reset window: a LiveLimitReached row with no incoming-account
+	// attribution loses which account produced the current wall (#5422 review).
+	if !inst2.LimitReached() {
+		t.Fatal("a limit-blocked deferral must re-park the limit (the row was LiveLimitReached, not LiveRunning/LiveReady)")
+	}
+	gotReset, gotResetOK := inst2.LimitResetAt()
+	if !gotResetOK || !gotReset.Equal(resetAt) {
+		t.Fatalf("the re-park must restore the reset window: got %v ok=%v want %v", gotReset, gotResetOK, resetAt)
+	}
+	gotAgent, gotAccount, gotOK := inst2.LimitIdentity()
+	if !gotOK {
+		t.Fatal("the re-park must restore the limit identity (LimitIdentity returned ok=false after the deferral)")
+	}
+	if gotAgent != parkedAgent || gotAccount != parkedAccount {
+		t.Fatalf("the re-park must restore the incoming-wall attribution: agent=%q account=%q want agent=%q account=%q", gotAgent, gotAccount, parkedAgent, parkedAccount)
+	}
+	if _, _, pending := inst2.PendingAccountSwap(); !pending {
+		t.Fatal("a pre-submission deferral must keep the pending manual swap pending so the scheduler re-fires")
+	}
+}
