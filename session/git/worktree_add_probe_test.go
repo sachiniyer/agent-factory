@@ -419,5 +419,70 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathStatErrorNamesResolvedPath
 		"the stat-error message must not name the raw relative worktreePath: %v", out)
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkedRepo pins the
+// symlink-traversal the git runner's cmd.Dir induces: when a restored record's
+// repoPath is a symlink and worktreePath is relative with "..", filepath.Join
+// lexically cleans "/launch/repo/../wt" to "/launch/wt" — but git, started with
+// cmd.Dir = repoPath, follows the symlink (chdir resolves it) and resolves the
+// relative worktree argument against the real repo dir, creating /mnt/wt when
+// /launch/repo -> /mnt/repo. The probe must target the same real filesystem or
+// it misclassifies ENOSPC/mount failures on the worktree's actual location.
+// Before the fix the probe examined the lexical /launch/wt and missed the real
+// /mnt/wt the way git -C /launch/repo worktree add ../wt confirmed.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkedRepo(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// A real repo dir on a distinct filesystem location, with a symlink inside
+	// the launch cwd pointing at it. The probe must resolve through the link.
+	realRepo := t.TempDir()
+	require.NotEqual(t, realRepo, launchCwd)
+	linkRepo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Symlink(realRepo, linkRepo))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		return nil, os.ErrNotExist // pre-creation normal answer — stays silent
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// "../wt" relative to a symlinked repo: git follows the link, so the real
+	// destination is <realRepo>/../wt = parent(realRepo)/wt, not the lexical
+	// <launchCwd>/repo/../wt = <launchCwd>/wt.
+	g := &GitWorktree{repoPath: "repo", worktreePath: "../wt"}
+	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+
+	resolvedDest := filepath.Join(filepath.Dir(realRepo), "wt")
+	require.Equal(t, resolvedDest, statTarget,
+		"the probe must target the symlink-resolved destination git's child writes to "+
+			"(%s), not the lexical filepath.Join of the un-resolved repoPath (%s)", resolvedDest, filepath.Join(launchCwd, "wt"))
+	require.Contains(t, probedDirs, filepath.Dir(resolvedDest),
+		"the worktree parent dir probed must be the symlink-resolved parent (%s), not the lexical %s",
+		filepath.Dir(resolvedDest), filepath.Join(launchCwd))
+	for _, d := range probedDirs {
+		require.True(t, filepath.IsAbs(d),
+			"a probed dir must be absolute (resolved through the symlink), not a raw relative path: %q", d)
+	}
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.

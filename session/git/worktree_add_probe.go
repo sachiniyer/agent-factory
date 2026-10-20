@@ -171,6 +171,19 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
 		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
 	}
+	// Resolve symlinks in repoPath before joining a relative worktreePath. The
+	// git runner sets cmd.Dir = repoPath, and the kernel's chdir follows
+	// symlinks, so a relative worktree argument resolves inside git against the
+	// resolved (real) repo dir — `git -C /launch/repo worktree add ../wt` with
+	// /launch/repo -> /mnt/repo creates /mnt/wt, not /launch/wt. filepath.Join
+	// only lexically cleans, so without this it would build /launch/wt and the
+	// probe would examine an unrelated filesystem, misclassifying ENOSPC or
+	// mount failures on the real one. EvalSymlinks needs the path to exist; a
+	// missing repo falls back to the lexical join above (the probe then
+	// reports the same errno git's child surfaces from the missing path).
+	if resolved, err := filepath.EvalSymlinks(repoPath); err == nil {
+		repoPath = resolved
+	}
 	worktreePath := g.worktreePath
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = filepath.Join(repoPath, worktreePath)
