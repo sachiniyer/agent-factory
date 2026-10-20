@@ -16715,6 +16715,7 @@ var AppShell = class {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
@@ -16729,7 +16730,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -16865,7 +16866,9 @@ var AppShell = class {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    const skippedSig = JSON.stringify(state.skippedRepos ?? []);
+    const skipped = state.skippedRepos ?? [];
+    const skippedRoots = state.registeredProjects.filter((p) => p.id && skipped.some((s) => s.repo_id === p.id)).map((p) => [p.id, p.root]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
     if (skippedSig !== this.lastSkippedNoticeSignature) {
       this.lastSkippedNoticeSignature = skippedSig;
       this.cachedSkippedNotice = this.skippedReposNotice(state);

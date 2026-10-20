@@ -1553,6 +1553,13 @@ export class AppShell {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    // A registry-only change (registeredProjects updated without touching
+    // sessions/selection/filter) still moves the skipped-repos notice — its labels
+    // map repo_id -> root via the registry, so a freshly learned root (a rebind, or a
+    // ListProjects recovery on projects.changed) must re-render the rail even though
+    // the row set is unchanged. Captured before the project-switcher block below
+    // overwrites lastRegisteredProjects.
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
 
     // Selecting a session on a phone should reveal its terminal, so fold the drawer
     // shut whenever the selection lands on a real session — the keyboard/programmatic
@@ -1590,7 +1597,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1749,9 +1756,17 @@ export class AppShell {
     // The skipped-repos notice is independent of the project scope and the status
     // filter: it reports snapshot incompleteness the daemon carried alongside the
     // rows, not a per-project empty/filter state, so it is rebuilt only when the
-    // skip set itself changes. Prepended before the rail notice so a project that
-    // IS the skipped one still sees WHY its sessions vanished.
-    const skippedSig = JSON.stringify(state.skippedRepos ?? []);
+    // skip set itself changes. Its labels map repo_id -> root via the registry, so
+    // the signature also carries the id/root pairs for the skipped repos — a
+    // ListProjects recovery or a rebind that leaves the skip set untouched still
+    // replaces a bare repo_id (or an obsolete root) with the now-known path.
+    // Prepended before the rail notice so a project that IS the skipped one still
+    // sees WHY its sessions vanished.
+    const skipped = state.skippedRepos ?? [];
+    const skippedRoots = state.registeredProjects
+      .filter(p => p.id && skipped.some(s => s.repo_id === p.id))
+      .map(p => [p.id, p.root] as [string, string]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
     if (skippedSig !== this.lastSkippedNoticeSignature) {
       this.lastSkippedNoticeSignature = skippedSig;
       this.cachedSkippedNotice = this.skippedReposNotice(state);
