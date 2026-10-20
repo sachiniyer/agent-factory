@@ -386,6 +386,29 @@ func TestProvisionCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
 	}
 }
 
+// TestLaunchCallBudgetCoversTheInSandboxGitProbe pins the launch route budget to
+// the in-sandbox bounded probes its handler runs (#5295 review). The Launch RPC
+// is the one that drives the bounded worktree setup/common-dir/ownership probe
+// (session/git.localGitTimeout, 60s) and the tmux pre-spawn has-session gate
+// (tmuxCommandTimeout, 10s) inside the sandbox: LocalBackend.Launch runs
+// gw.Setup() and tmuxSession.Start() (whereas Provision only does the in-memory
+// worktree record), so it is Launch — not Provision — whose outer call must
+// outlive the inner probe. The headless agent-server handler does not observe the
+// request context, so an outer call that expires before the inner probe's
+// deadline returns the client's own bare context.DeadlineExceeded and
+// disconnects before the server can emit the bounded_probe_no_answer envelope
+// code the lost-restore classifier's deadline+sentinel arm needs. The 60s here
+// mirrors session/git.localGitTimeout (the larger of the two bounds Launch runs);
+// the launch budget must outlive it with transport slack to spare, and this test
+// keeps anyone from decoupling the two again.
+func TestLaunchCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
+	const inSandboxBoundedProbeBound = 60 * time.Second
+	if slack := launchCallTimeout - inSandboxBoundedProbeBound; slack < 10*time.Second {
+		t.Fatalf("launchCallTimeout (%s) must exceed the in-sandbox bounded git probe bound (%s) with transport slack; got %s slack",
+			launchCallTimeout, inSandboxBoundedProbeBound, slack)
+	}
+}
+
 // TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
 // contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
 // URL fails at validation with an actionable message rather than at dial time. The

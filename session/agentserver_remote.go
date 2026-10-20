@@ -131,7 +131,7 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	return s.rc.callWithin("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil, launchCallTimeout)
 }
 
 func (s *remoteAgentServer) Expose() (StreamEndpoint, error) {
@@ -649,21 +649,36 @@ const AgentArchiveCallTimeout = 3 * time.Minute
 // TestSendPromptCallBudgetCoversTheInSandboxRetry.
 var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Second
 
-// provisionCallTimeout is the provision route's own budget, sized ABOVE the
-// in-sandbox bounded git probes (session/git.localGitTimeout, 60s) that run
-// during a sandbox restore. The outer call must OUTLIVE the inner probe: the
-// headless agent-server handler does not observe the request context, so a
-// daemon that gives up first returns its own bare context.DeadlineExceeded and
-// disconnects before the server can emit the bounded_probe_no_answer envelope
-// code the lost-restore classifier's deadline+sentinel arm needs — the exact
-// wire-hop flattening the #5295 fix carries the sentinel across to undo. Under
-// the shared 30s remoteAgentCallTimeout a stalled worktree
-// setup/common-dir/ownership probe (60s localGitTimeout) hit the client's own
-// deadline first, so the new code never crossed the wire and the classifier
-// still treated the failure as structural. Sized with transport slack over
-// localGitTimeout so a stalled probe trips its own bound, the server emits
+// launchCallTimeout is the launch route's own budget, sized ABOVE the in-sandbox
+// bounded probes that LocalBackend.Launch runs during a sandbox restore: the tmux
+// pre-spawn has-session gate (tmuxCommandTimeout, 10s) and the bounded git
+// worktree setup/common-dir/ownership probes (session/git.localGitTimeout, 60s).
+// The outer call must OUTLIVE the inner probe: the headless agent-server handler
+// does not observe the request context, so a daemon that gives up first returns
+// its own bare context.DeadlineExceeded and disconnects before the server can
+// emit the bounded_probe_no_answer envelope code the lost-restore classifier's
+// deadline+sentinel arm needs — the exact wire-hop flattening the #5295 fix
+// carries the sentinel across to undo. Under the shared 30s remoteAgentCallTimeout
+// a stalled setup/common-dir/ownership probe (60s localGitTimeout) hit the
+// client's own deadline first, so the new code never crossed the wire and the
+// classifier still treated the failure as structural. Sized with transport slack
+// over localGitTimeout so a stalled probe trips its own bound, the server emits
 // bounded_probe_no_answer, and the code crosses before this budget elapses.
 // A var (not const) so a test can shrink it; production never reassigns.
+var launchCallTimeout = 90 * time.Second
+
+// provisionCallTimeout is the provision route's own budget, sized ABOVE the
+// shared 30s remoteAgentCallTimeout. A sandbox restore runs Provision then
+// Launch over the wire (remoteAgentBackend.Start); the bounded git/tmux probes
+// that emit bounded_probe_no_answer run in the Launch half, which carries its
+// own launchCallTimeout. Provision itself runs only the in-sandbox provision
+// step (the in-memory worktree record and refreshSessionEnvironment), so it has
+// no localGitTimeout-bound inner work to outlive — but the headless handler does
+// not observe the request context, and a slow in-sandbox provision under the
+// shared 30s ceiling could still race the client and disconnect before the
+// server returns. Sized with the same headroom as launchCallTimeout for
+// consistency; a var (not const) so a test can shrink it. Production never
+// reassigns.
 var provisionCallTimeout = 90 * time.Second
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
