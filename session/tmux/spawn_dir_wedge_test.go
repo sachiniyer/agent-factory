@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -159,14 +160,30 @@ func TestStartWorkDirGateBoundedNonAnswerDoesNotHang(t *testing.T) {
 	wedged := filepath.Join(t.TempDir(), "wedged-forever")
 	require.NoError(t, os.Mkdir(wedged, 0o755))
 
+	// The wedged stat blocks on release so the test can unblock and drain the
+	// in-flight fsprobe worker BEFORE restoring the statPath/probeTimeout
+	// globals: the worker reads statPath (fsprobe.go's Stat closure) inside
+	// its own goroutine, so restoring statPath while that goroutine is still
+	// alive is a data race under -race. closing release lets the worker
+	// return, wg.Wait() establishes the happens-before edge, and only then
+	// do the SetStatPathForTest/SetProbeTimeoutForTest restores run.
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	restoreStatPath := fsprobe.SetStatPathForTest(func(string) (os.FileInfo, error) {
-		select {} // block forever; stands in for an uninterruptible D-state stat
+		defer wg.Done()
+		<-release
+		return nil, nil
 	})
 	defer restoreStatPath()
 	// Shrink the fsprobe bound so the test stays fast; the regression
 	// property is "bounded at all", not the specific 2s value.
 	restoreTimeout := fsprobe.SetProbeTimeoutForTest(200 * time.Millisecond)
 	defer restoreTimeout()
+	defer func() {
+		close(release)
+		wg.Wait()
+	}()
 
 	forceNewSessionEnvMarkers(t, true)
 	name := toTmuxName("spawn-stat-hang", "")
@@ -247,12 +264,26 @@ func TestRestoreWorkDirGateBoundedNonAnswerDoesNotHang(t *testing.T) {
 	wedged := filepath.Join(t.TempDir(), "restore-wedged-forever")
 	require.NoError(t, os.Mkdir(wedged, 0o755))
 
+	// See TestStartWorkDirGateBoundedNonAnswerDoesNotHang: the wedged stat
+	// blocks on release so the in-flight fsprobe worker drains (wg.Wait)
+	// before the statPath/probeTimeout globals are restored, avoiding a
+	// -race data race on statPath between the worker's read and the
+	// SetStatPathForTest restore.
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	restoreStatPath := fsprobe.SetStatPathForTest(func(string) (os.FileInfo, error) {
-		select {} // block forever; stands in for a wedged mount
+		defer wg.Done()
+		<-release
+		return nil, nil
 	})
 	defer restoreStatPath()
 	restoreTimeout := fsprobe.SetProbeTimeoutForTest(200 * time.Millisecond)
 	defer restoreTimeout()
+	defer func() {
+		close(release)
+		wg.Wait()
+	}()
 
 	forceNewSessionEnvMarkers(t, true)
 	name := toTmuxName("restore-stat-hang", "")
