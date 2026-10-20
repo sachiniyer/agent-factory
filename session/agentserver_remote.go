@@ -674,7 +674,27 @@ var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Secon
 // pre-spawn gate — plus transport slack, so every probe in the sequence can trip
 // its own bound and the server emits bounded_probe_no_answer before this budget
 // elapses. A var (not const) so a test can shrink it; production never reassigns.
-var launchCallTimeout = 5 * time.Minute
+//
+// The budget must ALSO cover the failure-cleanup path the handler runs BEFORE it
+// can serialize the error: LocalBackend.launch defers CleanupFailedCreate until
+// after setupErr is set, so a setup that stalls and then fails cannot return the
+// bounded_probe_no_answer envelope until the deferred teardown also finishes. The
+// worktree-add failure path additionally runs gitCommonDir (in
+// annotateWorktreeAddError, another localGitTimeout-bounded probe) before that
+// deferred cleanup, and CleanupFailedCreate's teardown runs its OWN sequence of
+// bounded git commands — the worktree-list ownership probe, worktree remove -f,
+// prune, branch -D, and a final prune (Cleanup runs five localGitTimeout-bounded
+// git commands, see worktree_ops.go's cleanupRun). Each of those is another
+// localGitTimeout a stalled filesystem can spend before the handler returns, so
+// sizing the budget for the setup probes alone left the cumulative failure path
+// (setup + gitCommonDir + cleanup) able to outlast the outer call: the client
+// disconnected with its own bare context.DeadlineExceeded before the server
+// finished the cleanup and emitted the sentinel. The bound therefore covers the
+// setup probes (4), the common-dir probe (1), AND the cleanup path's bounded git
+// commands (5) — 10 localGitTimeout-bounded git commands plus the tmux pre-spawn
+// gate — plus transport slack, so the handler's full failure path (the only path
+// that emits the sentinel) completes inside the outer deadline.
+var launchCallTimeout = 11 * time.Minute
 
 // provisionCallTimeout is the provision route's own budget, sized ABOVE the
 // shared 30s remoteAgentCallTimeout. A sandbox restore runs Provision then

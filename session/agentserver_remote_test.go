@@ -404,10 +404,25 @@ func TestProvisionCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
 // own localGitTimeout), and the new-branch path's deleteStaleSetupBranch adds a
 // fourth bounded git command after that. A budget sized for a SINGLE
 // localGitTimeout trips the client's deadline before a later probe in the
-// sequence can stall — so the bound here is the CUMULATIVE worst case: four
-// localGitTimeout-bounded git commands plus the tmux pre-spawn gate. The launch
-// budget must outlive that whole sequence with transport slack to spare, and this
-// test keeps anyone from decoupling the two again.
+// sequence can stall — so the bound here is the CUMULATIVE worst case.
+//
+// The budget must ALSO cover the failure-cleanup path the handler runs before it
+// can serialize the error: LocalBackend.launch defers CleanupFailedCreate until
+// after setupErr is set, so a setup that stalls and then fails cannot return the
+// bounded_probe_no_answer envelope until the deferred teardown finishes. The
+// worktree-add failure path additionally runs gitCommonDir (in
+// annotateWorktreeAddError, another localGitTimeout-bounded probe) before that
+// cleanup, and CleanupFailedCreate's teardown runs its OWN sequence of bounded
+// git commands — the worktree-list ownership probe, worktree remove -f, prune,
+// branch -D, and a final prune (Cleanup runs five localGitTimeout-bounded git
+// commands, see worktree_ops.go's cleanupRun). Each is another localGitTimeout a
+// stalled filesystem can spend before the handler returns, so sizing the budget
+// for the setup probes alone left the cumulative failure path (setup +
+// gitCommonDir + cleanup) able to outlast the outer call. The bound therefore
+// covers the setup probes (4), the common-dir probe (1), AND the cleanup path's
+// bounded git commands (5) — 10 localGitTimeout-bounded git commands plus the
+// tmux pre-spawn gate — plus transport slack, and this test keeps anyone from
+// decoupling them again.
 func TestLaunchCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
 	const (
 		localGitTimeoutBound    = 60 * time.Second // session/git.localGitTimeout
@@ -416,8 +431,18 @@ func TestLaunchCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
 		// commands (ownership, remove, prune); the new-branch path's
 		// deleteStaleSetupBranch adds a fourth.
 		boundedGitProbeSteps = 4
+		// gitCommonDir runs in annotateWorktreeAddError on a worktree-add failure,
+		// another localGitTimeout-bounded probe the handler runs before the
+		// deferred cleanup can return the sentinel.
+		commonDirProbeSteps = 1
+		// CleanupFailedCreate's teardown runs five localGitTimeout-bounded git
+		// commands (worktree-list ownership probe, worktree remove -f, prune,
+		// branch -D, final prune — see worktree_ops.go's cleanupRun). The handler
+		// cannot serialize the setup error until this whole sequence finishes, so
+		// the outer call must outlive it too.
+		failedCreateCleanupSteps = 5
 	)
-	inSandboxBoundedProbeBound := time.Duration(boundedGitProbeSteps)*localGitTimeoutBound + tmuxCommandTimeoutBound
+	inSandboxBoundedProbeBound := time.Duration(boundedGitProbeSteps+commonDirProbeSteps+failedCreateCleanupSteps)*localGitTimeoutBound + tmuxCommandTimeoutBound
 	if slack := launchCallTimeout - inSandboxBoundedProbeBound; slack < 10*time.Second {
 		t.Fatalf("launchCallTimeout (%s) must exceed the in-sandbox cumulative bounded probe bound (%s) with transport slack; got %s slack",
 			launchCallTimeout, inSandboxBoundedProbeBound, slack)
