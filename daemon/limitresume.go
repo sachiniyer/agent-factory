@@ -451,6 +451,16 @@ var testHookResumeBeforeAccountSwapCommit = func() {}
 // pane a TUI just attached to. No-op in production.
 var testHookResumeBeforeAccountSwapStop = func() {}
 
+// testHookResumeAfterRemotePreserve fires in resumeFromLimitLockedOutcome after the
+// remote-sandbox preservation push (preserveSandboxBeforeReap +
+// requireDurableSandboxBranch) in the probeAnsweredDead arm, and before the
+// attach-lease recheck that gates the pane-stop/respawn arms that follow. The
+// preservation is a long network round-trip, so a TUI can attach and renew the
+// lease during it; the pre-stop recheck at the top of the switch ran before the
+// probe, so this is the only seam that can keep the remote-preserve path from
+// replacing a runtime a TUI just attached to. No-op in production.
+var testHookResumeAfterRemotePreserve = func() {}
+
 // testHookResumeBeforeAccountSwapRespawn fires in resumeFromLimitLockedOutcome
 // immediately before the attach-lease recheck that gates the automated respawn, after
 // the identity commit and the pane-stop calls but before the respawn that rebuilds the

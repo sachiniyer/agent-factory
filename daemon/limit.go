@@ -539,9 +539,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			probeComputed = true
 		}
-		// Recheck the attach lease after the account-swap liveness probe and
-		// before the identity commit (#5422 review): a TUI can attach during the
-		// probe, and the commit/stop/respawn below would replace the runtime.
+		// Recheck the attach lease after the account-swap liveness probe, before the identity commit (#5422 review).
 		testHookResumeBeforeAccountSwapCommit()
 		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
 			return resumeNotPerformed, nil
@@ -624,10 +622,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			probe = probeLiveness(instance, as)
 		}
 	}
-	// Recheck the attach lease before the account-swap pane-stop arms below
-	// (#5422 review): a TUI can attach during the probe, and the stop calls
-	// replace the runtime before the send-boundary recheck. Same gate and
-	// deferral; the fresh path skips this probe (forceRespawn).
+	// Recheck the attach lease before the account-swap pane-stop arms below (#5422 review): a TUI can attach during the probe.
 	testHookResumeBeforeAccountSwapStop()
 	if accountSwap != nil && m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
 		return resumeNotPerformed, nil
@@ -676,6 +671,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 				return resumeNotPerformed, err
 			}
+			// Recheck after the remote-sandbox preservation push (#5422 review): a
+			// TUI can attach during it; the pre-stop recheck above ran before the probe.
+			testHookResumeAfterRemotePreserve()
+			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+				return resumeNotPerformed, nil
+			}
 		}
 		fallthrough
 	case probeAbsent:
@@ -697,8 +698,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	var accountConversationCapture session.ConversationCaptureSnapshot
 	captureAccountConversationAfterDelivery := false
 	if shouldRespawn {
-		// Recheck the attach lease immediately before the respawn, the last
-		// destructive replacement before the send (#5422 review).
+		// Recheck the attach lease immediately before the respawn, the last destructive replacement before the send (#5422 review).
 		testHookResumeBeforeAccountSwapRespawn()
 		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
 			return resumeNotPerformed, nil

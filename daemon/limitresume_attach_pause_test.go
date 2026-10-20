@@ -391,3 +391,54 @@ func TestResumeFromLimit_ManualRPCExemptFromAccountSwapAttachPause(t *testing.T)
 		t.Fatal("the manual retry must clear the limit liveness on delivery")
 	}
 }
+
+// TestResumeLimitedSessions_AttachPauseAfterRemotePreserveDefers pins the
+// attach-lease recheck after the remote-sandbox preservation push (#5422 review):
+// a probeAnsweredDead remote resume runs preserveSandboxBeforeReap and
+// requireDurableSandboxBranch (a long network round-trip) before the pane-stop
+// and respawn arms, and PauseStatusPoll takes only pausedMu — not the target or
+// op locks the resume body holds — so a TUI can attach and renew the lease
+// during that push. The pre-stop recheck at the top of the switch ran before the
+// liveness probe, so it does not cover this window. The recheck immediately after
+// the preservation (gated on !operatorInitiated, like the other rechecks) defers
+// the automated resume so the stop/respawn cannot replace a runtime a TUI just
+// attached to. A deferral returns resumeNotPerformed without clearing the limit,
+// so the scheduler re-fires on the next tick once the lease lapses.
+func TestResumeLimitedSessions_AttachPauseAfterRemotePreserveDefers(t *testing.T) {
+	// A remote sandbox whose agent exited (alive=false) drives the
+	// probeAnsweredDead arm, which runs the remote-sandbox preservation push
+	// (preserveSandboxBeforeReap/requireDurableSandboxBranch) before the
+	// stop/respawn arms. No account swap is configured, so this path exercises
+	// the no-swap respawn arm; the recheck after the preservation gates the
+	// same destructive replacement the stop arms would gate with a swap.
+	oldSandbox := newMockSandbox(t, false) // answers: the agent exited
+	freshSandbox := newMockSandbox(t, true)
+	manager, repoID, inst, backend := newRemoteLimitedSession(t, oldSandbox, freshSandbox, "finish the migration")
+	manager.cfg.LimitAutoResume = true
+
+	// The lease is NOT held when ResumeLimitedSessions starts, so the top-level
+	// gate and the pre-stop recheck pass. The hook attaches it inside the body,
+	// after the remote-sandbox preservation push and before the post-preserve
+	// recheck — the window between the preservation's network round-trip and the
+	// stop/respawn arms.
+	prevHook := testHookResumeAfterRemotePreserve
+	testHookResumeAfterRemotePreserve = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeAfterRemotePreserve = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	if got := backend.respawnCount(); got != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler respawned after a TUI attached during the remote-sandbox preservation (post-preserve recheck missed): respawns=%d", got)
+	}
+	if got := freshSandbox.gotPrompts(); len(got) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler delivered a prompt after a TUI attached during the remote-sandbox preservation: prompts=%v", got)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a post-preserve deferral must leave the session parked at the limit wall")
+	}
+	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
