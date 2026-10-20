@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
-  keybarPointerDown,
+  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, keybarClickIsPointerless, keybarPointerDown,
+  SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
 
@@ -607,6 +607,29 @@ test("teardown cancels custom input still queued behind a commit", t => {
 test("pointerdown prevents focus transfer before acting", () => {
   let prevented = false;
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
+});
+
+test("pointerdown still cancels the focus steal when the key acts on release (#5426)", () => {
+  // Paste's action moved to pointerup so its clipboard read lands inside the
+  // touch activation the press never carries; the preventDefault that stops
+  // the tap stealing xterm's focus is unconditional.
+  let prevented = false;
+  keybarPointerDown({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+});
+
+test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)", () => {
+  // Assistive activation — a screen reader, keyboard Enter, a programmatic
+  // .click() — arrives as a detail:0 click with no pointerType. But a real
+  // tap's click is ALSO detail:0 once its pointerdown was canceled (Chromium
+  // zeroes the count with the compat mouse events), so detail alone would let
+  // a tap act twice. pointerType separates them.
+  assert.equal(keybarClickIsPointerless({ detail: 0 }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "" }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "touch" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
 });
 
 test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {

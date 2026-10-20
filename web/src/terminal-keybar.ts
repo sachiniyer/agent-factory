@@ -275,9 +275,21 @@ export class StickyModifiers {
   }
 }
 
-export function keybarPointerDown(event: Pick<Event, "preventDefault">, act: () => void): void {
+export function keybarPointerDown(event: Pick<Event, "preventDefault">, act?: () => void): void {
   event.preventDefault(); // Cancel the browser's button-focus default before acting.
-  act();
+  act?.();
+}
+
+/**
+ * True only for a click no pointer produced — assistive-tech activation,
+ * keyboard Enter, a programmatic `.click()`. A real tap's click can also
+ * arrive at detail:0 once the press's pointerdown was canceled (Chromium
+ * zeroes the click count along with the compatibility mouse events it
+ * suppresses), so detail alone misreads it as assistive — pointerType is the
+ * honest discriminator (#5426).
+ */
+export function keybarClickIsPointerless(event: { detail: number; pointerType?: string }): boolean {
+  return event.detail === 0 && !event.pointerType;
 }
 
 export class TerminalKeybar {
@@ -338,10 +350,20 @@ export class TerminalKeybar {
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
-        button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
-        // Assistive activation has no pointerdown. Compatibility clicks must not
-        // send twice (or turn a one-shot tap into a locked modifier).
-        button.addEventListener("click", event => { if (event.detail === 0) act(); });
+        // #5426: pointerdown is activation-triggering only for a mouse; on the
+        // touch and pen input this bar exists for, transient activation arrives
+        // at the release — pointerup. navigator.clipboard.readText is
+        // activation-gated on exactly those engines, so Paste acts on the
+        // release instead of the press, while every other key still acts at
+        // pointerdown. Its preventDefault still runs either way — without it
+        // the tap would steal xterm's focus before the release ever arrives.
+        const onRelease = key === "Paste";
+        button.addEventListener("pointerdown", event => keybarPointerDown(event, onRelease ? undefined : act));
+        if (onRelease) button.addEventListener("pointerup", () => act());
+        // Assistive activation has no pointer at all, so its click gets the
+        // act() the pointer events already gave a real tap — and the tap's
+        // own click, pointer-derived, must not fire a second one.
+        button.addEventListener("click", event => { if (keybarClickIsPointerless(event)) act(); });
         if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
         row.append(button);
       }
@@ -450,9 +472,11 @@ export class TerminalKeybar {
   }
   /**
    * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
-   * tap's synchronous stack so the request lands inside the browser's
-   * user-activation window — iOS Safari answers with its own paste bubble and
-   * Android Chrome may ask for clipboard permission once; both are fine.
+   * synchronous stack of the tap's activation-bearing event — pointerup, not
+   * pointerdown, which carries transient user activation for a mouse alone
+   * (#5426) — so the request lands inside the browser's user-activation window.
+   * iOS Safari answers with its own paste bubble and Android Chrome may ask
+   * for clipboard permission once; both are fine.
    *
    * Three failure shapes collapse into the one never-silent fallback: no
    * readText at all (Firefox, an insecure context), a rejection (permission

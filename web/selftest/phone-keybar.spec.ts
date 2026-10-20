@@ -46,3 +46,103 @@ test("#4036 phone keybar applies and consumes modifiers before the next letter",
     }
   }
 });
+
+test("#5426 phone keybar Paste reads the clipboard inside the tap's activation-bearing event, once", async ({
+  browser, request,
+}, testInfo) => {
+  // A phone, not a narrow desktop window: hasTouch puts Chromium into real
+  // touch emulation, and for a finger the tap's activation-bearing event is
+  // pointerup — pointerdown grants transient activation only to a mouse. A
+  // stubbed readText records the activation state it was invoked under and the
+  // event dispatch it ran inside; a real clipboard can answer neither.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 812 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await ctx.newPage();
+  const stream = phoneInputStream(page);
+  const token = "af-5426-keybar-paste";
+  type PasteCall = { active: boolean; during: string | null };
+  const calls = () => page.evaluate(() =>
+    (window as unknown as { __pasteCalls: PasteCall[] }).__pasteCalls);
+  await page.addInitScript((t) => {
+    const readCalls: { active: boolean; during: string | null }[] = [];
+    const w = window as unknown as { __pasteCalls: typeof readCalls; __keybarEvent?: string };
+    w.__pasteCalls = readCalls;
+    // The capture-phase listener runs ahead of the keybar's own target-phase
+    // handlers, so the name stashed here is the event a readText call was
+    // invoked under; the bubble-phase one clears it when dispatch ends.
+    for (const type of ["pointerdown", "pointerup", "click", "touchstart", "touchend"]) {
+      window.addEventListener(type, () => { w.__keybarEvent = type; }, true);
+      window.addEventListener(type, () => { w.__keybarEvent = undefined; });
+    }
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: () => {
+          readCalls.push({ active: navigator.userActivation.isActive, during: w.__keybarEvent ?? null });
+          return Promise.resolve(t);
+        },
+      },
+    });
+  }, token);
+
+  const response = await request.post("/v1/CreateSession", { data: {
+    repo_path: process.env.AF_MOCK_REPO, title_base: "probe-keybar-paste",
+  } });
+  const created = await response.json();
+  expect(created.error).toBeFalsy();
+  const id = created.data.instance.id;
+  expect(id).toBeTruthy();
+  try {
+    await page.goto(`/#/session/${encodeURIComponent(id)}`);
+    await page.locator(".af-pane-host .xterm").first().click();
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
+    const bar = page.locator(".af-terminal-keybar:visible");
+    await expect(bar).toBeVisible();
+    const paste = bar.getByRole("button", { name: "Paste", exact: true });
+
+    // A single finger tap. The read must happen inside pointerup — the event
+    // whose dispatch grants a touch its transient activation — not pointerdown,
+    // where #5426 ran it and activation-strict engines always refused it.
+    await paste.tap();
+    await expect.poll(() => calls().then(c => c.length),
+      { message: "one tap must read the clipboard exactly once — its click must not read again" }).toBe(1);
+    const readCalls = await calls();
+    expect(readCalls).toHaveLength(1);
+    expect(readCalls[0].during, "the read must run inside the tap's activation-bearing event").toBe("pointerup");
+    expect(readCalls[0].active, "the read must see transient user activation").toBe(true);
+    await expect.poll(stream).toContain(token);
+    expect(stream().split(token).length - 1).toBe(1);
+    // No fallback sheet, and the canceled press never stole the terminal's focus.
+    await expect(page.locator(".af-modal-backdrop")).toHaveCount(0);
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
+
+    // Assistive activation is a detail:0 click no pointer produced — no
+    // pointerdown or pointerup precedes it — and it must still reach readText.
+    await paste.evaluate(el =>
+      el.dispatchEvent(new PointerEvent("click", { bubbles: true, detail: 0, pointerType: "" })));
+    await expect.poll(() => calls().then(c => c.length)).toBe(2);
+    expect((await calls())[1]?.during).toBe("click");
+
+    // A key that is not Paste still sends at pointerdown — and its tap still
+    // sends once, even though the canceled press zeroes its click's detail too.
+    const before = stream();
+    await bar.getByRole("button", { name: "Esc", exact: true }).tap();
+    await expect.poll(stream).toBe(before + "\x1b");
+    await page.waitForTimeout(250);
+    expect(stream(), "a tap's pointer-derived click must not send a second byte").toBe(before + "\x1b");
+  } finally {
+    try {
+      await page.screenshot({ path: testInfo.outputPath("phone-keybar-paste.png") });
+      console.log("#5426 PTY input:", JSON.stringify(stream()));
+    } finally {
+      await leavePageAndCleanup(page, async () => {
+        const killed = await request.post("/v1/KillSession", { data: { id } });
+        expect((await killed.json()).error).toBeFalsy();
+        await ctx.close();
+      });
+    }
+  }
+});

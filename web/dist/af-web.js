@@ -8675,7 +8675,10 @@ var StickyModifiers = class {
 };
 function keybarPointerDown(event, act) {
   event.preventDefault();
-  act();
+  act?.();
+}
+function keybarClickIsPointerless(event) {
+  return event.detail === 0 && !event.pointerType;
 }
 var TerminalKeybar = class {
   constructor(host, input, paste, refit, applicationCursor) {
@@ -8706,9 +8709,11 @@ var TerminalKeybar = class {
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
-        button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
+        const onRelease = key === "Paste";
+        button.addEventListener("pointerdown", (event) => keybarPointerDown(event, onRelease ? void 0 : act));
+        if (onRelease) button.addEventListener("pointerup", () => act());
         button.addEventListener("click", (event) => {
-          if (event.detail === 0) act();
+          if (keybarClickIsPointerless(event)) act();
         });
         if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
         row.append(button);
@@ -8847,9 +8852,11 @@ var TerminalKeybar = class {
   }
   /**
    * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
-   * tap's synchronous stack so the request lands inside the browser's
-   * user-activation window — iOS Safari answers with its own paste bubble and
-   * Android Chrome may ask for clipboard permission once; both are fine.
+   * synchronous stack of the tap's activation-bearing event — pointerup, not
+   * pointerdown, which carries transient user activation for a mouse alone
+   * (#5426) — so the request lands inside the browser's user-activation window.
+   * iOS Safari answers with its own paste bubble and Android Chrome may ask
+   * for clipboard permission once; both are fine.
    *
    * Three failure shapes collapse into the one never-silent fallback: no
    * readText at all (Firefox, an insecure context), a rejection (permission
