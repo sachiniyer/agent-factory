@@ -137,6 +137,32 @@ var testHookPollBeforeSettlementRecord = func() {}
 // only thing that can keep the prompt out of an attached pane. No-op in production.
 var testHookResumeBeforeSend = func() {}
 
+// testHookResumeBeforeAccountSwapCommit fires in resumeFromLimitLockedOutcome
+// after the account-swap liveness probe and before the attach-lease recheck that
+// gates the automated identity commit, after the scheduler's top-level gate but
+// before commitNewAccountSwapIdentity — the destructive account replacement that
+// rewrites the attached runtime's identity. A test substitutes it to attach the
+// lease in that window so the pre-commit recheck is the only thing that can keep
+// the swap from replacing a runtime a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapCommit = func() {}
+
+// testHookResumeBeforeAccountSwapStop fires in resumeFromLimitLockedOutcome
+// after the liveness probe and before the attach-lease recheck that gates the
+// automated account-swap stop/respawn arms — the pane-stop calls and the respawn
+// that replace the attached runtime. A test substitutes it to attach the lease
+// in that window so the pre-stop recheck is the only thing that can keep the
+// replacement from tearing down a pane a TUI just attached to. No-op in
+// production.
+var testHookResumeBeforeAccountSwapStop = func() {}
+
+// testHookResumeBeforeAccountSwapRespawn fires in resumeFromLimitLockedOutcome
+// immediately before the attach-lease recheck that gates the automated respawn,
+// after the identity commit and the pane-stop calls but before the respawn that
+// rebuilds the runtime. A test substitutes it to attach the lease in that window
+// so the pre-respawn recheck is the only thing that can keep the respawn from
+// replacing a runtime a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapRespawn = func() {}
+
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
 // transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
@@ -539,6 +565,23 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			probeComputed = true
 		}
+		// Recheck the attach lease after the account-swap liveness probe and
+		// before the identity commit, not only at the scheduler's top-level gate
+		// (#5422 review). The probe above is a network round-trip bounded by the
+		// caller's budget, and PauseStatusPoll takes only pausedMu — not the target
+		// or op locks this body holds — so a TUI can attach and renew the lease
+		// during it. Without this recheck the commit, the pane-stop calls, and the
+		// respawn below would all replace the attached runtime before the
+		// send-boundary recheck ever ran. The explicit ResumeFromLimit RPC reaches
+		// this body with operatorInitiated=true and stays exempt, exactly like a
+		// manual send-prompt. A deferral returns resumeNotPerformed without
+		// clearing the limit, so the scheduler re-fires on the next tick once the
+		// lease lapses; the pending account swap stays pending for that retry,
+		// since commitNewAccountSwapIdentity has not run yet.
+		testHookResumeBeforeAccountSwapCommit()
+		if !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID) {
+			return resumeNotPerformed, nil
+		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied,
 		// this admission observes it; once admission owns the fence, ApplyConfig
@@ -611,6 +654,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			probe = probeLiveness(instance, as)
 		}
 	}
+	// Recheck the attach lease after the liveness probe and before the
+	// account-swap pane-stop arms below (#5422 review). The probe is a network
+	// round-trip during which a TUI can attach and renew the lease; the stop
+	// calls in the probeAlive repair and probeAbsent/probeAnsweredDead arms
+	// (ValidateAccountSwapReplacementPanes, stopVSCodeForAccountSwap,
+	// StopRemainingPanesForAccountSwap, StopForAccountSwap) replace the runtime a
+	// TUI just attached to before the send-boundary recheck ever runs. Same
+	// !operatorInitiated gate and resumeNotPerformed deferral as the pre-commit
+	// recheck above; the fresh account-swap path skips this probe (forceRespawn)
+	// and is covered by the pre-commit and pre-respawn rechecks.
+	testHookResumeBeforeAccountSwapStop()
+	if !operatorInitiated && accountSwap != nil && m.isPollPaused(repoID, instance.Title, instance.ID) {
+		return resumeNotPerformed, nil
+	}
 	shouldRespawn := forceRespawn
 	switch probe {
 	case probeAlive:
@@ -676,6 +733,22 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	var accountConversationCapture session.ConversationCaptureSnapshot
 	captureAccountConversationAfterDelivery := false
 	if shouldRespawn {
+		// Recheck the attach lease immediately before the respawn, the last
+		// destructive replacement before the send (#5422 review). The identity
+		// commit and the pane-stop calls above already rechecked; this covers the
+		// window between them and the respawn (a TUI can attach during the probe,
+		// the commit, or the stop calls), and the non-swap probeAnsweredDead path
+		// whose only destructive op is this respawn. The fresh account-swap path
+		// also reaches here with forceRespawn set after the pre-commit recheck
+		// passed. Same !operatorInitiated gate and resumeNotPerformed deferral; a
+		// deferral here returns without clearing the limit, so the scheduler re-fires
+		// on the next tick once the lease lapses — the same recovery a send error
+		// uses (the pending account swap, if any, stays pending for that retry,
+		// since ClearPendingAccountSwap is only called on a successful send).
+		testHookResumeBeforeAccountSwapRespawn()
+		if !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID) {
+			return resumeNotPerformed, nil
+		}
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the

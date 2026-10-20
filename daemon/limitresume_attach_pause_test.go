@@ -213,3 +213,138 @@ func TestResumeFromLimit_ManualRPCExemptFromSendBoundaryAttachPause(t *testing.T
 		t.Fatal("the manual retry must clear the limit liveness on delivery")
 	}
 }
+
+// TestResumeLimitedSessions_AttachPauseBeforeAccountSwapCommitDefers pins the
+// pre-commit attach-lease recheck (#5422 review): an automatic account swap
+// performs a liveness probe before the identity commit, and PauseStatusPoll takes
+// only pausedMu — not the target or op locks the resume body holds — so a TUI
+// can attach and renew the lease during that probe. Without a recheck before
+// commitNewAccountSwapIdentity, the swap would commit the identity and proceed
+// to replace the attached runtime before the send-boundary recheck ever ran. The
+// pre-commit recheck (gated on !operatorInitiated) defers the whole swap instead,
+// leaving the session parked and the pending swap pending for the next tick.
+func TestResumeLimitedSessions_AttachPauseBeforeAccountSwapCommitDefers(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	configureLimitAccountCandidate(t, manager, "work")
+
+	// The account choice is immediate; advance past the reset window so the
+	// swap is due.
+	advance(time.Second)
+
+	// The lease is NOT held when ResumeLimitedSessions starts, so the top-level
+	// gate in resumeLimitedSession passes. The hook attaches it inside the body,
+	// after the account-swap liveness probe and before the identity commit — the
+	// window the pre-commit recheck exists for.
+	prevHook := testHookResumeBeforeAccountSwapCommit
+	testHookResumeBeforeAccountSwapCommit = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapCommit = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler committed the account swap after a TUI attached before the identity commit (pre-commit recheck missed): respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a pre-commit deferral must leave the session parked at the limit wall")
+	}
+	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeLimitedSessions_AttachPauseBeforeAccountSwapRespawnDefers pins the
+// pre-respawn attach-lease recheck (#5422 review): the identity commit and the
+// account-swap liveness probe have both run by the time the respawn replaces the
+// runtime, so a TUI that attaches during the commit window (after the pre-commit
+// recheck passed) must still be honored before the respawn. The pre-respawn
+// recheck (gated on !operatorInitiated) defers the respawn, leaving the session
+// parked; the committed identity stays pending for the next tick (the same
+// recovery a send error uses, since ClearPendingAccountSwap is only called on a
+// successful send).
+func TestResumeLimitedSessions_AttachPauseBeforeAccountSwapRespawnDefers(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	configureLimitAccountCandidate(t, manager, "work")
+
+	advance(time.Second)
+
+	// The lease is NOT held when ResumeLimitedSessions starts, and the
+	// pre-commit recheck passes (the hook only attaches at the respawn boundary).
+	// The identity commit runs, but the pre-respawn recheck keeps the respawn
+	// from replacing a runtime a TUI just attached to.
+	prevHook := testHookResumeBeforeAccountSwapRespawn
+	testHookResumeBeforeAccountSwapRespawn = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapRespawn = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler respawned after a TUI attached before the respawn (pre-respawn recheck missed): respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a pre-respawn deferral must leave the session parked at the limit wall")
+	}
+	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeFromLimit_ManualRPCExemptFromAccountSwapAttachPause pins the
+// operator-initiated exemption for the pre-commit, pre-stop, and pre-respawn
+// rechecks: the explicit ResumeFromLimit RPC reaches resumeFromLimitLockedOutcome
+// with operatorInitiated=true, so every attach-lease recheck in the body is
+// skipped exactly like the send-boundary recheck. The manual retry must still
+// respawn and deliver immediately even when the lease is acquired in those
+// windows, because the operator initiated the action.
+func TestResumeFromLimit_ManualRPCExemptFromAccountSwapAttachPause(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	// alive=false drives the exited-agent respawn arm so the pre-respawn recheck
+	// (inside if shouldRespawn) is reached on the operator-initiated path.
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", false, "manual retry work", resetAt)
+	// No clock advance needed: the manual RPC is an explicit operator action and
+	// ignores the scheduler's due-time gate too.
+	_ = advance
+
+	// Attach the lease at every destructive-boundary hook the body reaches on the
+	// non-swap respawn path (the pre-stop hook after the liveness probe, and the
+	// pre-respawn hook before the respawn). The pre-commit hook is inside the
+	// account-swap block this path never enters, so it does not fire here.
+	prevStopHook := testHookResumeBeforeAccountSwapStop
+	testHookResumeBeforeAccountSwapStop = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapStop = prevStopHook })
+	prevRespawnHook := testHookResumeBeforeAccountSwapRespawn
+	testHookResumeBeforeAccountSwapRespawn = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapRespawn = prevRespawnHook })
+
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("manual ResumeFromLimit RPC must succeed even when the lease is acquired at the destructive boundaries (operator action): %v", err)
+	}
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 1 {
+		t.Fatalf("an exited-agent manual retry must respawn despite the attach lease, got %d", respawns)
+	}
+	if len(prompts) != 1 || prompts[0] != "manual retry work" {
+		t.Fatalf("the manual retry must deliver immediately despite the destructive-boundary lease: prompts=%v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("the manual retry must clear the limit liveness on delivery")
+	}
+}
