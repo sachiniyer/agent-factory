@@ -414,9 +414,10 @@ func ampFrameBottomRule(content string) (string, bool) {
 // It exists because the daemon's liveness poll infers "working" from pane CHURN:
 // content changed since the last tick → LiveRunning, unchanged → idle → LiveReady
 // (the green dot). That inference silently assumes an agent REPAINTS CONTINUOUSLY
-// while it works, which claude and codex do (an animated spinner plus an elapsed
-// timer, so their pane can never hold still for a whole poll interval) — and amp
-// does not. amp draws a static frame and repaints only when output actually
+// while it works. codex animates a spinner plus an elapsed timer; claude does too,
+// but live claude sessions still held a byte-identical pane for a full poll
+// mid-turn and read Ready, so claude has a case here. amp does not repaint at
+// all between bursts: it draws a static frame and repaints only when output actually
 // arrives, so every quiet gap in a turn (between token bursts, during a tool call,
 // while the model thinks) holds the pane byte-identical past the 1s poll and reads
 // as idle. The dot then flips green mid-turn and back on the next burst: the #1766
@@ -478,6 +479,11 @@ func IsWorkingContent(content, agent string) bool {
 			}
 		}
 		return false
+	case tmux.ProgramClaude:
+		// Claude Code does not always repaint while it works: live sessions
+		// held a byte-identical pane for a full poll mid-turn and read Ready.
+		// See isClaudeWorkingContent for how the read stays on the live frame.
+		return isClaudeWorkingContent(content)
 	default:
 		return false
 	}
