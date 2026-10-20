@@ -220,6 +220,35 @@ func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Val
 	return collapsed
 }
 
+// recountNormalizedAfterCollapse recomputes the load-time normalization count
+// for a struct-backed candidate after collapseStructLeaves folded case-variant
+// spellings of one struct field into a single entry. compositeLeaves computed
+// the count over every physical spelling the source supplied, so when several
+// spellings collapsed, the discarded spellings' raw-value-vs-decoded-value
+// mismatches were still counted even though only the retained spelling is a
+// configured entry after collapse. Recount from the retained spelling alone:
+// the collapse retained the spelling whose raw value matches the decoded value
+// when one was identifiable, so the count is zero unless the decoder winner was
+// ambiguous and the fallback retained a spelling whose raw value does not match
+// the decoded value (#5397 review).
+func recountNormalizedAfterCollapse(collapsed map[string]reflect.Value, configured any) int {
+	configuredMap, ok := configured.(map[string]any)
+	if !ok || len(collapsed) == 0 {
+		return 0
+	}
+	normalized := 0
+	for physical, value := range collapsed {
+		raw, present := configuredMap[physical]
+		if !present {
+			continue
+		}
+		if !jsonEquivalent(raw, clonedInterface(value)) {
+			normalized++
+		}
+	}
+	return normalized
+}
+
 // resolutionNormalizationNote extracts the load-time normalization note a
 // candidate's Reason carries (if any) so the ResolvedValuePath projection can
 // append it to a shadowed candidate's projected reason. The markers are the

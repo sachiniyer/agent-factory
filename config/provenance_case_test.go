@@ -1237,3 +1237,56 @@ func TestResolveConfigCaseVariantRootAgentTableOriginProjectsLeafPath(t *testing
 			"candidate %s KeyPath must project to the leaf path, got %q", c.Layer, c.KeyPath)
 	}
 }
+
+// TestResolveConfigCaseVariantLeavesCollapseRecountsNormalization is the regression
+// test for the #5397 review finding that the provenance resolver counted the losing
+// spellings of a folded struct field as load-time-normalized even after
+// collapseStructLeaves folded them into one configured entry. encoding/json and
+// go-toml/v2 decode case-variant keys onto the same struct field
+// (last-write-wins for the value), so a source such as
+// {"docker":{"image":"a","Image":"b"}} leaves the typed field set to "b" while
+// the raw metadata map still carries both spellings. compositeLeaves counted the
+// losing "image":"a" entry as normalized (its raw value differs from the decoder's
+// final value "b"), and the collapse that folds the two spellings into one entry
+// reduced configuredCount but left normalizedCount at 1, so --explain reported
+// "load-time normalization changed 1 configured entry" for a single logical entry
+// whose retained spelling ("Image":"b") matches the decoded value and was not
+// normalized. The fix recomputes normalizedCount from the retained spelling after
+// collapse, so the reason no longer claims normalization for the discarded
+// spellings.
+func TestResolveConfigCaseVariantLeavesCollapseRecountsNormalization(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantDecoded string
+	}{
+		{
+			name:        "json image-then-Image with conflicting values",
+			body:        `{"docker":{"image":"a","Image":"b"}}`,
+			wantDecoded: "b",
+		},
+		{
+			name:        "json three spellings with conflicting values",
+			body:        `{"docker":{"image":"a","Image":"b","IMAGE":"c"}}`,
+			wantDecoded: "c",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
+			writeInRepoConfig(t, repoRoot, tc.body)
+
+			res, err := ResolveConfig(repoRoot)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantDecoded, res.Docker.Image,
+				"encoding/json decodes case-variant keys last-write-wins, so the typed field holds the decoder's final value")
+
+			value := requireResolvedValue(t, res, "docker")
+			repo := candidateForLayer(t, value, SourceRepoShared)
+			assert.Equal(t, "contributed", repo.Result,
+				"a single source's folded spellings of one field are one effective entry, not partially-shadowed")
+			assert.NotContains(t, repo.Reason, "load-time normalization changed",
+				"the collapsed spelling the decoder kept (the last conflicting spelling) matches the decoded value, so no load-time normalization remains after the fold; the discarded losing spellings are not separate configured entries")
+		})
+	}
+}

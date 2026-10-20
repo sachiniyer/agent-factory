@@ -299,6 +299,16 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 			collapsed := collapseStructLeaves(targetType, leaves, configured)
 			if len(collapsed) != len(leaves) {
 				candidate.configuredCount -= len(leaves) - len(collapsed)
+				// compositeLeaves counted the losing spellings of a folded
+				// struct field as normalized (each spelling's raw value vs the
+				// decoder's final typed value), so a source with
+				// {"image":"a","Image":"b"} (decoder keeps "b") counted the
+				// "image":"a" entry as normalized even though collapse folds both
+				// spellings into one logical configured entry. Recount from the
+				// retained spelling alone so the surviving-count and the
+				// --explain normalization note reflect only the one logical entry
+				// that remains after collapse (#5397 review).
+				candidate.normalizedCount = recountNormalizedAfterCollapse(collapsed, configured)
 				candidate.leaves = collapsed
 				leaves = collapsed
 			}
