@@ -167,6 +167,10 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		{class: notAShell, note: "`stat -c %u:%g` — stat's format flag"},
 		{class: afAuthored, note: "af's mkdir/chown script for the account-owned home"},
 	},
+	"session/backend_docker_account.go:(*dockerProvisioner).prepareNonAccountUser": {
+		{class: afAuthored, note: "af's `id -u:$(id -g)` probe of the image's default user"},
+		{class: afAuthored, note: "af's mkdir/chown script for the default-user HOME and workspace"},
+	},
 
 	// ---- not a shell at all ----
 	"session/tmux/start.go:(*TmuxSession).Start": {{
