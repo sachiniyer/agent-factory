@@ -170,3 +170,62 @@ func collapseStructLeaves(targetType reflect.Type, leaves map[string]reflect.Val
 	}
 	return collapsed
 }
+
+// resolutionNormalizationNote extracts the load-time normalization note a
+// candidate's Reason carries (if any) so the ResolvedValuePath projection can
+// append it to a shadowed candidate's projected reason. The markers are the
+// same strings resolveReplace and resolveComposite set when load-time
+// normalization changed the configured value before resolution.
+func resolutionNormalizationNote(reason string) string {
+	for _, marker := range []string{"load-time normalization changed", "effective key bindings normalize"} {
+		if index := strings.Index(reason, marker); index >= 0 {
+			return reason[index:]
+		}
+	}
+	return ""
+}
+
+// configLeafValue projects a single leaf from a candidate's raw Value (the
+// metadata map for non-built-in sources, the typed struct for built-in sources)
+// by exact key. For a struct-typed Value the lookup folds case via
+// taggedFieldByKey, so a case-variant leaf the operator wrote (e.g. [docker]
+// Image) projects the same field as the canonical tag. For a map-typed Value
+// the lookup is exact (map keys are not case-folded; see
+// TestResolveConfigCompositeLeafMapBranchStaysExact). Returns false for a nil
+// value, a missing key, or a type mismatch so the projection loop can mark the
+// candidate absent (#5397 review).
+func configLeafValue(value any, leaf string) (any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return nil, false
+		}
+		reflected = reflected.Elem()
+	}
+	switch reflected.Kind() {
+	case reflect.Map:
+		key := reflect.ValueOf(leaf)
+		if !key.Type().AssignableTo(reflected.Type().Key()) {
+			if !key.Type().ConvertibleTo(reflected.Type().Key()) {
+				return nil, false
+			}
+			key = key.Convert(reflected.Type().Key())
+		}
+		entry := reflected.MapIndex(key)
+		if !entry.IsValid() {
+			return nil, false
+		}
+		return clonedInterface(entry), true
+	case reflect.Struct:
+		field, ok := taggedFieldByKey(reflected, leaf)
+		if !ok {
+			return nil, false
+		}
+		return clonedInterface(field), true
+	default:
+		return nil, false
+	}
+}

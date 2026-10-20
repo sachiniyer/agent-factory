@@ -894,3 +894,140 @@ func TestResolveConfigCaseVariantLeafProjectionProjectsEachCandidatesOwnSpelling
 	assert.Equal(t, false, builtInCandidate.Value,
 		"the built-in candidate's projected value is its own enabled = false")
 }
+
+// TestResolveConfigCaseVariantSnapshotFoldedLeaf is the regression test for the
+// #5397 review finding that the sourceValueSnapshot branch enumerated canonical
+// full keys and looked up leaves with an exact key, so after collapseStructLeaves
+// retained the decoder-winning physical spelling (e.g. "Enabled" rather than the
+// canonical "enabled"), the snapshot branch missed the configured leaf and fell
+// through to the inherited-value check. When the global source's decoded value
+// differed from the built-in default (e.g. the global set Enabled = true over a
+// built-in enabled = false), the inherited check compared the built-in's value
+// (false) against the global's typed value (true) and aborted with
+// "snapshot changed unconfigured inherited leaf" — even though the leaf was
+// explicitly configured. The fix folds case in the snapshot branch's leaves
+// lookup so the canonical full key finds the collapsed physical spelling, and
+// uses the physical spelling for the origin and structMergeKeys (consistent with
+// the merge loop) so the surviving-count accounting and origin map stay correct.
+func TestResolveConfigCaseVariantSnapshotFoldedLeaf(t *testing.T) {
+	builtIn := &Config{RootAgent: RootAgent{Enabled: false, Program: "built-in"}}
+	global := &Config{RootAgent: RootAgent{Enabled: true, Program: "global"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "root_agent",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceGlobal},
+		Merge:      MergeTableByField,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn, &InRepoConfig{}}},
+		{
+			layer:          SourceGlobal,
+			valueSemantics: sourceValueSnapshot,
+			metadata: sourceMetadata{
+				shape: map[string]any{"root_agent": map[string]any{
+					"enabled": false,
+					"Enabled": true,
+					"program": "global",
+				}},
+			},
+			schemas: []any{global, &InRepoConfig{}},
+		},
+	}, true)
+	require.NoError(t, err, "the snapshot branch must not abort on a case-variant leaf the global source explicitly configured")
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	value := requireResolvedValue(t, resolved, "root_agent")
+	rootAgent, ok := value.Value.(RootAgent)
+	require.True(t, ok, "root_agent must resolve to a RootAgent value")
+	assert.True(t, rootAgent.Enabled,
+		"the global Enabled = true (the decoder-winning spelling) must survive the snapshot")
+	assert.Equal(t, "global", rootAgent.Program,
+		"the global program must survive")
+
+	// The origin must be keyed by the physical spelling the operator wrote,
+	// not the canonical key the snapshot branch enumerated.
+	leaf, ok := resolved.ResolvedValuePath("root_agent.enabled")
+	require.True(t, ok, "the canonical lowercase spelling must project the case-variant leaf")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, SourceGlobal.String(), leaf.Winner.Layer,
+		"the winner is the global source that supplied the case-variant leaf")
+	assert.Equal(t, "root_agent.Enabled", leaf.Winner.KeyPath,
+		"the winner KeyPath retains the decoder-winning physical spelling, not the canonical key")
+}
+
+// TestResolveConfigCaseVariantLeafProjectionProjectsDecoderWinnerDuplicate is
+// the regression test for the #5397 review finding that
+// candidateLeafProjectionKey preferred the winner's physical spelling whenever
+// the candidate's raw map carried it, so a shadowed candidate that contained
+// duplicate folded keys (e.g. a global root_agent with Enabled=false then
+// enabled=true) projected the losing raw value when the winner's physical
+// spelling matched the candidate's losing sibling. encoding/json decodes
+// case-variant keys onto the same struct field last-write-wins, so the
+// candidate's effective value is the decoder's final value (true), but the
+// raw map still carries both spellings with their original values. The fix
+// records each candidate's collapsed (decoder-winning) physical spelling on
+// the CandidateTrace and uses it for the projection, so a shadowed candidate
+// with duplicate folded keys projects the value the decoder kept rather than
+// the winner's spelling when the two differ.
+func TestResolveConfigCaseVariantLeafProjectionProjectsDecoderWinnerDuplicate(t *testing.T) {
+	builtIn := &Config{RootAgent: RootAgent{Enabled: false, Program: "built-in"}}
+	// The global source contains conflicting case-variant spellings of the
+	// same field: Enabled=false then enabled=true. The decoder (last-write-
+	// wins) keeps enabled=true, and collapseStructLeaves retains the
+	// decoder-winning spelling ("enabled") because its raw value matches the
+	// decoded value. The personal source wins with the spelling Enabled=true.
+	global := &Config{RootAgent: RootAgent{Enabled: true, Program: "global"}}
+	personal := &ProjectConfig{RootAgent: RootAgent{Enabled: true, Program: "personal"}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "root_agent",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceGlobal, SourceProjectPersonal},
+		Merge:      MergeTableByField,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn, &InRepoConfig{}}},
+		{
+			layer: SourceGlobal,
+			metadata: sourceMetadata{shape: map[string]any{"root_agent": map[string]any{
+				"Enabled": false,
+				"enabled": true,
+				"program": "global",
+			}}},
+			schemas: []any{global, &InRepoConfig{}},
+		},
+		{
+			layer:    SourceProjectPersonal,
+			metadata: sourceMetadata{shape: map[string]any{"root_agent": map[string]any{"Enabled": true}}},
+			schemas:  []any{personal, &InRepoConfig{}},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	value := requireResolvedValue(t, resolved, "root_agent")
+	rootAgent, ok := value.Value.(RootAgent)
+	require.True(t, ok, "root_agent must resolve to a RootAgent value")
+	assert.True(t, rootAgent.Enabled,
+		"the personal Enabled = true must win (it is the highest-precedence source)")
+
+	leaf, ok := resolved.ResolvedValuePath("root_agent.enabled")
+	require.True(t, ok, "the canonical lowercase spelling must project the case-variant leaf")
+	require.NotNil(t, leaf.Winner)
+	assert.Equal(t, SourceProjectPersonal.String(), leaf.Winner.Layer,
+		"the winner is the personal source's Enabled leaf")
+	assert.Equal(t, "root_agent.Enabled", leaf.Winner.KeyPath,
+		"the winner KeyPath retains the personal source's physical spelling")
+
+	// The global candidate's decoder-winning spelling is "enabled" (the
+	// collapse retained it because its raw value true matches the decoded
+	// value), not the winner's "Enabled". The global candidate must project
+	// its own decoder-winning value (true), not the losing raw value under the
+	// winner's spelling (false).
+	globalCandidate := candidateForLayer(t, leaf, SourceGlobal)
+	assert.Equal(t, "shadowed", globalCandidate.Result,
+		"the global source is shadowed by the higher-precedence personal Enabled leaf")
+	assert.True(t, globalCandidate.Present,
+		"the global candidate must be present in the projection (its own spelling projects)")
+	assert.Equal(t, true, globalCandidate.Value,
+		"the global candidate's projected value is its decoder-winning value (true), not the losing raw value under the winner's spelling (false)")
+}

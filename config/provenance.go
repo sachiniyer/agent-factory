@@ -33,6 +33,15 @@ type CandidateTrace struct {
 	Value   any    `json:"value"`
 	Result  string `json:"result"`
 	Reason  string `json:"reason"`
+	// collapsedLeafSpellings maps each canonical struct-leaf name to the
+	// physical spelling collapseStructLeaves retained for this candidate's
+	// struct-backed composite (the decoder-winning spelling when a source
+	// supplied conflicting case-variant keys). ResolvedValuePath uses it to
+	// project each candidate's own value from its raw metadata map rather
+	// than the winner's physical spelling, so a shadowed candidate whose raw
+	// map carries both spellings projects the value the decoder kept. Unset
+	// for map-backed composites and non-struct values (#5397 review).
+	collapsedLeafSpellings map[string]string `json:"-"`
 }
 
 // ResolvedValue is an effective config value and the complete trace that
@@ -293,6 +302,15 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 				candidate.leaves = collapsed
 				leaves = collapsed
 			}
+			// Record each leaf's physical spelling (the decoder-winning one
+			// after collapse) so ResolvedValuePath projects each candidate's
+			// own value from its raw metadata map at the key the decoder
+			// kept, not the winner's physical spelling (#5397 review).
+			spellings := make(map[string]string, len(leaves))
+			for physical := range leaves {
+				spellings[canonicalStructLeafName(targetType, physical)] = physical
+			}
+			trace.collapsedLeafSpellings = spellings
 		}
 
 		if candidate.document.valueSemantics == sourceValueSnapshot {
@@ -314,12 +332,36 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 				candidate.removedInherited++
 			}
 			for leaf, value := range full {
-				if explicit, configuredHere := leaves[leaf]; configuredHere {
-					leafValues[leaf] = cloneExportedValue(explicit)
-					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
-					if structBacked {
-						structMergeKeys[leaf] = leaf
+				explicit, configuredHere := leaves[leaf]
+				physicalLeaf := leaf
+				if !configuredHere && structBacked {
+					// collapseStructLeaves may have keyed leaves by the
+					// decoder-winning physical spelling rather than the
+					// canonical name full enumerates; fold case to find it so
+					// the snapshot branch treats an explicitly-configured
+					// case-variant leaf as configured instead of an unconfigured
+					// inherited change (#5397 review).
+					for physical, v := range leaves {
+						if strings.EqualFold(physical, leaf) {
+							explicit, configuredHere = v, true
+							physicalLeaf = physical
+							break
+						}
 					}
+				}
+				if configuredHere {
+					if structBacked {
+						// A lower-precedence source may have set the origin under
+						// a different physical spelling (or the canonical key);
+						// drop it so the surviving origin and the surviving-count
+						// accounting reflect this source's physical spelling.
+						if prevPhysical, ok := structMergeKeys[leaf]; ok && prevPhysical != physicalLeaf {
+							delete(origins, prevPhysical)
+						}
+						structMergeKeys[leaf] = physicalLeaf
+					}
+					leafValues[leaf] = cloneExportedValue(explicit)
+					origins[physicalLeaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, physicalLeaf))
 					continue
 				}
 				inherited, present := leafValues[leaf]
@@ -866,7 +908,20 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 		// equivalent to leaf (#5397 review).
 		projectionLeaf := physicalLeaf
 		if isStructBackedValue(parent.Value) {
-			projectionLeaf = candidateLeafProjectionKey(candidate.Value, leaf, physicalLeaf)
+			// Prefer the candidate's own collapsed spelling (the
+			// decoder-winning physical spelling collapseStructLeaves retained
+			// for this candidate) when it is available, so a shadowed
+			// candidate whose raw map carries both case-variant spellings
+			// projects the value the decoder kept rather than the winner's
+			// spelling. Fall back to candidateLeafProjectionKey's raw-map scan
+			// when the collapsed spelling is unavailable (map-backed composites
+			// and non-struct values never set collapsedLeafSpellings) (#5397
+			// review).
+			if spelling, ok := candidate.collapsedLeafSpellings[leaf]; ok {
+				projectionLeaf = spelling
+			} else {
+				projectionLeaf = candidateLeafProjectionKey(candidate.Value, leaf, physicalLeaf)
+			}
 		}
 		leafValue, present := configLeafValue(candidate.Value, projectionLeaf)
 		if !present && projectionLeaf != leaf {
@@ -907,63 +962,4 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 		projected.Candidates[i] = candidate
 	}
 	return projected, true
-}
-
-func resolutionNormalizationNote(reason string) string {
-	for _, marker := range []string{"load-time normalization changed", "effective key bindings normalize"} {
-		if index := strings.Index(reason, marker); index >= 0 {
-			return reason[index:]
-		}
-	}
-	return ""
-}
-
-// candidateLeafProjectionKey returns the map key under which a struct-backed
-// candidate stores a case-variant of leaf, so a non-winner candidate that
-// spells the leaf differently from the winner (e.g. a global [root_agent]
-// ENABLED = false when the winner is a personal [root_agent] Enabled = true)
-// projects its own value rather than being marked absent. physicalLeaf is the
-// winner's physical spelling; for the winner and any same-source candidate
-// whose map still carries that spelling, it is the decoder-winning spelling
-// the collapse retained, so it is preferred when present. For a struct-typed
-// candidate Value (built-in sources) configLeafValue's struct branch folds
-// case via taggedFieldByKey regardless of the key used, so physicalLeaf is
-// returned unchanged. Map-backed composites never reach the struct-backed
-// origin fallback in ResolvedValuePath, so this helper is only called for
-// struct-backed parents. Within one struct, tags are unique by case, so the
-// case-insensitive scan is unambiguous (#5397 review).
-func configLeafValue(value any, leaf string) (any, bool) {
-	if value == nil {
-		return nil, false
-	}
-	reflected := reflect.ValueOf(value)
-	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
-		if reflected.IsNil() {
-			return nil, false
-		}
-		reflected = reflected.Elem()
-	}
-	switch reflected.Kind() {
-	case reflect.Map:
-		key := reflect.ValueOf(leaf)
-		if !key.Type().AssignableTo(reflected.Type().Key()) {
-			if !key.Type().ConvertibleTo(reflected.Type().Key()) {
-				return nil, false
-			}
-			key = key.Convert(reflected.Type().Key())
-		}
-		entry := reflected.MapIndex(key)
-		if !entry.IsValid() {
-			return nil, false
-		}
-		return clonedInterface(entry), true
-	case reflect.Struct:
-		field, ok := taggedFieldByKey(reflected, leaf)
-		if !ok {
-			return nil, false
-		}
-		return clonedInterface(field), true
-	default:
-		return nil, false
-	}
 }
