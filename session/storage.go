@@ -197,10 +197,14 @@ type InstanceData struct {
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
-	// survive a restart, and so PR3's auto-resume scheduler can read it. omitempty
-	// drops it for every normal session; additive + rollforward, mirroring the
-	// Liveness precedent.
-	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// survive a restart, and so PR3's auto-resume scheduler can read it. omitzero
+	// drops it for every normal session (and for a limit row whose banner carried
+	// no parseable reset time): omitempty never omits a struct, and a zero
+	// time.Time would otherwise serialize as "0001-01-01T00:00:00Z" on every row,
+	// inventing a reset date the web would render (#4506 review, mirroring the
+	// TabExitData.At precedent); additive + rollforward, mirroring the Liveness
+	// precedent.
+	LimitResetAt time.Time `json:"limit_reset_at,omitzero"`
 	// LimitAgent is the provider namespace for LimitAccount. It is always a
 	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
 	// pending cross-agent replacement must retain both values.
