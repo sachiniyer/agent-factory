@@ -156,16 +156,35 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 // is evidence too. ENOENT is the normal pre-creation answer and stays
 // silent; anything else joins the chain.
 func (g *GitWorktree) annotateWorktreeAddError(err error) error {
-	dirs := []string{filepath.Dir(g.worktreePath)}
+	// Resolve the probe destination against the same resolved repo dir the git
+	// runner hands its child, mirroring gitCommonDir's daemonLaunchCwd rule for
+	// repoPath. The runner joins a relative `-C repoPath` onto daemonLaunchCwd
+	// and sets cmd.Dir to that joined dir, so a relative worktreePath argument
+	// resolves inside git against that resolved repo dir. Probing the raw
+	// worktreePath would resolve against the daemon's post-chdir cwd (the AF
+	// home) and verdict an unrelated filesystem — the #5295-review hazard
+	// gitCommonDir already documents. Production paths are always absolute, so
+	// this only matters for a hand-edited or externally-authored relative
+	// record in storage — the input class gitCommonDir, the runner, and
+	// bounded removal all defend against.
+	repoPath := g.repoPath
+	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
+		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
+	}
+	worktreePath := g.worktreePath
+	if !filepath.IsAbs(worktreePath) {
+		worktreePath = filepath.Join(repoPath, worktreePath)
+	}
+	dirs := []string{filepath.Dir(worktreePath)}
 	var statErr error
-	if st, sErr := statSpaceProbe(g.worktreePath); sErr == nil && st != nil && st.IsDir() {
-		dirs = append(dirs, g.worktreePath)
+	if st, sErr := statSpaceProbe(worktreePath); sErr == nil && st != nil && st.IsDir() {
+		dirs = append(dirs, worktreePath)
 	} else if sErr != nil && !os.IsNotExist(sErr) {
 		statErr = sErr
 	}
 	out := g.annotateGitWriteError(err, dirs...)
 	if statErr != nil {
-		out = errors.Join(out, fmt.Errorf("stat probe destination %s: %w", g.worktreePath, statErr))
+		out = errors.Join(out, fmt.Errorf("stat probe destination %s: %w", worktreePath, statErr))
 	}
 	return out
 }

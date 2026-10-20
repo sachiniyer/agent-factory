@@ -277,5 +277,147 @@ func TestAnnotateWorktreeAddError_CommonDirProbeNoAnswer(t *testing.T) {
 		"the sentinel must keep its deadline pair: %v", out)
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathResolvedAgainstLaunchCwd is the
+// worktreePath-side regression that TestGitCommonDir_RelativeRepoPath already pins for
+// repoPath: a restored record can carry a RELATIVE worktreePath. The git runner resolves
+// the relative `-C repoPath` against daemonLaunchCwd and sets cmd.Dir to that joined dir,
+// so a relative worktree argument resolves inside git against that resolved repo dir —
+// the file probes must target the same destination, not the raw relative worktreePath (which
+// the daemon resolves against its post-chdir AF home and verdicts an unrelated filesystem).
+//
+// Deterministic in both directions: before the fix the probes received the raw relative
+// path and statTarget/probedDirs would be "wt/dest"/"wt"; after the fix they are the
+// launch-cwd-resolved repo-dir-joined paths.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathResolvedAgainstLaunchCwd(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// Model the daemon's post-chdir AF home as a separate temp dir, distinct from the
+	// launch cwd, so a raw relative path resolves there (the bug) while the resolved
+	// path lands under the launch cwd (the fix). Without this divergence the two
+	// resolutions would coincide and the assertion could not tell them apart.
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		return nil, os.ErrNotExist // pre-creation normal answer — stays silent in the chain
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+
+	resolvedDest := filepath.Join(launchCwd, "repo", "wt", "dest")
+	require.Equal(t, resolvedDest, statTarget,
+		"the relative worktreePath must stat the launch-cwd-resolved repo-dir-joined destination "+
+			"(git's child cwd = resolved repo dir), not the raw relative path the daemon resolves against its post-chdir cwd")
+	require.Contains(t, probedDirs, filepath.Join(launchCwd, "repo", "wt"),
+		"the worktree parent dir probed must be the resolved <launchCwd>/repo/wt, not the raw relative "+
+			"path (`wt`) which resolves against the daemon's post-chdir AF home (%s)", afHome)
+	for _, d := range probedDirs {
+		require.True(t, filepath.IsAbs(d),
+			"a probed dir must be absolute (resolved against the launch cwd), not a raw relative path: %q", d)
+	}
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathEnvironmentalClassification proves the
+// worktreePath resolution keeps the #5295 fix's contract alive for the relative-path edge
+// case the rest of the probe layer already defends (git runner, gitCommonDir, bounded
+// removal): a full worktree filesystem at the resolved parent must classify as
+// environmental rather than structural — the exact #5295 failure mode "session gives up
+// while the disk is full" annotateWorktreeAddError exists to prevent. Before the fix the
+// probe targeted the daemon's post-chdir AF home (writable here), missed the real ENOSPC,
+// and the error stayed structural — the play-test failure.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathEnvironmentalClassification(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	fullParent := filepath.Join(launchCwd, "repo", "wt")
+	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	writeSpaceProbe = func(dir string) error {
+		if dir == fullParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil // AF home and any other dir probe writable — no spurious ENOSPC introduced
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a full worktree filesystem resolved against the launch cwd must read as environmental "+
+			"(ENOSPC in the chain) so lost-restore waits instead of hitting the structural give-up budget: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathStatErrorNamesResolvedPath — the
+// stat-probe error message must name the resolved destination so the lost-restore
+// classifier's diagnostics point at the filesystem git actually touched, not the raw
+// relative path the daemon would resolve against its post-chdir AF home. Before the fix
+// the message named `g.worktreePath` verbatim, hiding the resolution gap from anyone
+// reading the annotated chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathStatErrorNamesResolvedPath(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolved := filepath.Join(launchCwd, "repo", "wt", "dest")
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "stat", Path: p, Err: syscall.EACCES}
+	}
+	writeSpaceProbe = func(string) error { return nil }
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.EACCES),
+		"the resolved-path stat failure must join its errno: %v", out)
+	require.Contains(t, out.Error(), resolved,
+		"the stat-error message must name the resolved destination, not the raw relative worktreePath: %v", out)
+	require.NotContains(t, out.Error(), "stat probe destination wt/dest",
+		"the stat-error message must not name the raw relative worktreePath: %v", out)
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.
