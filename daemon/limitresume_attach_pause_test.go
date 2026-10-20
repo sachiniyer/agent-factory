@@ -130,3 +130,86 @@ func TestResumeFromLimit_ManualRPCExemptFromAttachPause(t *testing.T) {
 		t.Fatal("the manual retry must clear the limit liveness on delivery")
 	}
 }
+
+// TestResumeLimitedSessions_AttachPauseDuringLivenessProbeDefers pins the
+// send-boundary recheck (#5422 review): the top-level gate in
+// resumeLimitedSession runs BEFORE the liveness probe and account-swap readiness
+// wait this body performs, and PauseStatusPoll takes only pausedMu — not the
+// target or op locks the body holds — so a TUI can attach and renew the lease
+// during that window. resumeFromLimitLockedOutcome rechecks isPollPaused right
+// before the send, gated on !operatorInitiated, so an automated resume that
+// reached the send with a lease since acquired still defers instead of pasting
+// into the user's pane. testHookResumeBeforeSend fires in that window (after the
+// top-level gate, before the send) and is the only seam that can attach the lease
+// there, so this test exercises the recheck directly.
+//
+// The send-boundary recheck runs AFTER limitResumeAttempted has recorded the
+// attempt, so unlike the top-level gate a deferral here burns one backoff step —
+// an acceptable trade for the race window, since the user is attached and a short
+// retry delay is preferable to pasting into their pane. This test asserts the
+// deferral itself; the backoff-throttled re-fire is the same path the top-level
+// deferral's companion test already pins.
+func TestResumeLimitedSessions_AttachPauseDuringLivenessProbeDefers(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "auto-resume work", resetAt)
+	advance(limitResumeGrace + time.Second)
+
+	// The lease is NOT held when ResumeLimitedSessions starts, so the top-level
+	// gate in resumeLimitedSession passes. The hook attaches it inside the body,
+	// in the window the send-boundary recheck exists for.
+	prevHook := testHookResumeBeforeSend
+	testHookResumeBeforeSend = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeSend = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler delivered into the pane after a TUI attached during the liveness window (send-boundary recheck missed): respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a send-boundary deferral must leave the session parked at the limit wall")
+	}
+	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
+// TestResumeFromLimit_ManualRPCExemptFromSendBoundaryAttachPause pins the
+// operator-initiated exemption at the send boundary itself: even when the lease
+// is acquired in the window the send-boundary recheck covers (via the same hook),
+// the explicit ResumeFromLimit RPC reaches resumeFromLimitLockedOutcome with
+// operatorInitiated=true and the recheck is skipped, so a manual retry still
+// delivers immediately. The deferral is scoped to the automated scheduler.
+func TestResumeFromLimit_ManualRPCExemptFromSendBoundaryAttachPause(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "manual retry work", resetAt)
+	_ = advance
+
+	prevHook := testHookResumeBeforeSend
+	testHookResumeBeforeSend = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeSend = prevHook })
+
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("manual ResumeFromLimit RPC must succeed even when the lease is acquired at the send boundary (operator action): %v", err)
+	}
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 {
+		t.Fatalf("a live stall manual retry needs no respawn, got %d", respawns)
+	}
+	if len(prompts) != 1 || prompts[0] != "manual retry work" {
+		t.Fatalf("the manual retry must deliver immediately despite the send-boundary lease: prompts=%v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("the manual retry must clear the limit liveness on delivery")
+	}
+}

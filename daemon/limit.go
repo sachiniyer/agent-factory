@@ -129,6 +129,14 @@ var testHookPollBeforePersistLock = func() {}
 // lock: tests use this seam to pin that ordering without a scheduler race.
 var testHookPollBeforeSettlementRecord = func() {}
 
+// testHookResumeBeforeSend fires in resumeFromLimitLockedOutcome immediately
+// before the attach-lease recheck that gates the automated send, after the
+// liveness probe / account-swap readiness wait has run. A test substitutes it
+// to attach the lease in that window — after the scheduler's top-level gate in
+// resumeLimitedSession but before the send — so the send-boundary recheck is the
+// only thing that can keep the prompt out of an attached pane. No-op in production.
+var testHookResumeBeforeSend = func() {}
+
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
 // transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
@@ -839,6 +847,26 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
+	}
+	// Recheck the attach lease at the actual send boundary, not only at the
+	// scheduler's entry (#5422 review). The lease check in resumeLimitedSession
+	// runs before this body, but this body can spend a substantial window between
+	// that check and the send: the liveness probe above (up to the poll budget for
+	// a remote run), and the account-swap respawn and readiness wait. PauseStatusPoll
+	// takes only pausedMu — not the target or op locks this body holds — so a TUI
+	// can attach and renew the lease during those waits, which is exactly the race
+	// every DeliverPrompt send path re-checks for via deferWhileAttached. Mirror
+	// that contract here so an automated resume cannot paste into the pane the
+	// user is now typing in. The explicit ResumeFromLimit RPC reaches this body
+	// with operatorInitiated=true and stays exempt, exactly like a manual
+	// send-prompt: this recheck (and the lease) only constrain automated delivery.
+	// A deferral here returns resumeNotPerformed without clearing the limit, so the
+	// scheduler re-fires on the next tick once the lease lapses — the same recovery
+	// a send error uses (the pending account swap, if any, stays pending for that
+	// retry, since ClearPendingAccountSwap is only called on a successful send).
+	testHookResumeBeforeSend()
+	if !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID) {
+		return resumeNotPerformed, nil
 	}
 	var serr error
 	readinessSettlementAttempted := false

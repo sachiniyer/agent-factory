@@ -298,15 +298,18 @@ func (m *Manager) resumeLimitedSession(
 	// SendPromptWithEvidence / deliverManualAccountMission send arms, so it must
 	// honor the same lease here. The explicit ResumeFromLimit RPC bypasses
 	// resumeLimitedSession entirely (it is an operator action like a manual send)
-	// and stays exempt. Checked AFTER the locks are acquired and the eligibility
-	// re-check passes but BEFORE limitResumeAttempted records the attempt, so a
-	// deferral neither burns a backoff step nor logs a failed attempt — the
-	// resume simply re-fires on a later poll tick once the user detaches (the
-	// lease is heartbeat-renewed while attached and lapses within one
-	// statusPollLease after a crashed client, so the resume is delayed, never
-	// lost). Covers both the auto-swap arm that reaches SendPromptWithEvidence
-	// and the pending-manual-swap completion that reaches deliverManualAccountMission,
-	// since resumeLimitedSession is the single scheduler entry to both.
+	// and stays exempt. This gate is the fast path: it returns BEFORE
+	// limitResumeAttempted records the attempt, so the common case — a TUI already
+	// attached at scheduling time — neither burns a backoff step nor logs a failed
+	// attempt. A second recheck inside resumeFromLimitLockedOutcome, at the actual
+	// send boundary and gated on !operatorInitiated, covers the race where a TUI
+	// attaches during the liveness probe / account-swap readiness wait this body
+	// performs after this gate and before the send (see limit.go). The lease is
+	// heartbeat-renewed while attached and lapses within one statusPollLease after
+	// a crashed client, so a deferred resume is delayed, never lost. Covers both
+	// the auto-swap arm that reaches SendPromptWithEvidence and the pending-manual-
+	// swap completion that reaches deliverManualAccountMission, since
+	// resumeLimitedSession is the single scheduler entry to both.
 	if m.isPollPaused(repoID, inst.Title, inst.ID) {
 		return
 	}
