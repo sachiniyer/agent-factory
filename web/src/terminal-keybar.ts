@@ -358,8 +358,34 @@ export class TerminalKeybar {
         // pointerdown. Its preventDefault still runs either way — without it
         // the tap would steal xterm's focus before the release ever arrives.
         const onRelease = key === "Paste";
-        button.addEventListener("pointerdown", event => keybarPointerDown(event, onRelease ? undefined : act));
-        if (onRelease) button.addEventListener("pointerup", () => act());
+        // The release must complete a press that started on THIS key — plain
+        // click semantics. pointerup is paired to its pointerdown by pointerId
+        // (a finger landing elsewhere and lifting on the key never pastes;
+        // touch and pen already route their pointerup to the down-target via
+        // implicit pointer capture, so the pairing binds the mouse case), the
+        // release must land inside the key's box (capture still delivers a
+        // slid-off release to it), and pointercancel — the browser taking the
+        // gesture for a scroll — withdraws the press.
+        let pressedId: number | undefined;
+        button.addEventListener("pointerdown", event => {
+          if (onRelease) pressedId = event.pointerId;
+          keybarPointerDown(event, onRelease ? undefined : act);
+        });
+        if (onRelease) {
+          button.addEventListener("pointerup", event => {
+            if (event.pointerId !== pressedId) return;
+            pressedId = undefined;
+            const rect = button.getBoundingClientRect();
+            if (event.clientX >= rect.left && event.clientX < rect.right &&
+              event.clientY >= rect.top && event.clientY < rect.bottom) act();
+          });
+          button.addEventListener("pointercancel", event => {
+            if (event.pointerId === pressedId) pressedId = undefined;
+          });
+          // A mouse press dragged off the key releases elsewhere — its stale
+          // id must not pair with a later release that lands on the key.
+          button.addEventListener("pointerleave", () => { pressedId = undefined; });
+        }
         // Assistive activation has no pointer at all, so its click gets the
         // act() the pointer events already gave a real tap — and the tap's
         // own click, pointer-derived, must not fire a second one.

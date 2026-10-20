@@ -126,13 +126,37 @@ test("#5426 phone keybar Paste reads the clipboard inside the tap's activation-b
     await expect.poll(() => calls().then(c => c.length)).toBe(2);
     expect((await calls())[1]?.during).toBe("click");
 
+    // A tap that turns into a scroll — a drag starting on Paste — must not
+    // paste: the release pairs to its press by pointerId and must land on the
+    // key, and a pointercancel (the browser claiming the gesture) withdraws it.
+    const cdp = await ctx.newCDPSession(page);
+    const box = (await paste.boundingBox())!;
+    const px = box.x + box.width / 2;
+    const py = box.y + box.height / 2;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: px, y: py }] });
+    for (const step of [1, 2, 3, 4]) {
+      await cdp.send("Input.dispatchTouchEvent",
+        { type: "touchMove", touchPoints: [{ x: px, y: py - step * 30 }] });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await page.waitForTimeout(250);
+    expect(await calls(), "a drag off the Paste key must not read the clipboard").toHaveLength(2);
+    expect(stream().split(token).length - 1, "the drag must not paste either").toBe(2);
+
     // A key that is not Paste still sends at pointerdown — and its tap still
     // sends once, even though the canceled press zeroes its click's detail too.
+    // Esc is the harmless leg; ^C is the one the review named (it also ends the
+    // cat fixture, so it stays last).
     const before = stream();
     await bar.getByRole("button", { name: "Esc", exact: true }).tap();
     await expect.poll(stream).toBe(before + "\x1b");
     await page.waitForTimeout(250);
     expect(stream(), "a tap's pointer-derived click must not send a second byte").toBe(before + "\x1b");
+    const beforeInterrupt = stream();
+    await bar.getByRole("button", { name: "Interrupt (^C)", exact: true }).tap();
+    await expect.poll(stream).toBe(beforeInterrupt + "\x03");
+    await page.waitForTimeout(250);
+    expect(stream(), "^C must reach the PTY exactly once per tap").toBe(beforeInterrupt + "\x03");
   } finally {
     try {
       await page.screenshot({ path: testInfo.outputPath("phone-keybar-paste.png") });

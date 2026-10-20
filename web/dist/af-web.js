@@ -8710,8 +8710,25 @@ var TerminalKeybar = class {
           this.paint();
         };
         const onRelease = key === "Paste";
-        button.addEventListener("pointerdown", (event) => keybarPointerDown(event, onRelease ? void 0 : act));
-        if (onRelease) button.addEventListener("pointerup", () => act());
+        let pressedId;
+        button.addEventListener("pointerdown", (event) => {
+          if (onRelease) pressedId = event.pointerId;
+          keybarPointerDown(event, onRelease ? void 0 : act);
+        });
+        if (onRelease) {
+          button.addEventListener("pointerup", (event) => {
+            if (event.pointerId !== pressedId) return;
+            pressedId = void 0;
+            const rect = button.getBoundingClientRect();
+            if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act();
+          });
+          button.addEventListener("pointercancel", (event) => {
+            if (event.pointerId === pressedId) pressedId = void 0;
+          });
+          button.addEventListener("pointerleave", () => {
+            pressedId = void 0;
+          });
+        }
         button.addEventListener("click", (event) => {
           if (keybarClickIsPointerless(event)) act();
         });
