@@ -321,14 +321,21 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathResolvedAgainstLaunchCwd(t
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
 
+	// t.TempDir() lives under a symlinked prefix on macOS (/var/folders ->
+	// /private/var/folders), and the probe resolves the longest existing prefix
+	// through symlinks the way the kernel's chdir does, so the expected paths
+	// must be computed against the resolved launch cwd to match across hosts.
+	resolvedLaunchCwd, err := filepath.EvalSymlinks(launchCwd)
+	require.NoError(t, err)
+
 	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
 	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
 
-	resolvedDest := filepath.Join(launchCwd, "repo", "wt", "dest")
+	resolvedDest := filepath.Join(resolvedLaunchCwd, "repo", "wt", "dest")
 	require.Equal(t, resolvedDest, statTarget,
 		"the relative worktreePath must stat the launch-cwd-resolved repo-dir-joined destination "+
 			"(git's child cwd = resolved repo dir), not the raw relative path the daemon resolves against its post-chdir cwd")
-	require.Contains(t, probedDirs, filepath.Join(launchCwd, "repo", "wt"),
+	require.Contains(t, probedDirs, filepath.Join(resolvedLaunchCwd, "repo", "wt"),
 		"the worktree parent dir probed must be the resolved <launchCwd>/repo/wt, not the raw relative "+
 			"path (`wt`) which resolves against the daemon's post-chdir AF home (%s)", afHome)
 	for _, d := range probedDirs {
@@ -362,7 +369,13 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathEnvironmentalClassificatio
 	require.NotEqual(t, launchCwd, afHome)
 	t.Chdir(afHome)
 
-	fullParent := filepath.Join(launchCwd, "repo", "wt")
+	// t.TempDir() lives under a symlinked prefix on macOS (/var/folders ->
+	// /private/var/folders), and the probe resolves the longest existing
+	// prefix through symlinks the way the kernel's chdir does, so the full
+	// parent the mock must match is the resolved launch cwd's repo/wt.
+	resolvedLaunchCwd, err := filepath.EvalSymlinks(launchCwd)
+	require.NoError(t, err)
+	fullParent := filepath.Join(resolvedLaunchCwd, "repo", "wt")
 	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 	writeSpaceProbe = func(dir string) error {
 		if dir == fullParent {
