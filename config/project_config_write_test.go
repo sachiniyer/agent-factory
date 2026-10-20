@@ -249,6 +249,45 @@ func TestUnsetProjectConfigRootAgentCaseVariantLeafFoldsSpelling(t *testing.T) {
 	assert.False(t, resolved.Enabled, "the unset must restore inheritance: the root agent is no longer enabled")
 }
 
+// TestUnsetProjectConfigRootAgentCaseVariantLeafRemovesAllSpellings pins the
+// #5397 review follow-up: when a personal [root_agent] table carries more than
+// one case-equivalent spelling of a fixed struct leaf (Enabled = true and
+// enabled = false, which can also result from setting the canonical leaf over a
+// hand-written variant), UnsetProjectConfigValue must remove EVERY spelling.
+// Deleting only the canonical "enabled" would leave the case-variant "Enabled"
+// on disk, which re-enables the root agent instead of restoring inheritance
+// even though the command reported Removed: true.
+func TestUnsetProjectConfigRootAgentCaseVariantLeafRemovesAllSpellings(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nEnabled = true\nenabled = false\nprogram = \"custom\"\n")
+
+	// Before the fix, physicalLeafSpellingForUnset returned only the canonical
+	// "enabled" (it short-circuited on the canonical key), so deleteTOMLScalar
+	// removed only "enabled" and the surviving "Enabled = true" re-enabled the
+	// agent.
+	res, err := UnsetProjectConfigValue(project.ID, "root_agent.enabled")
+	require.NoError(t, err)
+	require.True(t, res.Removed, "every case-folded spelling of the enabled leaf must be removed")
+
+	path, _ := ProjectConfigTomlPath(project.ID)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(data)
+	assert.NotContains(t, content, "Enabled", "the case-variant Enabled line must be removed")
+	assert.NotContains(t, content, "enabled", "the canonical enabled line must be removed too")
+	assert.Contains(t, content, `program = "custom"`, "the sibling program field survives")
+
+	// The personal root_agent no longer sets enabled at all, so it falls back
+	// to the lower layer (the built-in default, which is disabled).
+	cfg, err := LoadProjectConfig(project.ID)
+	require.NoError(t, err)
+	layer := cfg.RootAgentLayer()
+	require.NotNil(t, layer)
+	assert.False(t, layer.EnabledSet, "unsetting every enabled spelling must clear EnabledSet")
+	resolved := ResolveRootAgent(RootAgentInputs{Personal: layer})
+	assert.False(t, resolved.Enabled, "the unset must restore inheritance: no surviving spelling re-enables the root agent")
+}
+
 // TestUnsetProjectConfigDynamicLeafStaysCaseSensitive pins the design boundary
 // the #5397 unset fix draws: a dynamic map key (program_overrides.<name>) is a
 // case-sensitive map entry, not a struct field the decoder folds, so unsetting

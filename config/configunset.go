@@ -91,11 +91,28 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured, 
 		}
 		removed = updated != string(current)
 	} else {
-		leafToDelete := leaf
+		// A fixed struct-field subkey (root_agent.enabled, root_agent.program)
+		// can carry more than one case-equivalent on-disk spelling at once — a
+		// hand-written [root_agent] Enabled = true plus a later enabled = false
+		// set over it, or any pair the operator typed. Each one decodes onto the
+		// same struct field, so deleting only the canonical (or any single)
+		// spelling leaves the surviving variant setting the field and the unset
+		// reports Removed: true while restoring nothing (#5397 review). Collect
+		// every case-folded spelling and delete each, so the field is actually
+		// cleared. Dynamic map keys never reach this branch (caseFoldLeaf gates
+		// them out and stays exact-match).
+		spellings := []string{leaf}
 		if caseFoldLeaf {
-			leafToDelete = physicalLeafSpellingForUnset(updated, section, leaf)
+			spellings = physicalLeafSpellingsForUnset(updated, section, leaf)
 		}
-		updated, removed = deleteTOMLScalar(updated, section, leafToDelete)
+		removed = false
+		for _, sp := range spellings {
+			var r bool
+			updated, r = deleteTOMLScalar(updated, section, sp)
+			if r {
+				removed = true
+			}
+		}
 	}
 	if !removed {
 		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
@@ -266,37 +283,38 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: true, RequiresRestart: true}, digestConfigBytes([]byte(updated)), nil
 }
 
-// physicalLeafSpellingForUnset returns the on-disk spelling of leaf under
-// [section] in content, folding case to match the typed decoder's
-// case-insensitive struct-field matching for a fixed subkey (root_agent.enabled,
-// root_agent.program). A case-variant [root_agent] Enabled = true decodes onto
-// RootAgent.Enabled via taggedFieldByKey's case fold, but deleteTOMLScalar's
-// exact-key line match would miss it and report Removed: false, leaving the
-// root agent enabled instead of restoring inheritance. The unset path must
-// locate and remove the physical spelling the operator wrote, the same way
-// resolution locates it (#5397 review). Returns leaf unchanged when content
-// has no such section, the leaf is present under its canonical spelling, or no
-// case-variant of the leaf is present, so callers that already use the
-// canonical spelling are unaffected.
-func physicalLeafSpellingForUnset(content, section, leaf string) string {
+// physicalLeafSpellingsForUnset returns every on-disk spelling of leaf under
+// [section] that the typed decoder folds onto the same struct field as leaf, so
+// the unset path can remove each one. A fixed struct-field subkey
+// (root_agent.enabled, root_agent.program) decodes case-insensitively
+// (taggedFieldByKey), so a personal [root_agent] Enabled = true and a
+// hand-written enabled = false are the same effective leaf and both must be
+// removed to restore inheritance — deleting only the canonical (or any single)
+// spelling would report Removed: true while a surviving variant re-sets the
+// field (#5397 review). Dynamic map keys are case-sensitive and never reach
+// this path (caseFoldLeaf gates them out). Returns []string{leaf} when section
+// is empty, the section is absent, or no case-variant is present, so callers
+// that already use the canonical spelling are unaffected.
+func physicalLeafSpellingsForUnset(content, section, leaf string) []string {
 	if section == "" {
-		return leaf
+		return []string{leaf}
 	}
 	var root map[string]any
 	if err := toml.Unmarshal([]byte(content), &root); err != nil {
-		return leaf
+		return []string{leaf}
 	}
 	sub, ok := root[section].(map[string]any)
 	if !ok {
-		return leaf
+		return []string{leaf}
 	}
-	if _, p := sub[leaf]; p {
-		return leaf
-	}
+	var spellings []string
 	for k := range sub {
 		if strings.EqualFold(k, leaf) {
-			return k
+			spellings = append(spellings, k)
 		}
 	}
-	return leaf
+	if len(spellings) == 0 {
+		return []string{leaf}
+	}
+	return spellings
 }
