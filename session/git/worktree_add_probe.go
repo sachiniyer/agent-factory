@@ -337,6 +337,32 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 		if resolveErr == nil {
+			// A final `..` held in base never reaches resolveSymlinkTail's
+			// non-directory check: filepath.Join collapses resolvedParent/.. to
+			// its lexical parent, but the kernel does not traverse `..` through a
+			// non-directory — `cd file/..` (or a symlink that resolved to a
+			// regular file followed by `..`) fails with ENOTDIR before writing
+			// anywhere. When resolvedParent is a symlink that resolved to a
+			// regular file (or a regular file component), filepath.Join would
+			// back out to the parent and the subsequent probe would target a
+			// filesystem git never reaches, so a coincidental ENOSPC there would
+			// stall the lost-restore loop indefinitely on a structural ENOTDIR
+			// failure. Surface ENOTDIR the way the tail walk does so the caller
+			// probes only the independently known locations and joins the
+			// structural error.
+			if base == ".." {
+				isDir, dErr := tailIsDir(resolvedParent)
+				if dErr != nil {
+					lexical := filepath.Join(repoPath, g.worktreePath)
+					out := g.annotateGitWriteError(err)
+					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, dErr))
+				}
+				if !isDir {
+					lexical := filepath.Join(repoPath, g.worktreePath)
+					out := g.annotateGitWriteError(err)
+					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, &os.PathError{Op: "stat", Path: resolvedParent, Err: syscall.ENOTDIR}))
+				}
+			}
 			worktreePath = filepath.Join(resolvedParent, base)
 		} else {
 			// A non-timeout resolution error is environmental evidence about the
