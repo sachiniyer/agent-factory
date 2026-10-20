@@ -312,17 +312,21 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 	// EvalSymlinks invocation already runs in its own per-dir bounded flight,
 	// but without a shared budget a path with many components past the first
 	// nonexistent entry could restart the deadline for every prefix. The
-	// goroutine keeps running after the deadline fires (the per-dir flights
-	// latch their own timeouts and drain), but the caller returns at the
-	// shared bound the way a single timed-out flight does.
+	// caller returns at the shared bound the way a single timed-out flight
+	// does; the walk's goroutine is canceled at the same bound so it does
+	// not keep issuing metadata calls (and accumulating background goroutines)
+	// after the caller has returned — the in-flight per-dir flight still
+	// drains on its own per-dir timeout, but no new prefix lookup starts.
 	type walkResult struct {
 		resolved string
 		timedOut bool
 		err      error
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan walkResult, 1)
 	go func() {
-		r, to, e := resolveSymlinkPrefixWalk(path)
+		r, to, e := resolveSymlinkPrefixWalk(ctx, path)
 		done <- walkResult{r, to, e}
 	}()
 	timer := time.NewTimer(symlinkResolveTimeout)
@@ -334,7 +338,10 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 		// The whole walk did not answer within the shared budget — surface
 		// the typed non-answer the same way a single timed-out flight does,
 		// so the classifier reads the bounded environmental class rather than
-		// bare structural silence.
+		// bare structural silence. Cancel the walk's context so it stops
+		// issuing new prefix lookups; the in-flight per-dir flight drains on
+		// its own timeout, but no further prefix is probed.
+		cancel()
 		return "", true, fmt.Errorf("symlink prefix walk of %s did not answer within %s: %w: %w",
 			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
 	}
@@ -344,10 +351,20 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 // resolveSymlinkPrefixBounded runs under a single shared deadline. It walks
 // the un-joined path from the longest prefix down, resolving the longest
 // existing prefix through symlinks and rejoining the non-existent tail
-// lexically.
-func resolveSymlinkPrefixWalk(path string) (resolved string, timedOut bool, err error) {
+// lexically. The context is canceled when the shared deadline fires so the
+// walk does not continue issuing prefix lookups after the caller has returned.
+func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string, timedOut bool, err error) {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts); i > 0; i-- {
+		select {
+		case <-ctx.Done():
+			// The shared deadline fired — stop walking. The in-flight
+			// per-dir flight drains on its own timeout, but no further
+			// prefix lookup starts, so the goroutine does not accumulate
+			// metadata calls or block waiting on each remaining component.
+			return "", false, ctx.Err()
+		default:
+		}
 		prefix := strings.Join(parts[:i], string(filepath.Separator))
 		if prefix == "" {
 			prefix = string(filepath.Separator)
