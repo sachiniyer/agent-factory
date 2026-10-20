@@ -2,12 +2,12 @@
 // the TUI renderer, ui/tree/render.go, for how (Liveness, InFlightOp) become a state
 // bucket and the [lost] / [deleting] / [limit] / [remote] / [model changed] title
 // prefixes. The glyphs differ: the web rail has no state words, so an idle Ready
-// row is blank and a working row draws a muted circle. Adding a Liveness value
+// row is blank and a working row draws a muted spinner. Adding a Liveness value
 // forces a deliberate choice here, mirroring the TUI's TOTAL liveness switch
 // (render.go:274-301).
 //
-// Shapes keep the low-contrast/color-blindness discipline: a filled circle for
-// Working, hollow for Dead, dashed for Lost, an archive for Archived, and a filled
+// Shapes keep the low-contrast/color-blindness discipline: a spinner for
+// Working, a hollow circle for Dead, dashed for Lost, an archive for Archived, and a filled
 // diamond for LimitReached (see styles.css .af-dot-*).
 
 import {
@@ -127,7 +127,7 @@ const LOST_ICON: IconName = "circle-dashed";
 const ARCHIVED_ICON: IconName = "archive";
 const LIMIT_ICON: IconName = "diamond";
 
-const WORKING: RowStatus = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
+const WORKING: RowStatus = { icon: "loader-circle", kind: "working", label: ROW_KIND_LABELS.working };
 
 /**
  * Resolves a session's status dot from its two axes: any in-flight op is a
@@ -303,7 +303,7 @@ export function isArchived(s: SessionData): boolean {
  *
  *  This gates the action. It is NOT the whole story for display, and an earlier
  *  version of this note claimed otherwise: rowStatus above returns WORKING for any
- *  in-flight op, so a respawning row shows the working circle and isWorking() counts it as
+ *  in-flight op, so a respawning row shows the working spinner and isWorking() counts it as
  *  working (project.ts). Only the "[limit] resets …" prefix from rowTitle survives,
  *  because that arm keys on liveness. Consistent with every other op. */
 export function isLimitReached(s: SessionData): boolean {

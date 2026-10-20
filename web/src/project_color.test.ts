@@ -56,6 +56,13 @@ test("the favicon SVG paints the tile in the project color", () => {
   assert.ok(projectFaviconDataUrl("#16a34a").startsWith("data:image/svg+xml,"));
 });
 
+test("the inverted favicon swaps the tile and mark colors", () => {
+  const svg = projectFaviconSvg("#16a34a", true);
+  assert.ok(svg.includes(`<rect width="512" height="512" rx="112" fill="${markInk("#16a34a")}"/>`));
+  assert.ok(svg.includes('fill="#16a34a"/></svg>'));
+  assert.notEqual(projectFaviconDataUrl("#16a34a", true), projectFaviconDataUrl("#16a34a"));
+});
+
 test("every palette color is a lowercase #rrggbb", () => {
   for (const c of PROJECT_COLOR_PALETTE) assert.match(c, /^#[0-9a-f]{6}$/);
 });
