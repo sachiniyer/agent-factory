@@ -392,7 +392,7 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyAccountRuntimeBoundary(); err != nil {
 		return ProvisionResult{}, err
 	}
-	if err := p.prepareAccountUser(); err != nil {
+	if err := p.prepareContainerUser(); err != nil {
 		return ProvisionResult{}, err
 	}
 	if err := p.configureGit(); err != nil {
@@ -787,13 +787,17 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 	return sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
-// execSh runs a `sh -c <script>` inside the container.
+// execSh runs a `sh -c <script>` inside the container as root (0:0). It is the
+// provisioning step that operates on root-owned container state — `docker cp`
+// lands the `af` binary owned by root, and `chmod +x` on it must run as root
+// regardless of the image's default USER. A non-root default USER (a common
+// hardening practice on BYO images) cannot chmod a root-owned file, so gating
+// the root override on account sessions left the non-account chmod failing with
+// "Operation not permitted" on any such image. Running as 0:0 unconditionally
+// is a no-op for a root-default image (its default user IS root) and is the
+// only thing that works for a non-root one.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec"}
-	if p.spec.Account.Dir != "" {
-		args = append(args, "--user", "0:0")
-	}
-	args = append(args, p.containerID, "sh", "-c", script)
+	args := []string{"exec", "--user", "0:0", p.containerID, "sh", "-c", script}
 	return p.docker(timeout, args...)
 }
 
