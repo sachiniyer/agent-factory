@@ -36,8 +36,13 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	}
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
-	// Capture the reset time before ClearLimitReached so a lease deferral inside the
-	// readiness wait can re-park the limit and let the scheduler re-fire (#5422 review).
+	// Capture the liveness and reset time before ClearLimitReached so a lease
+	// deferral inside the readiness wait can restore the row a TUI attached to
+	// (#5422 review). accountSwapScheduledResumeEligible admits a committed manual
+	// swap whose row is LiveRunning/LiveReady rather than limit-blocked, so
+	// ClearLimitReached is a no-op there and LimitResetAt returns no reset; an
+	// unconditional re-park would mislabel that healthy row as quota-blocked.
+	originalLiveness := instance.GetLiveness()
 	resetAt, _ := instance.LimitResetAt()
 	instance.ClearLimitReached()
 	status, err := task.WaitForReadyAndSubmitPrompt(context.Background(), instance, mission, func() error {
@@ -58,10 +63,25 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	// A lease deferral before the composer is not a send error: the mission was not
 	// submitted, so restore the attempt marker the begin boundary staged and re-park
 	// the limit ClearLimitReached cleared above. The caller translates the sentinel to
-	// a clean resumeNotPerformed so the scheduler re-fires on the next tick.
+	// a clean resumeDeferredByAttachPause so the scheduler re-fires on the next tick.
+	// Restore the liveness a TUI attached to: a committed manual swap whose row was
+	// LiveRunning/LiveReady (not limit-blocked) must not be re-parked to
+	// LiveLimitReached with a zero reset, which would mislabel a healthy handoff as
+	// quota-blocked (#5422 review). Persist the restored verdict and re-parked/healthy
+	// row so a daemon restart does not reload the PromptCouldNotConfirm marker the
+	// durable settlement write staged before the deferral: without it,
+	// accountSwapScheduledResumeEligible classifies the row as a possibly delivered
+	// mission and automatic recovery stays disabled (#5422 review).
 	if errors.Is(err, errAttachPauseDeferred) {
 		_ = instance.RestorePendingManualAccountSwapMissionDelivery(swap.from, swap.to, previousStatus)
-		_ = instance.ReparkLimitUnderResumeFence(resetAt)
+		if originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady {
+			_ = instance.Transition(session.ObserveLiveness(originalLiveness))
+		} else {
+			_ = instance.ReparkLimitUnderResumeFence(resetAt)
+		}
+		if persistErr := m.persistSettlement(repoID, key, instance); persistErr != nil {
+			m.warn().Printf("limit resume for %q: could not checkpoint the restored manual mission delivery deferral: %v", instance.Title, persistErr)
+		}
 		return false, false, errAttachPauseDeferred
 	}
 	err = handoffDeliveryResultError(status, err)

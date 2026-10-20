@@ -537,10 +537,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		// Recheck the attach lease after the account-swap liveness probe, before the
 		// identity commit (#5422 review).
-		testHookResumeBeforeAccountSwapCommit()
-		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-			return resumeNotPerformed, nil
-		}
+	testHookResumeBeforeAccountSwapCommit()
+	if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+		return resumeDeferredByAttachPause, nil
+	}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied, this
 		// admission observes it; once admission owns the fence, ApplyConfig cannot report a
@@ -591,9 +591,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		// The in-commit teardown recheck (commitNewAccountSwapIdentity) defers by
 		// returning errAttachPauseDeferred: no identity was committed, so fall through
-		// to a clean resumeNotPerformed instead of the error/fallback path.
+		// to a clean resumeDeferredByAttachPause instead of the error/fallback path.
 		if errors.Is(swapErr, errAttachPauseDeferred) {
-			return resumeNotPerformed, nil
+			return resumeDeferredByAttachPause, nil
 		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
@@ -621,7 +621,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// Recheck the attach lease before the account-swap pane-stop arms below (#5422 review): a TUI can attach during the probe.
 	testHookResumeBeforeAccountSwapStop()
 	if accountSwap != nil && m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-		return resumeNotPerformed, nil
+		return resumeDeferredByAttachPause, nil
 	}
 	shouldRespawn := forceRespawn
 	switch probe {
@@ -641,10 +641,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				}
 				// Recheck after the repair validation: ValidateAccountSwap re-runs the full preflight while a
 				// TUI can attach, so the pre-stop recheck above does not cover this window (#5422).
-				testHookResumeAfterRepairValidation()
-				if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-					return resumeNotPerformed, nil
-				}
+			testHookResumeAfterRepairValidation()
+			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+				return resumeDeferredByAttachPause, nil
+			}
 				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
 					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
@@ -674,10 +674,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			// Recheck after the remote-sandbox preservation push (#5422 review): a TUI can attach
 			// during it; the pre-stop recheck above ran before the probe.
-			testHookResumeAfterRemotePreserve()
-			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-				return resumeNotPerformed, nil
-			}
+		testHookResumeAfterRemotePreserve()
+		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+			return resumeDeferredByAttachPause, nil
+		}
 		}
 		fallthrough
 	case probeAbsent:
@@ -688,10 +688,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				}
 				// Recheck after the gone revalidation: revalidateGoneAccountSwap calls ValidateAccountSwap,
 				// and a TUI can attach during that preflight (#5422 review).
-				testHookResumeAfterGoneRevalidation()
-				if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-					return resumeNotPerformed, nil
-				}
+			testHookResumeAfterGoneRevalidation()
+			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+				return resumeDeferredByAttachPause, nil
+			}
 			}
 			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
 				return resumeNotPerformed, err
@@ -708,7 +708,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// Recheck the attach lease immediately before the respawn, the last destructive replacement before the send (#5422 review).
 		testHookResumeBeforeAccountSwapRespawn()
 		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-			return resumeNotPerformed, nil
+			return resumeDeferredByAttachPause, nil
 		}
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive, which
 		// drops both the LiveLimitReached liveness and its reset time, and LimitResetAt
@@ -877,12 +877,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// top-level gate, and PauseStatusPoll takes only pausedMu — not the locks this
 	// body holds — so a TUI can attach during that window. The explicit
 	// ResumeFromLimit RPC (operatorInitiated=true) is exempt; a deferral returns
-	// resumeNotPerformed without clearing the limit, so the scheduler re-fires on
-	// the next tick (the pending swap stays pending; ClearPendingAccountSwap runs
-	// only on a successful send).
+	// resumeDeferredByAttachPause without clearing the limit, so the scheduler
+	// re-fires on the next tick (the pending swap stays pending; ClearPendingAccountSwap
+	// runs only on a successful send).
 	testHookResumeBeforeSend()
 	if !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID) {
-		return resumeNotPerformed, nil
+		return resumeDeferredByAttachPause, nil
 	}
 	var serr error
 	readinessSettlementAttempted := false
@@ -895,9 +895,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// The pre-submission attach-lease recheck inside deliverManualAccountMission (via
 	// WaitForReadyAndSubmitPrompt's beforeSubmit) defers by returning errAttachPauseDeferred:
 	// the mission was not submitted, the limit was re-parked, and the pending mission
-	// delivery was restored, so fall through to a clean resumeNotPerformed (#5422 review).
+	// delivery was restored, so fall through to a clean resumeDeferredByAttachPause (#5422 review).
 	if errors.Is(serr, errAttachPauseDeferred) {
-		return resumeNotPerformed, nil
+		return resumeDeferredByAttachPause, nil
 	}
 	if serr != nil {
 		// The send crossed the runtime boundary, so even an error is an observed delivery

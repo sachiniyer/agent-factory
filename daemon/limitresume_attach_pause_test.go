@@ -96,6 +96,64 @@ func TestResumeLimitedSessions_AttachPauseDeferralLeavesBackoffUntouched(t *test
 	}
 }
 
+// TestResumeLimitedSessions_MidPassAttachPauseDeferralLeavesBackoffUntouched
+// pins the attempt-state rollback for a mid-pass attach-pause deferral (#5422
+// review): the send-boundary recheck runs AFTER limitResumeAttempted has recorded
+// the attempt, so without the rollback a deferral here would leave the retry gate
+// charged and the scheduler would wait for the exponential backoff after detach
+// instead of re-firing on the next tick — a genuine failure never attempted.
+// resumeDeferredByAttachPause rolls the attempt state back so the next unpaused
+// tick re-fires immediately, exactly like the top-level gate deferral.
+func TestResumeLimitedSessions_MidPassAttachPauseDeferralLeavesBackoffUntouched(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "auto-resume work", resetAt)
+	advance(limitResumeGrace + time.Second)
+
+	stateKey := stableSessionKey(repoID, inst)
+	// The lease is NOT held when ResumeLimitedSessions starts, so the top-level
+	// gate passes and limitResumeAttempted records the attempt. The send-boundary
+	// hook attaches it inside the body, after the attempt was charged — the
+	// window the rollback exists for.
+	prevHook := testHookResumeBeforeSend
+	testHookResumeBeforeSend = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeSend = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	// The deferral must have rolled the attempt state back: no backoff step
+	// charged, so the next unpaused tick re-fires immediately.
+	manager.mu.Lock()
+	st := manager.limitResumeStates[stateKey]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("a mid-pass deferral must keep the retry state so the scheduler re-fires on the next unpaused tick")
+	}
+	if st.attempts != 0 {
+		t.Fatalf("a mid-pass attach-pause deferral must not burn a backoff step, got attempts=%d", st.attempts)
+	}
+
+	// Detach: the resume fires on the very next tick — no backoff wait, because
+	// the deferral rolled the attempt state back. Clear the hook first so the
+	// send-boundary recheck does not re-attach the lease on the second pass.
+	testHookResumeBeforeSend = prevHook
+	manager.ResumeStatusPoll(repoID, inst.Title, inst.ID)
+	manager.ResumeLimitedSessions()
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 {
+		t.Fatalf("a live stall needs no re-spawn, got %d Respawn calls", respawns)
+	}
+	if len(prompts) != 1 || prompts[0] != "auto-resume work" {
+		t.Fatalf("the deferred resume must fire on the first unpaused tick: prompts=%v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("the limit liveness must be cleared once the deferred resume lands")
+	}
+}
+
 // TestResumeFromLimit_ManualRPCExemptFromAttachPause pins the operator-action
 // exemption: the explicit ResumeFromLimit RPC bypasses resumeLimitedSession
 // entirely and reaches resumeFromLimitLockedOutcome with operatorInitiated=true,
@@ -144,11 +202,12 @@ func TestResumeFromLimit_ManualRPCExemptFromAttachPause(t *testing.T) {
 // there, so this test exercises the recheck directly.
 //
 // The send-boundary recheck runs AFTER limitResumeAttempted has recorded the
-// attempt, so unlike the top-level gate a deferral here burns one backoff step —
-// an acceptable trade for the race window, since the user is attached and a short
-// retry delay is preferable to pasting into their pane. This test asserts the
-// deferral itself; the backoff-throttled re-fire is the same path the top-level
-// deferral's companion test already pins.
+// attempt. A mid-pass attach-pause deferral rolls the attempt state back
+// (resumeDeferredByAttachPause), so the next tick after detach re-fires
+// immediately instead of honoring the backoff a genuine failed attempt would
+// (#5422 review). This test asserts the deferral itself; the companion
+// TestResumeLimitedSessions_MidPassAttachPauseDeferralLeavesBackoffUntouched
+// pins the attempt-state rollback.
 func TestResumeLimitedSessions_AttachPauseDuringLivenessProbeDefers(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
@@ -510,7 +569,7 @@ func TestResumeLimitedSessions_AttachPauseAfterRepairValidationDefers(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if outcome != resumeNotPerformed {
+	if outcome != resumeDeferredByAttachPause {
 		t.Fatalf("BUG: the scheduler resumed after a TUI attached during the repair validation (post-validation recheck missed): outcome=%v", outcome)
 	}
 	_, respawns, prompts := backend.snapshot()
@@ -549,7 +608,7 @@ func TestResumeLimitedSessions_AttachPauseAfterGoneRevalidationDefers(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if outcome != resumeNotPerformed {
+	if outcome != resumeDeferredByAttachPause {
 		t.Fatalf("BUG: the scheduler resumed after a TUI attached during the gone revalidation (post-validation recheck missed): outcome=%v", outcome)
 	}
 	_, respawns, prompts := backend.snapshot()
@@ -591,7 +650,7 @@ func TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefers(t *testi
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if outcome != resumeNotPerformed {
+	if outcome != resumeDeferredByAttachPause {
 		t.Fatalf("BUG: the scheduler delivered the manual mission after a TUI attached during the readiness wait (pre-submission recheck missed): outcome=%v", outcome)
 	}
 	_, respawns, prompts := backend.snapshot()
@@ -608,8 +667,17 @@ func TestResumeLimitedSessions_AttachPauseBeforeManualMissionSendDefers(t *testi
 			t.Fatalf("the pre-submission recheck must defer the mission delivery: prompts=%v", prompts)
 		}
 	}
-	if !inst2.LimitReached() {
-		t.Fatal("a pre-submission deferral must re-park the limit so the scheduler re-fires on the next tick")
+	// A pre-submission deferral must not re-park a healthy committed swap to
+	// LiveLimitReached: the row was LiveRunning (accountSwapScheduledResumeEligible
+	// admits a committed swap that is not limit-blocked), so re-parking it would
+	// mislabel a healthy handoff as quota-blocked. Preserve the liveness instead,
+	// and keep the pending swap pending so the scheduler re-fires via
+	// accountSwapScheduledResumeEligible on the preserved liveness (#5422 review).
+	if inst2.LimitReached() {
+		t.Fatal("a pre-submission deferral must not re-park a healthy committed swap (the row was LiveRunning, not limit-blocked)")
+	}
+	if _, _, pending := inst2.PendingAccountSwap(); !pending {
+		t.Fatal("a pre-submission deferral must keep the pending manual swap pending so the scheduler re-fires")
 	}
 	if !m.isPollPaused(repo, inst2.Title, inst2.ID) {
 		t.Fatal("the attach lease must still be held after the deferral")

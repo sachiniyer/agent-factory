@@ -328,8 +328,13 @@ func (m *Manager) resumeLimitedSession(
 
 	// Record the attempt and set the backoff/interval gate BEFORE firing, so a
 	// resume that re-hits the wall on the very next tick is already throttled —
-	// never a hot re-limit loop.
+	// never a hot re-limit loop. Capture the pre-charge state so an attach-pause
+	// deferral mid-pass (resumeDeferredByAttachPause) can roll it back: the lease
+	// lapsed after the top-level gate, not the prompt, so the next tick after
+	// detach must re-fire immediately instead of honoring the backoff a genuine
+	// failed attempt would (#5422 review).
 	ordinaryAttempt := ordinarySchedulable && !now.Before(ordinaryDue)
+	prevAttempts, prevNextAttempt, prevOrdinaryAttemptedFor := st.attempts, st.nextAttempt, st.ordinaryAttemptedFor
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
@@ -339,6 +344,19 @@ func (m *Manager) resumeLimitedSession(
 	}
 	if resumeErr != nil {
 		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
+		return
+	}
+	if outcome == resumeDeferredByAttachPause {
+		// A TUI attached after the top-level gate but before a destructive or send
+		// boundary inside resumeFromLimitLockedOutcome. Nothing was sent and no
+		// identity was committed, so the attempt the gate already charged is not a
+		// genuine failure: roll it back so the scheduler re-fires on the first tick
+		// after the lease lapses instead of backing off (#5422 review).
+		m.mu.Lock()
+		st.attempts = prevAttempts
+		st.nextAttempt = prevNextAttempt
+		st.ordinaryAttemptedFor = prevOrdinaryAttemptedFor
+		m.mu.Unlock()
 		return
 	}
 	// resumeFromLimitLockedOutcome returns (resumeNotPerformed, nil) for several
