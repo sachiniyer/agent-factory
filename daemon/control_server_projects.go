@@ -144,3 +144,19 @@ func (s *controlServer) ListProjects(_ ListProjectsRequest, resp *ListProjectsRe
 	resp.Projects = projects
 	return nil
 }
+
+// SetProjectColor records a registered project's display color and publishes
+// projects.changed so every open client repaints.
+func (s *controlServer) SetProjectColor(req SetProjectColorRequest, resp *SetProjectColorResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	project, err := config.SetProjectColor(req.ID, req.Color)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}

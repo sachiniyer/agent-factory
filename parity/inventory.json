@@ -548,6 +548,24 @@
       "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending — the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind…' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject — no surface reimplements them."
     },
     {
+      "id": "project.color",
+      "title": "Give a project a display color",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/project_color.ts projectColorRow (project menu color row) → web/src/index.ts doSetProjectColor → web/src/api.ts setProjectColor (POST /v1/SetProjectColor); the color paints the session frame and the favicon"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects_color.go projectsColorCmd (af projects color) → daemon SetProjectColor RPC"
+      },
+      "verdict": "deliberate",
+      "notes": "The color exists to find a project's browser tab or window: the web paints the session frame and the favicon with it. The TUI runs inside a terminal it does not own, so it has no favicon or window chrome to paint; the CLI can still set the color for the web. config.SetProjectColor is the single writer; it stores the color in an appearance.json sidecar beside project.json."
+    },
+    {
       "id": "project.switch",
       "title": "Scope the view to one project",
       "tui": {
@@ -1570,6 +1588,7 @@
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
+      "af projects color": "project.color",
       "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
@@ -1632,6 +1651,7 @@
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RebindProject": "project.rebind",
+      "POST /v1/SetProjectColor": "project.color",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1726,6 +1746,7 @@
       "PauseStatusPoll": "-",
       "RegisterProject": "project.add",
       "RebindProject": "project.rebind",
+      "SetProjectColor": "project.color",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",
@@ -1824,6 +1845,7 @@
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
+      "af projects color --help": "meta.discovery",
       "af quota --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",

@@ -675,6 +675,8 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The user-chosen display color (#rrggbb); absent when none is set. */
+  color?: string;
 }
 
 /** Registers a git checkout as a durable, sessionless project (mirrors
@@ -706,6 +708,14 @@ export async function registerProject(path: string, token: string): Promise<Regi
  *  the registry and the rebound root lands in the switcher union. */
 export async function rebindProject(id: string, path: string, token: string): Promise<RegisteredProject> {
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", { id, path }, token);
+  return resp.project;
+}
+
+/** Sets (or, with "", clears) a registered project's display color (mirrors
+ *  `af projects color`). The daemon normalizes it to #rrggbb and emits
+ *  projects.changed, so every open client repaints from the refetched registry. */
+export async function setProjectColor(id: string, color: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("SetProjectColor", { id, color }, token);
   return resp.project;
 }
 

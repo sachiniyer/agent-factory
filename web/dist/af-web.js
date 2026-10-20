@@ -6710,6 +6710,10 @@ async function rebindProject(id, path, token2) {
   const resp = await af("RebindProject", { id, path }, token2);
   return resp.project;
 }
+async function setProjectColor(id, color, token2) {
+  const resp = await af("SetProjectColor", { id, color }, token2);
+  return resp.project;
+}
 async function listProjects(token2) {
   const resp = await af("ListProjects", {}, token2);
   return resp.projects ?? [];
@@ -15889,6 +15893,128 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   (replacement ?? fallback).focus({ preventScroll: true });
 }
 
+// src/project_color.ts
+var PROJECT_COLOR_PALETTE = [
+  "#e11d48",
+  "#ea580c",
+  "#ca8a04",
+  "#16a34a",
+  "#0d9488",
+  "#2563eb",
+  "#7c3aed",
+  "#db2777"
+];
+var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
+var HEX = /^#[0-9a-f]{6}$/;
+function projectColor(projects, root2) {
+  if (root2 === null) return null;
+  const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
+  return HEX.test(color) ? color : null;
+}
+function markInk(color) {
+  const channel = (i) => {
+    const v = parseInt(color.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  return luminance > 0.45 ? "#1f1f1f" : "#ffffff";
+}
+function projectFaviconSvg(color) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+}
+function projectFaviconDataUrl(color) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+}
+function projectFaviconPng(color, size) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof Path2D === "undefined") return null;
+  ctx.scale(size / 512, size / 512);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(0, 0, 512, 512, 112);
+  ctx.fill();
+  ctx.fillStyle = markInk(color);
+  ctx.fill(new Path2D(FAVICON_MARK_PATH));
+  return canvas.toDataURL("image/png");
+}
+var appliedFavicon = null;
+function applyProjectFavicon(color) {
+  if (appliedFavicon === color) return;
+  appliedFavicon = color;
+  for (const link of document.querySelectorAll('link[rel="icon"]')) {
+    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
+    let href = null;
+    if (color !== null) {
+      if (link.type === "image/svg+xml") {
+        href = projectFaviconDataUrl(color);
+      } else {
+        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
+      }
+    }
+    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
+  }
+}
+function applyProjectFrame(main, color) {
+  if (color === null) {
+    if (main.dataset.projectColor === void 0) return;
+    delete main.dataset.projectColor;
+    main.style.removeProperty("--af-project-color");
+    return;
+  }
+  if (main.dataset.projectColor === color) return;
+  main.dataset.projectColor = color;
+  main.style.setProperty("--af-project-color", color);
+}
+function projectColorRow(current, label, onPick) {
+  const pick = (color) => (e) => {
+    e.stopPropagation();
+    onPick(color);
+  };
+  const swatches = PROJECT_COLOR_PALETTE.map((color) => {
+    const swatch = h("button", { type: "button", class: "af-project-swatch" });
+    swatch.style.setProperty("--af-swatch", color);
+    swatch.setAttribute("aria-label", `Color ${label} ${color}`);
+    swatch.setAttribute("title", color);
+    swatch.setAttribute("aria-pressed", current === color ? "true" : "false");
+    swatch.addEventListener("click", pick(color));
+    return swatch;
+  });
+  const input = h("input", { type: "color", class: "af-project-color-input", tabIndex: -1 });
+  input.value = current ?? PROJECT_COLOR_PALETTE[5];
+  input.setAttribute("aria-hidden", "true");
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("change", () => onPick(input.value));
+  const custom2 = h("button", { type: "button", class: "af-project-swatch af-project-swatch-custom" }, "+");
+  custom2.setAttribute("aria-label", `Custom color for ${label}`);
+  custom2.setAttribute("title", "Custom color");
+  custom2.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try {
+      input.showPicker();
+    } catch {
+      input.click();
+    }
+  });
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  clear.disabled = current === null;
+  clear.addEventListener("click", pick(""));
+  const row = h(
+    "div",
+    { class: "af-project-color" },
+    h("span", { class: "af-project-color-label" }, "Color"),
+    ...swatches,
+    custom2,
+    input,
+    clear
+  );
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Color for ${label}`);
+  return row;
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -16670,6 +16796,9 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectFrame(this.main, color);
+    applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -17104,6 +17233,11 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        })
+      );
       const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
       if (currentRecord) {
         const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
@@ -17157,10 +17291,18 @@ var AppShell = class {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -19436,6 +19578,13 @@ function commitRegisteredProjects(projects) {
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
+function doSetProjectColor(root2, color) {
+  const tok = token;
+  if (tok === null) return;
+  const record = store.get().registeredProjects.find((r) => r.root === root2);
+  const id = record ? Promise.resolve(record.id) : registerProject(root2, tok).then((p) => p.id);
+  void id.then((projectId) => setProjectColor(projectId, color, tok)).then(() => refreshRegisteredProjects()).catch((e) => surfaceMutationError(e));
+}
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
     return;
@@ -19727,6 +19876,7 @@ var actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme
 };
 function syncSplit(state) {

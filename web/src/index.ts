@@ -29,6 +29,7 @@ import {
   deleteProject,
   registerProject,
   rebindProject,
+  setProjectColor,
   type RegisteredProject,
   errorText,
   fetchSessionSnapshot,
@@ -2192,6 +2193,19 @@ function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
 }
 
+/** Sets a project's color. A project known only from its sessions has no registry
+ *  record to hold a color, so it is registered first (idempotent on the daemon). */
+function doSetProjectColor(root: string, color: string): void {
+  const tok = token;
+  if (tok === null) return;
+  const record = store.get().registeredProjects.find((r) => r.root === root);
+  const id = record ? Promise.resolve(record.id) : registerProject(root, tok).then((p) => p.id);
+  void id
+    .then((projectId) => setProjectColor(projectId, color, tok))
+    .then(() => refreshRegisteredProjects())
+    .catch((e: unknown) => surfaceMutationError(e));
+}
+
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
  *  requestTaskResync. */
 function requestProjectsResync(): void {
@@ -2598,6 +2612,7 @@ const actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme,
 };
 

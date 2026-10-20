@@ -278,6 +278,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/SetProjectColor",
+		Description: "Set or clear (empty color) the display color of a registered project (id, a prj_… registry id) — a hex color such as #2f5fd8 that web clients use for the session frame and the favicon.",
+		requestType: reflect.TypeOf(SetProjectColorRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProjectColor) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ListProjects",
 		Description: "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
 		requestType: reflect.TypeOf(ListProjectsRequest{}),
