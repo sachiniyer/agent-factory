@@ -713,7 +713,6 @@ func TestSnapshotAndPushBranch_BehindDirtyPreservesUpstreamInConeChanges(t *test
 	runGit(t, wt, "add", "-A")
 	runGit(t, wt, "commit", "-m", "add a.txt and b.txt")
 	runGit(t, wt, "push", "origin", "root/behind-dirty-incone")
-	originTip := branchTip(t, bare, "refs/heads/root/behind-dirty-incone")
 
 	// Advance origin's a.txt from a separate clone (the worktree stays at
 	// the commit that has a.txt=v1, so it is behind origin after the push).
@@ -726,7 +725,7 @@ func TestSnapshotAndPushBranch_BehindDirtyPreservesUpstreamInConeChanges(t *test
 	runGit(t, advanceClone, "add", "-A")
 	runGit(t, advanceClone, "commit", "-m", "advance a.txt on origin")
 	runGit(t, advanceClone, "push", "origin", "root/behind-dirty-incone")
-	originTip = branchTip(t, bare, "refs/heads/root/behind-dirty-incone")
+	originTip := branchTip(t, bare, "refs/heads/root/behind-dirty-incone")
 	ancestorHead := branchTip(t, wt, "HEAD")
 	require.NotEqual(t, ancestorHead, originTip, "precondition: HEAD must be behind origin")
 	// a.txt is at v1 in the worktree (the ancestor's version, not origin's).
