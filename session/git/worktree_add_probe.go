@@ -238,8 +238,10 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// mount failures on the real one. The resolution walks the un-joined path
 	// component by component, following symlinks at each existing prefix; the
 	// destination git is about to create may not exist yet, so the longest
-	// existing prefix is resolved and the remaining non-existent tail is
-	// rejoined lexically.
+	// existing prefix is resolved and the remaining non-existent tail is walked
+	// component by component the same way, following symlinks the kernel's
+	// chdir would follow after creatable components rather than rejoining it
+	// lexically.
 	//
 	// The lookup runs through the bounded fsprobe.EvalSymlinks, the same flight
 	// shape statSpaceProbe and gitCommonDir's deadline already defend: an
@@ -250,6 +252,9 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// path; a non-ENOENT error on an existing prefix walks up to the next
 	// prefix, and if no prefix resolves the lexical join stands (the probe
 	// then reports the same errno git's child surfaces from the missing path).
+	// A dangling symlink in the tail (a symlink whose target does not exist)
+	// is surfaced as a resolution error rather than collapsed past, so the
+	// caller does not probe a filesystem git never reaches.
 	//
 	// The un-joined concatenation preserves `..` in the relative worktreePath
 	// so the walk traverses a symlinked component before collapsing it the way
@@ -311,30 +316,54 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			// its own right: the mount the probe is about to write to did not
 			// answer a metadata lookup, so the git subprocess's failure
 			// classifies environmental rather than structural, the same way a
-			// stat-probe non-answer does. Fall back to the lexical join — the
-			// bounded write/stat probes below still run and add evidence if
-			// they answer — and join the typed non-answer so the lost-restore
-			// classifier reads the bounded environmental class, not bare
-			// structural silence.
+			// stat-probe non-answer does. The actual destination is unknown after
+			// a timeout — the resolution did not complete, so the lexical
+			// filepath.Join of the un-resolved tail is a guess at a filesystem
+			// git may never touch: for a relative path containing traversal such
+			// as `link/../../wt`, git may have failed before reaching that
+			// destination (for example, while validating a branch), and a
+			// coincidental ENOSPC on the unrelated lexical filesystem would be
+			// added to the timeout chain. Because lostRestoreEnvironmentalClass
+			// checks resource errnos before the bounded-deadline signature, that
+			// would convert a capped timeout retry into an indefinite errno wait.
+			// Preserve the timeout evidence without probing a guessed lexical
+			// destination, while still probing independently known locations
+			// such as the common directory, and join the typed non-answer so the
+			// lost-restore classifier reads the bounded environmental class,
+			// not bare structural silence.
 			lexical := filepath.Join(repoPath, g.worktreePath)
-			out := g.annotateGitWriteError(err, filepath.Dir(lexical))
+			out := g.annotateGitWriteError(err)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 		if resolveErr == nil {
 			worktreePath = filepath.Join(resolvedParent, base)
 		} else {
-			// A non-timeout, non-ENOENT resolution error (EACCES, ETIMEDOUT,
-			// EIO, ...) is environmental evidence about the filesystem the
-			// probe is about to write to, not a missing path. Rejoining the
-			// tail lexically would remove a symlinked component like `link/..`
-			// and let the subsequent write/stat probes all succeed, so the
-			// original git failure would misclassify as structural. Fall back
-			// to the lexical join (the bounded probes below still run and add
-			// evidence if they answer) and join the resolution error so the
-			// lost-restore classifier reads it alongside the git failure
-			// rather than dropping it.
+			// A non-timeout resolution error is environmental evidence about the
+			// filesystem the probe is about to write to, not a missing path. It
+			// covers two shapes: an environmental errno (EACCES, EIO, the
+			// bounded ErrProbeTimedOut) returned by a prefix or tail lookup on
+			// an existing component, and a dangling-symlink ENOENT the tail
+			// walk surfaces (a symlink whose target does not exist — git fails
+			// resolving it the way it fails a missing path, but the symlink
+			// entry itself is present). In both shapes the actual destination
+			// is unknown — the resolution did not follow the path the kernel's
+			// chdir does — so a lexical filepath.Join of the un-resolved tail
+			// is a guess at a filesystem git may never touch. For a traversal
+			// such as `link/../../wt` with a dangling `link`, the lexical join
+			// collapses the symlink traversal to the repo's parent and a
+			// coincidental ENOSPC there would stall the lost-restore loop
+			// indefinitely on a structural dangling-link failure; for a
+			// symlinked component the tail walk could not follow, the same
+			// hazard applies. Rejoining the tail lexically would also remove a
+			// symlinked component like `link/..` and let the subsequent
+			// write/stat probes all succeed, misclassifying the original git
+			// failure as structural. Probe only the independently known
+			// locations (the common directory) and join the resolution error so
+			// the lost-restore classifier reads it alongside the git failure
+			// rather than dropping it, without write-probing a guessed lexical
+			// destination.
 			lexical := filepath.Join(repoPath, g.worktreePath)
-			out := g.annotateGitWriteError(err, filepath.Dir(lexical))
+			out := g.annotateGitWriteError(err)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 	}
@@ -414,35 +443,38 @@ const symlinkResolveTimeout = 2 * time.Second
 
 // resolveSymlinkPrefixBounded resolves the longest existing prefix of path
 // through symlinks the way the kernel's chdir resolves a relative worktree
-// argument against the repoPath the git runner sets as cmd.Dir, then rejoins
-// the remaining non-existent tail lexically. filepath.Join only lexically
-// cleans `..`, so a worktree argument like `link/../wt` (where `<repo>/link`
-// is a symlink to /mnt/dir) would collapse to `<repo>/wt` and probe the wrong
-// filesystem; git follows `link` first and writes /mnt/wt. Walking the
-// un-joined path component by component — following symlinks at each existing
-// prefix with filepath.EvalSymlinks before `..` is collapsed — preserves that
-// traversal for the probe. The destination git is about to create may not
-// exist yet, so the longest existing prefix is resolved and the non-existent
-// tail is rejoined; if no prefix resolves the lexical path is the honest
-// answer (the probe then reports the same errno git's child surfaces from the
-// missing path).
+// argument against the repoPath the git runner sets as cmd.Dir, then walks the
+// remaining non-existent tail component by component the same way. filepath.Join
+// only lexically cleans `..`, so a worktree argument like `link/../wt` (where
+// `<repo>/link` is a symlink to /mnt/dir) would collapse to `<repo>/wt` and
+// probe the wrong filesystem; git follows `link` first and writes /mnt/wt. The
+// prefix walk follows symlinks at each existing prefix with
+// filepath.EvalSymlinks before `..` is collapsed, and the tail walk
+// (resolveSymlinkTail) continues the same component-by-component resolution
+// past creatable components, following symlinks the kernel's chdir would
+// follow so a traversal like `missing/../link/../wt` resolves to the
+// filesystem git actually writes to rather than the lexical collapse. The
+// destination git is about to create may not exist yet, so the longest
+// existing prefix is resolved and the non-existent tail is walked; if no
+// prefix resolves the lexical path is the honest answer (the probe then
+// reports the same errno git's child surfaces from the missing path).
 //
-// Each prefix lookup runs through the bounded fsprobe.EvalSymlinks, the same
-// per-dir flight shape statSpaceProbe uses — a stalled network/FUSE mount that
-// never answers a Readlink or Stat would otherwise wedge the synchronous
-// restore poll the probe informs (#5295 review). The whole walk shares a
-// single deadline (symlinkResolveTimeout) rather than restarting the per-dir
-// bound for every prefix, so a path with many components past the first
-// nonexistent entry cannot block for N × probeTimeout. A timed-out lookup
-// returns the bounded non-answer (ErrProbeTimedOut + context.DeadlineExceeded)
-// so the caller joins it into the annotation rather than silently falling back
-// to the lexical path; a non-timeout ENOENT (the normal pre-creation answer)
-// walks up to the next shorter prefix, while any other resolution error
-// (EACCES, ETIMEDOUT, EIO, ...) is returned — it is environmental evidence
-// about the filesystem git's child is about to write to, and rejoining the
-// tail lexically would remove a symlinked component like `link/..` and let the
-// subsequent probes succeed, misclassifying the original git failure as
-// structural.
+// Each prefix and tail lookup runs through the bounded fsprobe.EvalSymlinks
+// and fsprobe.Lstat, the same per-dir flight shape statSpaceProbe uses — a
+// stalled network/FUSE mount that never answers a Readlink or Stat would
+// otherwise wedge the synchronous restore poll the probe informs (#5295
+// review). The whole walk shares a single deadline (symlinkResolveTimeout)
+// rather than restarting the per-dir bound for every component, so a path
+// with many components past the first nonexistent entry cannot block for
+// N × probeTimeout. A timed-out lookup returns the bounded non-answer
+// (ErrProbeTimedOut + context.DeadlineExceeded) so the caller joins it into
+// the annotation rather than silently falling back to the lexical path; a
+// non-timeout ENOENT (the normal pre-creation answer) walks up to the next
+// shorter prefix, while any other resolution error (EACCES, ETIMEDOUT,
+// EIO, ...) is returned — it is environmental evidence about the filesystem
+// git's child is about to write to, and rejoining the tail lexically would
+// remove a symlinked component like `link/..` and let the subsequent probes
+// succeed, misclassifying the original git failure as structural.
 func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, err error) {
 	if path == "" {
 		return path, false, nil
@@ -490,9 +522,13 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 // resolveSymlinkPrefixWalk is the unbounded component walk
 // resolveSymlinkPrefixBounded runs under a single shared deadline. It walks
 // the un-joined path from the longest prefix down, resolving the longest
-// existing prefix through symlinks and rejoining the non-existent tail
-// lexically. The context is canceled when the shared deadline fires so the
-// walk does not continue issuing prefix lookups after the caller has returned.
+// existing prefix through symlinks, then hands the non-existent tail to
+// resolveSymlinkTail which follows it component by component the way the
+// kernel's chdir does (following symlinks at existing components, treating a
+// genuinely missing component as creatable, and surfacing a dangling symlink
+// as a resolution error). The context is canceled when the shared deadline
+// fires so the walk does not continue issuing prefix or tail lookups after the
+// caller has returned.
 func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string, timedOut bool, err error) {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts); i > 0; i-- {
@@ -511,23 +547,47 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		}
 		r, e := evalSymlinksSpaceProbe(prefix)
 		if e == nil {
-			tail := strings.Join(parts[i:], string(filepath.Separator))
-			if tail == "" {
+			tailParts := parts[i:]
+			if len(tailParts) == 0 {
 				return r, false, nil
 			}
-			return filepath.Join(r, tail), false, nil
+			// Walk the non-existent tail component by component the way the
+			// kernel's chdir does, following symlinks at each existing
+			// component before `..` collapses the path. A lexical
+			// filepath.Join would clean `..` first and skip a symlink the
+			// kernel follows, so a relative path like `missing/../link/../wt`
+			// (git creates `missing`, backs out, follows `link`, backs out,
+			// and creates `wt` under the link's target's parent) would collapse
+			// to `<repo>/wt` and probe an unrelated filesystem. The walk
+			// resolves each existing component (including a symlink) before the
+			// `..` that follows it, treats a genuinely missing component as
+			// creatable (git creates it and continues), and surfaces a dangling
+			// symlink (a symlink whose target does not exist) as a resolution
+			// error instead of collapsing past it — git fails resolving the
+			// dangling link, so probing a filesystem it never reaches would let
+			// a coincidental ENOSPC there stall the lost-restore loop
+			// indefinitely on a structural failure.
+			return resolveSymlinkTail(ctx, r, tailParts)
 		}
 		if errors.Is(e, fsprobe.ErrProbeTimedOut) {
 			return "", true, e
 		}
 		// A missing path (ENOENT) is the normal pre-creation answer — walk
 		// up to the next shorter prefix to find the longest existing one.
-		// Any other resolution error (EACCES, ETIMEDOUT, EIO, ...) is
-		// environmental evidence about the filesystem git's child is about to
-		// write to; rejoining the tail lexically would remove a symlinked
-		// component like `link/..` and let the subsequent probes succeed,
-		// misclassifying the original git failure as structural. Return it so
-		// the caller joins it into the annotation.
+		// A dangling symlink is not a missing path: its entry exists (Lstat
+		// succeeds and reports a symlink) but its target does not, so
+		// EvalSymlinks returns ENOENT for a prefix that contains it. The
+		// prefix walk treats that ENOENT the same as a genuinely absent
+		// component and walks up; the tail walk re-examines each component
+		// (including the dangling symlink) and surfaces it as a resolution
+		// error, so the caller does not collapse the traversal past it and
+		// probe a filesystem git never reaches. Any other resolution error
+		// (EACCES, ETIMEDOUT, EIO, ...) is environmental evidence about the
+		// filesystem git's child is about to write to; rejoining the tail
+		// lexically would remove a symlinked component like `link/..` and let
+		// the subsequent probes succeed, misclassifying the original git
+		// failure as structural. Return it so the caller joins it into the
+		// annotation.
 		if os.IsNotExist(e) {
 			continue
 		}
@@ -537,4 +597,109 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 	// answer: the probe reports the same errno git's child surfaces from the
 	// missing path.
 	return path, false, nil
+}
+
+// resolveSymlinkTail walks the non-existent tail of a worktree parent path —
+// the components after the longest existing prefix resolveSymlinkPrefixWalk
+// resolved — the way the kernel's chdir resolves a relative worktree argument
+// inside git, following symlinks at each existing component before `..`
+// collapses the path and treating a genuinely missing component as creatable
+// (git creates it and continues). A lexical filepath.Join would clean `..`
+// first and skip a symlink the kernel follows, so a relative path like
+// `missing/../link/../wt` (where `link` -> /mnt/dir) would collapse to
+// `<repo>/wt` and probe an unrelated filesystem: git creates `missing`, backs
+// out to the repo, follows `link` to /mnt/dir, backs out to /mnt, and creates
+// `wt` there, so a full /mnt is the real ENOSPC git's write would hit but a
+// lexical probe would never see it.
+//
+// Each component is resolved through the bounded fsprobe seams the prefix walk
+// already uses, so a stalled mount surfaces the typed non-answer rather than
+// wedging the synchronous restore poll, and the whole walk shares the prefix
+// walk's context so the shared deadline still bounds it. A `..` component
+// backs out of the current path the way chdir does — after a symlink is
+// followed, `..` is the symlink target's parent, not the lexical parent of the
+// link entry, and after a creatable component, `..` backs out the way git's
+// chdir does once it has created the entry.
+//
+// A genuinely missing component (Lstat reports ENOENT for a non-symlink entry,
+// or the prefix walk already reached this tail because EvalSymlinks reported
+// ENOENT for the longest existing prefix) is creatable: git makes the
+// directory and continues, so the walk advances past it without following a
+// symlink (there is nothing to follow). A dangling symlink (Lstat reports a
+// symlink whose EvalSymlinks returns ENOENT) is NOT creatable — git fails
+// resolving it the way it fails a missing path, but the symlink entry itself
+// is present, so collapsing the traversal past it would probe a filesystem git
+// never reaches. The walk surfaces it as a resolution error so the caller
+// preserves the structural failure rather than write-probing a guessed lexical
+// destination.
+func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (string, bool, error) {
+	for _, part := range tailParts {
+		select {
+		case <-ctx.Done():
+			// The shared deadline fired — stop walking. The in-flight per-dir
+			// flight drains on its own timeout, but no further component lookup
+			// starts, so the goroutine does not accumulate metadata calls or
+			// block waiting on each remaining component.
+			return "", false, ctx.Err()
+		default:
+		}
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
+		info, err := lstatSpaceProbe(next)
+		if err != nil {
+			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+				return "", true, err
+			}
+			if os.IsNotExist(err) {
+				// A genuinely missing component — git creates it and
+				// continues. There is nothing to follow, so the walk advances
+				// without resolving a symlink; a creatable component is not a
+				// dangling symlink, and the `..` after it backs out the way
+				// chdir does once git has made the entry.
+				cur = next
+				continue
+			}
+			// A non-ENOENT, non-timeout lstat error (EACCES, EIO, ...) is
+			// environmental evidence about the filesystem git's child is about
+			// to write to. Return it so the caller joins it rather than
+			// collapsing the tail lexically and probing an unrelated filesystem.
+			return "", false, err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			// A regular component — continue through it the way chdir does.
+			cur = next
+			continue
+		}
+		// A symlink. Resolve it the way the kernel's chdir does: EvalSymlinks
+		// follows the target. A dangling symlink (the entry exists but its
+		// target does not) is NOT a creatable component — git fails resolving
+		// it, so collapsing the traversal past it would probe a filesystem git
+		// never reaches and a coincidental ENOSPC there would stall the
+		// lost-restore loop indefinitely on a structural failure. Distinguish
+		// it from a genuinely absent component (Lstat reported ENOENT) and
+		// surface the resolution error so the caller preserves the structural
+		// failure rather than write-probing a guessed lexical destination.
+		resolved, rErr := evalSymlinksSpaceProbe(next)
+		if rErr != nil {
+			if errors.Is(rErr, fsprobe.ErrProbeTimedOut) {
+				return "", true, rErr
+			}
+			if os.IsNotExist(rErr) {
+				return "", false, fmt.Errorf("dangling symlink %s: %w", next, rErr)
+			}
+			// A non-ENOENT, non-timeout resolution error on a symlink is
+			// environmental evidence about the filesystem the symlink's target
+			// sits on; return it the way the prefix walk returns a non-ENOENT
+			// EvalSymlinks error.
+			return "", false, rErr
+		}
+		cur = resolved
+	}
+	return cur, false, nil
 }

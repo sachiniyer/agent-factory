@@ -1228,5 +1228,248 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationReadDirErrorPreserved(t *t
 			"than silently dropping it: %v", out)
 }
 
-// The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
-// the named fallback, and the bounded flight) is tested in internal/fsprobe.
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkAfterCreatableComponent pins the
+// contract the #5421 review added: a relative worktree path whose longest existing prefix is the
+// repo but whose non-existent tail traverses a creatable component followed by `..` and an
+// existing symlink (worktreePath = `missing/../link/../wt` with `link` -> /mnt/dir) must follow
+// the symlink after the creatable component the way git's chdir does — git creates `missing`, backs
+// out to the repo, follows `link` to its target, backs out to the target's parent, and creates
+// `wt` there. A lexical filepath.Join collapses `missing/../link/../wt` to `<repo>/wt` and probes
+// the wrong filesystem, so a full /mnt (the real destination's parent) would never reach the chain
+// and a full repo filesystem (which git never writes to for this path) could instead. The tail
+// walk follows the symlink at each existing component before `..` collapses the path, so the
+// probe targets the filesystem git actually writes to.
+//
+// Deterministic in both directions: against the form that lexically rejoined the tail the probe
+// targeted <repo>/wt (the lexical collapse) and missed the real parent entirely, so a write probe
+// mocked to fail only on the real parent returned nil and errors.Is(out, syscall.ENOSPC) was
+// false; with the tail walk the probe targets the real parent and the mocked ENOSPC reaches the
+// chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkAfterCreatableComponent(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real dir on a distinct location; `missing` does
+	// not exist, so the longest existing prefix is the repo and the tail
+	// `missing/../link/../wt` must walk past `missing` (creatable), back to the
+	// repo, through `link` (symlink), back to the link target's parent, and
+	// into `wt` — landing at parent(realTarget)/wt, the same filesystem git
+	// writes to. A lexical join would collapse to <repo>/wt and miss it.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "wt"))
+	link := filepath.Join(repo, "link")
+	require.NoError(t, os.Symlink(realTarget, link))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		return nil, os.ErrNotExist // pre-creation normal answer — stays silent
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// `missing/../link/../wt` relative to a real repo: git creates `missing`,
+	// backs out, follows `link`, backs out, and creates `wt` under the link
+	// target's parent. The probe must target parent(realTarget)/wt, not the
+	// lexical <repo>/wt that filepath.Join(repo, "missing/../link/../wt")
+	// would produce. Resolve the link target the way the production code does
+	// so the expected paths match across hosts (macOS /var/folders ->
+	// /private/var/folders).
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	expectedDest := filepath.Join(filepath.Dir(resolvedRealTarget), "wt")
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	lexicalDest := filepath.Join(resolvedRepo, "wt")
+	require.NotEqual(t, lexicalDest, expectedDest,
+		"the creatable-component-then-symlink case must diverge from the lexical join, otherwise the test cannot distinguish the fix from the bug")
+	g := &GitWorktree{repoPath: "repo", worktreePath: "missing/../link/../wt"}
+	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+
+	require.Equal(t, expectedDest, statTarget,
+		"the probe must target the symlink-resolved destination git's child writes to (%s), not the "+
+			"lexical filepath.Join that collapses the creatable component and the symlink (%s)",
+		expectedDest, lexicalDest)
+	require.Contains(t, probedDirs, filepath.Dir(expectedDest),
+		"the worktree parent dir probed must be the symlink-resolved parent (%s), not the lexical %s",
+		filepath.Dir(expectedDest), lexicalDest)
+	require.NotContains(t, probedDirs, resolvedRepo,
+		"the lexical <repo>/wt parent must not be probed — git writes to the link target's parent, "+
+			"not the repo")
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathDanglingSymlinkDoesNotCollapseTraversal pins the
+// contract the #5421 review added: a relative worktree path that traverses a dangling symlink
+// before `..` (link -> /missing, worktreePath = link/../../wt) must not collapse the traversal
+// past the dangling symlink. EvalSymlinks returns ENOENT for prefixes containing `link`, and a
+// lexical filepath.Join would backtrack to the repo and collapse `link/../..` to the repo's
+// parent, probing a filesystem git never reaches — git fails resolving the dangling `link`
+// before it touches that filesystem, so a coincidental ENOSPC there would stall the
+// lost-restore loop indefinitely on a structural dangling-link failure. The tail walk
+// distinguishes a dangling symlink (Lstat succeeds and reports a symlink whose target does not
+// exist) from a genuinely absent component, surfaces it as a resolution error, and the caller
+// probes only the independently known locations (the common directory) rather than a guessed
+// lexical destination.
+//
+// Deterministic in both directions: against the form that collapsed the dangling symlink the
+// probe targeted the lexical parent (the repo's parent) and a write probe mocked to fail only
+// there returned ENOSPC, so errors.Is(out, syscall.ENOSPC) was true and the test failed; with
+// the tail walk the dangling symlink is surfaced and the lexical parent is never probed, so the
+// ENOSPC never reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathDanglingSymlinkDoesNotCollapseTraversal(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link is a dangling symlink: its target does not exist, so
+	// EvalSymlinks returns ENOENT for any prefix containing `link`. Git fails
+	// resolving it before reaching the lexical parent a filepath.Join would
+	// collapse `link/../..` to. A coincidental ENOSPC on that lexical parent
+	// must not reach the chain — the dangling symlink is a structural failure,
+	// not an environmental one.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "does-not-exist"), filepath.Join(repo, "link")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	// The lexical parent a filepath.Join(repo, "link/../../wt") would collapse
+	// to — the repo's parent — which git never writes to for this path.
+	lexicalParent := filepath.Dir(resolvedRepo)
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		// A coincidental ENOSPC on the lexical parent (the repo's parent) is
+		// the bug: the dangling symlink never lets git reach it, so freeing it
+		// cannot fix the structural failure and the probe must not target it.
+		if dir == lexicalParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/../../wt"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a dangling symlink before `..` must not collapse the traversal to the repo's parent — "+
+			"git fails resolving the dangling link before reaching that filesystem, so a coincidental "+
+			"ENOSPC there must not stall the lost-restore loop on a structural failure: %v", out)
+	require.NotContains(t, probedDirs, lexicalParent,
+		"the lexical parent the dangling-symlink traversal would collapse to must not be probed — "+
+			"git never writes there for this path")
+	// The dangling-symlink resolution error is joined so the classifier sees it
+	// alongside the git failure rather than the structural silence a dropped
+	// resolution would leave.
+	require.Contains(t, out.Error(), "symlink resolution of",
+		"the dangling-symlink resolution error must be named in the annotation, not dropped: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_SymlinkResolutionTimeoutDoesNotProbeLexicalDestination pins the
+// contract the #5421 review added: when symlink resolution times out for a relative path containing
+// traversal (link/../../wt), the actual destination is unknown and git may have failed before
+// reaching it (for example while validating a branch), so the lexical filepath.Join a timeout
+// falls back to is a guess at a filesystem git may never touch. A coincidental ENOSPC on that
+// unrelated lexical filesystem would be added to the timeout chain, and because
+// lostRestoreEnvironmentalClass checks resource errnos before the bounded-deadline signature,
+// it would convert a capped timeout retry into an indefinite errno wait. The timeout branch
+// must preserve the timeout evidence and probe only the independently known locations (the
+// common directory), never the guessed lexical destination.
+//
+// Deterministic in both directions: against the form that probed filepath.Dir(lexical) on a
+// timeout the lexical parent was probed and a write probe mocked to fail only there returned
+// ENOSPC, so errors.Is(out, syscall.ENOSPC) was true and the test failed; with the timeout
+// branch probing only the common directory the ENOSPC never reaches the chain while the
+// bounded non-answer (ErrProbeTimedOut + context.DeadlineExceeded) does.
+func TestAnnotateWorktreeAddError_SymlinkResolutionTimeoutDoesNotProbeLexicalDestination(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+	oldEval := evalSymlinksSpaceProbe
+	defer func() { evalSymlinksSpaceProbe = oldEval }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	// The lexical parent a timeout would collapse `link/../../wt` to — the
+	// repo's parent — which git may never reach for this path.
+	lexicalParent := filepath.Dir(resolvedRepo)
+
+	// A stalled mount never answers the symlink resolution: the bounded flight
+	// returns the typed non-answer, and the timeout branch must not probe the
+	// lexical destination it would have fallen back to.
+	evalSymlinksSpaceProbe = func(string) (string, error) {
+		return "", fmt.Errorf("eval-symlinks probe did not answer within bound: %w: %w",
+			fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		// A coincidental ENOSPC on the lexical parent is the bug: the timeout
+		// did not resolve the destination, so git may have failed before
+		// reaching it and freeing this filesystem cannot fix the failure.
+		if dir == lexicalParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/../../wt"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a timeout must not probe the guessed lexical destination — git may have failed before "+
+			"reaching it, so a coincidental ENOSPC on the unrelated lexical filesystem must not be "+
+			"added to the timeout chain and convert a capped retry into an indefinite errno wait: %v", out)
+	require.NotContains(t, probedDirs, lexicalParent,
+		"the lexical parent a timeout collapses the traversal to must not be probed — the actual "+
+			"destination is unknown after a timeout")
+	require.True(t, errors.Is(out, fsprobe.ErrProbeTimedOut),
+		"the bounded symlink-resolution non-answer must still reach the chain: %v", out)
+	require.True(t, errors.Is(out, context.DeadlineExceeded),
+		"the sentinel must keep its deadline pair for the classifier: %v", out)
+}
