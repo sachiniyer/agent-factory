@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -416,16 +417,25 @@ func limitResumeBackoffFor(attempts int) time.Duration {
 
 // attachPauseLeaseHeld reports whether an attached TUI now holds the pause lease
 // for this session, which an automated resume must defer to at every destructive
-// boundary in resumeFromLimitLockedOutcome (#5422 review): the identity commit, the
-// pane-stop calls, and the respawn all replace a runtime a TUI may have attached to
-// during a liveness probe the scheduler's top-level gate does not cover. The
-// operatorInitiated RPC (the explicit ResumeFromLimit) is exempt, exactly like a
-// manual send-prompt; the caller's !operatorInitiated gate mirrors the send-boundary
-// recheck and the top-level gate above. A deferral returns resumeNotPerformed without
-// clearing the limit, so the scheduler re-fires on the next tick once the lease lapses.
+// boundary in resumeFromLimitLockedOutcome and commitNewAccountSwapIdentity (#5422
+// review): the identity commit, the in-commit teardown, the pane-stop calls, and the
+// respawn all replace a runtime a TUI may have attached to during a liveness probe the
+// scheduler's top-level gate does not cover. The operatorInitiated RPC (the explicit
+// ResumeFromLimit) is exempt, exactly like a manual send-prompt; the caller's
+// !operatorInitiated gate mirrors the send-boundary recheck and the top-level gate
+// above. A deferral returns resumeNotPerformed without clearing the limit, so the
+// scheduler re-fires on the next tick once the lease lapses.
 func (m *Manager) attachPauseLeaseHeld(operatorInitiated bool, repoID string, instance *session.Instance) bool {
 	return !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID)
 }
+
+// errAttachPauseDeferred is the sentinel returned by commitNewAccountSwapIdentity
+// when the attach-lease recheck immediately before its destructive teardown
+// (prepareRuntimeForAccountSwap) defers an automated swap. The caller translates
+// it to a clean resumeNotPerformed return so the scheduler re-fires on the next
+// tick once the lease lapses; it is never surfaced as a real error and is not
+// fallback-eligible, since no identity was committed.
+var errAttachPauseDeferred = errors.New("attach pause lease held: deferred automated account-swap teardown")
 
 // testHookResumeBeforeAccountSwapCommit fires in resumeFromLimitLockedOutcome after
 // the account-swap liveness probe and before the attach-lease recheck that gates the
@@ -448,3 +458,14 @@ var testHookResumeBeforeAccountSwapStop = func() {}
 // recheck is the only thing that can keep the respawn from replacing a runtime a TUI
 // just attached to. No-op in production.
 var testHookResumeBeforeAccountSwapRespawn = func() {}
+
+// testHookResumeBeforeAccountSwapTeardown fires inside
+// commitNewAccountSwapIdentity (account_swap.go) after the admission and the
+// rare in-commit liveness re-probe, immediately before the attach-lease recheck
+// that gates the destructive prepareRuntimeForAccountSwap teardown. A test
+// substitutes it to attach the lease in that window — after the top-level
+// pre-commit recheck in resumeFromLimitLockedOutcome has already passed but
+// before the old panes are stopped — so the pre-teardown recheck is the only
+// thing that can keep the commit from tearing down a runtime a TUI just
+// attached to. No-op in production.
+var testHookResumeBeforeAccountSwapTeardown = func() {}

@@ -595,6 +595,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if !lockEntered && precheckErr != nil {
 			swapErr = precheckErr
 		}
+		// The in-commit teardown recheck (commitNewAccountSwapIdentity) defers by
+		// returning errAttachPauseDeferred: no identity was committed, so fall
+		// through to a clean resumeNotPerformed instead of the error/fallback path.
+		if errors.Is(swapErr, errAttachPauseDeferred) {
+			return resumeNotPerformed, nil
+		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
 				return resumeNotPerformed, swapErr
@@ -869,22 +875,16 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	// Recheck the attach lease at the actual send boundary, not only at the
-	// scheduler's entry (#5422 review). The lease check in resumeLimitedSession
-	// runs before this body, but this body can spend a substantial window between
-	// that check and the send: the liveness probe above (up to the poll budget for
-	// a remote run), and the account-swap respawn and readiness wait. PauseStatusPoll
-	// takes only pausedMu — not the target or op locks this body holds — so a TUI
-	// can attach and renew the lease during those waits, which is exactly the race
-	// every DeliverPrompt send path re-checks for via deferWhileAttached. Mirror
-	// that contract here so an automated resume cannot paste into the pane the
-	// user is now typing in. The explicit ResumeFromLimit RPC reaches this body
-	// with operatorInitiated=true and stays exempt, exactly like a manual
-	// send-prompt: this recheck (and the lease) only constrain automated delivery.
-	// A deferral here returns resumeNotPerformed without clearing the limit, so the
-	// scheduler re-fires on the next tick once the lease lapses — the same recovery
-	// a send error uses (the pending account swap, if any, stays pending for that
-	// retry, since ClearPendingAccountSwap is only called on a successful send).
+	// Recheck the attach lease at the actual send boundary (#5422 review): the
+	// liveness probe, account-swap respawn, and readiness wait above can all run
+	// after the top-level gate, and PauseStatusPoll takes only pausedMu — not the
+	// locks this body holds — so a TUI can attach during that window. Mirror the
+	// deferWhileAttached contract every SendPrompt path uses so an automated resume
+	// cannot paste into the pane the user is now typing in. The explicit
+	// ResumeFromLimit RPC reaches this body with operatorInitiated=true and stays
+	// exempt. A deferral returns resumeNotPerformed without clearing the limit, so
+	// the scheduler re-fires on the next tick (the pending account swap stays
+	// pending; ClearPendingAccountSwap runs only on a successful send).
 	testHookResumeBeforeSend()
 	if !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID) {
 		return resumeNotPerformed, nil

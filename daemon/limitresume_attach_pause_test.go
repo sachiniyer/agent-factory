@@ -258,6 +258,49 @@ func TestResumeLimitedSessions_AttachPauseBeforeAccountSwapCommitDefers(t *testi
 	}
 }
 
+// TestResumeLimitedSessions_AttachPauseBeforeAccountSwapTeardownDefers pins the
+// in-commit teardown attach-lease recheck (#5422 review): the pre-commit recheck
+// in resumeFromLimitLockedOutcome runs before the identity commit, but
+// commitNewAccountSwapIdentity performs the account-swap admission and the rare
+// in-commit liveness re-probe under the config/account/project fences before it
+// stops the old panes via prepareRuntimeForAccountSwap — a window where a TUI can
+// attach and renew the lease. The recheck immediately before that teardown (gated
+// on !operatorInitiated) defers the swap so prepareRuntimeForAccountSwap never
+// runs, leaving the session parked and the pending swap pending for the next tick.
+func TestResumeLimitedSessions_AttachPauseBeforeAccountSwapTeardownDefers(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	configureLimitAccountCandidate(t, manager, "work")
+
+	advance(time.Second)
+
+	// The lease is NOT held when ResumeLimitedSessions starts, and the pre-commit
+	// recheck passes (the hook only attaches inside commitNewAccountSwapIdentity,
+	// after the admission and before prepareRuntimeForAccountSwap stops the old
+	// panes). The in-commit teardown recheck is the only thing that keeps the
+	// commit from tearing down a runtime a TUI just attached to.
+	prevHook := testHookResumeBeforeAccountSwapTeardown
+	testHookResumeBeforeAccountSwapTeardown = func() {
+		manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	}
+	t.Cleanup(func() { testHookResumeBeforeAccountSwapTeardown = prevHook })
+
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	if respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("BUG: the auto-resume scheduler tore down the runtime after a TUI attached inside the identity commit (pre-teardown recheck missed): respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("a pre-teardown deferral must leave the session parked at the limit wall")
+	}
+	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
+		t.Fatal("the attach lease must still be held after the deferral")
+	}
+}
+
 // TestResumeLimitedSessions_AttachPauseBeforeAccountSwapRespawnDefers pins the
 // pre-respawn attach-lease recheck (#5422 review): the identity commit and the
 // account-swap liveness probe have both run by the time the respawn replaces the
