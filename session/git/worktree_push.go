@@ -130,8 +130,12 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// does not yet exist on origin for a first archive — leaves FETCH_HEAD
 	// unset and we fall through to the unconditional push below, which still
 	// fast-forwards origin for the equal/ahead cases and creates the branch
-	// on the first push.
-	_, _ = g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", branch)
+	// on the first push. The refspec is qualified with refs/heads/ so a
+	// same-named tag on origin cannot resolve into FETCH_HEAD in its place
+	// (git fetch selects a same-named tag for an unqualified refspec), which
+	// would fast-forward HEAD onto unrelated tagged history or report a false
+	// divergence — the classification and the push both target the branch.
+	_, _ = g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", "refs/heads/"+branch)
 	// rev-parse --verify -q confirms FETCH_HEAD resolved to a commit before
 	// we classify; without it a missing FETCH_HEAD would read as "diverged"
 	// and refuse a perfectly pushable ahead/equal HEAD.
@@ -150,11 +154,27 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 				// Clean tree: fast-forward HEAD and the working tree to
 				// origin's tip. No snapshot commit is needed — origin
 				// already holds this history, and the push below becomes a
-				// no-op fast-forward.
-				if out, ffErr := g.runGitCommand(g.worktreePath, "merge", "--ff-only", "FETCH_HEAD"); ffErr != nil {
+				// no-op fast-forward. Use `reset --hard` rather than
+				// `merge --ff-only`: the ancestor check above already proved
+				// FETCH_HEAD is a descendant of HEAD, so this is a
+				// fast-forward that discards nothing (the tree is clean), and
+				// reset does NOT run a post-merge hook (git merge does, and
+				// runGitCommand has no timeout, so a slow/blocking post-merge
+				// hook would hang the archive — --no-verify does not suppress
+				// post-merge).
+				if out, ffErr := g.runGitCommand(g.worktreePath, "reset", "--hard", "FETCH_HEAD"); ffErr != nil {
 					return "", g.annotateGitWriteError(fmt.Errorf("failed to fast-forward HEAD onto origin's tip before archive push: %s: %w",
 						strings.TrimSpace(out), ffErr), probeDir)
 				}
+				// Do NOT re-check status here: a fast-forward can advance a
+				// submodule gitlink in the index without checking out the new
+				// submodule commit, and a re-checked `git status` would report
+				// that as ` M <submodule>`. That is reconciliation, not user
+				// work — the snapshot block below would stage the stale gitlink
+				// and push a commit reverting origin's submodule update. The
+				// tree was clean before (we are in the !dirty branch), so
+				// preserve that classification: leave `status` empty and let
+				// the push fast-forward origin's branch unchanged.
 			} else {
 				// Dirty tree: build the snapshot commit directly on origin's
 				// tip so the push fast-forwards, WITHOUT `git stash`
@@ -187,14 +207,15 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 					return "", g.annotateGitWriteError(fmt.Errorf("failed to advance HEAD onto snapshot commit before archive push: %s: %w",
 						strings.TrimSpace(out), e), probeDir)
 				}
-			}
-			// Re-read status after reconciliation: both branches leave the
-			// tree clean (clean: the ff updated it; dirty: reset --soft
-			// onto the just-staged commit), so the snapshot block below is
-			// a no-op and we proceed straight to the push.
-			status, err = g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
-			if err != nil {
-				return "", g.annotateGitWriteError(fmt.Errorf("failed to re-check worktree status after reconciling with origin: %w", err), probeDir)
+				// Re-read status after the dirty reconciliation: reset --soft
+				// onto the just-staged commit leaves the tree clean, so the
+				// snapshot block below is a no-op and we proceed straight to
+				// the push. (The clean branch deliberately skips this re-check
+				// — see the submodule-gitlink note above.)
+				status, err = g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
+				if err != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to re-check worktree status after reconciling with origin: %w", err), probeDir)
+				}
 			}
 		} else if !isAncestor("FETCH_HEAD", "HEAD") {
 			// FETCH_HEAD is NOT an ancestor of HEAD either, and HEAD is not
