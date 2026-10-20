@@ -159,18 +159,36 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	}
 	joined := err
 	probed := map[string]bool{}
-	probe := func(dir string) {
+	// Each writeSpaceProbe runs in its own per-dir bounded flight, so a
+	// hand-edited relative path with many accumulated creatable parents (the
+	// tail walker's output) would otherwise block the synchronous restore poll
+	// for roughly number of parents × probeTimeout when the metadata lookups
+	// answer but writes stall — the degraded-filesystem case these bounds exist
+	// to contain. Stop after the first timed-out probe: the in-flight flight
+	// already drained, the timed-out probe already named a mount the joined
+	// error reads as environmental, and every remaining parent sits on the same
+	// degraded filesystem that the timeout just reported. The common-dir probe
+	// below is a single bounded flight on an independently known location, so
+	// it still runs after a timed-out parent so the classifier keeps its
+	// separate evidence.
+	probe := func(dir string) (timedOut bool) {
 		if dir == "" || probed[dir] {
-			return
+			return false
 		}
 		probed[dir] = true
 		if probeErr := writeSpaceProbe(dir); probeErr != nil {
 			joined = errors.Join(joined,
 				fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
+			if errors.Is(probeErr, fsprobe.ErrProbeTimedOut) {
+				return true
+			}
 		}
+		return false
 	}
 	for _, dir := range dirs {
-		probe(dir)
+		if probe(dir) {
+			break
+		}
 	}
 	common, cerr := gitCommonDir(g)
 	if cerr != nil {
