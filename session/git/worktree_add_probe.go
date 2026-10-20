@@ -31,6 +31,18 @@ var writeSpaceProbe = fsprobe.Write
 // deadline ambiguity.
 var statSpaceProbe = fsprobe.Stat
 
+// evalSymlinksSpaceProbe is the test seam over fsprobe.EvalSymlinks — the
+// bounded symlink-resolution walk the worktree probe uses to follow symlinks
+// in the destination the way the kernel's chdir does. It is bounded for the
+// same reason statSpaceProbe is: filepath.EvalSymlinks performs an unbounded
+// sequence of Readlink/Stat calls, and the annotate path runs inside the
+// synchronous restore poll — an unbounded lookup on a stalled mount would
+// wedge the loop before the probe is reached (#5295 review). Its non-answer
+// carries the fsprobe ErrProbeTimedOut + context.DeadlineExceeded pair so the
+// classifier reads the bounded environmental class, not bare deadline
+// ambiguity.
+var evalSymlinksSpaceProbe = fsprobe.EvalSymlinks
+
 // ErrCommonDirProbeNoAnswer marks the bounded `rev-parse --git-common-dir`
 // lookup's non-answer: runGitLocalCommand returns a bare
 // context.DeadlineExceeded when its deadline trips, and the lost-restore
@@ -171,22 +183,62 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
 		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
 	}
-	// Resolve symlinks in repoPath before joining a relative worktreePath. The
-	// git runner sets cmd.Dir = repoPath, and the kernel's chdir follows
-	// symlinks, so a relative worktree argument resolves inside git against the
+	// Resolve symlinks in the probe path the way the kernel's chdir resolves
+	// the worktree argument inside git. The git runner sets cmd.Dir = repoPath,
+	// so a relative worktree argument resolves inside git against the
 	// resolved (real) repo dir — `git -C /launch/repo worktree add ../wt` with
-	// /launch/repo -> /mnt/repo creates /mnt/wt, not /launch/wt. filepath.Join
-	// only lexically cleans, so without this it would build /launch/wt and the
-	// probe would examine an unrelated filesystem, misclassifying ENOSPC or
-	// mount failures on the real one. EvalSymlinks needs the path to exist; a
-	// missing repo falls back to the lexical join above (the probe then
-	// reports the same errno git's child surfaces from the missing path).
-	if resolved, err := filepath.EvalSymlinks(repoPath); err == nil {
-		repoPath = resolved
-	}
+	// /launch/repo -> /mnt/repo creates /mnt/wt, not /launch/wt — and a
+	// worktree argument like `link/../wt` (where `<repo>/link` is a symlink)
+	// follows `link` before collapsing `..`, creating /mnt/wt rather than the
+	// lexical `<repo>/wt`. filepath.Join only lexically cleans `..`, so a
+	// raw join would probe an unrelated filesystem and misclassify ENOSPC or
+	// mount failures on the real one. The resolution walks the un-joined path
+	// component by component, following symlinks at each existing prefix; the
+	// destination git is about to create may not exist yet, so the longest
+	// existing prefix is resolved and the remaining non-existent tail is
+	// rejoined lexically.
+	//
+	// The lookup runs through the bounded fsprobe.EvalSymlinks, the same flight
+	// shape statSpaceProbe and gitCommonDir's deadline already defend: an
+	// unbounded filepath.EvalSymlinks on a stalled network/FUSE mount would
+	// wedge the synchronous restore poll the probe informs. A bounded
+	// non-answer joins the chain as typed environmental evidence the way a
+	// stat-probe timeout does, instead of silently falling back to the lexical
+	// path; a non-ENOENT error on an existing prefix walks up to the next
+	// prefix, and if no prefix resolves the lexical join stands (the probe
+	// then reports the same errno git's child surfaces from the missing path).
+	//
+	// The un-joined concatenation preserves `..` in the relative worktreePath
+	// so the walk traverses a symlinked component before collapsing it the way
+	// git's chdir does; a joined path would lexically clean `..` first and the
+	// symlink would never be followed.
 	worktreePath := g.worktreePath
 	if !filepath.IsAbs(worktreePath) {
-		worktreePath = filepath.Join(repoPath, worktreePath)
+		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
+		resolved, timedOut, resolveErr := resolveSymlinkPrefixBounded(worktreePath)
+		if timedOut {
+			// A bounded non-answer from the symlink resolution is evidence in
+			// its own right: the mount the probe is about to write to did not
+			// answer a metadata lookup, so the git subprocess's failure
+			// classifies environmental rather than structural, the same way a
+			// stat-probe non-answer does. Fall back to the lexical join — the
+			// bounded write/stat probes below still run and add evidence if
+			// they answer — and join the typed non-answer so the lost-restore
+			// classifier reads the bounded environmental class, not bare
+			// structural silence.
+			lexical := filepath.Join(repoPath, g.worktreePath)
+			out := g.annotateGitWriteError(err, filepath.Dir(lexical))
+			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
+		}
+		if resolveErr == nil {
+			worktreePath = resolved
+		} else {
+			// No prefix resolved through symlinks and the resolution did not
+			// time out — fall back to the lexical join, the honest answer when
+			// nothing on the path exists yet (the probe then reports the same
+			// errno git's child surfaces from the missing path).
+			worktreePath = filepath.Join(repoPath, g.worktreePath)
+		}
 	}
 	dirs := []string{filepath.Dir(worktreePath)}
 	var statErr error
@@ -200,4 +252,57 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		out = errors.Join(out, fmt.Errorf("stat probe destination %s: %w", worktreePath, statErr))
 	}
 	return out
+}
+
+// resolveSymlinkPrefixBounded resolves the longest existing prefix of path
+// through symlinks the way the kernel's chdir resolves a relative worktree
+// argument against the repoPath the git runner sets as cmd.Dir, then rejoins
+// the remaining non-existent tail lexically. filepath.Join only lexically
+// cleans `..`, so a worktree argument like `link/../wt` (where `<repo>/link`
+// is a symlink to /mnt/dir) would collapse to `<repo>/wt` and probe the wrong
+// filesystem; git follows `link` first and writes /mnt/wt. Walking the
+// un-joined path component by component — following symlinks at each existing
+// prefix with filepath.EvalSymlinks before `..` is collapsed — preserves that
+// traversal for the probe. The destination git is about to create may not
+// exist yet, so the longest existing prefix is resolved and the non-existent
+// tail is rejoined; if no prefix resolves the lexical path is the honest
+// answer (the probe then reports the same errno git's child surfaces from the
+// missing path).
+//
+// Each prefix lookup runs through the bounded fsprobe.EvalSymlinks, the same
+// per-dir flight shape statSpaceProbe uses — a stalled network/FUSE mount that
+// never answers a Readlink or Stat would otherwise wedge the synchronous
+// restore poll the probe informs (#5295 review). A timed-out lookup returns the
+// bounded non-answer (ErrProbeTimedOut + context.DeadlineExceeded) so the
+// caller joins it into the annotation rather than silently falling back to
+// the lexical path; a non-timeout error (ENOENT on the final component,
+// EACCES on a parent) walks up to the next shorter prefix.
+func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, err error) {
+	if path == "" {
+		return path, false, nil
+	}
+	parts := strings.Split(path, string(filepath.Separator))
+	for i := len(parts); i > 0; i-- {
+		prefix := strings.Join(parts[:i], string(filepath.Separator))
+		if prefix == "" {
+			prefix = string(filepath.Separator)
+		}
+		r, e := evalSymlinksSpaceProbe(prefix)
+		if e == nil {
+			tail := strings.Join(parts[i:], string(filepath.Separator))
+			if tail == "" {
+				return r, false, nil
+			}
+			return filepath.Join(r, tail), false, nil
+		}
+		if errors.Is(e, fsprobe.ErrProbeTimedOut) {
+			return "", true, e
+		}
+		// Non-timeout error (ENOENT on the final component, EACCES on a
+		// parent, ...) — walk up to the next shorter prefix.
+	}
+	// No prefix resolved through symlinks. The lexical path is the honest
+	// answer: the probe reports the same errno git's child surfaces from the
+	// missing path.
+	return path, false, nil
 }

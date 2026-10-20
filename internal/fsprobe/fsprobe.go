@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -159,6 +160,14 @@ func openProbeFile(dir string) (*os.File, error) {
 // gets probed itself rather than the parent that hosts its name.
 var statPath = os.Stat
 
+// evalSymlinksPath is the test seam under EvalSymlinks's bounded flight — the
+// metadata + Readlink walk that resolves a path to its real destination. The
+// raw filepath.EvalSymlinks performs an unbounded sequence of metadata
+// lookups that would wedge the synchronous restore poll on a stalled mount
+// (the same hazard Stat is bounded for), so EvalSymlinks runs it inside a
+// per-dir flight.
+var evalSymlinksPath = filepath.EvalSymlinks
+
 // Write runs the space probe for dir inside a per-dir bounded flight: a
 // filesystem that stops completing writes (a degraded mount) must surface as
 // a typed non-answer — context.DeadlineExceeded carried in the chain —
@@ -207,6 +216,24 @@ func Stat(dir string) (os.FileInfo, error) {
 	return info, err
 }
 
+// EvalSymlinks runs filepath.EvalSymlinks for path inside the same per-dir
+// bounded flight shape as Stat. A caller resolving a path through symlinks —
+// to mirror the kernel's chdir for a worktree probe, or to find the real
+// filesystem a relative argument writes to — cannot afford an unbounded
+// Readlink/Stat walk: on a degraded mount that never answers, the resolution
+// would wedge the synchronous restore poll before the probe is reached. The
+// returned non-answer carries the same ErrProbeTimedOut +
+// context.DeadlineExceeded pair the other probes use, so the lost-restore
+// classifier reads the bounded environmental class rather than charging the
+// structural budget for a mount stall (#5295 review).
+func EvalSymlinks(path string) (string, error) {
+	res, err := runBounded(path, evalSymlinksFlights, "eval-symlinks probe",
+		"the filesystem did not answer the symlink resolution",
+		func() (any, error) { return evalSymlinksPath(path) })
+	s, _ := res.(string)
+	return s, err
+}
+
 type probeFlight struct {
 	done     chan struct{}
 	res      any
@@ -221,6 +248,7 @@ type flightRegistry struct {
 
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var evalSymlinksFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
 func runBounded(dir string, flights *flightRegistry, what, detail string,

@@ -492,5 +492,125 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkedRepo(t *te
 	}
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkInPathComponent pins the
+// symlink traversal the kernel's chdir applies INSIDE a relative worktreePath: a restored
+// record's worktreePath like `link/../wt` (where `<repo>/link` is a symlink to /mnt/dir) must
+// resolve the symlink before collapsing `..`, the way `git -C <repo> worktree add link/../wt`
+// does (it creates /mnt/wt, not `<repo>/wt`). filepath.Join lexically cleans `link/../wt` to
+// `wt`, so a probe built from the join would examine `<repo>/wt` — an unrelated filesystem —
+// and misclassify ENOSPC or mount failures on the real destination. The resolution walks the
+// un-joined path component by component so the symlink is followed before the `..` collapses,
+// then rejoins the non-existent tail onto the resolved prefix.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkInPathComponent(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real dir on a distinct location; `link/../wt`
+	// must follow the link before collapsing `..`, landing at <realTarget>/wt,
+	// not the lexical <repo>/wt.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "wt"))
+	link := filepath.Join(repo, "link")
+	require.NoError(t, os.Symlink(realTarget, link))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		return nil, os.ErrNotExist // pre-creation normal answer — stays silent
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// `link/../wt` relative to a real repo: git follows `link` to realTarget,
+	// then `..` to its parent, then creates `wt`. The probe must target the
+	// same parent(realTarget)/wt, not the lexical <repo>/wt that
+	// filepath.Join(repo, "link/../wt") would produce.
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	expectedDest := filepath.Join(filepath.Dir(resolvedRealTarget), "wt")
+	lexicalDest := filepath.Join(resolvedRepo, "wt")
+	require.NotEqual(t, lexicalDest, expectedDest,
+		"the symlink-in-path case must diverge from the lexical join, otherwise the test cannot distinguish the fix from the bug")
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/../wt"}
+	_ = g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+
+	require.Equal(t, expectedDest, statTarget,
+		"the probe must target the symlink-resolved destination git's child writes to "+
+			"(%s), not the lexical filepath.Join of the un-resolved path (%s)", expectedDest, lexicalDest)
+	require.Contains(t, probedDirs, filepath.Dir(expectedDest),
+		"the worktree parent dir probed must be the symlink-resolved parent (%s), not the lexical %s",
+		filepath.Dir(expectedDest), lexicalDest)
+}
+
+// TestAnnotateWorktreeAddError_SymlinkResolutionIsBounded pins the #5295-review contract for
+// the symlink resolution the worktree probe added: filepath.EvalSymlinks performs unbounded
+// metadata lookups, and the annotate path runs inside the synchronous restore poll, so the
+// resolution must run through the same bounded flight as the stat probe — a stalled mount
+// that never answers must surface the typed non-answer (ErrProbeTimedOut +
+// context.DeadlineExceeded) instead of wedging the poll. The bounded non-answer joins the
+// chain as evidence so the classifier reads the bounded environmental class, not bare
+// structural silence.
+func TestAnnotateWorktreeAddError_SymlinkResolutionIsBounded(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+	oldEval := evalSymlinksSpaceProbe
+	defer func() { evalSymlinksSpaceProbe = oldEval }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// A stalled mount never answers the symlink resolution: the bounded flight
+	// returns the typed non-answer instead of blocking, so the annotate path
+	// stays responsive and the environmental evidence joins the chain.
+	var evalCalls []string
+	evalSymlinksSpaceProbe = func(p string) (string, error) {
+		evalCalls = append(evalCalls, p)
+		return "", fmt.Errorf("eval-symlinks probe of %s did not answer within bound: %w: %w",
+			p, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+	}
+	writeSpaceProbe = func(string) error { return nil }
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, fsprobe.ErrProbeTimedOut),
+		"the bounded symlink-resolution non-answer must reach the chain: %v", out)
+	require.True(t, errors.Is(out, context.DeadlineExceeded),
+		"the sentinel must keep its deadline pair for the classifier: %v", out)
+	require.NotEmpty(t, evalCalls,
+		"the bounded symlink resolution must be attempted, not skipped")
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.
