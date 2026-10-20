@@ -213,10 +213,29 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// so the walk traverses a symlinked component before collapsing it the way
 	// git's chdir does; a joined path would lexically clean `..` first and the
 	// symlink would never be followed.
+	//
+	// Only the parent traversal is resolved, and the final component is
+	// preserved as the existing-destination check sees it. When the final
+	// component is a symlink to a regular file or a nonempty directory, git
+	// rejects the add because the destination already exists without writing to
+	// the symlink target's parent; resolving the whole destination would make
+	// filepath.Dir below point at that unrelated parent, and a full filesystem
+	// there would add ENOSPC the lost-restore loop waits on indefinitely even
+	// though freeing it cannot fix the structural failure. Resolving the parent
+	// and rejoining the final name keeps filepath.Dir on the directory that
+	// hosts the destination's name — the filesystem git actually operates in —
+	// while the symlinked components the kernel's chdir walks through before the
+	// final name are still followed.
+	//
+	// The split uses filepath.Split rather than filepath.Dir so the parent keeps
+	// its `..` for the bounded walk: a relative worktreePath like `link/../wt`
+	// resolves `link` before `..` collapses the way git's chdir does, and
+	// filepath.Dir would clean the `..` away and lose the symlinked component.
 	worktreePath := g.worktreePath
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
-		resolved, timedOut, resolveErr := resolveSymlinkPrefixBounded(worktreePath)
+		parent, base := filepath.Split(worktreePath)
+		resolvedParent, timedOut, resolveErr := resolveSymlinkPrefixBounded(strings.TrimRight(parent, string(filepath.Separator)))
 		if timedOut {
 			// A bounded non-answer from the symlink resolution is evidence in
 			// its own right: the mount the probe is about to write to did not
@@ -232,7 +251,7 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 		if resolveErr == nil {
-			worktreePath = resolved
+			worktreePath = filepath.Join(resolvedParent, base)
 		} else {
 			// A non-timeout, non-ENOENT resolution error (EACCES, ETIMEDOUT,
 			// EIO, ...) is environmental evidence about the filesystem the

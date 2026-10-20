@@ -670,5 +670,91 @@ func TestAnnotateWorktreeAddError_SymlinkResolutionNonEnoentErrorPreserved(t *te
 		"the resolution failure must be named as a symlink resolution error, not dropped: %v", out)
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFinalComponentSymlinkPreservesParent pins the
+// contract the #5421 review added: when a restored relative destination's final component is a
+// symlink to an existing directory, git rejects the add because the destination already exists
+// without writing to the symlink target's parent. Resolving the whole destination would make
+// filepath.Dir(worktreePath) point at that unrelated parent, and a full filesystem there would
+// add ENOSPC the lost-restore loop waits on indefinitely even though freeing it cannot fix the
+// structural failure. The parent traversal is resolved separately and the final component is
+// preserved for the existing-destination check, so the parent probe targets the directory that
+// hosts the destination's name rather than the symlink target's parent.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalComponentSymlinkPreservesParent(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The relative worktree path's final component is a symlink to a real
+	// directory on a distinct location. Git rejects the add because the
+	// destination already exists; the probe must not resolve through the
+	// symlink and probe the symlink target's parent, which sits on a
+	// filesystem git never writes to.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the symlinked prefix the way the production code does, so the
+	// expected parent matches across hosts (macOS /var/folders ->
+	// /private/var/folders).
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	symlinkTargetParent := filepath.Dir(resolvedRealTarget)
+	require.NotEqual(t, symlinkTargetParent, resolvedRepo,
+		"the symlink target's parent must differ from the repo dir, otherwise the test cannot distinguish the fix from the bug")
+
+	// Only the symlink target's parent is full. The parent that hosts the
+	// destination's name is writable, so a probe of the correct parent sees
+	// no ENOSPC and the git failure stays structural; a probe of the symlink
+	// target's parent (the bug) adds ENOSPC and the lost-restore loop would
+	// wait indefinitely on a filesystem freeing it cannot fix.
+	var statTarget string
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		statTarget = p
+		// The destination already exists (the symlink resolves to a real
+		// directory), so the existing-destination check sees it as a dir.
+		return os.Stat(p)
+	}
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == symlinkTargetParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem at the symlink target's parent must not add ENOSPC — git rejected the add "+
+			"because the destination already exists, so freeing that filesystem cannot fix the structural "+
+			"failure and the parent that hosts the destination's name is writable: %v", out)
+	require.NotContains(t, probedDirs, symlinkTargetParent,
+		"the parent probe must target the directory that hosts the destination's name (%s), not the "+
+			"symlink target's parent (%s)", resolvedRepo, symlinkTargetParent)
+	require.Equal(t, filepath.Join(resolvedRepo, "dest"), statTarget,
+		"the existing-destination check must see the preserved final component (%s), not the resolved "+
+			"symlink target (%s)", filepath.Join(resolvedRepo, "dest"), resolvedRealTarget)
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the parent that hosts the destination's name must be probed")
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.
