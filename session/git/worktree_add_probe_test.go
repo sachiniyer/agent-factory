@@ -1312,9 +1312,19 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkAfterCreatab
 	require.Contains(t, probedDirs, filepath.Dir(expectedDest),
 		"the worktree parent dir probed must be the symlink-resolved parent (%s), not the lexical %s",
 		filepath.Dir(expectedDest), lexicalDest)
-	require.NotContains(t, probedDirs, resolvedRepo,
-		"the lexical <repo>/wt parent must not be probed — git writes to the link target's parent, "+
-			"not the repo")
+	// git creates the missing `missing` component under the repo via
+	// safe_create_leading_directories before backing out and following `link`,
+	// so the repo is the existing parent of a creatable component the tail
+	// walk advanced past and must be probed for ENOSPC the way a full
+	// filesystem on the mount git wrote the missing directory into surfaces
+	// the resource errno. The destination stat above still targets the
+	// symlink-resolved parent (not the lexical <repo>/wt), so probing the repo
+	// as a creatable parent does not collapse the traversal to the lexical
+	// destination.
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the existing parent of the creatable `missing` component (the repo, where git creates it "+
+			"via safe_create_leading_directories) must be probed for ENOSPC, not just the symlink-"+
+			"resolved destination parent")
 }
 
 // TestAnnotateWorktreeAddError_RelativeWorktreePathDanglingSymlinkDoesNotCollapseTraversal pins the

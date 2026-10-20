@@ -344,3 +344,91 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesExistingAncestorForN
 		"the nearest existing ancestor of the non-existent worktree parent must "+
 			"be probed so the ENOSPC git encounters creating it reaches the chain")
 }
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentEscapingMount pins the
+// contract the #5421 review added: when a relative worktree path's tail creates a missing
+// component on a mounted symlink target and a later `..` escapes that mount (for example
+// `link/missing/../../dest` with `<repo>/link -> /mnt/x`), git's safe_create_leading_directories
+// creates `missing` under the link target (/mnt/x) before the final worktree lands under a
+// different filesystem (the target's parent's parent). The existing-parent walk
+// (filepath.Dir(worktreePath) upward) ascends from the final destination's parent toward the
+// root and never reaches the mount the missing component was created on, so without retaining
+// the creatable parent a full filesystem on /mnt/x is missed and the restore consumes its
+// structural retry budget. The tail walk retains the existing parent of each creatable
+// component it advances past, and the probe write-probes it so a full filesystem on the mount
+// git actually wrote the missing directory into surfaces the resource errno the subprocess's
+// opaque ExitError drops.
+//
+// Deterministic in both directions: against the form that did not retain the creatable parent
+// the write probe only targeted the final parent and the common dir, a write probe mocked to
+// fail only on the link target returned nil, so errors.Is(out, syscall.ENOSPC) was false and
+// the test failed; with the creatable parent retained the link target is probed and the ENOSPC
+// reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentEscapingMount(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real dir on a distinct location; `missing` does
+	// not exist, so the longest existing prefix is <repo>/link (resolved to
+	// the link target) and the tail `missing/../..` must create `missing` under
+	// the link target (the mount), back out twice to the target's parent's
+	// parent, and land there — a different filesystem than the link target
+	// where git's safe_create_leading_directories wrote `missing`. A lexical
+	// join would collapse `link/missing/../..` to <repo> and miss the mount
+	// entirely; the existing-parent walk from the final parent never reaches the
+	// link target, so only the creatable parent the tail walk retains can
+	// surface ENOSPC on the mount git wrote the missing directory into.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "wt"))
+	link := filepath.Join(repo, "link")
+	require.NoError(t, os.Symlink(realTarget, link))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Pre-creation: every stat returns ENOENT so the tail walk treats every
+	// tail component as creatable the way git's safe_create_leading_directories
+	// would, and the existing-destination check stays silent.
+	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	// A full filesystem on the link target (the mount where `missing` is
+	// created) is the bug: git creates `missing` there via
+	// safe_create_leading_directories, so the ENOSPC is on that filesystem.
+	// Without the creatable parent only the final parent and the common dir
+	// are probed, neither is the link target, and the ENOSPC never reaches the
+	// chain.
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == resolvedRealTarget {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/missing/../../dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem on the mounted symlink target where git creates the "+
+			"missing component must surface the resource errno: the existing-parent walk "+
+			"from the final destination never reaches that mount, so only the creatable "+
+			"parent the tail walk retains can probe it: %v", out)
+	require.Contains(t, probedDirs, resolvedRealTarget,
+		"the existing parent of the creatable `missing` component (the link target, where "+
+			"git creates it via safe_create_leading_directories) must be probed when a later "+
+			"`..` escapes the mount, not just the final parent and the common dir")
+}

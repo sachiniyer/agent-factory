@@ -280,6 +280,7 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// resolves `link` before `..` collapses the way git's chdir does, and
 	// filepath.Dir would clean the `..` away and lose the symlinked component.
 	worktreePath := g.worktreePath
+	var creatableParents []string
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
 		// Trim trailing separators (but preserve a filesystem root) so a
@@ -311,7 +312,8 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		if parent == "" || parent == vol {
 			parent = vol + string(filepath.Separator)
 		}
-		resolvedParent, timedOut, resolveErr := resolveSymlinkPrefixBounded(parent)
+		resolvedParent, timedOut, resolveErr, cp := resolveSymlinkPrefixBounded(parent)
+		creatableParents = cp
 		if timedOut {
 			// A bounded non-answer from the symlink resolution is evidence in
 			// its own right: the mount the probe is about to write to did not
@@ -406,8 +408,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// common dir is probed separately below, but a common dir on another
 	// writable filesystem leaves this ancestor as the only probe that can
 	// catch the ENOSPC.
+	//
+	// Bound the complete ancestor search the way resolveSymlinkPrefixBounded
+	// bounds the prefix walk: each statSpaceProbe already runs in its own
+	// per-dir bounded flight, but without a shared budget a hand-edited
+	// relative path with many components whose missing-path stats each return
+	// ENOENT just before the per-call timeout could block the synchronous
+	// restore poll for roughly components × probeTimeout. Stop walking once
+	// the shared budget elapses; the in-flight stat drains on its own per-dir
+	// timeout, and the common-dir probe below still covers the independently
+	// known location.
+	ancestorDeadline := time.Now().Add(symlinkResolveTimeout)
 	parentDir := filepath.Dir(worktreePath)
 	for {
+		if time.Now().After(ancestorDeadline) {
+			break
+		}
 		if st, sErr := statSpaceProbe(parentDir); sErr == nil && st != nil {
 			if parentDir != filepath.Dir(worktreePath) {
 				dirs = append(dirs, parentDir)
@@ -426,6 +442,24 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			break
 		}
 		parentDir = next
+	}
+	// Probe the existing parent of every creatable component the tail walk
+	// advanced past, so a full filesystem on the mount git actually wrote a
+	// missing directory into surfaces the resource errno the subprocess's
+	// opaque ExitError drops. When a creatable component sits on a mounted
+	// symlink target a later `..` escapes (for example `link/missing/../../dest`
+	// with `link -> /mnt/x`, where git creates `missing` under `/mnt/x` before
+	// the final worktree lands under a different filesystem), the
+	// existing-parent walk above (filepath.Dir(worktreePath) upward) never
+	// reaches that mount: it ascends from the final destination's parent
+	// toward the root, but the creatable parent is a sibling branch the tail
+	// walk followed. The tail walk retains each such parent so the probe
+	// covers the filesystem git wrote the missing directory into, not just the
+	// final parent and the common dir. annotateGitWriteError dedups via its
+	// probed map, so a creatable parent that coincides with an already-probed
+	// dir is probed once.
+	for _, cp := range creatableParents {
+		dirs = append(dirs, cp)
 	}
 	var statErr error
 	var lstatErr error
@@ -534,9 +568,9 @@ const symlinkResolveTimeout = 2 * time.Second
 // git's child is about to write to, and rejoining the tail lexically would
 // remove a symlinked component like `link/..` and let the subsequent probes
 // succeed, misclassifying the original git failure as structural.
-func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, err error) {
+func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, err error, creatableParents []string) {
 	if path == "" {
-		return path, false, nil
+		return path, false, nil, nil
 	}
 	// Run the whole prefix walk under one deadline so a slow filesystem
 	// cannot block the restore poll for N × probeTimeout — each prefix
@@ -549,22 +583,23 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 	// after the caller has returned — the in-flight per-dir flight still
 	// drains on its own per-dir timeout, but no new prefix lookup starts.
 	type walkResult struct {
-		resolved string
-		timedOut bool
-		err      error
+		resolved         string
+		timedOut         bool
+		err              error
+		creatableParents []string
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan walkResult, 1)
 	go func() {
-		r, to, e := resolveSymlinkPrefixWalk(ctx, path)
-		done <- walkResult{r, to, e}
+		r, to, e, cp := resolveSymlinkPrefixWalk(ctx, path)
+		done <- walkResult{r, to, e, cp}
 	}()
 	timer := time.NewTimer(symlinkResolveTimeout)
 	defer timer.Stop()
 	select {
 	case res := <-done:
-		return res.resolved, res.timedOut, res.err
+		return res.resolved, res.timedOut, res.err, res.creatableParents
 	case <-timer.C:
 		// The whole walk did not answer within the shared budget — surface
 		// the typed non-answer the same way a single timed-out flight does,
@@ -574,7 +609,7 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 		// its own timeout, but no further prefix is probed.
 		cancel()
 		return "", true, fmt.Errorf("symlink prefix walk of %s did not answer within %s: %w: %w",
-			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), nil
 	}
 }
 
@@ -588,7 +623,7 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 // as a resolution error). The context is canceled when the shared deadline
 // fires so the walk does not continue issuing prefix or tail lookups after the
 // caller has returned.
-func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string, timedOut bool, err error) {
+func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string, timedOut bool, err error, creatableParents []string) {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts); i > 0; i-- {
 		select {
@@ -597,7 +632,7 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 			// per-dir flight drains on its own timeout, but no further
 			// prefix lookup starts, so the goroutine does not accumulate
 			// metadata calls or block waiting on each remaining component.
-			return "", false, ctx.Err()
+			return "", false, ctx.Err(), nil
 		default:
 		}
 		prefix := strings.Join(parts[:i], string(filepath.Separator))
@@ -608,7 +643,7 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		if e == nil {
 			tailParts := parts[i:]
 			if len(tailParts) == 0 {
-				return r, false, nil
+				return r, false, nil, nil
 			}
 			// Walk the non-existent tail component by component the way the
 			// kernel's chdir does, following symlinks at each existing
@@ -629,7 +664,7 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 			return resolveSymlinkTail(ctx, r, tailParts)
 		}
 		if errors.Is(e, fsprobe.ErrProbeTimedOut) {
-			return "", true, e
+			return "", true, e, nil
 		}
 		// A missing path (ENOENT) is the normal pre-creation answer — walk
 		// up to the next shorter prefix to find the longest existing one.
@@ -650,12 +685,12 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		if os.IsNotExist(e) {
 			continue
 		}
-		return "", false, e
+		return "", false, e, nil
 	}
 	// No prefix resolved through symlinks. The lexical path is the honest
 	// answer: the probe reports the same errno git's child surfaces from the
 	// missing path.
-	return path, false, nil
+	return path, false, nil, nil
 }
 
 // resolveSymlinkTail walks the non-existent tail of a worktree parent path —
@@ -711,7 +746,33 @@ func tailIsDir(path string) (bool, error) {
 	return info.IsDir(), nil
 }
 
-func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (string, bool, error) {
+// resolveSymlinkTail walks the non-existent tail of a worktree parent path —
+// the components after the longest existing prefix resolveSymlinkPrefixWalk
+// resolved — component by component the way the kernel's chdir resolves a
+// relative worktree argument against the repoPath the git runner sets as
+// cmd.Dir. The final component is preserved by the caller (filepath.Split) so
+// the existing-destination check sees it un-resolved; this walk only resolves
+// the parent the way chdir does, following symlinks at existing components
+// before a `..` collapses them and treating a genuinely missing component as
+// creatable the way git's safe_create_leading_directories does.
+//
+// It returns the resolved tail, whether the walk timed out, an error for a
+// non-ENOENT failure the caller must join (a dangling symlink, ENOTDIR on a
+// non-directory `..`, or a non-timeout lstat/eval error the caller preserves
+// as environmental evidence), and the existing parent of every creatable
+// component the walk advanced past — the directory git creates that component
+// in. When a creatable component sits on a mounted symlink target a later
+// `..` escapes (for example `link/missing/../../dest` with `link -> /mnt/x`,
+// where git creates `missing` under `/mnt/x` before the final worktree lands
+// under a different filesystem), the existing-parent walk above
+// (filepath.Dir(worktreePath) upward) never reaches that mount: it ascends
+// from the final destination's parent toward the root, but the creatable
+// parent is a sibling branch the tail walk followed. Returning the creatable
+// parents lets the caller write-probe each one so a full filesystem on the
+// mount git actually wrote the missing directory into surfaces the resource
+// errno the subprocess's opaque ExitError drops, instead of probing only the
+// final parent and the common dir.
+func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (string, bool, error, []string) {
 	// Track whether the current resolved component is a directory. The
 	// kernel's chdir does not traverse `..` through a non-directory — a
 	// symlink that resolved to a regular file (or a regular file component)
@@ -724,15 +785,16 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 	curIsDir, err := tailIsDir(cur)
 	if err != nil {
 		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-			return "", true, err
+			return "", true, err, nil
 		}
 		// A non-timeout lstat error (EACCES, EIO, ...) on the resolved prefix
 		// is environmental evidence about the filesystem the probe is about to
 		// write to; return it the way a non-ENOENT lstat on a tail component is
 		// returned so the caller joins it rather than probing a guessed
 		// lexical destination.
-		return "", false, err
+		return "", false, err, nil
 	}
+	var creatableParents []string
 	for _, part := range tailParts {
 		select {
 		case <-ctx.Done():
@@ -740,7 +802,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			// flight drains on its own timeout, but no further component lookup
 			// starts, so the goroutine does not accumulate metadata calls or
 			// block waiting on each remaining component.
-			return "", false, ctx.Err()
+			return "", false, ctx.Err(), nil
 		default:
 		}
 		if part == "" || part == "." {
@@ -759,7 +821,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 				// ENOTDIR failure. Surface ENOTDIR the way the kernel does so
 				// the caller probes only the independently known locations and
 				// joins the structural error.
-				return "", false, &os.PathError{Op: "stat", Path: cur, Err: syscall.ENOTDIR}
+				return "", false, &os.PathError{Op: "stat", Path: cur, Err: syscall.ENOTDIR}, nil
 			}
 			cur = filepath.Dir(cur)
 			curIsDir = true
@@ -769,14 +831,24 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		info, err := lstatSpaceProbe(next)
 		if err != nil {
 			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-				return "", true, err
+				return "", true, err, nil
 			}
 			if os.IsNotExist(err) {
 				// A genuinely missing component — git creates it and
 				// continues. There is nothing to follow, so the walk advances
 				// without resolving a symlink; a creatable component is not a
 				// dangling symlink, and the `..` after it backs out the way
-				// chdir does once git has made the entry.
+				// chdir does once git has made the entry. Retain the existing
+				// parent as a creatable prefix: git's
+				// safe_create_leading_directories writes the missing entry
+				// under it, so a full filesystem on that mount is the resource
+				// errno the lost-restore classifier must read. When a later
+				// `..` escapes a symlink target the existing-parent walk above
+				// (filepath.Dir(worktreePath) upward) never reaches that mount,
+				// so the caller write-probes the creatable parents this walk
+				// retains the way it probes the final parent and the common
+				// dir.
+				creatableParents = append(creatableParents, cur)
 				cur = next
 				curIsDir = true
 				continue
@@ -785,7 +857,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			// environmental evidence about the filesystem git's child is about
 			// to write to. Return it so the caller joins it rather than
 			// collapsing the tail lexically and probing an unrelated filesystem.
-			return "", false, err
+			return "", false, err, nil
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			// A regular component — continue through it the way chdir does.
@@ -808,16 +880,16 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		resolved, rErr := evalSymlinksSpaceProbe(next)
 		if rErr != nil {
 			if errors.Is(rErr, fsprobe.ErrProbeTimedOut) {
-				return "", true, rErr
+				return "", true, rErr, nil
 			}
 			if os.IsNotExist(rErr) {
-				return "", false, fmt.Errorf("dangling symlink %s: %w", next, rErr)
+				return "", false, fmt.Errorf("dangling symlink %s: %w", next, rErr), nil
 			}
 			// A non-ENOENT, non-timeout resolution error on a symlink is
 			// environmental evidence about the filesystem the symlink's target
 			// sits on; return it the way the prefix walk returns a non-ENOENT
 			// EvalSymlinks error.
-			return "", false, rErr
+			return "", false, rErr, nil
 		}
 		// Track whether the resolved symlink target is a directory: a `..`
 		// after a symlink to a regular file must surface ENOTDIR the way the
@@ -826,15 +898,15 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		curIsDir, err = tailIsDir(resolved)
 		if err != nil {
 			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-				return "", true, err
+				return "", true, err, nil
 			}
 			// A non-timeout lstat on the resolved target is environmental
 			// evidence about the filesystem git's child is about to write to;
 			// return it the way a non-ENOENT tail lstat is returned so the
 			// caller joins it rather than probing a guessed lexical destination.
-			return "", false, err
+			return "", false, err, nil
 		}
 		cur = resolved
 	}
-	return cur, false, nil
+	return cur, false, nil, creatableParents
 }
