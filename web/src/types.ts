@@ -114,9 +114,10 @@ export const Status = {
 /**
  * The subset of session.InstanceData (session/storage.go) the sidebar renders.
  * Field names and JSON tags match the Go struct exactly so this decodes the
- * daemon projection as-is. Optional fields carry Go's `omitempty` semantics:
- * `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at` only present
- * for a LimitReached row.
+ * daemon projection as-is. Optional fields carry Go's `omitempty`/`omitzero`
+ * semantics: `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at`
+ * only present for a LimitReached row with a known reset time (omitzero on a
+ * time.Time, mirroring the TabExitData.at precedent).
  */
 export interface SessionData {
   id?: string;
