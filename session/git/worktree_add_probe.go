@@ -427,6 +427,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// known location.
 	ancestorDeadline := time.Now().Add(symlinkResolveTimeout)
 	parentDir := filepath.Dir(worktreePath)
+	// A non-ENOENT stat error on an ancestor (EIO, ETIMEDOUT, the bounded
+	// ErrProbeTimedOut, ...) is environmental evidence about the filesystem
+	// the missing parent would be created on. The write probe of the parent
+	// already in dirs surfaces the same kind of error on the immediate parent,
+	// but a coincidental writable parent (ENOENT on the parent itself, a
+	// writable common dir) leaves the opaque Git failure with no environmental
+	// errno if this branch discards it — the same hazard the destination and
+	// symlink-resolution probes join rather than drop. Retain the error and
+	// the ancestor it was reported on so the classifier reads it alongside
+	// the Git failure the way it reads statErr/lstatErr/readDirErr, instead
+	// of charging a full filesystem on the mount the ancestor stat named to
+	// the structural retry budget. Walk up to the nearest existing ancestor
+	// and probe it too, so a full filesystem on the ancestor that git writes
+	// the missing parent into surfaces the resource errno.
+	var ancestorStatErr error
+	var ancestorStatPath string
 	for {
 		if time.Now().After(ancestorDeadline) {
 			break
@@ -437,11 +453,14 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			}
 			break
 		} else if !os.IsNotExist(sErr) {
-			// A non-ENOENT stat error on the ancestor is environmental evidence
-			// about the filesystem the missing parent would be created on; the
-			// write probe of the parent already in dirs surfaces the same kind
-			// of error, and the common dir probe below covers the rest, so stop
-			// walking and let the existing probes handle it.
+			// Stop walking and let the existing probes handle the immediate
+			// parent, but retain this error the way the destination and
+			// symlink-resolution probes retain theirs — a writable parent and
+			// common dir would otherwise leave the opaque Git failure with no
+			// environmental evidence, charging the structural budget for a
+			// mount the ancestor stat reported on.
+			ancestorStatErr = sErr
+			ancestorStatPath = parentDir
 			break
 		}
 		next := filepath.Dir(parentDir)
@@ -529,6 +548,9 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	if readDirErr != nil {
 		out = errors.Join(out, fmt.Errorf("readdir probe destination %s: %w", worktreePath, readDirErr))
 	}
+	if ancestorStatErr != nil {
+		out = errors.Join(out, fmt.Errorf("stat probe ancestor %s: %w", ancestorStatPath, ancestorStatErr))
+	}
 	return out
 }
 
@@ -615,8 +637,26 @@ func resolveSymlinkPrefixBounded(path string) (resolved string, timedOut bool, e
 		// issuing new prefix lookups; the in-flight per-dir flight drains on
 		// its own timeout, but no further prefix is probed.
 		cancel()
+		// The tail walk accumulates the existing parent of every creatable
+		// component it advances past, and returns those parents on the
+		// context-cancellation path (resolveSymlinkTail's ctx.Done branch
+		// returns creatableParents rather than nil). select choosing timer.C
+		// over done loses those parents when the worker had already handed
+		// them to the buffered channel, and the worker continues to send
+		// them after cancellation once the in-flight per-dir flight drains on
+		// its own timeout — git wrote the missing directories into those
+		// parents before the deadline fired, so a full filesystem on the
+		// mount they sit on is the resource errno the classifier must read.
+		// Wait for the worker to hand them over rather than returning a
+		// hard-coded nil that leaves the creatable-parent probes out of
+		// annotateGitWriteError: the in-flight per-dir flight the deadline
+		// interrupted already has its own probeTimeout bound, so the receive
+		// drains a bounded flight (it does not start a new one) and the total
+		// stays within symlinkResolveTimeout plus one in-flight probeTimeout
+		// rather than the N × probeTimeout the shared deadline prevents.
+		res := <-done
 		return "", true, fmt.Errorf("symlink prefix walk of %s did not answer within %s: %w: %w",
-			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), nil
+			path, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), res.creatableParents
 	}
 }
 

@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/stretchr/testify/require"
 )
 
@@ -505,4 +507,173 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentBefor
 	require.Contains(t, probedDirs, resolvedRealTarget,
 		"the existing parent of the creatable `missing` component (the link target) must be probed even "+
 			"when a later dangling symlink makes the final destination unresolvable")
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathJoinsAncestorStatError pins the contract the
+// #5421 review added: when the existing-ancestor stat search (the walk up from a nested worktree
+// parent that does not yet exist) reaches an ancestor whose stat returns a non-ENOENT error (EIO,
+// ETIMEDOUT, the bounded ErrProbeTimedOut, ...), the resolver must retain and join that error the
+// way the destination and symlink-resolution probes join theirs. Before the fix the branch
+// discarded sErr and stopped, so a writable parent and common dir left the opaque Git failure with
+// no environmental evidence and the lost-restore classifier charged a full filesystem on the mount
+// the ancestor stat reported on to the structural retry budget. The joined error lets the
+// classifier read the environmental errno alongside the Git failure.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathJoinsAncestorStatError(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The repo exists but the nested worktree parent wt does not, so the
+	// existing-ancestor search walks up from wt to the repo. The repo's stat
+	// returns a non-ENOENT environmental error (EIO) the way a stalled mount or
+	// a filesystem returning an environmental errno does; before the fix the
+	// search discarded it and stopped, leaving the opaque Git failure with no
+	// environmental evidence when the parent and common dir are writable.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the launch cwd the way the production code does so the expected
+	// paths match across hosts (macOS /var/folders -> /private/var/folders).
+	resolvedLaunchCwd, err := filepath.EvalSymlinks(launchCwd)
+	require.NoError(t, err)
+	resolvedRepo := filepath.Join(resolvedLaunchCwd, "repo")
+
+	// The nested worktree parent does not exist (the walk ascends from wt to
+	// the repo), and the repo returns a non-ENOENT stat error (EIO) instead of
+	// the existence the walk is looking for. A writable parent and common dir
+	// would otherwise leave the opaque Git failure with no environmental errno
+	// to classify, so the ancestor stat error must reach the chain.
+	statErr := &os.PathError{Op: "stat", Path: resolvedRepo, Err: syscall.EIO}
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		if p == resolvedRepo {
+			return nil, statErr
+		}
+		return os.Stat(p)
+	}
+	// The parent (wt) and common dir are writable, so the ancestor stat is the
+	// only environmental evidence the classifier can read — discarding it
+	// (the pre-fix behavior) charged the EIO to the structural budget.
+	writeSpaceProbe = func(string) error { return nil }
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "wt/dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.EIO),
+		"a non-ENOENT stat error on an existing ancestor the missing-parent walk "+
+			"reaches must be joined into the chain the way the destination and "+
+			"symlink-resolution probes join theirs, not discarded: %v", out)
+	require.Contains(t, out.Error(), "stat probe ancestor",
+		"the ancestor stat error must be named in the annotation so the lost-restore "+
+			"classifier reads the environmental errno alongside the Git failure: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathPreservesCreatableParentsOnOuterTimeout pins the
+// contract the #5421 review added: when the shared symlink-resolution deadline fires while the tail
+// walk has already accumulated a creatable parent (git wrote a missing directory into the mount the
+// parent sits on before a later metadata lookup consumed the remaining budget), the bounded
+// non-answer the outer deadline returns must still carry those parents so annotateGitWriteError
+// write-probes them. Before the fix the outer-deadline branch returned a hard-coded nil parent
+// slice, so a full filesystem on the mount git wrote into was never probed and the lost-restore
+// classifier charged it to the structural retry budget instead of waiting for that filesystem to
+// recover.
+//
+// The deadline is a constant (symlinkResolveTimeout) the test cannot inject, so the tail walk blocks
+// a tail component's lstat on a channel the test releases just after the deadline fires: the
+// worker accumulates the creatable parent before the block, the outer timer fires while the lstat
+// is in flight, the deadline's receive drains the worker's accumulated parents once the lstat
+// returns, and the annotate path write-probes the mount git wrote the missing directory into.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathPreservesCreatableParentsOnOuterTimeout(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real dir on a distinct location; `missing` does
+	// not exist, so the longest existing prefix is <repo>/link (resolved to the
+	// link target) and the tail `missing/block` must create `missing` under the
+	// link target (the mount) before reaching `block`. The tail walk accumulates
+	// the link target as the creatable parent of `missing`, then the `block`
+	// component's lstat blocks until the test releases it just after the shared
+	// deadline fires — the outer deadline must drain the accumulated parent the
+	// worker hands back rather than returning a hard-coded nil.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "link")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	// The `block` tail component's lstat blocks on this channel until the test
+	// releases it just after the outer deadline fires, so the worker is still
+	// in flight when the deadline trips the timer branch (the deadline is a
+	// constant, so the release waits symlinkResolveTimeout plus a short grace).
+	blockRelease := make(chan struct{})
+	time.AfterFunc(symlinkResolveTimeout+200*time.Millisecond, func() { close(blockRelease) })
+	blockPath := filepath.Join(resolvedRealTarget, "missing", "block")
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) {
+		if p == blockPath {
+			<-blockRelease
+			return nil, os.ErrNotExist
+		}
+		return os.Lstat(p)
+	}
+	// Pre-creation: every stat returns ENOENT so the existing-destination check
+	// stays silent and the walk treats the missing component as creatable.
+	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	// A full filesystem on the link target (the mount where `missing` is
+	// created) is the bug: the outer deadline must drain the accumulated
+	// creatable parent so the write probe surfaces ENOSPC there instead of
+	// probing only the common dir.
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == resolvedRealTarget {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	// The base `extra` is split off by filepath.Split so the tail the walk runs
+	// is `missing/block`; the tail accumulates the link target as the creatable
+	// parent of `missing`, then the `block` lstat blocks until the test
+	// releases it after the deadline.
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/missing/block/extra"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, fsprobe.ErrProbeTimedOut),
+		"the outer deadline must surface the typed non-answer the way a single "+
+			"timed-out flight does: %v", out)
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem on the mounted symlink target where git creates the "+
+			"missing component must surface the resource errno even when the shared "+
+			"deadline fires while the tail walk is in flight — the outer deadline "+
+			"drains the creatable parents the worker accumulated before the block: %v", out)
+	require.Contains(t, probedDirs, resolvedRealTarget,
+		"the existing parent of the creatable `missing` component (the link target) must be probed "+
+			"even when the shared deadline fires while the tail walk is in flight")
 }
