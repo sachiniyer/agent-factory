@@ -135,7 +135,23 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// (git fetch selects a same-named tag for an unqualified refspec), which
 	// would fast-forward HEAD onto unrelated tagged history or report a false
 	// divergence — the classification and the push both target the branch.
-	_, _ = g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", "refs/heads/"+branch)
+	//
+	// Fetch from the push URL (git remote get-url --push), not the fetch URL,
+	// so the classification inspects the same server the push targets: a
+	// separate remote.origin.pushurl (git remote -h documents the distinct
+	// [--push] endpoint) would otherwise fetch from an upstream or read-only
+	// source while the push writes to the user's fork, so a same-named branch
+	// on the upstream could report a false divergence or reset HEAD onto an
+	// unrelated tip the push then carries. Fall back to the "origin" remote
+	// if the push URL is not configured (the common case: one remote, one URL)
+	// or get-url fails.
+	fetchRemote := "origin"
+	if pushURL, urlErr := g.runGitCommand(g.worktreePath, "remote", "get-url", "--push", "origin"); urlErr == nil {
+		if trimmed := strings.TrimSpace(pushURL); trimmed != "" {
+			fetchRemote = trimmed
+		}
+	}
+	_, _ = g.runGitNetworkCommand(g.worktreePath, "fetch", fetchRemote, "refs/heads/"+branch)
 	// rev-parse --verify -q confirms FETCH_HEAD resolved to a commit before
 	// we classify; without it a missing FETCH_HEAD would read as "diverged"
 	// and refuse a perfectly pushable ahead/equal HEAD.
@@ -166,6 +182,20 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 					return "", g.annotateGitWriteError(fmt.Errorf("failed to fast-forward HEAD onto origin's tip before archive push: %s: %w",
 						strings.TrimSpace(out), ffErr), probeDir)
 				}
+				// Synchronize submodule checkouts after the fast-forward so a
+				// retry of SnapshotAndPushBranch (e.g. the ArchiveSandbox retry
+				// in the reap-failure path) does not see ` M <submodule>` — the
+				// non-recursive reset advances the gitlink in the index without
+				// checking out the new submodule commit, and a retry's `git
+				// status` would report that as dirt, sending it into the dirty
+				// path where `add -A` stages the stale gitlink and pushes a
+				// commit that reverts origin's submodule update. --recursive
+				// descends into nested submodules; the update is best-effort
+				// (a failure leaves the gitlink advanced and the push a no-op,
+				// degrading only the retry's cleanliness, not the archive).
+				// runGitNetworkCommand bounds a submodule fetch (the new commit
+				// may not be local) under the network timeout.
+				_, _ = g.runGitNetworkCommand(g.worktreePath, "submodule", "update", "--recursive")
 				// Do NOT re-check status here: a fast-forward can advance a
 				// submodule gitlink in the index without checking out the new
 				// submodule commit, and a re-checked `git status` would report
@@ -187,6 +217,32 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 				// tree reads clean and the snapshot block below is a no-op.
 				// The snapshot is created only after reconciliation is
 				// decided, so a failure here strands nothing.
+				//
+				// Before staging, update the index to FETCH_HEAD's tree with
+				// `read-tree -m HEAD FETCH_HEAD` so paths the user did NOT
+				// touch — in particular out-of-cone paths under a sparse
+				// checkout, whose stale HEAD blobs `add -A` cannot update
+				// (skip-worktree) — reflect origin's tip rather than the
+				// behind HEAD. Without this, `write-tree` would attach the
+				// entire stale index tree to FETCH_HEAD, and a push carrying
+				// an unrelated visible edit would silently revert origin's
+				// out-of-cone change. The two-way merge is a fast-forward in
+				// the index only (no -u, so the dirty working tree is
+				// untouched): for a behind HEAD it cleanly advances every
+				// index entry, and it preserves skip-worktree bits for
+				// out-of-cone paths so `add -A` stages only the user's in-cone
+				// changes and `write-tree` produces a tree with FETCH_HEAD's
+				// out-of-cone blobs. If the merge fails (an in-cone file the
+				// user modified was also advanced by origin — a conflict the
+				// fast-forward index merge refuses to overwrite), fall back to
+				// staging on the behind index: the push reverts that one
+				// file's origin change (the user's edit takes precedence) but
+				// out-of-cone paths are no worse than the current code.
+				if _, rtErr := g.runGitCommand(g.worktreePath, "read-tree", "-m", "HEAD", "FETCH_HEAD"); rtErr != nil {
+					// read-tree -m is atomic on failure (the index is
+					// unchanged), so the fallback below stages on the
+					// original behind index.
+				}
 				if _, e := g.runGitCommand(g.worktreePath, "add", "-A"); e != nil {
 					return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", e), probeDir)
 				}

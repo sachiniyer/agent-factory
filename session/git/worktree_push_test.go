@@ -503,3 +503,193 @@ func TestSnapshotAndPushBranch_BehindCleanDoesNotTouchOrigin(t *testing.T) {
 	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-notouch"),
 		"a behind-only clean archive must not rewrite origin's tip")
 }
+
+// TestSnapshotAndPushBranch_BehindCleanSyncsSubmoduleOnRetry pins the
+// submodule-gitlink retry regression: a behind, clean worktree whose origin
+// advanced an initialized submodule. The fast-forward (reset --hard) advances
+// the gitlink in the index without checking out the new submodule commit, so a
+// re-checked `git status` would report ` M <submodule>` and send a retry into
+// the dirty path where `add -A` stages the stale gitlink and pushes a commit
+// that reverts origin's submodule update. The fix synchronizes the submodule
+// checkout after the fast-forward (git submodule update --recursive) so the
+// retry sees a clean tree and takes the no-op clean path.
+func TestSnapshotAndPushBranch_BehindCleanSyncsSubmoduleOnRetry(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-sub")
+
+	// Add a submodule to the session branch and push the initial state.
+	wt := gw.GetWorktreePath()
+	// protocol.file.allow=always is required for git submodule operations
+	// against local paths (the bare sub-repo); the production code path
+	// (SnapshotAndPushBranch's submodule update) runs via runGitNetworkCommand
+	// which does not pass -c, so the config must be set in the repo.
+	runGit(t, wt, "config", "protocol.file.allow", "always")
+	subPath := filepath.Join(wt, "mysub")
+	subBare := filepath.Join(t.TempDir(), "sub.git")
+	require.NoError(t, exec.Command("git", "init", "--bare", subBare).Run())
+	runGit(t, subBare, "config", "user.email", "af@agent-factory.local")
+	runGit(t, subBare, "config", "user.name", "Agent Factory")
+	subClone := filepath.Join(t.TempDir(), "sub-clone")
+	runGit(t, "", "-c", "protocol.file.allow=always", "clone", subBare, subClone)
+	runGit(t, subClone, "config", "user.email", "af@agent-factory.local")
+	runGit(t, subClone, "config", "user.name", "Agent Factory")
+	require.NoError(t, os.WriteFile(filepath.Join(subClone, "s.txt"), []byte("sub-v1\n"), 0o644))
+	runGit(t, subClone, "add", "-A")
+	runGit(t, subClone, "commit", "-m", "sub init")
+	runGit(t, subClone, "push", "origin", "refs/heads/master")
+	runGit(t, wt, "-c", "protocol.file.allow=always", "submodule", "add", subBare, "mysub")
+	runGit(t, wt, "commit", "-m", "add submodule")
+	runGit(t, wt, "push", "origin", "root/behind-sub")
+
+	// Advance the submodule on its own remote and update the gitlink on origin's
+	// session branch, then reset the worktree HEAD back to the ancestor (the
+	// behind state a restored sandbox lands in).
+	require.NoError(t, os.WriteFile(filepath.Join(subClone, "s.txt"), []byte("sub-v2\n"), 0o644))
+	runGit(t, subClone, "add", "-A")
+	runGit(t, subClone, "commit", "-m", "sub advance")
+	runGit(t, subClone, "push", "origin", "refs/heads/master")
+	// Update the gitlink in the worktree to the advanced submodule, commit, and
+	// push so origin's session branch references sub-v2.
+	runGit(t, subPath, "fetch", "origin")
+	runGit(t, subPath, "checkout", "origin/master")
+	runGit(t, wt, "add", "mysub")
+	runGit(t, wt, "commit", "-m", "advance submodule gitlink")
+	runGit(t, wt, "push", "origin", "root/behind-sub")
+	originTip := branchTip(t, bare, "refs/heads/root/behind-sub")
+	// Reset to the ancestor (before the submodule gitlink advance) — the
+	// submodule gitlink is at sub-v1 but the checkout is still at sub-v2
+	// (reset --hard does not recurse into submodules). Sync the checkout to
+	// the ancestor's gitlink so the tree is clean and the archive takes the
+	// clean-behind path (the path the fix targets).
+	runGit(t, wt, "reset", "--hard", "HEAD~1")
+	runGit(t, wt, "-c", "protocol.file.allow=always", "submodule", "update", "--recursive")
+	ancestorHead := branchTip(t, wt, "HEAD")
+	require.NotEqual(t, ancestorHead, originTip, "precondition: HEAD must be behind origin's tip")
+	// The submodule checkout is at sub-v1 (the ancestor's gitlink).
+	require.Equal(t, "sub-v1\n", readFile(t, filepath.Join(subPath, "s.txt")),
+		"precondition: submodule checkout at sub-v1 before the fast-forward")
+	require.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: tree must be clean after submodule sync")
+
+	// First archive (clean, behind): the fast-forward advances the gitlink to
+	// sub-v2 and the submodule update synchronizes the checkout so a retry
+	// does not see ` M <submodule>`.
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-sub"),
+		"clean behind archive must not rewrite origin's tip")
+	// The submodule checkout is now at sub-v2 (synchronized by the fix).
+	assert.Equal(t, "sub-v2\n", readFile(t, filepath.Join(subPath, "s.txt")),
+		"submodule checkout must be synchronized to origin's gitlink after the fast-forward")
+
+	// Retry (the ArchiveSandbox reap-failure path re-issues the call): the
+	// worktree must be clean (no ` M <submodule>`), so the retry takes the
+	// no-op clean path and does NOT revert origin's submodule update.
+	_, err = gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "sub-v2\n", readFile(t, filepath.Join(subPath, "s.txt")),
+		"retry must not revert the submodule checkout")
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-sub"),
+		"retry must not rewrite origin's tip")
+}
+
+// readFile is defined in worktree_rebuild_hooks_test.go (shared test helper).
+
+// TestSnapshotAndPushBranch_BehindCleanFetchesFromPushURL pins the push-URL
+// reconciliation: when origin has a separate pushurl (an upstream/read-only
+// source for fetch, the user's fork for push), the fetch must read from the
+// push URL so the classification inspects the same server the push targets.
+// Without the fix, the fetch reads from the fetch URL (the upstream) and the
+// push writes to the push URL (the fork): a same-named branch on the upstream
+// could report a false divergence or reset HEAD onto an unrelated tip the push
+// then carries to the fork.
+func TestSnapshotAndPushBranch_BehindCleanFetchesFromPushURL(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/pushurl")
+
+	// Create a SECOND bare repo to act as the "upstream" (fetch URL) and
+	// reconfigure origin's pushurl to point at the original bare (the fork).
+	wt := gw.GetWorktreePath()
+	upstream := filepath.Join(t.TempDir(), "upstream.git")
+	require.NoError(t, exec.Command("git", "clone", "--bare", bare, upstream).Run())
+	// origin fetches from the upstream but pushes to the fork (bare).
+	runGit(t, wt, "remote", "set-url", "--push", "origin", bare)
+	runGit(t, wt, "remote", "set-url", "origin", upstream)
+
+	// Advance the fork (push URL) so the worktree is behind the fork but not
+	// behind the upstream — the fetch must read the fork to detect the
+	// behind-only state.
+	originTip, _ := advanceOriginAndResetHeadBehind(t, gw, bare, "root/pushurl")
+
+	// The fetch from the push URL (the fork) detects the behind-only state
+	// and fast-forwards HEAD onto the fork's tip. A fetch from the upstream
+	// would see no advance (the upstream was just cloned from the fork's
+	// pre-advance state) and classify HEAD as equal/ahead, skipping the
+	// reconciliation.
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, originTip, branchTip(t, wt, "HEAD"),
+		"HEAD must fast-forward to the push URL's tip, not the fetch URL's")
+}
+
+// TestSnapshotAndPushBranch_BehindDirtyPreservesOutOfConePaths pins the
+// sparse-checkout regression: when the worktree uses a sparse checkout and
+// origin advanced a path outside the sparse cone, the behind-dirty snapshot
+// must carry the user's in-cone changes on top of origin's tip WITHOUT
+// reverting the out-of-cone advance. Without the fix, `add -A` cannot update
+// the out-of-cone index entry (skip-worktree), so `write-tree` attaches the
+// stale HEAD blob and the push silently reverts origin's out-of-cone change.
+func TestSnapshotAndPushBranch_BehindDirtyPreservesOutOfConePaths(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/sparse")
+
+	// Set up a sparse checkout: the cone contains only `sub/`, and
+	// `outside.txt` is out-of-cone.
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.MkdirAll(filepath.Join(wt, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "sub", "in.txt"), []byte("in-v1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "outside.txt"), []byte("out-v1\n"), 0o644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "init with sub/ and outside.txt")
+	runGit(t, wt, "push", "origin", "root/sparse")
+	runGit(t, wt, "sparse-checkout", "set", "--no-cone", "sub")
+	// outside.txt is now out-of-cone: skip-worktree in the index, absent from
+	// the working tree.
+	require.NoFileExists(t, filepath.Join(wt, "outside.txt"))
+
+	// Advance origin's out-of-cone path (outside.txt) from a separate clone
+	// (the worktree's sparse cone excludes it, so the advance must not be
+	// staged by `add -A`).
+	advanceClone := filepath.Join(t.TempDir(), "advance")
+	runGit(t, "", "clone", bare, advanceClone)
+	runGit(t, advanceClone, "config", "user.email", "af@agent-factory.local")
+	runGit(t, advanceClone, "config", "user.name", "Agent Factory")
+	runGit(t, advanceClone, "checkout", "root/sparse")
+	require.NoError(t, os.WriteFile(filepath.Join(advanceClone, "outside.txt"), []byte("out-v2\n"), 0o644))
+	runGit(t, advanceClone, "add", "-A")
+	runGit(t, advanceClone, "commit", "-m", "advance out-of-cone outside.txt")
+	runGit(t, advanceClone, "push", "origin", "root/sparse")
+
+	// The worktree is now behind origin: its HEAD is at the commit with
+	// outside.txt=v1 (C0), while origin's root/sparse is at C1
+	// (outside.txt=v2). The sparse cone is sub/, so outside.txt is
+	// out-of-cone in the worktree (skip-worktree in the index, absent from
+	// the working tree).
+
+	// Leave in-cone dirty work (the user's change the snapshot must carry).
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "sub", "in.txt"), []byte("user-edit\n"), 0o644))
+	require.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: in-cone tree must be dirty")
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	// The push must carry the user's in-cone change AND preserve origin's
+	// out-of-cone advance — not revert outside.txt to the stale HEAD blob.
+	pushed := runGitOut(t, bare, "show", "refs/heads/root/sparse:outside.txt")
+	assert.Contains(t, pushed, "out-v2",
+		"out-of-cone path advanced by origin must NOT be reverted by the behind-dirty snapshot")
+	pushedIn := runGitOut(t, bare, "show", "refs/heads/root/sparse:sub/in.txt")
+	assert.Contains(t, pushedIn, "user-edit",
+		"in-cone user change must be carried by the behind-dirty snapshot")
+}
