@@ -432,3 +432,77 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentEscap
 			"git creates it via safe_create_leading_directories) must be probed when a later "+
 			"`..` escapes the mount, not just the final parent and the common dir")
 }
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentBeforeDanglingSymlink pins
+// the contract the #5421 review added: when the tail walk records a creatable parent and a later
+// component makes the final destination unresolvable (a dangling symlink git fails resolving before
+// it reaches the final filesystem), the creatable parent the walk already accumulated is still
+// probed — git creates the missing component under it via safe_create_leading_directories before
+// reaching the dangling link, so a full filesystem on the mount git wrote the missing directory into
+// is the resource errno the lost-restore classifier must read even when the final destination is
+// structurally unresolvable. The resolution error (dangling symlink) is still joined to the chain so
+// the classifier sees it, but the creatable parent is not discarded: the write probe surfaces ENOSPC
+// on the mount git wrote the missing directory into.
+//
+// Deterministic in both directions: against the form that discarded the creatable parents on the
+// dangling-symlink error the write probe only targeted the common dir, a write probe mocked to fail
+// only on the creatable parent returned nil, so errors.Is(out, syscall.ENOSPC) was false and the test
+// failed; with the creatable parent retained on the error path the mount is probed and the ENOSPC
+// reaches the chain alongside the dangling-symlink error.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentBeforeDanglingSymlink(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real dir; <realTarget>/dangling is a dangling symlink
+	// (its target does not exist). `missing` does not exist, so the longest existing
+	// prefix is <repo>/link (resolved to the link target) and the tail
+	// `missing/../dangling/..` must create `missing` under the link target (the mount)
+	// before reaching the dangling symlink, which makes the final destination
+	// unresolvable. The existing parent the walk accumulates for `missing` is the link
+	// target; a full filesystem on the mount git wrote the missing directory into must
+	// surface ENOSPC even though the dangling symlink makes the tail fail.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "does-not-exist"), filepath.Join(realTarget, "dangling")))
+	link := filepath.Join(repo, "link")
+	require.NoError(t, os.Symlink(realTarget, link))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// A full filesystem on the link target (the mount where `missing` is created) is
+	// the bug: git creates `missing` there via safe_create_leading_directories before
+	// reaching the dangling symlink, so the ENOSPC is on that filesystem. Without
+	// retaining the creatable parent on the error path only the common dir is probed
+	// and the ENOSPC never reaches the chain.
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == resolvedRealTarget {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/missing/../dangling/../dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem on the mount where git creates `missing` (the link target) must surface the "+
+			"resource errno even when a later dangling symlink makes the final destination unresolvable — "+
+			"the creatable parent the tail walk accumulated before the error is probed: %v", out)
+	require.Contains(t, probedDirs, resolvedRealTarget,
+		"the existing parent of the creatable `missing` component (the link target) must be probed even "+
+			"when a later dangling symlink makes the final destination unresolvable")
+}

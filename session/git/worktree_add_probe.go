@@ -333,9 +333,12 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			// destination, while still probing independently known locations
 			// such as the common directory, and join the typed non-answer so the
 			// lost-restore classifier reads the bounded environmental class,
-			// not bare structural silence.
+			// not bare structural silence. The creatable parents the tail walk
+			// accumulated before the timeout are independently known locations
+			// git wrote missing directories into, so probe them too rather than
+			// dropping the resource errno the classifier must read.
 			lexical := filepath.Join(repoPath, g.worktreePath)
-			out := g.annotateGitWriteError(err)
+			out := g.annotateGitWriteError(err, creatableParents...)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 		if resolveErr == nil {
@@ -357,12 +360,12 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				isDir, dErr := tailIsDir(resolvedParent)
 				if dErr != nil {
 					lexical := filepath.Join(repoPath, g.worktreePath)
-					out := g.annotateGitWriteError(err)
+					out := g.annotateGitWriteError(err, creatableParents...)
 					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, dErr))
 				}
 				if !isDir {
 					lexical := filepath.Join(repoPath, g.worktreePath)
-					out := g.annotateGitWriteError(err)
+					out := g.annotateGitWriteError(err, creatableParents...)
 					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, &os.PathError{Op: "stat", Path: resolvedParent, Err: syscall.ENOTDIR}))
 				}
 			}
@@ -388,12 +391,16 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			// symlinked component like `link/..` and let the subsequent
 			// write/stat probes all succeed, misclassifying the original git
 			// failure as structural. Probe only the independently known
-			// locations (the common directory) and join the resolution error so
-			// the lost-restore classifier reads it alongside the git failure
-			// rather than dropping it, without write-probing a guessed lexical
-			// destination.
+			// locations (the common directory and the creatable parents the
+			// tail walk accumulated before the unresolvable component — git wrote
+			// the missing directories that precede it, so a full filesystem on
+			// the mount they were created into is the resource errno the
+			// classifier must read even when a later component fails) and join
+			// the resolution error so the lost-restore classifier reads it
+			// alongside the git failure rather than dropping it, without
+			// write-probing a guessed lexical destination.
 			lexical := filepath.Join(repoPath, g.worktreePath)
-			out := g.annotateGitWriteError(err)
+			out := g.annotateGitWriteError(err, creatableParents...)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 	}
@@ -802,7 +809,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			// flight drains on its own timeout, but no further component lookup
 			// starts, so the goroutine does not accumulate metadata calls or
 			// block waiting on each remaining component.
-			return "", false, ctx.Err(), nil
+			return "", false, ctx.Err(), creatableParents
 		default:
 		}
 		if part == "" || part == "." {
@@ -820,8 +827,12 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 				// would stall the lost-restore loop indefinitely on a structural
 				// ENOTDIR failure. Surface ENOTDIR the way the kernel does so
 				// the caller probes only the independently known locations and
-				// joins the structural error.
-				return "", false, &os.PathError{Op: "stat", Path: cur, Err: syscall.ENOTDIR}, nil
+				// joins the structural error. The creatable parents the walk
+				// already accumulated are still independently known locations
+				// git wrote missing directories into before the unresolvable
+				// component, so return them for the caller to probe alongside
+				// the structural error.
+				return "", false, &os.PathError{Op: "stat", Path: cur, Err: syscall.ENOTDIR}, creatableParents
 			}
 			cur = filepath.Dir(cur)
 			curIsDir = true
@@ -831,7 +842,7 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		info, err := lstatSpaceProbe(next)
 		if err != nil {
 			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-				return "", true, err, nil
+				return "", true, err, creatableParents
 			}
 			if os.IsNotExist(err) {
 				// A genuinely missing component — git creates it and
@@ -857,7 +868,10 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 			// environmental evidence about the filesystem git's child is about
 			// to write to. Return it so the caller joins it rather than
 			// collapsing the tail lexically and probing an unrelated filesystem.
-			return "", false, err, nil
+			// The creatable parents accumulated before the error are still
+			// independently known locations git wrote missing directories into,
+			// so return them for the caller to probe alongside the error.
+			return "", false, err, creatableParents
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			// A regular component — continue through it the way chdir does.
@@ -880,16 +894,26 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		resolved, rErr := evalSymlinksSpaceProbe(next)
 		if rErr != nil {
 			if errors.Is(rErr, fsprobe.ErrProbeTimedOut) {
-				return "", true, rErr, nil
+				return "", true, rErr, creatableParents
 			}
 			if os.IsNotExist(rErr) {
-				return "", false, fmt.Errorf("dangling symlink %s: %w", next, rErr), nil
+				// A dangling symlink makes the final destination unresolvable,
+				// but the creatable parents the walk already accumulated (git
+				// wrote the missing directories that precede the dangling link)
+				// are still independently known locations the caller must probe —
+				// a full filesystem on the mount git wrote them into is the
+				// resource errno the lost-restore classifier reads even when a
+				// later component fails. Return them so the caller write-probes
+				// them alongside the structural error.
+				return "", false, fmt.Errorf("dangling symlink %s: %w", next, rErr), creatableParents
 			}
 			// A non-ENOENT, non-timeout resolution error on a symlink is
 			// environmental evidence about the filesystem the symlink's target
 			// sits on; return it the way the prefix walk returns a non-ENOENT
-			// EvalSymlinks error.
-			return "", false, rErr, nil
+			// EvalSymlinks error. The creatable parents accumulated before the
+			// error are still independently known locations git wrote missing
+			// directories into, so return them for the caller to probe.
+			return "", false, rErr, creatableParents
 		}
 		// Track whether the resolved symlink target is a directory: a `..`
 		// after a symlink to a regular file must surface ENOTDIR the way the
@@ -898,13 +922,16 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 		curIsDir, err = tailIsDir(resolved)
 		if err != nil {
 			if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-				return "", true, err, nil
+				return "", true, err, creatableParents
 			}
 			// A non-timeout lstat on the resolved target is environmental
 			// evidence about the filesystem git's child is about to write to;
 			// return it the way a non-ENOENT tail lstat is returned so the
 			// caller joins it rather than probing a guessed lexical destination.
-			return "", false, err, nil
+			// The creatable parents accumulated before the error are still
+			// independently known locations git wrote missing directories into,
+			// so return them for the caller to probe.
+			return "", false, err, creatableParents
 		}
 		cur = resolved
 	}
