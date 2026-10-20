@@ -15970,20 +15970,15 @@ function projectFaviconPng(color, size) {
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
+var DEFAULT_FAVICON_COLOR = "#2f5fd8";
 var appliedFavicon = null;
 function applyProjectFavicon(color) {
   if (appliedFavicon === color) return;
   appliedFavicon = color;
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    let href = null;
-    if (color !== null) {
-      if (link.type === "image/svg+xml") {
-        href = projectFaviconDataUrl(color);
-      } else {
-        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
-      }
-    }
+    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
@@ -16035,7 +16030,8 @@ function projectColorRow(current, label, onPick) {
       input.click();
     }
   });
-  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
   clear.disabled = current === null;
   clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));

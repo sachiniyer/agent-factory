@@ -747,7 +747,7 @@ af projects color ~/work/myrepo '#bd93f9'   # a prj_ id or any path inside the p
 af projects color ~/work/myrepo ''          # clear it
 ```
 
-In the web client, open the project menu and pick a swatch (the Dracula palette), a custom color, or **No color**. Picking a color for a project that is known only from its sessions registers it first. The color is stored beside the project record in `appearance.json`, so it is machine-local like the rest of this layer.
+In the web client, open the project menu and pick a swatch (the Dracula palette), a custom color, or **Default** to go back to the theme accent. Picking a color for a project that is known only from its sessions registers it first. The color is stored beside the project record in `appearance.json`, so it is machine-local like the rest of this layer.
 
 ## Migrating from JSON
 

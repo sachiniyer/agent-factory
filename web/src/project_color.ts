@@ -113,23 +113,25 @@ function projectFaviconPng(color: string, size: number): string | null {
   return canvas.toDataURL("image/png");
 }
 
+/** The tile color of icons/icon.svg (project_color.test.ts pins it). */
+export const DEFAULT_FAVICON_COLOR = "#2f5fd8";
+
 let appliedFavicon: string | null = null;
 
-/** Points every favicon link at the project-colored mark, or back at the static
- *  icons when color is null. Writes only on a change. */
+/** Points every favicon link at the project-colored mark, or back at the default
+ *  mark when color is null. Writes only on a change. */
 export function applyProjectFavicon(color: string | null): void {
   if (appliedFavicon === color) return;
   appliedFavicon = color;
+  // Chrome keeps showing the last data: favicon when a link's href returns to a
+  // URL it already loaded, so the default is redrawn as a data: URL too.
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === undefined) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    let href: string | null = null;
-    if (color !== null) {
-      if (link.type === "image/svg+xml") {
-        href = projectFaviconDataUrl(color);
-      } else {
-        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
-      }
-    }
+    const href =
+      link.type === "image/svg+xml"
+        ? projectFaviconDataUrl(tile)
+        : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
@@ -193,7 +195,8 @@ export function projectColorRow(current: string | null, label: string, onPick: (
       input.click();
     }
   });
-  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
   clear.disabled = current === null;
   clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));

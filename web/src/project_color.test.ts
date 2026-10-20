@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { RegisteredProject } from "./api.js";
 import {
+  DEFAULT_FAVICON_COLOR,
   FAVICON_MARK_PATH,
   PROJECT_COLOR_PALETTE,
   applyProjectFavicon,
@@ -28,6 +29,8 @@ const record = (root: string, color?: string): RegisteredProject => ({
 test("the favicon mark matches icons/icon.svg", () => {
   const svg = readFileSync(fileURLToPath(new URL("./icons/icon.svg", import.meta.url)), "utf8");
   assert.ok(svg.includes(`d="${FAVICON_MARK_PATH}"`));
+  assert.ok(svg.includes(`fill="${DEFAULT_FAVICON_COLOR}"`));
+  assert.equal(markInk(DEFAULT_FAVICON_COLOR), "#ffffff");
 });
 
 test("projectColor reads the selected project's valid color only", () => {
