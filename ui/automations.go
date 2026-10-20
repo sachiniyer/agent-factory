@@ -153,7 +153,7 @@ func (a *AutomationsPane) SelectedTaskIndex() int {
 	if n == 0 {
 		return -1
 	}
-	return clampInt(a.selected, 0, n-1)
+	return layout.ClampInt(a.selected, 0, n-1)
 }
 
 // HandleKey implements layout.Pane: the focused section owns only its cursor
@@ -820,14 +820,4 @@ func (a *AutomationsPane) String() string {
 		}
 	}
 	return layout.ClampToRect(strings.Join(lines, "\n"), a.rect)
-}
-
-func clampInt(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }

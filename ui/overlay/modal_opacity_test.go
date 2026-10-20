@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // #2149: a modal must be OPAQUE — every cell inside its rectangle (border,
@@ -182,8 +183,8 @@ func placement(fg, bg string) (x, y, w, h int) {
 	bgLines := strings.Split(bg, "\n")
 	w, h = lipgloss.Width(fg), len(fgLines)
 	bgW, bgH := lipgloss.Width(bg), len(bgLines)
-	x = clamp((bgW-w)/2, 0, bgW-w)
-	y = clamp((bgH-h)/2, 0, bgH-h)
+	x = layout.ClampInt((bgW-w)/2, 0, bgW-w)
+	y = layout.ClampInt((bgH-h)/2, 0, bgH-h)
 	return x, y, w, h
 }
 
