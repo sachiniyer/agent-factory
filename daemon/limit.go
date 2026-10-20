@@ -537,10 +537,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		// Recheck the attach lease after the account-swap liveness probe, before the
 		// identity commit (#5422 review).
-	testHookResumeBeforeAccountSwapCommit()
-	if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-		return resumeDeferredByAttachPause, nil
-	}
+		testHookResumeBeforeAccountSwapCommit()
+		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+			return resumeDeferredByAttachPause, nil
+		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied, this
 		// admission observes it; once admission owns the fence, ApplyConfig cannot report a
@@ -641,10 +641,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				}
 				// Recheck after the repair validation: ValidateAccountSwap re-runs the full preflight while a
 				// TUI can attach, so the pre-stop recheck above does not cover this window (#5422).
-			testHookResumeAfterRepairValidation()
-			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-				return resumeDeferredByAttachPause, nil
-			}
+				testHookResumeAfterRepairValidation()
+				if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+					return resumeDeferredByAttachPause, nil
+				}
 				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
 					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
@@ -674,10 +674,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			// Recheck after the remote-sandbox preservation push (#5422 review): a TUI can attach
 			// during it; the pre-stop recheck above ran before the probe.
-		testHookResumeAfterRemotePreserve()
-		if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-			return resumeDeferredByAttachPause, nil
-		}
+			testHookResumeAfterRemotePreserve()
+			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+				return resumeDeferredByAttachPause, nil
+			}
 		}
 		fallthrough
 	case probeAbsent:
@@ -688,10 +688,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				}
 				// Recheck after the gone revalidation: revalidateGoneAccountSwap calls ValidateAccountSwap,
 				// and a TUI can attach during that preflight (#5422 review).
-			testHookResumeAfterGoneRevalidation()
-			if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
-				return resumeDeferredByAttachPause, nil
-			}
+				testHookResumeAfterGoneRevalidation()
+				if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+					return resumeDeferredByAttachPause, nil
+				}
 			}
 			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
 				return resumeNotPerformed, err
