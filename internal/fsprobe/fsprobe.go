@@ -160,6 +160,12 @@ func openProbeFile(dir string) (*os.File, error) {
 // gets probed itself rather than the parent that hosts its name.
 var statPath = os.Stat
 
+// lstatPath is the test seam under Lstat's bounded flight — the metadata
+// syscall that reports the final path component itself without following a
+// symlink, so a worktree destination whose final name is a symlink to an
+// existing directory is not probed through to its target's filesystem.
+var lstatPath = os.Lstat
+
 // evalSymlinksPath is the test seam under EvalSymlinks's bounded flight — the
 // metadata + Readlink walk that resolves a path to its real destination. The
 // raw filepath.EvalSymlinks performs an unbounded sequence of metadata
@@ -216,6 +222,30 @@ func Stat(dir string) (os.FileInfo, error) {
 	return info, err
 }
 
+// Lstat runs os.Lstat for path inside the same per-dir bounded flight shape as
+// Stat. A caller deciding whether the final component of a worktree
+// destination is a symlink — so a `git worktree add` whose destination already
+// exists as a symlink to a nonempty directory is not probed through the symlink
+// — cannot follow the symlink the way Stat does: `git worktree add` rejects a
+// destination that already exists without writing through it, so probing the
+// symlink target's filesystem would target an unrelated filesystem and a
+// coincidental ENOSPC there would stall the lost-restore loop indefinitely on
+// a filesystem freeing it cannot fix. Lstat reports the final component
+// itself so the probe can skip a symlinked destination. The syscall is bounded
+// for the same reason Stat is: an unbounded os.Lstat on a mount that never
+// answers would wedge the synchronous restore poll the probe informs. The
+// returned non-answer carries the same ErrProbeTimedOut +
+// context.DeadlineExceeded pair the other probes use, so the lost-restore
+// classifier reads the bounded environmental class rather than charging the
+// structural budget (#5295 review).
+func Lstat(path string) (os.FileInfo, error) {
+	res, err := runBounded(path, lstatFlights, "lstat probe",
+		"the filesystem did not answer the lstat",
+		func() (any, error) { return lstatPath(path) })
+	info, _ := res.(os.FileInfo)
+	return info, err
+}
+
 // EvalSymlinks runs filepath.EvalSymlinks for path inside the same per-dir
 // bounded flight shape as Stat. A caller resolving a path through symlinks —
 // to mirror the kernel's chdir for a worktree probe, or to find the real
@@ -248,6 +278,7 @@ type flightRegistry struct {
 
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var lstatFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var evalSymlinksFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 

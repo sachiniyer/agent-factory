@@ -905,5 +905,133 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathTrailingSlashPreservesFina
 		"the parent that hosts the destination's name must be probed")
 }
 
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkSkipsDestinationProbe pins the
+// contract the #5421 review added: when a restored relative destination's final component is a
+// symlink to an existing nonempty directory, Stat follows the symlink and reports it as a
+// directory, but `git worktree add` rejects the add because the destination already exists
+// without writing through the symlink. The destination-directory probe must therefore not
+// follow the symlink and write-probe the target's filesystem — a coincidental ENOSPC there
+// would make the restore retry environmentally even though freeing it cannot fix the
+// structural failure. A bounded lstat excludes the final-component symlink the way a missing
+// destination is skipped, while a regular (non-symlink) destination directory is still
+// probed in its own right.
+//
+// Deterministic in both directions: against the reverted form (Stat alone, no lstat gate)
+// the destination probe targets the symlinked path and the mocked write returns ENOSPC, so
+// errors.Is(out, syscall.ENOSPC) is true and the test fails; with the lstat gate the
+// symlinked destination is excluded before the write probe and no ENOSPC reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkSkipsDestinationProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The relative worktree path's final component is a symlink to a real
+	// nonempty directory on a distinct filesystem. Git rejects the add
+	// because the destination already exists, without writing through the
+	// symlink; the destination-directory probe must not follow the symlink
+	// and write-probe the target's filesystem, where a coincidental ENOSPC
+	// would stall the lost-restore loop indefinitely.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the symlinked prefix the way the production code does, so the
+	// expected destination matches across hosts (macOS /var/folders ->
+	// /private/var/folders).
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	destPath := filepath.Join(resolvedRepo, "dest")
+
+	// Stat follows the symlink and reports a directory (the existing
+	// destination); Lstat reports the symlink itself so the gate excludes it
+	// before the write probe targets the symlink's target.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		// The write probe following the symlink into the target's filesystem
+		// would see ENOSPC there (the bug); the parent that hosts the
+		// destination's name is writable.
+		if dir == destPath {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a final-component symlink to a nonempty directory must not be probed through to its "+
+			"target — git rejects the add because the destination already exists, so a full target "+
+			"filesystem cannot fix the structural failure and must not stall the lost-restore loop: %v", out)
+	require.NotContains(t, probedDirs, destPath,
+		"the write probe must not target the symlinked destination (%s) — its target's filesystem "+
+			"is not one git writes into", destPath)
+	require.Contains(t, probedDirs, resolvedRepo,
+		"the parent that hosts the destination's name must still be probed")
+}
+
+// TestAnnotateWorktreeAddError_DestinationRegularDirIsProbed pins that the lstat gate does
+// not exclude a regular (non-symlink) destination directory: a pre-created mount point or
+// partial-attempt debris on a different filesystem than the parent must still be probed in
+// its own right. Only a final-component symlink is skipped.
+func TestAnnotateWorktreeAddError_DestinationRegularDirIsProbed(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// The destination already exists as a regular directory on a distinct
+	// filesystem than the parent that hosts its name — a pre-created mount
+	// point or partial-attempt debris. The probe must still target it so a
+	// full filesystem there reaches the chain the way a full parent does.
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	require.NoError(t, os.Mkdir(dest, 0o755))
+
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		probedDirs = append(probedDirs, dir)
+		if dir == dest {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{worktreePath: dest}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a regular destination directory on a full filesystem must still be probed so its ENOSPC "+
+			"reaches the chain: %v", out)
+	require.Contains(t, probedDirs, dest,
+		"a regular (non-symlink) destination directory must still be probed in its own right")
+}
+
 // The probe machinery itself (real writes, the O_TMPFILE anonymous inode,
 // the named fallback, and the bounded flight) is tested in internal/fsprobe.
