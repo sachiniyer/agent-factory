@@ -361,7 +361,7 @@ export class TasksPane {
     const enabledDot = h(
       "span",
       { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
-      icon(mark ? mark.icon : t.enabled ? "square-check" : "square"),
+      ...(mark ? [icon(mark.icon)] : []),
     );
     // Hidden from assistive tech even when it is a MARK. The glyph exists to
     // survive visual CLIPPING, and clipping is a sighted-reader problem: CSS
@@ -401,31 +401,56 @@ export class TasksPane {
       main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
 
-    const toggleBtn = h(
+    const toggle = h(
       "button",
-      { type: "button", class: "af-ghost af-task-action" },
-      t.enabled ? "Disable" : "Enable",
+      { type: "button", class: `af-task-switch${t.enabled ? " af-task-switch-on" : ""}`, role: "switch" },
+      h("span", { class: "af-task-switch-track" }, h("span", { class: "af-task-switch-thumb" })),
     );
-    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
+    toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
+    toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
+    toggle.addEventListener("click", () => this.actions.toggle(t));
 
-    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
-    editBtn.addEventListener("click", () => this.actions.edit(t));
+    const verbs: { label: string; glyph: IconName; run: () => void }[] = [
+      { label: "Edit", glyph: "pencil", run: () => this.actions.edit(t) },
+    ];
+    if (canTrigger(t)) {
+      verbs.push({ label: "Trigger", glyph: "play", run: () => this.actions.trigger(t) });
+    }
+    verbs.push({ label: "Remove", glyph: "trash", run: () => this.actions.remove(t) });
 
+    const iconBtns = verbs.map(({ label, glyph, run }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: label }, icon(glyph));
+      btn.setAttribute("aria-label", label);
+      btn.addEventListener("click", run);
+      return btn;
+    });
+    if (!canTrigger(t)) {
+      // Kept as a disabled slot so the icon columns line up across rows.
+      const why = !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: why }, icon("play"));
+      btn.setAttribute("aria-label", "Trigger");
+      btn.disabled = true;
+      iconBtns.splice(1, 0, btn);
+    }
+
+    // Phones show the same verbs as a menu; CSS picks one of the two sets.
     const menu = actionsDisclosure(`Actions for ${t.name}`);
     this.menus.push(menu);
-    const actionEls: HTMLElement[] = [toggleBtn];
-    if (canTrigger(t)) {
-      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
-      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
-      actionEls.push(triggerBtn);
-    }
-    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
-    removeBtn.addEventListener("click", () => this.actions.remove(t));
-    actionEls.push(removeBtn);
-
-    menu.panel.append(...actionEls);
+    menu.panel.append(...verbs.map(({ label, glyph, run }) => {
+      const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
+      btn.addEventListener("click", run);
+      return btn;
+    }));
     menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
-    const actions = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+
+    const actions = h(
+      "div",
+      { class: "af-task-actions" },
+      h("div", { class: "af-task-icons" }, ...iconBtns),
+      menu.el,
+      toggle,
+    );
     const row = h("li", { class: "af-task-row" }, enabledDot, main, actions);
     row.dataset.taskId = t.id;
     return row;
