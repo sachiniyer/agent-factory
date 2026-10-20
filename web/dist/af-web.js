@@ -16874,9 +16874,16 @@ var AppShell = class {
       this.cachedSkippedNotice = this.skippedReposNotice(state);
     }
     const head = [];
-    if (this.cachedSkippedNotice) head.push(this.cachedSkippedNotice);
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
     orderChildren(this.railList, [...head, ...rows]);
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -16891,6 +16898,10 @@ var AppShell = class {
   cachedRailNotice = null;
   lastSkippedNoticeSignature = "";
   cachedSkippedNotice = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  mountedSkippedNotice = null;
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
@@ -17059,7 +17070,7 @@ var AppShell = class {
       body.append(line);
     }
     return h(
-      "li",
+      "div",
       { class: "af-rail-skipped", role: "alert" },
       h(
         "div",

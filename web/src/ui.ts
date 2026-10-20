@@ -1772,9 +1772,24 @@ export class AppShell {
       this.cachedSkippedNotice = this.skippedReposNotice(state);
     }
     const head: HTMLElement[] = [];
-    if (this.cachedSkippedNotice) head.push(this.cachedSkippedNotice);
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
     orderChildren(this.railList, [...head, ...rows]);
+    // The skipped-repos notice is a role="alert": it must be a SIBLING of the
+    // role="listbox", not one of its owned children (which the ARIA listbox contract
+    // expects to be role="option" session rows). Mounting it inside the listbox made
+    // assistive tech either drop the alert or miscount the listbox's options. Render
+    // it just above the list, between the rail head and the listbox, so it is still
+    // announced and visually precedes the rows without joining the listbox's owned
+    // item set. Tracked separately from cachedSkippedNotice so a null notice (the
+    // healthy steady state) removes the previously mounted element.
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -1790,6 +1805,10 @@ export class AppShell {
   private cachedRailNotice: HTMLElement | null = null;
   private lastSkippedNoticeSignature = "";
   private cachedSkippedNotice: HTMLElement | null = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  private mountedSkippedNotice: HTMLElement | null = null;
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
@@ -1976,7 +1995,7 @@ export class AppShell {
       }
       body.append(line);
     }
-    return h("li", { class: "af-rail-skipped", role: "alert" },
+    return h("div", { class: "af-rail-skipped", role: "alert" },
       h("div", { class: "af-rail-skipped-head" },
         "Some sessions are hidden — a daemon repo could not be loaded."),
       body,
