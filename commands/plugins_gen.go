@@ -81,6 +81,7 @@ var pluginReleaseDigests = []string{
 	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
 	"3a9901060da8792f1540a636f7bc853acda06dcd0f54fa60abf03fbf1b9515ec", // 3.17 — retry-limit --delivered: the mark-delivered exit for ambiguous handoff delivery (#4429)
 	"77fa36ac207b2370db0c505c9503930610bed63e52af1d4601b7ac1d6405418f", // 3.18 — task verbs accept <id-or-name>; name resolution and ambiguity rules (#4676)
+	"44e424184f3f0af13ad42a0b9c5665f691440f16cb3d71cabd7a74e9e655bd3f", // 3.19 — sessions attention --self: ask the user for attention
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

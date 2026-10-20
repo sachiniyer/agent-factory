@@ -45,9 +45,9 @@ func validate(t Tokens) error {
 		}
 		delete(expected, s.Name)
 	}
-	requiredColors := []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached"}
+	requiredColors := []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached", "attention"}
 	if len(t.Colors) != len(requiredColors) {
-		return fmt.Errorf("keep the contract to twelve colour roles")
+		return fmt.Errorf("keep the contract to thirteen colour roles")
 	}
 	for _, k := range requiredColors {
 		if _, ok := t.Colors[k]; !ok {

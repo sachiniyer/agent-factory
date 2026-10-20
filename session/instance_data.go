@@ -62,6 +62,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UserKilled:               i.userKilled,
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
+		Attention:                cloneAttention(i.attention),
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
@@ -404,6 +405,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// outage. An unrecognized value from a newer binary loads as-is and
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
+		attention:           cloneAttention(data.Attention),
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	// The pending on_complete obligation rides the restart so the daemon can

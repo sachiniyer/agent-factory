@@ -464,5 +464,3 @@ otherwise — see #1826.
   clause.
 - **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
   are reserved for env vars (`AF_HOME`) and literal flag/command names.
-- **No animated indicators** (spinners, blink, pulse) — state reads from a static
-  glyph (#1766).

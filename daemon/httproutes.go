@@ -278,6 +278,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/SetAttention",
+		Description: "Set (with an optional reason) or clear a session's attention request — the agent's explicit ask for the user. It clears when the user types into the agent pane, or when the agent starts work again after it went idle.",
+		requestType: reflect.TypeOf(SetAttentionRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetAttention) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/SetProjectColor",
 		Description: "Set or clear (empty color) the display color of a registered project (id, a prj_… registry id) — a hex color such as #2f5fd8 that web clients use for the session frame and the favicon.",
 		requestType: reflect.TypeOf(SetProjectColorRequest{}),

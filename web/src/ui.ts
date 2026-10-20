@@ -40,6 +40,7 @@ import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
+  attentionReason,
   canHandoff,
   compareSessionsForRail,
   isArchived,
@@ -53,6 +54,7 @@ import {
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
+  rowDot,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -3432,11 +3434,9 @@ export function sessionRow(
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts: Array<Node | string> = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-  ];
+  const branchParts: Array<Node | string> = [];
   if (selected && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
@@ -3444,8 +3444,10 @@ export function sessionRow(
     branchParts.push(idle);
   }
   if (s.branch) {
+    if (branchParts.length > 0) {
+      branchParts.push(" · ");
+    }
     branchParts.push(
-      " · ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
     );
   }
@@ -3460,15 +3462,12 @@ export function sessionRow(
   row.replaceChildren();
   row.onclick = null;
   row.removeAttribute("aria-disabled");
-  row.dataset.state = status.kind ?? "working";
-  // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
-  // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
-  // every title aligned without inventing a working indicator.
+  row.dataset.state = status.kind;
   const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
-  if (status.kind && status.icon) {
-    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    statusSlot.append(dot);
+  const dot = rowDot(s);
+  if (dot) {
+    statusSlot.append(h("span", { class: `af-dot af-dot-${dot.kind}` }, icon(dot.icon)));
   }
   row.append(statusSlot);
   row.append(main);
@@ -3494,7 +3493,8 @@ export function sessionRow(
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
-  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
+  const reason = attentionReason(s);
+  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleInert = inertReason;
@@ -3525,7 +3525,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";

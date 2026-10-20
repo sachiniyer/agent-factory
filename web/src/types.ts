@@ -119,6 +119,11 @@ export const Status = {
  * only present for a LimitReached row with a known reset time (omitzero on a
  * time.Time, mirroring the TabExitData.at precedent).
  */
+export interface Attention {
+  reason?: string;
+  set_at: string;
+}
+
 export interface SessionData {
   id?: string;
   title: string;
@@ -176,6 +181,8 @@ export interface SessionData {
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
+  /** The agent's own request for the user (`af sessions attention`). */
+  attention?: Attention;
   /** Present while a Lost row has exhausted automatic restore attempts. */
   lost_restore_failure?: LostRestoreFailure;
   /** Present while the restore loop defers a retry on the environment (#5295). */

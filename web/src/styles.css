@@ -1,4 +1,4 @@
-/* Product chrome uses the generated 23-token contract in tokens.css. */
+/* Product chrome uses the generated 24-token contract in tokens.css. */
 :root {
  --af-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
  --af-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -1074,11 +1074,6 @@ button:disabled,
   text-overflow: ellipsis;
 }
 
-.af-operator-state {
-  font-weight: 400;
-  font-size: var(--af-type-body);
-}
-
 .af-row-branch-name {
   /* Inline text truncates within the branch; an atomic inline-flex box was
    * replaced wholesale by the parent's ellipsis, leaving only the separator. */
@@ -1095,8 +1090,7 @@ button:disabled,
   opacity: 1;
 }
 
-/* A fixed status cell aligns every title even though Working intentionally has no
- * glyph (#1766). Shape + visible operator label carry state beyond color. */
+/* A fixed status cell aligns every title, also for an idle row with no glyph. */
 .af-row-status {
   display: inline-flex;
   align-items: center;
@@ -1113,13 +1107,31 @@ button:disabled,
   font-size: var(--af-type-body);
 }
 
-.af-dot-ready .af-icon,
+.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
 
-.af-dot-ready {
-  color: var(--af-ready);
+.af-dot-working {
+  color: var(--af-ink-muted);
+}
+
+.af-dot-attention .af-icon {
+  fill: currentColor;
+}
+
+.af-dot-attention {
+  color: var(--af-attention);
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+
+@keyframes af-attention-blink {
+  from { opacity: 1; }
+  to { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .af-dot-attention { animation: none; }
 }
 
 .af-dot-lost {
@@ -1140,12 +1152,6 @@ button:disabled,
 
 /* Resolved state is independent of the selected surface. Failure detail remains
  * readable even for a ready process whose prompt could not be delivered. */
-.af-row[data-state="ready"] .af-operator-state { color: var(--af-ready); }
-.af-row[data-state="working"] .af-operator-state { color: var(--af-running); }
-.af-row[data-state="lost"] .af-operator-state { color: var(--af-lost); }
-.af-row[data-state="dead"] .af-operator-state { color: var(--af-dead); }
-.af-row[data-state="archived"] .af-operator-state { color: var(--af-archived); }
-.af-row[data-state="limit"] .af-operator-state { color: var(--af-limit-reached); }
 .af-row-operator-broken .af-idle-reason { color: var(--af-dead); }
 .af-row-selected .af-row-title { font-weight: 600; }
 .af-row-selected::before {

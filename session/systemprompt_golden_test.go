@@ -145,9 +145,14 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 			want: "no one can help.\n\nCommands print JSON on stdout;",
 		},
 		{
-			// body + "\n\n" + outro: a blank line, a new paragraph.
-			name: "body to inside outro",
-			want: "no code changes\".\n\nFinishing up: when the user confirms",
+			// body + "\n\n" + attention: a blank line, a new paragraph.
+			name: "body to attention",
+			want: "no code changes\".\n\nAsking for the user:",
+		},
+		{
+			// attention + "\n\n" + outro: a blank line, a new paragraph.
+			name: "attention to inside outro",
+			want: "if you no longer need them.\n\nFinishing up: when the user confirms",
 		},
 		{
 			// outro + "\n\n" + tail.
