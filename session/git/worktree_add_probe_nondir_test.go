@@ -68,7 +68,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathRejectsDirTraversalAfterNo
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A coincidental ENOSPC on the regular file's parent is the bug: git
 		// fails with ENOTDIR before writing there, so freeing it cannot fix
 		// the structural failure and the probe must not target it.
@@ -154,7 +154,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathRejectsFinalDirTraversalAf
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A coincidental ENOSPC on the regular file's parent is the bug: git
 		// fails with ENOTDIR before writing there, so freeing it cannot fix
 		// the structural failure and the probe must not target it.
@@ -238,7 +238,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathRejectsFinalDotTraversalAf
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A coincidental ENOSPC on the regular file's parent is the bug: git
 		// fails with ENOTDIR before writing there, so freeing it cannot fix
 		// the structural failure and the probe must not target it.
@@ -322,7 +322,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesExistingAncestorForN
 	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A full filesystem on the existing ancestor (the repo) is the bug:
 		// git creates wt there via safe_create_leading_directories, so the
 		// ENOSPC is on this filesystem. A non-existent wt returns ENOENT
@@ -414,7 +414,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentEscap
 	require.NoError(t, err)
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == resolvedRealTarget {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -490,7 +490,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathProbesCreatableParentBefor
 	require.NoError(t, err)
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == resolvedRealTarget {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -651,7 +651,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathPreservesCreatableParentsO
 	// probing only the common dir.
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == resolvedRealTarget {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -676,4 +676,56 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathPreservesCreatableParentsO
 	require.Contains(t, probedDirs, resolvedRealTarget,
 		"the existing parent of the creatable `missing` component (the link target) must be probed "+
 			"even when the shared deadline fires while the tail walk is in flight")
+}
+
+// TestAnnotateGitWriteError_ConcurrentProbesPreserveOtherFilesystemsAfterTimeout pins the
+// contract the #5421 review added: a timed-out write probe on one filesystem must not skip a
+// later probe on a separate full filesystem. The sequential loop a shared deadline replaced
+// could not advance past the first timed-out probe because a single writeSpaceProbe consumes
+// its full probeTimeout (the same duration as symlinkResolveTimeout), so the deadline elapsed
+// before the next parent on a different filesystem was reached and its ENOSPC was omitted —
+// the lost-restore classifier then read only the bounded-deadline evidence and could exhaust
+// its capped retries even though disk exhaustion was the actual failure. The concurrent loop
+// runs each dir's probe in its own goroutine, so a stalled write on one filesystem does not
+// consume the budget a later probe on a separate filesystem needs: every distinct filesystem
+// gets its own probe within the same bound, and a full filesystem's ENOSPC reaches the chain.
+//
+// The stalled dir blocks for longer than the sequential loop's shared deadline would have
+// waited (symlinkResolveTimeout), so the reverted form skips the second dir (the deadline
+// checks before each probe); the concurrent form probes both in parallel and the second dir's
+// ENOSPC reaches the chain.
+func TestAnnotateGitWriteError_ConcurrentProbesPreserveOtherFilesystemsAfterTimeout(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	stalledDir := filepath.Join(t.TempDir(), "stalled")
+	enospcDir := filepath.Join(t.TempDir(), "enospc")
+
+	var probedDirs []string
+	blockRelease := make(chan struct{})
+	time.AfterFunc(symlinkResolveTimeout+200*time.Millisecond, func() { close(blockRelease) })
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		if dir == stalledDir {
+			<-blockRelease
+			return nil
+		}
+		if dir == enospcDir {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{}
+	out := g.annotateGitWriteError(errors.New("git worktree add failed"), stalledDir, enospcDir)
+
+	require.Contains(t, probedDirs, enospcDir,
+		"a later dir on a separate filesystem must be probed even while the first dir's write "+
+			"probe stalls, so its ENOSPC reaches the chain rather than being skipped by a sequential "+
+			"deadline that a single probeTimeout consumes")
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"the second dir's ENOSPC must reach the chain: %v", out)
 }

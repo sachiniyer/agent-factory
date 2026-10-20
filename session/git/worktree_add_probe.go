@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -165,41 +166,50 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	// tail walker's output) would otherwise block the synchronous restore poll
 	// for roughly number of parents × probeTimeout when the metadata lookups
 	// answer but writes stall — the degraded-filesystem case these bounds exist
-	// to contain. Bound the whole probe set with a single symlinkResolveTimeout
-	// deadline so the total stays bounded, but keep probing the remaining
-	// parents after a single probe times out: dirs can contain parents on
-	// different filesystems, and a timed-out final parent can precede a
-	// creatable parent on a separate full mount whose ENOSPC the lost-restore
-	// classifier must read. Stopping at the first timeout would discard that
-	// later parent's evidence and could abandon the session while the full
-	// filesystem remains the actual write failure, so the loop continues
-	// through the remaining distinct filesystems until the shared deadline
-	// elapses. The common-dir probe below is a single bounded flight on an
-	// independently known location, so it still runs after the deadline so the
-	// classifier keeps its separate evidence.
-	probeDeadline := time.Now().Add(symlinkResolveTimeout)
-	probe := func(dir string) {
+	// to contain. Run the probes concurrently so a stalled write on one
+	// filesystem does not consume the whole budget and skip every remaining
+	// parent: dirs can contain parents on different filesystems, and a
+	// timed-out final parent can precede a creatable parent on a separate full
+	// mount whose ENOSPC the lost-restore classifier must read. A sequential
+	// loop with a shared deadline could not advance past the first timed-out
+	// probe because a single writeSpaceProbe consumes its full probeTimeout
+	// (the same duration as symlinkResolveTimeout), so the deadline elapsed
+	// before the next parent on a different filesystem was reached. Running
+	// the probes concurrently keeps the total within a single probeTimeout
+	// rather than the N × probeTimeout a sequential loop would take on a
+	// degraded filesystem, and each distinct filesystem gets its own probe
+	// within the same bound. The common-dir probe below is a single bounded
+	// flight on an independently known location, so it still runs after the
+	// concurrent probes on its own per-dir bound.
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, dir := range dirs {
 		if dir == "" || probed[dir] {
-			return
+			continue
 		}
 		probed[dir] = true
-		if probeErr := writeSpaceProbe(dir); probeErr != nil {
-			joined = errors.Join(joined,
-				fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
-		}
+		wg.Add(1)
+		go func(dir string) {
+			defer wg.Done()
+			if probeErr := writeSpaceProbe(dir); probeErr != nil {
+				mu.Lock()
+				joined = errors.Join(joined,
+					fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
+				mu.Unlock()
+			}
+		}(dir)
 	}
-	for _, dir := range dirs {
-		if time.Now().After(probeDeadline) {
-			break
-		}
-		probe(dir)
-	}
+	wg.Wait()
 	common, cerr := gitCommonDir(g)
 	if cerr != nil {
 		joined = errors.Join(joined,
 			fmt.Errorf("could not resolve the repository's common dir to probe it: %w", cerr))
-	} else {
-		probe(common)
+	} else if common != "" && !probed[common] {
+		probed[common] = true
+		if probeErr := writeSpaceProbe(common); probeErr != nil {
+			joined = errors.Join(joined,
+				fmt.Errorf("write probe of %s also failed: %w", common, probeErr))
+		}
 	}
 	return joined
 }
@@ -324,7 +334,17 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// filepath.Dir would clean the `..` away and lose the symlinked component.
 	worktreePath := g.worktreePath
 	var creatableParents []string
-	if !filepath.IsAbs(worktreePath) && !isWindowsDriveRooted(worktreePath) {
+	if isWindowsDriveRooted(worktreePath) {
+		// A Windows current-drive-rooted path (\wt or /wt) resolves against
+		// the current drive. The git child runs with cmd.Dir = repoPath (e.g.
+		// D:\repo), so it resolves \wt against the repo's drive (D:\wt), while
+		// the parent process's Stat and write probes resolve the unchanged \wt
+		// against the daemon's current drive (e.g. C:\wt). Qualify it with the
+		// resolved repo's volume so the probes target the same drive git's
+		// child writes to, instead of the daemon's current drive which the
+		// unchanged path would resolve against.
+		worktreePath = filepath.VolumeName(repoPath) + worktreePath
+	} else if !filepath.IsAbs(worktreePath) {
 		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
 		// Trim trailing separators (but preserve a filesystem root) so a
 		// trailing slash on the destination does not fold the final
@@ -339,8 +359,20 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// volume name plus one separator so a root path is not turned into
 		// a relative one.
 		vol := filepath.VolumeName(worktreePath)
-		for len(worktreePath) > len(vol)+1 && strings.HasSuffix(worktreePath, string(filepath.Separator)) {
-			worktreePath = strings.TrimSuffix(worktreePath, string(filepath.Separator))
+		// On Windows both \ and / are valid path separators, but the trim
+		// above recognized only filepath.Separator (\). A restored path
+		// written with forward slashes (for example dest/) left the trailing
+		// / in place: filepath.Split recognizes it on Windows and returns an
+		// empty base, folding the final component into the parent resolution
+		// the way a trailing \ does. Trim both separators so the final
+		// component is preserved the same way the non-trailing-slash case
+		// already defends.
+		seps := string(filepath.Separator)
+		if seps != "/" {
+			seps += "/"
+		}
+		for len(worktreePath) > len(vol)+1 && strings.ContainsRune(seps, rune(worktreePath[len(worktreePath)-1])) {
+			worktreePath = worktreePath[:len(worktreePath)-1]
 		}
 		parent, base := filepath.Split(worktreePath)
 		// Trim the parent's trailing separator for the prefix walk, but

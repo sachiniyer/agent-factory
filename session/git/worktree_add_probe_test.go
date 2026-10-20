@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +17,18 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
+
+// probedDirsMu guards appendProbedDir so the concurrent write-probe loop in
+// annotateGitWriteError can call writeSpaceProbe from goroutines without racing
+// on a test mock's probedDirs slice (#5421: keep probing other-filesystem
+// parents after a timed-out probe).
+var probedDirsMu sync.Mutex
+
+func appendProbedDir(dirs *[]string, dir string) {
+	probedDirsMu.Lock()
+	*dirs = append(*dirs, dir)
+	probedDirsMu.Unlock()
+}
 
 // TestAnnotateWorktreeAddError_DiskFull — the #5295 play-test failure: `git
 // worktree add` dies with ENOSPC trapped inside *exec.ExitError stderr text,
@@ -316,7 +329,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathResolvedAgainstLaunchCwd(t
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -473,7 +486,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkedRepo(t *te
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -548,7 +561,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkInPathCompon
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -732,7 +745,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalComponentSymlinkPrese
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == symlinkTargetParent {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -791,7 +804,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathRootRepoPathPreservesRootP
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -878,7 +891,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathTrailingSlashPreservesFina
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == symlinkTargetParent {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -972,7 +985,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkSkipsDestinati
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// The write probe following the symlink into the target's filesystem
 		// would see ENOSPC there (the bug); the parent that hosts the
 		// destination's name is writable.
@@ -1022,7 +1035,7 @@ func TestAnnotateWorktreeAddError_DestinationRegularDirIsProbed(t *testing.T) {
 	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == dest {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -1098,7 +1111,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalSymlinkEmptyTargetIsP
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		if dir == destPath {
 			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
 		}
@@ -1157,7 +1170,7 @@ func TestAnnotateWorktreeAddError_LstatErrorPreserved(t *testing.T) {
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -1215,7 +1228,7 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationReadDirErrorPreserved(t *t
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -1282,7 +1295,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFollowsSymlinkAfterCreatab
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
@@ -1378,7 +1391,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathDanglingSymlinkDoesNotColl
 
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A coincidental ENOSPC on the lexical parent (the repo's parent) is
 		// the bug: the dangling symlink never lets git reach it, so freeing it
 		// cannot fix the structural failure and the probe must not target it.
@@ -1458,7 +1471,7 @@ func TestAnnotateWorktreeAddError_SymlinkResolutionTimeoutDoesNotProbeLexicalDes
 	}
 	var probedDirs []string
 	writeSpaceProbe = func(dir string) error {
-		probedDirs = append(probedDirs, dir)
+		appendProbedDir(&probedDirs, dir)
 		// A coincidental ENOSPC on the lexical parent is the bug: the timeout
 		// did not resolve the destination, so git may have failed before
 		// reaching it and freeing this filesystem cannot fix the failure.
