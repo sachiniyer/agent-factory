@@ -289,6 +289,27 @@ func (m *Manager) resumeLimitedSession(
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
+	// An attached TUI holds the pause-poll lease for this session (#1160), and
+	// holding it is the daemon's contract to DEFER automated deliveries into the
+	// pane — so a scheduled prompt can't paste into and submit the user's
+	// in-progress input (#1586/#1638). Every DeliverPrompt send path re-checks
+	// the lease right before sending via deferWhileAttached; the auto-resume
+	// scheduler is an automated delivery into the same pane and reaches the same
+	// SendPromptWithEvidence / deliverManualAccountMission send arms, so it must
+	// honor the same lease here. The explicit ResumeFromLimit RPC bypasses
+	// resumeLimitedSession entirely (it is an operator action like a manual send)
+	// and stays exempt. Checked AFTER the locks are acquired and the eligibility
+	// re-check passes but BEFORE limitResumeAttempted records the attempt, so a
+	// deferral neither burns a backoff step nor logs a failed attempt — the
+	// resume simply re-fires on a later poll tick once the user detaches (the
+	// lease is heartbeat-renewed while attached and lapses within one
+	// statusPollLease after a crashed client, so the resume is delayed, never
+	// lost). Covers both the auto-swap arm that reaches SendPromptWithEvidence
+	// and the pending-manual-swap completion that reaches deliverManualAccountMission,
+	// since resumeLimitedSession is the single scheduler entry to both.
+	if m.isPollPaused(repoID, inst.Title, inst.ID) {
+		return
+	}
 	if accountSwap != nil {
 		// This value only schedules the attempt. admitAccountSwap rebuilds all facts
 		// after the limit-resume fence is raised and is the only result allowed to
