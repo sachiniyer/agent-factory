@@ -80,6 +80,24 @@ var isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
 // ambiguity.
 var evalSymlinksSpaceProbe = fsprobe.EvalSymlinks
 
+// writeProbeConcurrency bounds the number of write probes annotateGitWriteError
+// runs concurrently. A hand-edited relative worktree path can accumulate many
+// distinct creatable parents (repeated `dirN/missing/../../` segments, each
+// retained by the tail walk), and starting one goroutine and one 1 MiB write
+// probe per parent simultaneously would let all of them target the same mount
+// at once — temporarily consuming hundreds of MiB, exhausting file
+// descriptors, or leaving hundreds of underlying fsprobe workers stuck after
+// their callers time out; the probes could even manufacture ENOSPC on a
+// filesystem a structural git failure does not actually write to and stall the
+// lost-restore loop on a coincidental resource errno. The per-dir fsprobe
+// flights already deduplicate probes of the same path, but a bound on the
+// simultaneous fan-out also caps the resource use across distinct paths on the
+// same mount while retaining the cross-filesystem concurrency a single
+// timed-out probe on one mount does not consume the budget a probe on a
+// separate mount needs (writeProbeConcurrency is sized above one so a stalled
+// probe on one filesystem does not block a probe on another).
+const writeProbeConcurrency = 8
+
 // ErrCommonDirProbeNoAnswer marks the bounded `rev-parse --git-common-dir`
 // lookup's non-answer: runGitLocalCommand returns a bare
 // context.DeadlineExceeded when its deadline trips, and the lost-restore
@@ -180,17 +198,27 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	// degraded filesystem, and each distinct filesystem gets its own probe
 	// within the same bound. The common-dir probe below is a single bounded
 	// flight on an independently known location, so it still runs after the
-	// concurrent probes on its own per-dir bound.
+	// concurrent probes on its own per-dir bound. The fan-out is capped by
+	// writeProbeConcurrency so a hand-edited path with hundreds of creatable
+	// parents cannot start hundreds of simultaneous 1 MiB probes on the same
+	// mount (which would manufacture ENOSPC on a filesystem a structural git
+	// failure does not write to, or exhaust file descriptors), while still
+	// letting probes on distinct filesystems run in parallel so a timed-out
+	// probe on one mount does not consume the budget a probe on a separate
+	// mount needs.
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, writeProbeConcurrency)
 	for _, dir := range dirs {
 		if dir == "" || probed[dir] {
 			continue
 		}
 		probed[dir] = true
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(dir string) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			if probeErr := writeSpaceProbe(dir); probeErr != nil {
 				mu.Lock()
 				joined = errors.Join(joined,
@@ -443,8 +471,36 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 					out := g.annotateGitWriteError(err, creatableParents...)
 					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, &os.PathError{Op: "stat", Path: resolvedParent, Err: syscall.ENOTDIR}))
 				}
+				if base == "." {
+					// Preserve a final symlink before the dot: `link/.` with
+					// `link` targeting an existing nonempty directory is rejected
+					// by `git worktree add` because the destination already
+					// exists, without writing through the symlink.
+					// filepath.Join(resolvedParent, ".") collapses the dot after
+					// resolving `link`, so the later Lstat would see the target
+					// as an ordinary directory and the destination-directory
+					// probe below would unconditionally write-probe it (the lstat
+					// gate skips only a final symlink, not the target it resolved
+					// to); a coincidental ENOSPC on the target's filesystem
+					// would turn a structural "already exists" failure into an
+					// indefinite environmental retry. Keeping the un-resolved
+					// parent as the probe target preserves the symlink as the
+					// final component the existing-destination check's Lstat
+					// sees, so the empty-dir gate below skips a nonempty target
+					// the way a non-dot symlinked destination is skipped — `git
+					// worktree add` populates an empty target through the symlink
+					// but rejects a nonempty one without writing, so a full
+					// filesystem on the target the structural failure does not
+					// write to must not stall the loop. For a regular directory
+					// the un-resolved and resolved paths coincide, so the
+					// regular-dir probe is unchanged.
+					worktreePath = parent
+				} else {
+					worktreePath = filepath.Join(resolvedParent, base)
+				}
+			} else {
+				worktreePath = filepath.Join(resolvedParent, base)
 			}
-			worktreePath = filepath.Join(resolvedParent, base)
 		} else {
 			// A non-timeout resolution error is environmental evidence about the
 			// filesystem the probe is about to write to, not a missing path. It

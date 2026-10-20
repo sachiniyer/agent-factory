@@ -2,8 +2,10 @@ package git
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -728,4 +730,166 @@ func TestAnnotateGitWriteError_ConcurrentProbesPreserveOtherFilesystemsAfterTime
 			"deadline that a single probeTimeout consumes")
 	require.True(t, errors.Is(out, syscall.ENOSPC),
 		"the second dir's ENOSPC must reach the chain: %v", out)
+}
+
+// TestAnnotateGitWriteError_BoundsConcurrentWriteProbeFanOut pins the contract the #5421
+// review added for the write-probe fan-out: a hand-edited relative worktree path can
+// accumulate many distinct creatable parents (repeated `dirN/missing/../../` segments, each
+// retained by the tail walk), and annotateGitWriteError starts one goroutine and one 1 MiB
+// write probe per parent. Without a bound all of them could target the same mount at once —
+// hundreds of simultaneous probes could exhaust file descriptors or manufacture ENOSPC on a
+// filesystem a structural git failure does not actually write to, stalling the lost-restore
+// loop on a coincidental resource errno. The fan-out is capped by writeProbeConcurrency so a
+// degraded same-mount path cannot fan out unbounded resource use while still letting probes
+// on distinct filesystems run in parallel (a timed-out probe on one mount does not consume
+// the budget a probe on a separate mount needs).
+//
+// Deterministic in both directions: against the form that started one goroutine per parent
+// with no bound, the in-flight count exceeded writeProbeConcurrency and the test failed; with
+// the bound the in-flight count never exceeds writeProbeConcurrency while every dir is still
+// probed and a full filesystem's ENOSPC still reaches the chain.
+func TestAnnotateGitWriteError_BoundsConcurrentWriteProbeFanOut(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// More dirs than writeProbeConcurrency so the bound is the limiter, not the
+	// number of dirs. Each probe blocks until a shared gate opens so the in-flight
+	// count is observable, and a full filesystem on the last dir must still
+	// reach the chain (the bound does not drop coverage of distinct paths).
+	dirs := make([]string, writeProbeConcurrency*4)
+	base := t.TempDir()
+	for i := range dirs {
+		dirs[i] = filepath.Join(base, fmt.Sprintf("d%d", i))
+	}
+
+	var mu sync.Mutex
+	var inFlight, maxInFlight int
+	blockRelease := make(chan struct{})
+	writeSpaceProbe = func(dir string) error {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		// Hold each probe in flight long enough for the fan-out to reach the
+		// bound. The gate opens after a short delay so the test does not stall
+		// the whole poll; the bound is what limits concurrency, not the gate.
+		<-blockRelease
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		if dir == dirs[len(dirs)-1] {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	time.AfterFunc(50*time.Millisecond, func() { close(blockRelease) })
+	g := &GitWorktree{}
+	out := g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
+
+	require.LessOrEqual(t, maxInFlight, writeProbeConcurrency,
+		"the concurrent write-probe fan-out must be bounded by writeProbeConcurrency so a "+
+			"hand-edited path with many creatable parents cannot start hundreds of simultaneous "+
+			"1 MiB probes on the same mount (which would exhaust file descriptors or manufacture "+
+			"ENOSPC on a filesystem a structural git failure does not write to): saw %d in flight",
+		maxInFlight)
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"the bound must not drop coverage of distinct paths: the full filesystem's ENOSPC must "+
+			"still reach the chain: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathFinalDotSymlinkedNonemptyDirSkipsDestinationProbe
+// pins the contract the #5421 review added for a final `.` after a symlinked directory: `link/.`
+// with `link` targeting an existing nonempty directory is rejected by `git worktree add` because
+// the destination already exists, without writing through the symlink. The earlier final-`.` fix
+// handled a symlink to a regular file (it surfaces ENOTDIR), but a symlink to a nonempty
+// directory bypassed that non-directory check — `filepath.Join(resolvedParent, ".")` collapses
+// the dot after resolving `link`, so the later Lstat saw the target as an ordinary directory
+// and the destination-directory probe unconditionally write-probed it; a coincidental ENOSPC on
+// the target's filesystem turned a structural "already exists" failure into an indefinite
+// environmental retry on a filesystem freeing it cannot fix. Keeping the un-resolved parent as
+// the probe target preserves the symlink as the final component the existing-destination
+// check's Lstat sees, so the empty-dir gate skips a nonempty target the way a non-dot
+// symlinked destination is skipped — git populates an empty target through the symlink but
+// rejects a nonempty one without writing.
+//
+// Deterministic in both directions: against the form that collapsed the dot, the write probe
+// targeted the symlink target and a write probe mocked to fail only there returned ENOSPC, so
+// errors.Is(out, syscall.ENOSPC) was true and the test failed; with the un-resolved parent the
+// Lstat gate sees the symlink, the empty-dir read skips the nonempty target, and the ENOSPC
+// never reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalDotSymlinkedNonemptyDirSkipsDestinationProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real nonempty directory on a distinct filesystem; `git
+	// worktree add link/.` follows `link` to the directory and rejects the add because the
+	// destination already exists, without writing through the symlink. A coincidental
+	// ENOSPC on the target's filesystem must not stall the lost-restore loop on a
+	// structural failure freeing it cannot fix — the empty-dir gate skips a nonempty
+	// symlinked destination the way a non-dot final symlink does.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "link"))
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "occupied"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "link")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the symlink target the way the production code does so the expected path
+	// matches across hosts (macOS /var/folders -> /private/var/folders).
+	resolvedTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+
+	// Stat follows the symlink and reports a directory (the existing target); Lstat
+	// reports the symlink itself so the gate excludes it before the write probe targets
+	// the symlink's target. The empty-dir read counts the target's entries and skips the
+	// probe because the target is nonempty — git rejects the add without writing.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		// A coincidental ENOSPC on the symlink target's filesystem is the bug:
+		// git rejects `link/.` without writing there, so freeing it cannot fix
+		// the structural failure and the probe must not target it.
+		if dir == resolvedTarget {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/."}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a `.` after a symlink to a nonempty directory must not write-probe the target — git "+
+			"rejects the add because the destination already exists, so a full target filesystem "+
+			"cannot fix the structural failure and must not stall the lost-restore loop: %v", out)
+	require.NotContains(t, probedDirs, resolvedTarget,
+		"the symlink target's filesystem must not be probed for a `.` after a symlink to a "+
+			"nonempty directory — git never writes there")
 }
