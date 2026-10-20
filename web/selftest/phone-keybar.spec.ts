@@ -170,3 +170,71 @@ test("#5426 phone keybar Paste reads the clipboard inside the tap's activation-b
     }
   }
 });
+
+test("#5428 a tap whose clipboard read fails leaves the paste sheet open past the tap's own click", async ({
+  browser, request,
+}, testInfo) => {
+  // The fallback half of the Paste promise: when readText rejects, the sheet
+  // is appended while the tap is still in flight and the tap's own trailing
+  // click hit-tests the fresh backdrop. Before the #5428 fix that click's
+  // dismiss listener closed the sheet inside the same gesture — Paste did
+  // nothing at all on any phone where the read fails.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 812 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await ctx.newPage();
+  const stream = phoneInputStream(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => Promise.reject(new DOMException("denied", "NotAllowedError")) },
+    });
+  });
+
+  const response = await request.post("/v1/CreateSession", { data: {
+    repo_path: process.env.AF_MOCK_REPO, title_base: "probe-keybar-paste-sheet",
+  } });
+  const created = await response.json();
+  expect(created.error).toBeFalsy();
+  const id = created.data.instance.id;
+  expect(id).toBeTruthy();
+  try {
+    await page.goto(`/#/session/${encodeURIComponent(id)}`);
+    await page.locator(".af-pane-host .xterm").first().click();
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
+    const bar = page.locator(".af-terminal-keybar:visible");
+    await expect(bar).toBeVisible();
+    const paste = bar.getByRole("button", { name: "Paste", exact: true });
+    const sheet = page.locator(".af-modal-backdrop");
+
+    // The tap's trailing click lands on the backdrop the tap itself summoned.
+    // The dismiss is keyed to the opening gesture, so the sheet must be open
+    // — and focused — once the gesture has fully settled.
+    await paste.tap();
+    await expect(sheet).toHaveCount(1, { timeout: 5000 });
+    await expect(sheet.locator(".af-textarea")).toBeFocused();
+    await page.waitForTimeout(300); // let the trailing click finish dispatching
+    await expect(sheet, "the tap's own click must not dismiss the sheet it opened").toHaveCount(1);
+    await expect(sheet.locator(".af-textarea")).toBeFocused();
+
+    // A later, separate interaction still dismisses — a fresh backdrop tap is
+    // a new pointer gesture with an uncanceled pointerdown (detail>0 click).
+    await sheet.tap({ position: { x: 12, y: 12 } });
+    await expect(sheet).toHaveCount(0);
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
+    expect(stream(), "a dismissed empty sheet pastes nothing").not.toContain("\x1b[200~");
+  } finally {
+    try {
+      await page.screenshot({ path: testInfo.outputPath("phone-keybar-paste-sheet.png") });
+      console.log("#5428 PTY input:", JSON.stringify(stream()));
+    } finally {
+      await leavePageAndCleanup(page, async () => {
+        const killed = await request.post("/v1/KillSession", { data: { id } });
+        expect((await killed.json()).error).toBeFalsy();
+        await ctx.close();
+      });
+    }
+  }
+});

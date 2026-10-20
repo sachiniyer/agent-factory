@@ -292,6 +292,25 @@ export function keybarClickIsPointerless(event: { detail: number; pointerType?: 
   return event.detail === 0 && !event.pointerType;
 }
 
+/**
+ * True when a backdrop click belongs to the pointer gesture that opened the
+ * paste sheet (#5428). The sheet is appended while that gesture is still in
+ * flight, so its trailing click hit-tests the fresh full-screen backdrop and
+ * would dismiss the sheet inside the same tap. Pointer identity is the key:
+ * the trailing click is the first click after the open and carries the opening
+ * pointer, and a later gesture can never match it — a new press either brings
+ * a new pointerId or disarms the swallow at its pointerdown (engines that
+ * reuse ids, e.g. touch on WebKit). The click's own detail is NOT part of the
+ * key: Chromium counts it as 0 only for the first canceled-press click.
+ * Pointerless opens record no gesture, so every click still dismisses.
+ */
+export function keybarSheetClickIsOpeningGesture(
+  event: { pointerId?: number; pointerType?: string },
+  opening: { pointerId: number; pointerType: string } | undefined): boolean {
+  return opening !== undefined && event.pointerId === opening.pointerId &&
+    event.pointerType === opening.pointerType;
+}
+
 export class TerminalKeybar {
   private arrows = false;
   private readonly rows: HTMLElement[] = [];
@@ -321,6 +340,10 @@ export class TerminalKeybar {
   private readonly suppressedKeydowns = new WeakSet<Event>();
   private pasteSheet: HTMLElement | undefined;
   private pasteSheetArea: HTMLTextAreaElement | undefined;
+  private pasteSheetGesture: { pointerId: number; pointerType: string } | undefined;
+  // A pointerdown anywhere starts a NEW gesture — by definition later than the
+  // one whose trailing click the armed swallow exists for (#5428).
+  private readonly disarmPasteSheetGesture = (): void => { this.pasteSheetGesture = undefined; };
   private disposed = false;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
@@ -340,11 +363,15 @@ export class TerminalKeybar {
         button.type = "button";
         button.textContent = key;
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
-        const act = () => {
+        const act = (event?: PointerEvent) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else if (key === "Paste") void this.requestPaste();
+          // The pointer that released on Paste is remembered through the read:
+          // if it falls back to the sheet, the tap's own trailing click must not
+          // dismiss it (#5428). A pointerless invocation arms nothing.
+          else if (key === "Paste") void this.requestPaste(
+            event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : undefined);
           // Resolve and consume at source. The marker preserves these bytes
           // without sending a keybar emission through the user decoder again.
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
@@ -377,7 +404,7 @@ export class TerminalKeybar {
             pressedId = undefined;
             const rect = button.getBoundingClientRect();
             if (event.clientX >= rect.left && event.clientX < rect.right &&
-              event.clientY >= rect.top && event.clientY < rect.bottom) act();
+              event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
           });
           button.addEventListener("pointercancel", event => {
             if (event.pointerId === pressedId) pressedId = undefined;
@@ -509,10 +536,10 @@ export class TerminalKeybar {
    * denied), and an empty read each open the paste sheet — the textarea route
    * is how paste works on browsers that block readText.
    */
-  async requestPaste(): Promise<void> {
+  async requestPaste(gesture?: { pointerId: number; pointerType: string }): Promise<void> {
     const clipboard = navigator.clipboard;
     if (!clipboard?.readText) {
-      this.openPasteSheet();
+      this.openPasteSheet(gesture);
       return;
     }
     try {
@@ -526,7 +553,7 @@ export class TerminalKeybar {
         return;
       }
     } catch { /* readText also rejects on denied permission. */ }
-    if (!this.disposed && this.focused) this.openPasteSheet();
+    if (!this.disposed && this.focused) this.openPasteSheet(gesture);
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -553,8 +580,13 @@ export class TerminalKeybar {
    * and Send routes the text through the same sendPaste path a direct
    * clipboard read would. The card reuses the app's modal chrome classes;
    * Escape, Cancel, and a backdrop tap all dismiss.
+   *
+   * `gesture` is the pointer that invoked Paste, when there was one: the sheet
+   * is appended while that gesture is still in flight, and the tap's own
+   * trailing click would otherwise hit-test the fresh backdrop and dismiss it
+   * inside the same gesture (#5428).
    */
-  private openPasteSheet(): void {
+  private openPasteSheet(gesture?: { pointerId: number; pointerType: string }): void {
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
@@ -565,7 +597,7 @@ export class TerminalKeybar {
     // drops a just-committed IME composition before its zero-delay finalizer
     // reads it. Open behind that commit instead, the same deferral sendPaste
     // takes, so the text the user finished lands before the sheet takes focus.
-    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet(gesture))) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
     title.textContent = "Paste";
@@ -621,11 +653,24 @@ export class TerminalKeybar {
     const backdrop = document.createElement("div");
     backdrop.className = "af-modal-backdrop";
     backdrop.append(card);
-    backdrop.addEventListener("click", () => this.closePasteSheet(false));
+    backdrop.addEventListener("click", event => {
+      // The click that ends the opening gesture hit-tests a backdrop that did
+      // not exist when its pointerdown ran — swallowing it keeps the sheet
+      // open past its own tap (#5428). Consumed either way; a later, separate
+      // interaction always dismisses.
+      const opening = this.pasteSheetGesture;
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+        this.pasteSheetGesture = undefined;
+        return;
+      }
+      this.closePasteSheet(false);
+    });
     cancel.addEventListener("click", () => this.closePasteSheet(false));
     send.addEventListener("click", () => this.closePasteSheet(true));
     this.pasteSheet = backdrop;
     this.pasteSheetArea = area;
+    this.pasteSheetGesture = gesture;
+    document.addEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     document.body.append(backdrop);
     area.focus();
   }
@@ -634,6 +679,8 @@ export class TerminalKeybar {
     this.pasteSheet?.remove();
     this.pasteSheet = undefined;
     this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     if (send && area?.value) this.sendPaste(area.value);
     // Focusing the sheet blurred the terminal's textarea; hand the focus back
     // so the keybar returns to the session the text was sent to.
@@ -676,6 +723,8 @@ export class TerminalKeybar {
     this.pasteSheet?.remove();
     this.pasteSheet = undefined;
     this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
     this.softInput.dispose();

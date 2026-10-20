@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
   ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, keybarClickIsPointerless, keybarPointerDown,
-  SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
+  keybarSheetClickIsOpeningGesture, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
 
@@ -630,6 +630,33 @@ test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)"
   assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "mouse" }), false);
   assert.equal(keybarClickIsPointerless({ detail: 1, pointerType: "mouse" }), false);
   assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
+});
+
+test("the paste sheet's backdrop dismiss ignores exactly the opening gesture's click (#5428)", () => {
+  const opening = { pointerId: 2, pointerType: "touch" };
+  // The tap that opened the sheet carries the same pointer — swallowed
+  // however late its click arrives, and whatever detail the engine counted
+  // (Chromium reports 0 for the first canceled-press click, 1 for later ones).
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, opening), true);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 1, pointerId: 2, pointerType: "touch" }, opening), true);
+  // A later tap is a new pointer id...
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 3, pointerType: "touch" }, opening), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 1, pointerId: 3, pointerType: "touch" }, opening), false);
+  // ...a different pointer type is a different gesture even at the same id...
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "pen" }, opening), false);
+  // ...and an assistive click never carries the opening pointer's type.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 0, pointerType: "" }, opening), false);
+  // A pointerless open arms nothing, so no click is ever swallowed.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 0, pointerType: "" }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, undefined), false);
 });
 
 test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {

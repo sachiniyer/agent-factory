@@ -8680,6 +8680,9 @@ function keybarPointerDown(event, act) {
 function keybarClickIsPointerless(event) {
   return event.detail === 0 && !event.pointerType;
 }
+function keybarSheetClickIsOpeningGesture(event, opening) {
+  return opening !== void 0 && event.pointerId === opening.pointerId && event.pointerType === opening.pointerType;
+}
 var TerminalKeybar = class {
   constructor(host, input, paste, refit, applicationCursor) {
     this.host = host;
@@ -8701,11 +8704,13 @@ var TerminalKeybar = class {
         button.type = "button";
         button.textContent = key;
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
-        const act = () => {
+        const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else if (key === "Paste") void this.requestPaste();
+          else if (key === "Paste") void this.requestPaste(
+            event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : void 0
+          );
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
@@ -8720,7 +8725,7 @@ var TerminalKeybar = class {
             if (event.pointerId !== pressedId) return;
             pressedId = void 0;
             const rect = button.getBoundingClientRect();
-            if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act();
+            if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
           });
           button.addEventListener("pointercancel", (event) => {
             if (event.pointerId === pressedId) pressedId = void 0;
@@ -8784,6 +8789,12 @@ var TerminalKeybar = class {
   suppressedKeydowns = /* @__PURE__ */ new WeakSet();
   pasteSheet;
   pasteSheetArea;
+  pasteSheetGesture;
+  // A pointerdown anywhere starts a NEW gesture — by definition later than the
+  // one whose trailing click the armed swallow exists for (#5428).
+  disarmPasteSheetGesture = () => {
+    this.pasteSheetGesture = void 0;
+  };
   disposed = false;
   setFocused(focused) {
     this.focused = focused;
@@ -8880,10 +8891,10 @@ var TerminalKeybar = class {
    * denied), and an empty read each open the paste sheet — the textarea route
    * is how paste works on browsers that block readText.
    */
-  async requestPaste() {
+  async requestPaste(gesture) {
     const clipboard = navigator.clipboard;
     if (!clipboard?.readText) {
-      this.openPasteSheet();
+      this.openPasteSheet(gesture);
       return;
     }
     try {
@@ -8895,7 +8906,7 @@ var TerminalKeybar = class {
       }
     } catch {
     }
-    if (!this.disposed && this.focused) this.openPasteSheet();
+    if (!this.disposed && this.focused) this.openPasteSheet(gesture);
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -8922,14 +8933,19 @@ var TerminalKeybar = class {
    * and Send routes the text through the same sendPaste path a direct
    * clipboard read would. The card reuses the app's modal chrome classes;
    * Escape, Cancel, and a backdrop tap all dismiss.
+   *
+   * `gesture` is the pointer that invoked Paste, when there was one: the sheet
+   * is appended while that gesture is still in flight, and the tap's own
+   * trailing click would otherwise hit-test the fresh backdrop and dismiss it
+   * inside the same gesture (#5428).
    */
-  openPasteSheet() {
+  openPasteSheet(gesture) {
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
     }
     if (this.disposed || !this.focused) return;
-    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet(gesture))) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
     title.textContent = "Paste";
@@ -8981,11 +8997,20 @@ var TerminalKeybar = class {
     const backdrop = document.createElement("div");
     backdrop.className = "af-modal-backdrop";
     backdrop.append(card);
-    backdrop.addEventListener("click", () => this.closePasteSheet(false));
+    backdrop.addEventListener("click", (event) => {
+      const opening = this.pasteSheetGesture;
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+        this.pasteSheetGesture = void 0;
+        return;
+      }
+      this.closePasteSheet(false);
+    });
     cancel.addEventListener("click", () => this.closePasteSheet(false));
     send.addEventListener("click", () => this.closePasteSheet(true));
     this.pasteSheet = backdrop;
     this.pasteSheetArea = area;
+    this.pasteSheetGesture = gesture;
+    document.addEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     document.body.append(backdrop);
     area.focus();
   }
@@ -8994,6 +9019,8 @@ var TerminalKeybar = class {
     this.pasteSheet?.remove();
     this.pasteSheet = void 0;
     this.pasteSheetArea = void 0;
+    this.pasteSheetGesture = void 0;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     if (send && area?.value) this.sendPaste(area.value);
     this.textarea?.focus?.();
   }
@@ -9036,6 +9063,8 @@ var TerminalKeybar = class {
     this.pasteSheet?.remove();
     this.pasteSheet = void 0;
     this.pasteSheetArea = void 0;
+    this.pasteSheetGesture = void 0;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
     this.softInput.dispose();
