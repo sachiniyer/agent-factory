@@ -413,3 +413,38 @@ func limitResumeBackoffFor(attempts int) time.Duration {
 	}
 	return backoff
 }
+
+// attachPauseLeaseHeld reports whether an attached TUI now holds the pause lease
+// for this session, which an automated resume must defer to at every destructive
+// boundary in resumeFromLimitLockedOutcome (#5422 review): the identity commit, the
+// pane-stop calls, and the respawn all replace a runtime a TUI may have attached to
+// during a liveness probe the scheduler's top-level gate does not cover. The
+// operatorInitiated RPC (the explicit ResumeFromLimit) is exempt, exactly like a
+// manual send-prompt; the caller's !operatorInitiated gate mirrors the send-boundary
+// recheck and the top-level gate above. A deferral returns resumeNotPerformed without
+// clearing the limit, so the scheduler re-fires on the next tick once the lease lapses.
+func (m *Manager) attachPauseLeaseHeld(operatorInitiated bool, repoID string, instance *session.Instance) bool {
+	return !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID)
+}
+
+// testHookResumeBeforeAccountSwapCommit fires in resumeFromLimitLockedOutcome after
+// the account-swap liveness probe and before the attach-lease recheck that gates the
+// automated identity commit. A test substitutes it to attach the lease in that window
+// so the pre-commit recheck is the only thing that can keep the swap from replacing a
+// runtime a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapCommit = func() {}
+
+// testHookResumeBeforeAccountSwapStop fires in resumeFromLimitLockedOutcome after the
+// liveness probe and before the attach-lease recheck that gates the account-swap
+// pane-stop arms. A test substitutes it to attach the lease in that window so the
+// pre-stop recheck is the only thing that can keep the stop calls from tearing down a
+// pane a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapStop = func() {}
+
+// testHookResumeBeforeAccountSwapRespawn fires in resumeFromLimitLockedOutcome
+// immediately before the attach-lease recheck that gates the automated respawn, after
+// the identity commit and the pane-stop calls but before the respawn that rebuilds the
+// runtime. A test substitutes it to attach the lease in that window so the pre-respawn
+// recheck is the only thing that can keep the respawn from replacing a runtime a TUI
+// just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapRespawn = func() {}
