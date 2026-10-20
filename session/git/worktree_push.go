@@ -38,6 +38,34 @@ const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 // origin and surfaces as an error here rather than silently overwriting or losing
 // history.
 //
+// Before snapshotting, the worktree is reconciled with origin so a behind-only
+// HEAD does not wedge the archive. A routine agent action — `git checkout
+// <old-sha>`, `git reset --hard` on a restored session — leaves HEAD an ancestor
+// of origin's session branch. That state overwrites nothing on origin, yet the
+// plain non-force push of HEAD is rejected as non-fast-forward, so the unreformed
+// path aborted the archive to Lost AND stranded the just-created snapshot commit
+// inside the sandbox (the retry loop then re-failed identically, and the
+// --force-reap / `af sessions kill` off-ramps tore the box down with the WIP
+// still in it — the exact data loss the "nothing lost" guarantee exists to
+// prevent). So we fetch origin's branch, classify HEAD against FETCH_HEAD, and:
+//
+//   - behind (HEAD is an ancestor of FETCH_HEAD): a clean tree fast-forwards HEAD
+//     and the working tree to origin's tip (no snapshot needed — origin already
+//     holds this history); a dirty tree builds the snapshot commit directly on
+//     FETCH_HEAD via plumbing (write-tree/commit-tree + reset --soft) so the push
+//     becomes a trivial fast-forward, WITHOUT `git stash` — refs/stash is shared
+//     across worktrees (#2801) and stash-create does not capture untracked files,
+//     so the snapshot recipe would both race sibling sessions and drop the very
+//     untracked work the snapshot exists to preserve.
+//   - diverged (neither is an ancestor of the other): refuse BEFORE creating any
+//     snapshot commit, with an error that names the condition and distinguishes
+//     it from the recoverable cases — a rejected push never strands a local WIP
+//     the retry loop cannot recover.
+//   - ahead or equal, or FETCH_HEAD unavailable (origin unreachable, or the
+//     branch does not yet exist on origin for a first archive): fall through to
+//     the snapshot + push below, which fast-forwards origin (or creates the
+//     branch on the first push).
+//
 // The push runs under the network timeout (a stalled or auth-prompting origin
 // must not hang the archive forever). Credentials are the sandbox image's/host's
 // responsibility — the same `origin` the sandbox cloned from must be pushable
@@ -93,6 +121,98 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	if err != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
 	}
+	dirty := strings.TrimSpace(status) != ""
+
+	// Reconcile HEAD with origin BEFORE creating any snapshot commit, so a
+	// rejected push never strands a local WIP commit the retry loop cannot
+	// recover. Fetch origin's session branch (best-effort, bounded by
+	// networkGitTimeout); a failed fetch — origin unreachable, or the branch
+	// does not yet exist on origin for a first archive — leaves FETCH_HEAD
+	// unset and we fall through to the unconditional push below, which still
+	// fast-forwards origin for the equal/ahead cases and creates the branch
+	// on the first push.
+	_, _ = g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", branch)
+	// rev-parse --verify -q confirms FETCH_HEAD resolved to a commit before
+	// we classify; without it a missing FETCH_HEAD would read as "diverged"
+	// and refuse a perfectly pushable ahead/equal HEAD.
+	if _, verifyErr := g.runGitCommand(g.worktreePath, "rev-parse", "--verify", "-q", "FETCH_HEAD"); verifyErr == nil {
+		// isAncestor reports whether `a` is an ancestor of `b` (a commit
+		// counts as its own ancestor, so an equal HEAD reads as "behind"
+		// here and is handled by the same path). merge-base --is-ancestor
+		// exits 0 iff the first rev is an ancestor of the second.
+		isAncestor := func(a, b string) bool {
+			_, e := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", a, b)
+			return e == nil
+		}
+		behind := isAncestor("HEAD", "FETCH_HEAD")
+		if behind {
+			if !dirty {
+				// Clean tree: fast-forward HEAD and the working tree to
+				// origin's tip. No snapshot commit is needed — origin
+				// already holds this history, and the push below becomes a
+				// no-op fast-forward.
+				if out, ffErr := g.runGitCommand(g.worktreePath, "merge", "--ff-only", "FETCH_HEAD"); ffErr != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to fast-forward HEAD onto origin's tip before archive push: %s: %w",
+						strings.TrimSpace(out), ffErr), probeDir)
+				}
+			} else {
+				// Dirty tree: build the snapshot commit directly on origin's
+				// tip so the push fast-forwards, WITHOUT `git stash`
+				// (refs/stash is shared across worktrees, #2801, and stash
+				// create does not capture untracked files) and WITHOUT
+				// disturbing the working-tree bytes. Stage the work, write a
+				// tree, commit it with FETCH_HEAD as its parent, then reset
+				// --soft HEAD onto it: the index and working tree already
+				// match the new commit (we just staged everything), so the
+				// tree reads clean and the snapshot block below is a no-op.
+				// The snapshot is created only after reconciliation is
+				// decided, so a failure here strands nothing.
+				if _, e := g.runGitCommand(g.worktreePath, "add", "-A"); e != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", e), probeDir)
+				}
+				treeSha, e := g.runGitCommand(g.worktreePath, "write-tree")
+				if e != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to write snapshot tree before archive push: %w", e), probeDir)
+				}
+				fetchHead, e := g.runGitCommand(g.worktreePath, "rev-parse", "FETCH_HEAD")
+				if e != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to resolve origin's tip before archive push: %w", e), probeDir)
+				}
+				commitSha, e := g.runGitCommand(g.worktreePath, "commit-tree", strings.TrimSpace(treeSha),
+					"-p", strings.TrimSpace(fetchHead), "-m", archiveSnapshotMessage)
+				if e != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to create snapshot commit on origin's tip before archive push: %w", e), probeDir)
+				}
+				if out, e := g.runGitCommand(g.worktreePath, "reset", "--soft", strings.TrimSpace(commitSha)); e != nil {
+					return "", g.annotateGitWriteError(fmt.Errorf("failed to advance HEAD onto snapshot commit before archive push: %s: %w",
+						strings.TrimSpace(out), e), probeDir)
+				}
+			}
+			// Re-read status after reconciliation: both branches leave the
+			// tree clean (clean: the ff updated it; dirty: reset --soft
+			// onto the just-staged commit), so the snapshot block below is
+			// a no-op and we proceed straight to the push.
+			status, err = g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
+			if err != nil {
+				return "", g.annotateGitWriteError(fmt.Errorf("failed to re-check worktree status after reconciling with origin: %w", err), probeDir)
+			}
+		} else if !isAncestor("FETCH_HEAD", "HEAD") {
+			// FETCH_HEAD is NOT an ancestor of HEAD either, and HEAD is not
+			// an ancestor of FETCH_HEAD: genuine divergence. Refuse BEFORE
+			// creating any snapshot commit, with an error that names the
+			// condition and distinguishes it from the recoverable cases —
+			// a behind-only HEAD was the wedge, and this is the other half
+			// of the classification the old path never did.
+			return "", g.annotateGitWriteError(fmt.Errorf(
+				"archive push aborted: HEAD has diverged from origin's %q branch and no fast-forward is possible "+
+					"(behind-only HEAD is reconciled automatically; genuine divergence is not) — "+
+					"reconcile HEAD with origin inside the sandbox (e.g. `git merge origin/%[1]s` or `git rebase origin/%[1]s`) before re-archiving, "+
+					"or the uncommitted work in the sandbox will be lost when it is reaped",
+				branch), probeDir)
+		}
+		// else: ahead or equal — the push below will fast-forward (or no-op).
+	}
+
 	if strings.TrimSpace(status) != "" {
 		// No name exclusions here: whatever the sweep could not prove it
 		// created is user content and must be snapshotted like everything

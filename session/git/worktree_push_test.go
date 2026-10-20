@@ -272,3 +272,234 @@ func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {
 		t.Fatal("SnapshotAndPushBranch on an external worktree: want error")
 	}
 }
+
+// advanceOriginAndResetHeadBehind is the shared setup for the behind-only HEAD
+// regression: push the session branch to origin, advance it one commit, then
+// move the worktree HEAD back to the ancestor — the state a restored sandbox
+// lands in the moment its agent runs `git checkout <old-sha>` or
+// `git reset --hard HEAD~1`. Returns origin's advanced tip and the worktree's
+// pre-archive HEAD (the ancestor).
+func advanceOriginAndResetHeadBehind(t *testing.T, gw *GitWorktree, bare, branch string) (originTip, ancestorHead string) {
+	t.Helper()
+	wt := gw.GetWorktreePath()
+	runGit(t, wt, "commit", "--allow-empty", "-m", "origin advance")
+	runGit(t, wt, "push", "origin", branch)
+	originTip = branchTip(t, bare, "refs/heads/"+branch)
+	runGit(t, wt, "reset", "--hard", "HEAD~1")
+	ancestorHead = branchTip(t, wt, "HEAD")
+	require.NotEqual(t, ancestorHead, originTip, "precondition: HEAD must be behind origin's tip")
+	return originTip, ancestorHead
+}
+
+// TestSnapshotAndPushBranch_BehindCleanFastForwards is the core behind-only
+// regression: a CLEAN worktree whose HEAD is an ancestor of origin's session
+// branch. The old code pushed HEAD with a plain non-force push and was
+// rejected as non-fast-forward (overwriting nothing on origin), aborting the
+// archive to Lost. The fix fast-forwards HEAD onto origin's tip, so the push
+// becomes a no-op fast-forward and the archive succeeds.
+func TestSnapshotAndPushBranch_BehindCleanFastForwards(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-clean")
+	wt := gw.GetWorktreePath()
+	originTip, _ := advanceOriginAndResetHeadBehind(t, gw, bare, "root/behind-clean")
+	require.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: tree must be clean after reset --hard")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-clean", got)
+
+	// HEAD was fast-forwarded to origin's tip; origin is untouched (no-op push).
+	assert.Equal(t, originTip, branchTip(t, wt, "HEAD"))
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-clean"))
+	// No snapshot commit was made (clean tree, nothing to snapshot).
+	assert.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")))
+}
+
+// TestSnapshotAndPushBranch_BehindDetachedCleanFastForwards is the behind-only
+// regression for a DETACHED HEAD — the restored-sandbox case where the agent
+// ran `git checkout --detach <old-sha>` to inspect old code. The fast-forward
+// must work off any branch (#1721), and the push must still target the session
+// branch on origin.
+func TestSnapshotAndPushBranch_BehindDetachedCleanFastForwards(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-detached")
+	wt := gw.GetWorktreePath()
+	originTip, _ := advanceOriginAndResetHeadBehind(t, gw, bare, "root/behind-detached")
+	runGit(t, wt, "checkout", "--detach", "HEAD")
+	require.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-detached", got)
+
+	assert.Equal(t, originTip, branchTip(t, wt, "HEAD"))
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-detached"))
+}
+
+// TestSnapshotAndPushBranch_BehindDirtySnapshotsOnOriginTip is the behind-only
+// regression with UNCOMMITTED work — the case that stranded a WIP commit in the
+// old code. The fix builds the snapshot commit directly on origin's tip (not on
+// the behind HEAD) so the push fast-forwards, the agent's uncommitted work
+// (modified + untracked) survives on the session branch, and no WIP commit is
+// stranded on the old HEAD for the retry loop to fail on.
+func TestSnapshotAndPushBranch_BehindDirtySnapshotsOnOriginTip(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-dirty")
+	wt := gw.GetWorktreePath()
+
+	// Put a tracked file on origin's tip so we can both modify it and prove
+	// the snapshot lands on origin's tip, not the behind HEAD.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "tracked.txt"), []byte("base\n"), 0o644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "add tracked.txt")
+	runGit(t, wt, "push", "origin", "root/behind-dirty")
+	originTip := branchTip(t, bare, "refs/heads/root/behind-dirty")
+	runGit(t, wt, "reset", "--hard", "HEAD~1") // HEAD back at init, behind origin
+	ancestorHead := branchTip(t, wt, "HEAD")
+	require.NotEqual(t, ancestorHead, originTip)
+
+	// Leave uncommitted work: a modification to a tracked file AND a brand-new
+	// untracked file (the kind `git stash create` would drop, which is why the
+	// fix uses plumbing instead of stash).
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "tracked.txt"), []byte("agent edit\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "untracked.txt"), []byte("new work\n"), 0o644))
+	require.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"precondition: tree must be dirty")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-dirty", got)
+
+	// The snapshot commit's ONLY parent is origin's tip — NOT the behind HEAD.
+	// This is the anti-stranding assertion: a WIP commit on the old HEAD
+	// (what the old code created) would have made HEAD^ == ancestorHead.
+	pushedTip := branchTip(t, wt, "HEAD")
+	assert.Equal(t, pushedTip, branchTip(t, bare, "refs/heads/root/behind-dirty"))
+	assert.Equal(t, originTip, strings.TrimSpace(runGitOut(t, wt, "rev-parse", "HEAD^")),
+		"the snapshot commit's parent must be origin's tip, not the behind HEAD")
+	assert.NotEqual(t, ancestorHead, strings.TrimSpace(runGitOut(t, wt, "rev-parse", "HEAD^")),
+		"no WIP commit stranded on the behind HEAD")
+
+	// The agent's uncommitted work survives on origin's session branch —
+	// both the modified tracked file and the untracked file.
+	files := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/behind-dirty")
+	assert.Contains(t, files, "tracked.txt")
+	assert.Contains(t, files, "untracked.txt")
+	assert.Contains(t, runGitOut(t, bare, "show", "refs/heads/root/behind-dirty:tracked.txt"), "agent edit")
+	assert.Contains(t, runGitOut(t, bare, "show", "refs/heads/root/behind-dirty:untracked.txt"), "new work")
+
+	// The worktree is clean after — nothing stranded for a retry to re-fail on.
+	assert.Empty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")))
+}
+
+// TestSnapshotAndPushBranch_BehindDirtyRetryIsIdempotent pins the other half
+// of the stranding bug: the lost-restore recovery loop re-issues the identical
+// failing push on every retry, burning its whole budget on deterministic
+// non-fast-forward rejections. With the fix the FIRST call succeeds, and a
+// retry (a second SnapshotAndPushBranch call) is a clean no-op — HEAD already
+// equals origin's tip — rather than a re-failure.
+func TestSnapshotAndPushBranch_BehindDirtyRetryIsIdempotent(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-retry")
+	wt := gw.GetWorktreePath()
+	_, _ = advanceOriginAndResetHeadBehind(t, gw, bare, "root/behind-retry")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "work.txt"), []byte("precious\n"), 0o644))
+
+	// First archive attempt (the one the old code wedged on).
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	tipAfterFirst := branchTip(t, bare, "refs/heads/root/behind-retry")
+
+	// The recovery loop's retry: a second call must not re-fail. HEAD now
+	// equals origin's tip and the tree is clean, so this is a no-op push.
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-retry", got)
+	assert.Equal(t, tipAfterFirst, branchTip(t, bare, "refs/heads/root/behind-retry"),
+		"the retry must not change origin's tip")
+	assert.Equal(t, tipAfterFirst, branchTip(t, wt, "HEAD"))
+}
+
+// TestSnapshotAndPushBranch_DivergedRefusesWithoutStranding pins that a
+// GENUINELY divergent HEAD (neither ancestor of the other) is still refused —
+// the non-force guarantee from #1721/#1733 — but now refused BEFORE any
+// snapshot commit is created, with an error that names the condition and
+// distinguishes it from the recoverable behind-only case. The old code created
+// the WIP commit first and then failed the push, stranding the commit; this
+// test asserts HEAD does not advance and the uncommitted work stays
+// uncommitted, so neither --force-reap nor `af sessions kill` discards a
+// pushed-but-rejected WIP.
+func TestSnapshotAndPushBranch_DivergedRefusesWithoutStranding(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/diverged")
+	wt := gw.GetWorktreePath()
+
+	// Establish origin's tip, then diverge the worktree HEAD from it.
+	runGit(t, wt, "commit", "--allow-empty", "-m", "origin advance")
+	runGit(t, wt, "push", "origin", "root/diverged")
+	originTip := branchTip(t, bare, "refs/heads/root/diverged")
+	runGit(t, wt, "reset", "--hard", "HEAD~1")
+	runGit(t, wt, "commit", "--allow-empty", "-m", "divergent local")
+	divergentTip := branchTip(t, wt, "HEAD")
+	require.NotEqual(t, originTip, divergentTip, "precondition: HEAD must diverge from origin")
+
+	// Uncommitted work the old code would have committed as a stranded WIP.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "uncommitted.txt"), []byte("precious\n"), 0o644))
+	require.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "diverged",
+		"the error must name the divergence and distinguish it from the recoverable behind-only case")
+
+	// No snapshot commit was created: HEAD is unchanged.
+	assert.Equal(t, divergentTip, branchTip(t, wt, "HEAD"),
+		"HEAD must not advance on a refused push (no stranded WIP commit)")
+	// The uncommitted work is still uncommitted in the worktree, not stranded
+	// as a commit the retry loop would then re-fail on.
+	assert.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")),
+		"uncommitted work must remain uncommitted, not stranded as a WIP commit")
+	// origin is untouched.
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/diverged"))
+}
+
+// TestSnapshotAndPushBranch_FirstArchiveSkipsClassification pins that a
+// brand-new session branch (the branch does not yet exist on origin) is NOT
+// misclassified as diverged: the fetch of the not-yet-existent ref leaves
+// FETCH_HEAD unset, so the classification is skipped and the push creates the
+// branch on origin — the normal first-archive path.
+func TestSnapshotAndPushBranch_FirstArchiveSkipsClassification(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/first")
+	wt := gw.GetWorktreePath()
+	// origin does NOT have root/first yet (pushTestRepo only clones the main
+	// branch). Leave uncommitted work and archive.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "work.txt"), []byte("precious\n"), 0o644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/first", got)
+
+	pushed := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/first")
+	assert.Contains(t, pushed, "work.txt",
+		"first archive must create the branch on origin carrying the uncommitted work")
+}
+
+// TestSnapshotAndPushBranch_BehindCleanDoesNotTouchOrigin verifies the
+// fast-forward reconciliation is genuinely non-destructive on origin: when
+// HEAD is behind and the tree is clean, origin's tip is byte-identical before
+// and after the (no-op) push. This is the "overwrites nothing" half of the
+// bug — the behind-only push protects nothing on origin, so it must not
+// rewrite it.
+func TestSnapshotAndPushBranch_BehindCleanDoesNotTouchOrigin(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/behind-notouch")
+	originTip, _ := advanceOriginAndResetHeadBehind(t, gw, bare, "root/behind-notouch")
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	assert.Equal(t, originTip, branchTip(t, bare, "refs/heads/root/behind-notouch"),
+		"a behind-only clean archive must not rewrite origin's tip")
+}
