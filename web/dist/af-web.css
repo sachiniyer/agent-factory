@@ -910,32 +910,6 @@ button:disabled,
   border-width: calc(var(--af-space-1) / 2);
   border-color: var(--af-accent);
 }
-:root[data-af-theme=light] .af-app[data-project-color],
-.af-app[data-project-color] [data-af-theme=light] {
-  --af-accent: var(--af-project-accent-light);
-}
-:root[data-af-theme=dark] .af-app[data-project-color],
-.af-app[data-project-color] [data-af-theme=dark] {
-  --af-accent: var(--af-project-accent-dark);
-}
-.af-app[data-project-color] .af-main-term::after {
-  border-width: calc(var(--af-space-1) / 2);
-  border-color: var(--af-accent);
-}
-.af-app[data-project-color] .af-appbar {
-  background: var(--af-project-color);
-  color: var(--af-project-ink);
-}
-.af-app[data-project-color] .af-viewnav,
-.af-app[data-project-color] .af-viewtab,
-.af-app[data-project-color] .af-viewtab:hover,
-.af-app[data-project-color] .af-appbar .af-term-title-separator {
-  background: transparent;
-  color: inherit;
-}
-.af-app[data-project-color] .af-viewtab-active {
-  text-decoration-color: currentColor;
-}
 .af-term-head {
   display: flex;
   align-items: center;
@@ -3151,8 +3125,8 @@ textarea[class] {
   display: block;
   width: calc(var(--af-space-4) + var(--af-space-3));
   height: calc(var(--af-space-3) + var(--af-space-2));
-  background: var(--af-surface-raised);
-  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  background: var(--af-ink-muted);
+  border: calc(var(--af-space-1) / 4) solid var(--af-ink-muted);
   border-radius: var(--af-space-3);
   box-sizing: border-box;
 }
@@ -3163,7 +3137,7 @@ textarea[class] {
   width: calc(var(--af-space-3) + var(--af-space-1) / 2);
   height: calc(var(--af-space-3) + var(--af-space-1) / 2);
   transform: translateY(-50%);
-  background: var(--af-ink-muted);
+  background: var(--af-surface);
   border-radius: 50%;
 }
 .af-task-switch-on .af-task-switch-track {

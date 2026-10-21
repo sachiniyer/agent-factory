@@ -1146,39 +1146,6 @@ button:disabled,
   border-color: var(--af-accent);
 }
 
-/* A project color replaces the theme accent everywhere. Each themed chrome element
- * restates the theme tokens, so the override must also reach those elements. */
-:root[data-af-theme="light"] .af-app[data-project-color],
-.af-app[data-project-color] [data-af-theme="light"] {
-  --af-accent: var(--af-project-accent-light);
-}
-:root[data-af-theme="dark"] .af-app[data-project-color],
-.af-app[data-project-color] [data-af-theme="dark"] {
-  --af-accent: var(--af-project-accent-dark);
-}
-
-/* The session pane keeps the project frame when the keyboard is elsewhere too. */
-.af-app[data-project-color] .af-main-term::after {
-  border-width: calc(var(--af-space-1) / 2);
-  border-color: var(--af-accent);
-}
-
-/* The app bar takes the raw project color, so the current project reads at a
- * glance. Controls with a raised surface stay as chips on the bar. */
-.af-app[data-project-color] .af-appbar {
-  background: var(--af-project-color);
-  color: var(--af-project-ink);
-}
-.af-app[data-project-color] .af-viewnav,
-.af-app[data-project-color] .af-viewtab,
-.af-app[data-project-color] .af-viewtab:hover,
-.af-app[data-project-color] .af-appbar .af-term-title-separator {
-  background: transparent;
-  color: inherit;
-}
-.af-app[data-project-color] .af-viewtab-active {
-  text-decoration-color: currentColor;
-}
 .af-term-head {
   display: flex;
   align-items: center;
@@ -3614,8 +3581,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   display: block;
   width: calc(var(--af-space-4) + var(--af-space-3));
   height: calc(var(--af-space-3) + var(--af-space-2));
-  background: var(--af-surface-raised);
-  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  background: var(--af-ink-muted);
+  border: calc(var(--af-space-1) / 4) solid var(--af-ink-muted);
   border-radius: var(--af-space-3);
   box-sizing: border-box;
 }
@@ -3626,7 +3593,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   width: calc(var(--af-space-3) + var(--af-space-1) / 2);
   height: calc(var(--af-space-3) + var(--af-space-1) / 2);
   transform: translateY(-50%);
-  background: var(--af-ink-muted);
+  background: var(--af-surface);
   border-radius: 50%;
 }
 .af-task-switch-on .af-task-switch-track { background: var(--af-accent); border-color: var(--af-accent); }
