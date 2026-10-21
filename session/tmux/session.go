@@ -142,6 +142,50 @@ func EnsureDevinWorkspaceTrustSuppressed(command string) string {
 	return command + " " + devinWorkspaceTrustFlag + " false"
 }
 
+// codexUpdateCheckConfigKey is codex's top-level config.toml key for the
+// startup update prompt ("Update available! … 1. Update now 2. Skip …").
+// Verified against codex-cli 0.163.0: it is a ConfigToml field, and codex's
+// get_upgrade_version_for_popup returns nothing when it is false — no check,
+// no picker, no keystroke for af to get wrong (#5238).
+const codexUpdateCheckConfigKey = "check_for_update_on_startup"
+
+// EnsureCodexUpdateCheckDisabled appends "-c check_for_update_on_startup=false"
+// to a codex launch command so codex's startup update picker never renders and
+// the session reaches ready without af navigating a modal that can exit the
+// process. The picker is answered, not just displayed: confirming "Update now"
+// makes the TUI exit and run the installer synchronously in the same process,
+// which is how a restored session dies seconds after af interacted with the
+// dialog (#5238). Preventing the prompt is strictly safer than answering it —
+// handleCodexUpdatePrompt remains as the fallback for commands launched
+// outside these paths.
+//
+// Same one-helper contract as EnsureDevinWorkspaceTrustSuppressed: every path
+// that launches codex under af calls this — ordinary sessions through
+// injectSystemPrompt (which create, lazy respawn, and Recover all funnel
+// through) and the config-agent spawn directly — so the two cannot drift.
+//
+// The appended -c lands inside whatever subcommand position the command already
+// carries: `codex -c …` is global config, `codex resume --last -c …` is
+// resume's own accepted flag, and the generated-argument declaration af
+// computes against the base command covers it like any other injection.
+//
+// Two conditions, both load-bearing:
+//   - A non-codex command is returned unchanged. A program_overrides entry can
+//     point "codex" at another binary (the #1116/#1131 class); appending a
+//     codex flag to it would make that binary exit on an unknown argument.
+//   - A command already carrying the key — either -c value form — is left
+//     alone, so a user's explicit choice wins: that is how an operator who
+//     wants the prompt gets it back.
+func EnsureCodexUpdateCheckDisabled(command string) string {
+	if DetectAgentFromCommand(command) != ProgramCodex {
+		return command
+	}
+	if strings.Contains(command, codexUpdateCheckConfigKey) {
+		return command
+	}
+	return command + " -c " + codexUpdateCheckConfigKey + "=false"
+}
+
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
 	// closeReapDone is a test seam, set before Close and never mutated during

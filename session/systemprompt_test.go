@@ -61,9 +61,11 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 	}
 }
 
-// Codex now gets a FILE seam (its skills folder, 0.144.1+), not the old
-// -c developer_instructions= blob (#1043 retired): the launch command comes back
-// UNCHANGED and the af skill is written where codex auto-discovers it.
+// Codex gets a FILE seam for guidance (its skills folder, 0.144.1+), not the
+// old -c developer_instructions= blob (#1043 retired): the af skill is written
+// where codex auto-discovers it. The launch command itself still gains one
+// flag: -c check_for_update_on_startup=false, so codex's startup update picker
+// can never block or kill a launch af owns (#5238).
 func TestInjectSystemPrompt_Codex(t *testing.T) {
 	// These agents write into the USER'S global config dir, which af only does
 	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
@@ -75,8 +77,8 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 
 	result := injectSystemPrompt("codex", skillTarget{})
 
-	if result != "codex" {
-		t.Errorf("expected codex command unchanged (file seam, no flag), got %q", result)
+	if result != "codex -c check_for_update_on_startup=false" {
+		t.Errorf("expected codex command carrying the startup update check suppression, got %q", result)
 	}
 	if strings.Contains(result, "developer_instructions=") {
 		t.Errorf("developer_instructions must no longer be injected, got %q", result)
@@ -101,8 +103,25 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 
 	result := injectSystemPrompt("codex --full-auto", skillTarget{})
 
-	if result != "codex --full-auto" {
-		t.Errorf("expected resolved form unchanged (file seam), got %q", result)
+	if result != "codex --full-auto -c check_for_update_on_startup=false" {
+		t.Errorf("expected resolved form preserved with the update-check suppression appended, got %q", result)
+	}
+}
+
+// A program_overrides.codex command carrying the key itself is left alone —
+// the user's explicit choice wins, which is also how an operator opts the
+// startup prompt back in (#5238).
+func TestInjectSystemPrompt_CodexRespectsUserUpdateCheckSetting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
+
+	for _, resolved := range []string{
+		"codex -c check_for_update_on_startup=true",
+		"codex -c check_for_update_on_startup=false",
+	} {
+		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+			t.Errorf("expected %q untouched (user's own value wins), got %q", resolved, got)
+		}
 	}
 }
 
@@ -438,10 +457,11 @@ func TestInjectSystemPrompt_Devin(t *testing.T) {
 // used is decided by the agent the RESOLVED command actually runs — through every
 // override shape (bare name, absolute path, path+flags, redirect to a different
 // agent, redirect to a non-agent binary) — never by the config-name key the
-// command was resolved from. Flag agents (claude → --plugin-dir, aider → --read)
-// gain a flag; file-seam agents (codex, gemini, amp) come back UNCHANGED; non-agent
-// binaries get nothing (the class fix: injecting a flag into e.g. bash makes it
-// exit instantly and the spawn dies as an opaque timeout).
+// command was resolved from. Flag agents (claude → --plugin-dir, aider → --read,
+// codex → -c check_for_update_on_startup=false) gain a flag; file-seam-only
+// agents (gemini, amp) come back UNCHANGED; non-agent binaries get nothing (the
+// class fix: injecting a flag into e.g. bash makes it exit instantly and the
+// spawn dies as an opaque timeout).
 func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// The file-seam rows write under $HOME (~/.config/amp, ~/.codex, ~/.gemini);
@@ -465,7 +485,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}{
 		// name→name (no override) for all supported agents.
 		{name: "claude bare", resolved: "claude", want: "--plugin-dir"},
-		{name: "codex bare", resolved: "codex", want: ""},
+		{name: "codex bare", resolved: "codex", want: "-c check_for_update_on_startup=false"},
 		{name: "aider bare", resolved: "aider", want: "--read"},
 		{name: "gemini bare", resolved: "gemini", want: ""},
 		{name: "amp bare", resolved: "amp", want: ""},
@@ -474,7 +494,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		// name→path and name→path+flags overrides.
 		{name: "claude override path", resolved: "/opt/claude-next/bin/claude", want: "--plugin-dir"},
 		{name: "claude override path with flags", resolved: "/opt/claude-next/bin/claude --model opus", want: "--plugin-dir"},
-		{name: "codex override path with flags", resolved: "/usr/local/bin/codex --full-auto", want: ""},
+		{name: "codex override path with flags", resolved: "/usr/local/bin/codex --full-auto", want: "-c check_for_update_on_startup=false"},
 		{name: "aider override path", resolved: "/usr/local/bin/aider --no-auto-commits", want: "--read"},
 		{name: "gemini override path", resolved: "/usr/local/bin/gemini", want: ""},
 		{name: "amp override path", resolved: "/home/me/.amp/bin/amp --no-ide", want: ""},
@@ -488,7 +508,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{name: "devin override path with flags", resolved: "/home/me/.local/bin/devin --permission-mode accept-edits", want: "--respect-workspace-trust false"},
 
 		// name→other-agent: the RESOLVED agent's seam, not the key's.
-		{name: "claude key resolved to codex is file seam", resolved: "codex --full-auto", want: ""},
+		{name: "claude key resolved to codex gets codex flag", resolved: "codex --full-auto", want: "-c check_for_update_on_startup=false"},
 		{name: "codex key resolved to claude gets claude flag", resolved: "/usr/bin/claude", want: "--plugin-dir"},
 
 		// name→non-agent binary: no injection at all (#1116, #1131).

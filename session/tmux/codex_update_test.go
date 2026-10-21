@@ -232,3 +232,88 @@ func TestCheckAndHandleTrustPrompt_CodexUpdateDoesNotRepeatConfirmation(t *testi
 	require.False(t, session.CheckAndHandleTrustPrompt(),
 		"a positively visible composer releases the confirmed picker state")
 }
+
+// TestEnsureCodexUpdateCheckDisabled is the shared-helper contract both launch
+// paths depend on (#5238): injectSystemPrompt for ordinary sessions and the
+// config-agent spawn both route codex's launch command through here so its
+// startup update picker never renders — and so the two can never drift on how
+// it is suppressed (the #729/#2097/#2416 class, same as the devin helper this
+// mirrors).
+//
+// The cases mirror what TestInjectSystemPrompt_Codex already pins for the
+// session path, asserted here against the function itself so the config-agent
+// path is covered by the same contract rather than a copy of it.
+func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
+	const arg = "-c " + codexUpdateCheckConfigKey + "=false"
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"bare codex gets the flag", "codex", "codex " + arg},
+		{
+			"abs-path codex gets the flag",
+			"/home/u/.local/bin/codex",
+			"/home/u/.local/bin/codex " + arg,
+		},
+		{
+			"existing flags compose with the flag",
+			"codex --model gpt-5 --full-auto",
+			"codex --model gpt-5 --full-auto " + arg,
+		},
+		{
+			// The flag lands after the resume subcommand af splices in on
+			// restore: -c is an accepted resume option, and this is the exact
+			// shape a restored session launches.
+			"a restore's resume --last splice carries the flag",
+			"codex resume --last",
+			"codex resume --last " + arg,
+		},
+		{
+			"a recorded conversation resume carries the flag",
+			"codex resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+			"codex resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d " + arg,
+		},
+		{
+			"codex exec keeps its own -c scope",
+			"codex exec --json",
+			"codex exec --json " + arg,
+		},
+		// A command already carrying the key — either value — is left alone,
+		// so a user's explicit choice wins: that is the opt-back-in.
+		{
+			"an explicit false is left alone",
+			"codex -c check_for_update_on_startup=false",
+			"codex -c check_for_update_on_startup=false",
+		},
+		{
+			"an explicit true wins",
+			"codex -c check_for_update_on_startup=true",
+			"codex -c check_for_update_on_startup=true",
+		},
+		{
+			"the key inside a quoted -c value wins",
+			`codex -c 'check_for_update_on_startup = true'`,
+			`codex -c 'check_for_update_on_startup = true'`,
+		},
+		// A program_overrides entry can point "codex" at another binary
+		// (#1116/#1131); appending a codex flag would make that binary exit on
+		// an unknown argument.
+		{"a non-codex command is unchanged", "bash", "bash"},
+		{"a claude command is unchanged", "claude --dangerously-skip-permissions", "claude --dangerously-skip-permissions"},
+		{"empty is unchanged", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EnsureCodexUpdateCheckDisabled(tt.command); got != tt.want {
+				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			// Whatever the path, the key must never end up on the command
+			// twice — a second -c carrying it is the override ambiguity the
+			// conditional exists to prevent.
+			if got := EnsureCodexUpdateCheckDisabled(tt.command); strings.Count(got, codexUpdateCheckConfigKey+"=") > 1 {
+				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q carries %q more than once", tt.command, got, codexUpdateCheckConfigKey)
+			}
+		})
+	}
+}
