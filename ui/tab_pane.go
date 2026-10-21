@@ -579,6 +579,12 @@ func vscodeTabPlaceholder() string {
 	return "Open this VS Code tab in the web UI."
 }
 
+// docsTabPlaceholder is the TUI pane for a proposal Docs tab. The editor is web
+// only, so the pane names the proposal and the way to read it from a terminal.
+func docsTabPlaceholder(slug string) string {
+	return fmt.Sprintf("The Docs tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
+}
+
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
 // render, and ok=false for kinds it can (agent/shell/process, which have a PTY).
 // Shared by updateShell and canEnterScrollModeLocked so the two never diverge.
@@ -588,6 +594,8 @@ func tabPlaceholder(tab *session.Tab) (string, bool) {
 		return webTabPlaceholder(tab.URL), true
 	case session.TabKindVSCode:
 		return vscodeTabPlaceholder(), true
+	case session.TabKindDocs:
+		return docsTabPlaceholder(tab.Proposal), true
 	default:
 		return "", false
 	}

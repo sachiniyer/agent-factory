@@ -71,6 +71,16 @@ func gitConfigArgs(settings ...string) []string {
 func (s *Store) gitDir() string { return s.dir + ".git" }
 
 func (s *Store) git(stdin []byte, args ...string) (string, error) {
+	out, err := s.gitOutput(stdin, args...)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// gitOutput runs git and returns its stdout also when git fails, for commands
+// such as merge-file whose exit code carries a result.
+func (s *Store) gitOutput(stdin []byte, args ...string) (string, error) {
 	return s.gitIn(s.gitDir(), stdin, args...)
 }
 
@@ -85,7 +95,7 @@ func (s *Store) gitIn(gitDir string, stdin []byte, args ...string) (string, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return stdout.String(), fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
 }

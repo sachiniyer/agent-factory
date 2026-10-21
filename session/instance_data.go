@@ -135,7 +135,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// would land in that slot (#3062).
 	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
-		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
+		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal}
 		if tab.tmux != nil {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
@@ -720,6 +720,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Kind:                          kind,
 				Command:                       td.Command,
 				URL:                           td.URL,
+				Proposal:                      td.Proposal,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),

@@ -354,6 +354,15 @@ func (s *Store) commitDiff(commit, slug string) ([]string, string, error) {
 }
 
 func isExitCode(err error, code int) bool {
+	var got int
+	return exitCode(err, &got) && got == code
+}
+
+func exitCode(err error, code *int) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	*code = exitErr.ExitCode()
+	return true
 }

@@ -613,6 +613,10 @@ func redactTabData(tab *session.TabData) {
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
 	}
+	// A proposal slug is user-chosen, like a tab name, and names the work.
+	if tab.Proposal != "" {
+		tab.Proposal = redactedMarker
+	}
 	// An account label, the same fact InstanceData.Account is redacted for
 	// (#4506 review).
 	if tab.AccountScope != "" {

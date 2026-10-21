@@ -1626,7 +1626,7 @@ af proposal add-doc <slug> <name> [flags]
 
 Attach this session to a proposal and print the rules
 
-Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again.
+Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Docs tab for the proposal when it has none, and "tab" names it.
 
 ```
 af proposal attach [<slug>] [flags]
@@ -1718,6 +1718,8 @@ af proposal checkpoint [flags]
 
 Remove this session's proposal attachment and cursor
 
+Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.
+
 ```
 af proposal detach [flags]
 ```
@@ -1758,6 +1760,8 @@ af proposal list
 
 Print the absolute folder path of a proposal
 
+Print the absolute folder path of a proposal. With --daemon-url, the path is on the daemon host.
+
 ```
 af proposal path <slug>
 ```
@@ -1775,7 +1779,7 @@ af proposal path <slug>
 
 Create a proposal from templates, attach this session, and print the rules
 
-Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones.
+Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Docs tab for the proposal, and "tab" names it.
 
 ```
 af proposal start <slug> [flags]
@@ -2488,11 +2492,16 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
+Docs tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
+the session's project (see af proposal). It has no process. The TUI shows a
+placeholder, because the editor is web only. af proposal start and attach create
+this tab for you.
+
 The tab persists and reconnects across a daemon/af restart like every other
 tab — for a process tab "reconnect" means reattach-only, never re-running the
 command (see above).
 
---name sets a process, web, or VS Code tab's name — the handle every other tab
+--name sets a process, web, VS Code, or docs tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:
@@ -2516,9 +2525,10 @@ af sessions tab-create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
@@ -2699,9 +2709,10 @@ af sessions tabs create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
