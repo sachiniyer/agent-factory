@@ -385,6 +385,23 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
 		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
 	}
+	// A restored record can carry a relative repoPath that no longer exists
+	// (the user deleted it after the session was saved). The git child cannot
+	// enter its cmd.Dir when the repo is missing, so the worktree add fails
+	// before writing anything — a structural missing-repository failure, not
+	// an environmental ENOSPC. The worktree-prefix walker would otherwise
+	// treat the missing repository component as a creatable prefix and record
+	// its existing parent for a write probe (the existing-ancestor search
+	// walks up to the same parent), and a coincidental ENOSPC on that parent
+	// would turn the structural failure into an indefinite environmental
+	// retry. Validate the repo boundary the way the git child's cmd.Dir does:
+	// the bounded EvalSymlinks flight resolves a symlinked repo and surfaces a
+	// typed non-answer on a stalled mount, so the gate only fires on a
+	// definitive ENOENT.
+	repoMissing := false
+	if _, err := evalSymlinksSpaceProbe(repoPath); err != nil && os.IsNotExist(err) {
+		repoMissing = true
+	}
 	// Resolve symlinks in the probe path the way the kernel's chdir resolves
 	// the worktree argument inside git. The git runner sets cmd.Dir = repoPath,
 	// so a relative worktree argument resolves inside git against the
@@ -806,6 +823,14 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	var ancestorStatErr error
 	var ancestorStatPath string
 	for {
+		if repoMissing {
+			// A missing repo is a structural failure (git cannot enter its
+			// cmd.Dir), so the worktree add never writes anything. The
+			// ancestor walk would otherwise walk up to the repo's parent
+			// and probe it, turning a coincidental ENOSPC there into an
+			// environmental retry of a structural missing-repo failure.
+			break
+		}
 		if time.Now().After(ancestorDeadline) {
 			// The shared deadline elapsed before the walk reached an existing
 			// ancestor: each stat returned ENOENT just before the per-call
@@ -862,8 +887,16 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// final parent and the common dir. annotateGitWriteError dedups via its
 	// probed map, so a creatable parent that coincides with an already-probed
 	// dir is probed once.
-	for _, cp := range creatableParents {
-		dirs = append(dirs, cp)
+	if !repoMissing {
+		// A missing repo is a structural failure (git cannot enter its
+		// cmd.Dir), so the worktree-prefix walker's creatable parents are
+		// not creatable worktree prefixes — git never creates the missing
+		// repository, so a full filesystem on its parent is not the resource
+		// errno the classifier must read. Skip the creatable-parent probe
+		// the way the ancestor walk above is skipped.
+		for _, cp := range creatableParents {
+			dirs = append(dirs, cp)
+		}
 	}
 	var statErr error
 	var lstatErr error
@@ -899,12 +932,26 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				dirs = append(dirs, worktreePath)
 			} else if empty, dErr := isEmptyDirSpaceProbe(worktreePath); dErr == nil {
 				// The symlink target is empty — git populates it, so probe the
-				// destination the way a regular directory is probed. A
-				// nonempty target is skipped: git rejects the add without
-				// writing, so a coincidental ENOSPC on the target's filesystem
-				// would stall the lost-restore loop indefinitely on a
-				// filesystem freeing it cannot fix.
+				// destination the way a regular directory is probed. A nonempty
+				// target is skipped: git rejects the add without writing, so a
+				// coincidental ENOSPC on the target's filesystem would stall the
+				// lost-restore loop indefinitely on a filesystem freeing it
+				// cannot fix — UNLESS the nonempty content is partial-attempt
+				// debris from a failed `git worktree add` rather than a
+				// pre-existing destination. `git worktree add` creates a `.git`
+				// entry before it checks out, so a nonempty target that contains
+				// a `.git` entry is one git already started writing into and then
+				// failed (for example with ENOSPC mid-checkout), not a destination
+				// git rejects without writing. Retain coverage when the contents
+				// show the failed add started populating the target, so a
+				// coincidental ENOSPC on the target's filesystem is the real
+				// resource errno the way an empty target's is. A non-ENOENT lstat
+				// error (EIO, ETIMEDOUT, ErrProbeTimedOut) is environmental
+				// evidence, not a missing `.git` entry, so it stays silent the way
+				// a missing-destination lstat does.
 				if empty {
+					dirs = append(dirs, worktreePath)
+				} else if _, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil {
 					dirs = append(dirs, worktreePath)
 				}
 			} else if !os.IsNotExist(dErr) {
