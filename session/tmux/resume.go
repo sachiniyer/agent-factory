@@ -558,6 +558,45 @@ func findAgentTokenStrict(tokens []string) (int, string, error) {
 	return -1, "", nil
 }
 
+// commandExecutableTokenIndex returns the index of the token the command will
+// actually exec — where a flag has to land to reach the real program's argv —
+// for exactly the wrapper grammar the account boundary models: leading
+// VAR=val assignments, one bare `exec` builtin, and an `env` invocation whose
+// command operand envcommand.Parse locates. The non-portable `exec --`
+// separator refuses the same way the boundary does (dash cannot run it,
+// #3557). Anything else — `my-chat --persona codex`, `ionice -c 3 codex`,
+// `sudo codex` — makes the first unmodeled word the executable, and a LATER
+// token that merely names an agent is an argument, not the program (#5238
+// review): -1 means the executable is not provably placed, so the caller must
+// leave the command alone.
+func commandExecutableTokenIndex(tokens []string) int {
+	i := 0
+	for i < len(tokens) {
+		if _, _, assignment := shellAssignment(tokens[i]); assignment {
+			i++
+			continue
+		}
+		break
+	}
+	if i < len(tokens) && strings.EqualFold(baseCommand(tokens[i]), "exec") {
+		i++
+		if i >= len(tokens) || tokens[i] == "--" {
+			return -1
+		}
+	}
+	if i < len(tokens) && strings.EqualFold(baseCommand(tokens[i]), "env") {
+		invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 {
+			return -1
+		}
+		i += 1 + invocation.CommandIndex
+	}
+	if i >= len(tokens) {
+		return -1
+	}
+	return i
+}
+
 // ampResumeInsertIndex returns the token index before which Amp's resume
 // subcommand should be inserted. Amp global options may appear before the
 // subcommand ("amp --no-ide threads continue --last"), while an explicit user

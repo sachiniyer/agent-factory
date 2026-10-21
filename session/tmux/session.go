@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -197,14 +198,19 @@ const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 //     launch the flag never touched.
 func EnsureCodexUpdateCheckDisabled(command string) string {
 	tokens, ends := splitShellTokens(command)
-	agentIdx, agent := findAgentToken(tokens)
-	if agent != ProgramCodex {
+	// The flag must land on codex's own argv, so the executable is located
+	// through the wrapper grammar af actually models — never a later token
+	// that merely names codex (`my-chat --persona codex` would otherwise get
+	// `-c` spliced into an arbitrary program's arguments, #5238 review).
+	execIdx := commandExecutableTokenIndex(tokens)
+	if execIdx < 0 || strings.ToLower(filepath.Base(tokens[execIdx])) != ProgramCodex {
 		return command
 	}
+	agentIdx := execIdx
 	// Only codex's own option surface decides "already set": tokens before
-	// the executable belong to a wrapper (ionice's `-c` is its class flag,
-	// not codex's config), and a `--` terminator makes the rest positional
-	// prompt text rather than an override.
+	// the executable belong to the wrapper prefix (an `env` option or
+	// assignment, never codex's config), and a `--` terminator makes the
+	// rest positional prompt text rather than an override.
 	if _, overridden := codexCommandConfigValue(tokens[agentIdx+1:], codexUpdateCheckConfigKey); overridden {
 		return command
 	}

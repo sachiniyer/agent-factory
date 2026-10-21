@@ -315,18 +315,66 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			"env FOO=1 codex --full-auto",
 			"env FOO=1 codex " + arg + " --full-auto",
 		},
+		// Only the wrapper grammar af models — assignments, a bare `exec`, an
+		// `env` invocation — places the executable. Any other first word IS
+		// the executable, so a later token that names codex is an argument of
+		// a program af cannot prove is codex: splicing `-c` there hands the
+		// flag to an arbitrary binary that may reject the launch (#5238
+		// review). Those commands stay untouched — the update check runs and
+		// af answers the picker, exactly as master does.
 		{
-			// ionice's `-c` is its scheduling-class option, not codex's
-			// config — the scan looks only at tokens after the executable,
-			// so it is neither suppressed nor mistaken for the override.
-			"a wrapper's own -c is not codex's override",
-			"ionice -c 3 codex",
-			"ionice -c 3 codex " + arg,
+			"a codex argument is not the executable",
+			"my-chat --persona codex",
+			"my-chat --persona codex",
 		},
 		{
-			"a wrapper's -c operand naming the key is still not the override",
+			"a relative-path wrapper's codex argument is not the executable",
+			"./collect codex",
+			"./collect codex",
+		},
+		{
+			"an unmodeled wrapper's codex operand is not the executable",
+			"sudo codex",
+			"sudo codex",
+		},
+		{
+			// ionice's `-c` is its scheduling-class option, not codex's —
+			// and ionice is not a wrapper af models, so the command is left
+			// alone entirely.
+			"an unmodeled wrapper's own -c changes nothing",
+			"ionice -c 3 codex",
+			"ionice -c 3 codex",
+		},
+		{
+			"an unmodeled wrapper's -c operand naming the key changes nothing",
 			"ionice -c check_for_update_on_startup=x codex",
-			"ionice -c check_for_update_on_startup=x codex " + arg,
+			"ionice -c check_for_update_on_startup=x codex",
+		},
+		{
+			// `exec --` is the separator dash cannot run (#3557) — the
+			// boundary refuses it and so does the locator.
+			"the non-portable exec separator is not modeled",
+			"exec -- codex",
+			"exec -- codex",
+		},
+		{
+			// After `exec`, the next word is the program exec will run —
+			// assignment-looking text is its NAME, not an environment pair.
+			"exec's operand is the executable even when it looks assigned",
+			"exec FOO=1 codex",
+			"exec FOO=1 codex",
+		},
+		{
+			// env's command operand is the executable — `my-chat` here —
+			// and `codex` is just its argument.
+			"env's operand is the executable, not its codex argument",
+			"env my-chat codex",
+			"env my-chat codex",
+		},
+		{
+			"an assignment prefix still reaches the modeled executable",
+			"FOO=1 exec codex",
+			"FOO=1 exec codex " + arg,
 		},
 		// End-of-options: a `--` makes the rest a positional prompt. The flag
 		// must land before it or clap reads it as prompt text and rejects the
