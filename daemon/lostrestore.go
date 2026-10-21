@@ -954,10 +954,14 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 		// A daemon restart drops the in-memory retry map but deliberately keeps
 		// the terminal session fact: an explicit retry's failure continues the
 		// recorded count and stays terminal rather than promising an automatic
-		// retry the durable gate refuses.
+		// retry the durable gate refuses. The floor matters: a persisted
+		// failure's Attempts is the evidence that earned the verdict, not a
+		// structural budget burn — the flap bound records 4 confirmations, and
+		// seeding 4 would arm "retrying in …" for a retry LostRestoreGaveUp
+		// refuses to run (#5238 review).
 		if persistedFailure != nil {
-			st.consecutiveFailures = persistedFailure.Attempts
-			st.totalAttempts = persistedFailure.Attempts
+			st.consecutiveFailures = max(persistedFailure.Attempts, lostRestoreMaxAttempts)
+			st.totalAttempts = st.consecutiveFailures
 		}
 		m.lostRestoreStates[stateKey] = st
 	}

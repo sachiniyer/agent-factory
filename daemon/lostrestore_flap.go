@@ -70,7 +70,7 @@ func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, ins
 	if n < lostRestoreFlapMaxRestores {
 		return false
 	}
-	m.lostRestoreFlapGiveUp(key, repoID, inst, n)
+	m.lostRestoreFlapGiveUp(key, repoID, stateKey, inst, n)
 	return true
 }
 
@@ -80,12 +80,20 @@ func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, ins
 // with the flap-specific reason and the operator's explicit way back. The
 // in-memory flap history is kept: it IS the evidence, and nothing reads it
 // once the durable flag suppresses further restores anyway.
-func (m *Manager) lostRestoreFlapGiveUp(key, repoID string, inst *session.Instance, confirmedRestores int) {
+func (m *Manager) lostRestoreFlapGiveUp(key, repoID, stateKey string, inst *session.Instance, confirmedRestores int) {
 	hint := shellsuggest.Command("af", "sessions", "restore", inst.Title)
 	flapErr := fmt.Errorf("the session was confirmed restored %d times in %s and went lost again each time — automatic restore is stopped; find out why the agent exits soon after launch, then bring it back with %s",
 		confirmedRestores, lostRestoreFlapWindow, hint)
 	inst.ClearLostRestoreWait()
 	inst.SetLostRestoreFailure(confirmedRestores, flapErr)
+	// The retry episode is CLOSED, not merely terminal: the pass that fired the
+	// bound created a fresh zeroed state, and leaving it lets a failed manual
+	// off-ramp record "attempt 1" and arm a retry LostRestoreGaveUp refuses to
+	// run (#5238 review). Deleting makes the next failure re-seed from the
+	// durable verdict — floored at the structural budget so it stays terminal.
+	m.mu.Lock()
+	delete(m.lostRestoreStates, stateKey)
+	m.mu.Unlock()
 	m.err().Printf("restore of lost session %q (repo %s): giving up after %d confirmed restores in %s: %v",
 		inst.Title, repoID, confirmedRestores, lostRestoreFlapWindow, flapErr)
 	if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {

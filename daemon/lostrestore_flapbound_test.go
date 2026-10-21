@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -404,5 +405,83 @@ func TestRestoreLostSessions_RemotePreserveRespectsFlapBound(t *testing.T) {
 	}
 	if !strings.Contains(data.LostRestoreFailure.Error, "confirmed restored") {
 		t.Fatalf("failure = %q, want the flap-specific confirmed-restored diagnostic", data.LostRestoreFailure.Error)
+	}
+}
+
+// #5238 review: the advertised off-ramp must not promise a retry the durable
+// gate refuses. The flap verdict used to leave the pass's fresh retry episode
+// in place, so a manual restore whose Recover then failed recorded "attempt 1"
+// and armed a backoff LostRestoreGaveUp makes unreachable — a lying log line
+// and a slot the session never stops holding. The episode must close with the
+// verdict, and a failure after it must re-seed terminal.
+func TestRestoreSession_ManualFailureAfterFlapGiveUpStaysTerminal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "manual-after-flap", backend, true, session.Lost)
+	key := stableSessionKey(repoID, inst)
+	seedFlapHistory(manager, key, lostRestoreFlapMaxRestores)
+
+	manager.RestoreLostSessions()
+	if inst.ToInstanceData().LostRestoreFailure == nil {
+		t.Fatal("setup: the flap bound did not produce its durable give-up")
+	}
+	manager.mu.Lock()
+	_, stale := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if stale {
+		t.Fatal("the flap verdict left a retry episode in place: a later failure would reuse its zeroed budget")
+	}
+
+	// The operator takes the advertised off-ramp and the respawn itself fails —
+	// a structural Recover failure after the durable verdict must STAY
+	// terminal, not arm "retrying in …" for a retry the gate refuses to run.
+	backend.failWith = errors.New("sandbox rebuild refused")
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-after-flap", RepoID: repoID}); err == nil {
+		t.Fatal("the manual restore's Recover failure should surface to the operator")
+	}
+
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("the failed manual restore left no retry episode to inspect")
+	}
+	if st.consecutiveFailures < lostRestoreMaxAttempts {
+		t.Fatalf("a failed manual off-ramp recorded attempt %d and arms a retry the gate refuses: the episode must stay terminal at %d",
+			st.consecutiveFailures, lostRestoreMaxAttempts)
+	}
+	if !st.nextAttempt.IsZero() {
+		t.Fatalf("a failed manual off-ramp armed a retry for %v that LostRestoreGaveUp refuses to run", st.nextAttempt)
+	}
+}
+
+// The same floor covers the restart path: a daemon restart drops the in-memory
+// episode but keeps the durable verdict, whose Attempts count is the evidence
+// that earned it — 4 confirmations for the flap bound, not a structural budget
+// burn — so a post-restart manual failure re-seeds terminal rather than
+// restarting the budget at the recorded count (#5238 review).
+func TestRecordLostRestoreFailure_PersistedFlapVerdictSeedsTerminal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "post-restart-flap", backend, true, session.Lost)
+	key := stableSessionKey(repoID, inst)
+	inst.SetLostRestoreFailure(lostRestoreFlapMaxRestores, errors.New("the flap verdict"))
+
+	manager.recordLostRestoreFailure(daemonInstanceKey(repoID, "post-restart-flap"), repoID, inst,
+		errors.New("manual restore failed"), lostRestoreManual)
+
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("the failed manual restore left no retry episode to inspect")
+	}
+	if st.consecutiveFailures < lostRestoreMaxAttempts {
+		t.Fatalf("a persisted flap verdict seeded a sub-budget episode at %d — every further failure must stay terminal at %d",
+			st.consecutiveFailures, lostRestoreMaxAttempts)
+	}
+	if !st.nextAttempt.IsZero() {
+		t.Fatalf("the seeded episode armed a retry for %v the durable gate refuses to run", st.nextAttempt)
 	}
 }
