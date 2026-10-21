@@ -387,11 +387,13 @@ func TestGenerateAccountLaunchProof_ExecPrefixDoesNotTrustRelativeExecutable(t *
 	require.Error(t, err, "the relative executable must still fail closed")
 }
 
-// The codex resume splice is an INSERTION, not an append — `codex -c k=v`
-// becomes `codex resume --last -c k=v` — so the extension diff cannot describe
-// it and would clear the declaration, refusing every account-scoped codex
-// restore at the launch boundary (#5238 review; same pane-exits-127 defect
-// #3083 closed for claude's append). The merge must keep the proof.
+// The codex resume splice lands `resume --last` after any global -c options
+// (an extension the positional diff describes), but rewrites that DO insert
+// mid-command — this shape, or anything a future splice produces ahead of a
+// declared word — must still merge the declaration rather than clearing it and
+// refusing every account-scoped codex restore at the launch boundary (#5238
+// review; same pane-exits-127 defect #3083 closed for claude's append). The
+// merge must keep the proof.
 func TestGeneratedArgsByInsertion_ResumeSpliceKeepsTheProof(t *testing.T) {
 	base := "codex -c check_for_update_on_startup=false"
 	declared := []string{"-c", "check_for_update_on_startup=false"}
@@ -406,6 +408,70 @@ func TestGeneratedArgsByInsertion_ResumeSpliceKeepsTheProof(t *testing.T) {
 		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
 	})
 	require.NoError(t, err, "the launcher's own description of the splice must satisfy the guard")
+}
+
+// The account boundary proves `exec codex` and `env codex` wrappers — so a
+// launch through one must keep its declaration across the resume splice too,
+// or every account-scoped restore through an accepted wrapper is refused
+// (#5238 review). The executable is the codex operand, not the command's
+// first word: the wrapper prefix is the operator's and only has to be
+// identical between base and final.
+func TestGeneratedArgsByInsertion_WrapperSpliceKeepsTheProof(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		// scopeable reports whether the account boundary itself accepts the
+		// shape — an env MUTATION is refused there regardless of how well the
+		// diff describes it, so the merge alone is asserted for that row.
+		scopeable bool
+	}{
+		{"exec wrapper",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{"env wrapper",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{
+			// env's own operand sits between `env` and codex — the executable
+			// is still the codex word, located through the same envcommand
+			// model the boundary uses. FOO=1 is a mutation the boundary
+			// refuses on its own rule; the merge is what this fixes.
+			"env assignment wrapper",
+			"env FOO=1 codex -c check_for_update_on_startup=false",
+			"env FOO=1 codex resume --last -c check_for_update_on_startup=false",
+			false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declared := []string{"-c", "check_for_update_on_startup=false"}
+			merged, ok := GeneratedArgsByInsertion(test.base, test.final, declared)
+			require.True(t, ok)
+			require.Equal(t,
+				[]string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, merged)
+
+			if !test.scopeable {
+				return
+			}
+			_, err := ApplyAccount([]string{"PATH=/usr/bin"}, test.final, Account{
+				Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
+			})
+			require.NoError(t, err, "the wrapper's proof must satisfy the same boundary")
+		})
+	}
+}
+
+// Wrapper refusals stay refusals: `exec --` (dash cannot run it) and an env
+// with no command to execute have no executable to anchor the splice on.
+func TestGeneratedArgsByInsertion_RefusesUnplaceableWrappers(t *testing.T) {
+	for _, test := range []struct{ name, base, final string }{
+		{"exec separator", "exec -- codex -c k=v", "exec -- codex resume --last -c k=v"},
+		{"env with no command", "env FOO=1 -c k=v", "env FOO=1 resume --last -c k=v"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, ok := GeneratedArgsByInsertion(test.base, test.final, []string{"-c", "k=v"})
+			require.False(t, ok)
+		})
+	}
 }
 
 // Insertion lands wherever the words landed — not only at index 1.

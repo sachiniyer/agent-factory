@@ -257,27 +257,89 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			"/home/u/.local/bin/codex " + arg,
 		},
 		{
-			"existing flags compose with the flag",
+			// The flag lands right after the executable — codex's global -c
+			// position — so it is an option for every command shape, not
+			// stranded at the tail (#5238 review).
+			"existing flags keep the flag in the global position",
 			"codex --model gpt-5 --full-auto",
-			"codex --model gpt-5 --full-auto " + arg,
+			"codex " + arg + " --model gpt-5 --full-auto",
 		},
 		{
-			// The flag lands after the resume subcommand af splices in on
-			// restore: -c is an accepted resume option, and this is the exact
-			// shape a restored session launches.
-			"a restore's resume --last splice carries the flag",
+			// The flag precedes an existing resume subcommand; codex parses
+			// global -c before any subcommand (0.163.0). af's own restore
+			// splice lands `resume --last` behind the flag, in this same
+			// global position (#5238 review).
+			"a restore's resume --last keeps the flag global",
 			"codex resume --last",
-			"codex resume --last " + arg,
+			"codex " + arg + " resume --last",
 		},
 		{
-			"a recorded conversation resume carries the flag",
+			"a recorded conversation resume keeps the flag global",
 			"codex resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
-			"codex resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d " + arg,
+			"codex " + arg + " resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
 		},
 		{
 			"codex exec keeps its own -c scope",
 			"codex exec --json",
-			"codex exec --json " + arg,
+			"codex " + arg + " exec --json",
+		},
+		// Wrappers the account boundary and findAgentToken both model: the
+		// flag belongs to codex's argv, so it lands after the codex operand —
+		// an append would hand it to the wrapper or strand it after `--`
+		// (#5238 review).
+		{
+			"an exec wrapper carries the flag on codex's argv",
+			"exec codex",
+			"exec codex " + arg,
+		},
+		{
+			// Trailing codex args are the shape that proves the position: an
+			// append would leave the flag at the command's tail instead of
+			// codex's own option position.
+			"an exec wrapper's flags keep the flag on codex's argv",
+			"exec codex --full-auto",
+			"exec codex " + arg + " --full-auto",
+		},
+		{
+			"an env wrapper carries the flag on codex's argv",
+			"env codex",
+			"env codex " + arg,
+		},
+		{
+			"an env assignment wrapper carries the flag on codex's argv",
+			"env FOO=1 codex",
+			"env FOO=1 codex " + arg,
+		},
+		{
+			"an env assignment wrapper's flags keep the flag on codex's argv",
+			"env FOO=1 codex --full-auto",
+			"env FOO=1 codex " + arg + " --full-auto",
+		},
+		{
+			// ionice's `-c` is its scheduling-class option, not codex's
+			// config — the scan looks only at tokens after the executable,
+			// so it is neither suppressed nor mistaken for the override.
+			"a wrapper's own -c is not codex's override",
+			"ionice -c 3 codex",
+			"ionice -c 3 codex " + arg,
+		},
+		{
+			"a wrapper's -c operand naming the key is still not the override",
+			"ionice -c check_for_update_on_startup=x codex",
+			"ionice -c check_for_update_on_startup=x codex " + arg,
+		},
+		// End-of-options: a `--` makes the rest a positional prompt. The flag
+		// must land before it or clap reads it as prompt text and rejects the
+		// launch (#5238 review) — and post-`--` operands are not an override.
+		{
+			"an option terminator keeps the flag in option position",
+			"codex -- '-review this'",
+			"codex " + arg + " -- '-review this'",
+		},
+		{
+			"the key after -- is prompt text, not an override",
+			"codex -- -c check_for_update_on_startup=true",
+			"codex " + arg + " -- -c check_for_update_on_startup=true",
 		},
 		// A command already carrying the key — either value — is left alone,
 		// so a user's explicit choice wins: that is the opt-back-in.
@@ -324,7 +386,7 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 		{
 			"the key inside another -c operand is not the override",
 			"codex -c model=check_for_update_on_startup",
-			"codex -c model=check_for_update_on_startup " + arg,
+			"codex " + arg + " -c model=check_for_update_on_startup",
 		},
 		{
 			"the key inside an env assignment is not the override",
@@ -334,12 +396,12 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 		{
 			"the key inside another --config operand is not the override",
 			"codex --config sandbox_mode=check_for_update_on_startup",
-			"codex --config sandbox_mode=check_for_update_on_startup " + arg,
+			"codex " + arg + " --config sandbox_mode=check_for_update_on_startup",
 		},
 		{
 			"a dangling -c at the end still gets the flag",
 			"codex --model gpt-5 -c",
-			"codex --model gpt-5 -c " + arg,
+			"codex " + arg + " --model gpt-5 -c",
 		},
 		// A program_overrides entry can point "codex" at another binary
 		// (#1116/#1131); appending a codex flag would make that binary exit on
@@ -353,46 +415,62 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			if got := EnsureCodexUpdateCheckDisabled(tt.command); got != tt.want {
 				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q, want %q", tt.command, got, tt.want)
 			}
-			// Whatever the path, the key must never end up on the command
-			// twice — a second -c carrying it is the override ambiguity the
-			// conditional exists to prevent.
-			if got := EnsureCodexUpdateCheckDisabled(tt.command); strings.Count(got, codexUpdateCheckConfigKey+"=") > 1 {
-				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q carries %q more than once", tt.command, got, codexUpdateCheckConfigKey)
+			// Whatever the path, the key must never end up in codex's own
+			// OPTION position twice — a second -c carrying it is the override
+			// ambiguity the conditional exists to prevent. Count only tokens
+			// after the executable and before any `--`: a wrapper's operand or
+			// prompt text may legitimately spell the key without being the
+			// option being duplicated.
+			got := EnsureCodexUpdateCheckDisabled(tt.command)
+			gotTokens, _ := splitShellTokens(got)
+			gotIdx, _ := findAgentToken(gotTokens)
+			seen := 0
+			for _, tok := range gotTokens[gotIdx+1:] {
+				if tok == "--" {
+					break
+				}
+				seen += strings.Count(tok, codexUpdateCheckConfigKey+"=")
+			}
+			if seen > 1 {
+				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q carries %q more than once in option position", tt.command, got, codexUpdateCheckConfigKey)
 			}
 		})
 	}
 }
 
 // `-c check_for_update_on_startup=true` is the documented opt-back-in (#5238
-// review): the operator asked for the picker, so af must not answer it. The
-// handler reports the frame handled — the modal owns the pane until a human
-// answers — but sends nothing, in every -c/--config spelling.
-func TestCheckAndHandleTrustPrompt_CodexUpdateOptedInPickerIsHeldForTheOperator(t *testing.T) {
+// review): codex runs its startup check because the operator asked for it —
+// and a picker that renders still gets af's ordinary dismissal, the same
+// Down-then-Enter on Skip master sends for a launch the flag never touched.
+// Holding the modal open for a human would spin DismissTrustPrompt to its
+// attempt budget and fail the launch, and a config agent has nobody to
+// answer it anyway (#5238 review).
+func TestCheckAndHandleTrustPrompt_CodexUpdateOptedInStillAnswersSkip(t *testing.T) {
 	for _, program := range []string{
 		"codex -c check_for_update_on_startup=true",
 		"codex -ccheck_for_update_on_startup=true",
 		"codex -c=check_for_update_on_startup=true",
 		"codex --config check_for_update_on_startup=true",
 		"codex --config=check_for_update_on_startup=true",
-		// The key only wins when it is the override's KEY — an operator whose
-		// model happens to be named after it still gets the dismisser.
-		"codex -c check_for_update_on_startup=true -c model=x",
 	} {
 		t.Run(program, func(t *testing.T) {
-			session, commands := runTrustPromptSequence(t, program, codexCurrentUpdatePicker)
+			session, commands := runTrustPromptSequence(t, program,
+				codexCurrentUpdatePicker, codexCurrentUpdatePickerSkipSelected)
 
-			require.True(t, session.CheckAndHandleTrustPrompt(),
-				"a picker the operator opted into still owns the pane, so the frame is 'handled'")
-			require.Empty(t, sentKeystrokes(*commands),
-				"af answered a picker the operator explicitly opted into: %v", *commands)
+			require.True(t, session.CheckAndHandleTrustPrompt())
+			require.Equal(t, []string{
+				"tmux send-keys -t =af_trust: Down",
+				"tmux send-keys -t =af_trust: Enter",
+			}, sentKeystrokes(*commands),
+				"an opted-in picker is answered like any other: Down to Skip, Enter — never held for a human")
 		})
 	}
 }
 
-// The opt-in is value-exact: `=false` (or any other value) is not an opt-in,
-// so the fallback dismisser still answers a rendered picker — the same posture
-// as before the flag existed. And a bare codex command navigates as always.
-func TestCheckAndHandleTrustPrompt_CodexUpdateOptInIsValueExact(t *testing.T) {
+// `=false` is the operator's explicit choice too, and a picker that renders
+// anyway gets the same fallback navigation — the program's words change what
+// codex does, never what af's dismisser does.
+func TestCheckAndHandleTrustPrompt_CodexUpdateExplicitFalseStillAnswersSkip(t *testing.T) {
 	session, commands := runTrustPromptSequence(t, "codex -c check_for_update_on_startup=false",
 		codexCurrentUpdatePicker, codexCurrentUpdatePickerSkipSelected)
 
@@ -401,5 +479,5 @@ func TestCheckAndHandleTrustPrompt_CodexUpdateOptInIsValueExact(t *testing.T) {
 		"tmux send-keys -t =af_trust: Down",
 		"tmux send-keys -t =af_trust: Enter",
 	}, sentKeystrokes(*commands),
-		"=false is not an opt-in: the picker the operator disabled still gets af's fallback navigation")
+		"the fallback dismisser navigates a rendered picker regardless of the command's -c words")
 }

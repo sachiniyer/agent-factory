@@ -149,25 +149,42 @@ func EnsureDevinWorkspaceTrustSuppressed(command string) string {
 // no picker, no keystroke for af to get wrong (#5238).
 const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 
-// EnsureCodexUpdateCheckDisabled appends "-c check_for_update_on_startup=false"
-// to a codex launch command so codex's startup update picker never renders and
-// the session reaches ready without af navigating a modal that can exit the
-// process. The picker is answered, not just displayed: confirming "Update now"
-// makes the TUI exit and run the installer synchronously in the same process,
-// which is how a restored session dies seconds after af interacted with the
-// dialog (#5238). Preventing the prompt is strictly safer than answering it —
-// handleCodexUpdatePrompt remains as the fallback for commands launched
-// outside these paths.
+// EnsureCodexUpdateCheckDisabled inserts "-c check_for_update_on_startup=false"
+// into a codex launch command so codex's startup update picker never renders
+// and the session reaches ready without af navigating a modal that can exit
+// the process. The picker is answered, not just displayed: confirming "Update
+// now" makes the TUI exit and run the installer synchronously in the same
+// process, which is how a restored session dies seconds after af interacted
+// with the dialog (#5238). Preventing the prompt is strictly safer than
+// answering it — handleCodexUpdatePrompt remains as the fallback for commands
+// launched outside these paths.
 //
 // Same one-helper contract as EnsureDevinWorkspaceTrustSuppressed: every path
 // that launches codex under af calls this — ordinary sessions through
 // injectSystemPrompt (which create, lazy respawn, and Recover all funnel
 // through) and the config-agent spawn directly — so the two cannot drift.
 //
-// The appended -c lands inside whatever subcommand position the command already
-// carries: `codex -c …` is global config, `codex resume --last -c …` is
-// resume's own accepted flag, and the generated-argument declaration af
-// computes against the base command covers it like any other injection.
+// The flag is spliced immediately after the codex executable, not appended:
+// `-c`/`--config` is codex's top-level option, accepted there before any
+// subcommand or argument (verified against `codex -c k=v …` on 0.163.0 —
+// `resume --help`, `exec --help`, and `--version` all parse with it). That one
+// position is the only one that is a real option for EVERY shape the launch
+// can take (#5238 review):
+//   - `codex` and `/path/codex` — the ordinary case;
+//   - `exec codex` / `env codex` — the flag belongs to codex's argv, so it
+//     lands after the codex operand, not at the command's tail where env
+//     would read it as its own word;
+//   - `codex -- '-prompt'` — appending would place the flag AFTER the
+//     end-of-options terminator, where clap reads it as prompt text;
+//   - `codex resume <id>` (the account-swap carry build) and `codex exec
+//     --json` — an existing subcommand shifts right, the flag stays global.
+//
+// The restore splice then lands `resume --last` behind it (`codex -c k=v
+// resume --last`, a positional extension of the launch command), so the
+// generated-argument declaration grows by the same two words through either
+// splice position. The splice uses the byte offset right after the executable
+// token, the same technique as resumeProgram, so operator quoting and
+// metachars pass through.
 //
 // Two conditions, both load-bearing:
 //   - A non-codex command is returned unchanged. A program_overrides entry can
@@ -175,32 +192,45 @@ const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 //     codex flag to it would make that binary exit on an unknown argument.
 //   - A command already carrying the key — any -c/--config spelling, any
 //     value — is left alone, so a user's explicit choice wins. `=true` is the
-//     opt-back-in: handleCodexUpdatePrompt honors it by holding the picker
-//     for a human answer instead of navigating it.
+//     opt-back-in: codex runs its startup check because the operator asked
+//     for it, and af's dismisser answers the picker exactly as it does on a
+//     launch the flag never touched.
 func EnsureCodexUpdateCheckDisabled(command string) string {
-	if DetectAgentFromCommand(command) != ProgramCodex {
+	tokens, ends := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
 		return command
 	}
-	if _, overridden := codexCommandConfigValue(command, codexUpdateCheckConfigKey); overridden {
+	// Only codex's own option surface decides "already set": tokens before
+	// the executable belong to a wrapper (ionice's `-c` is its class flag,
+	// not codex's config), and a `--` terminator makes the rest positional
+	// prompt text rather than an override.
+	if _, overridden := codexCommandConfigValue(tokens[agentIdx+1:], codexUpdateCheckConfigKey); overridden {
 		return command
 	}
-	return command + " -c " + codexUpdateCheckConfigKey + "=false"
+	off := ends[agentIdx]
+	return command[:off] + " -c " + codexUpdateCheckConfigKey + "=false" + command[off:]
 }
 
-// codexCommandConfigValue reports the value a command's -c/--config overrides
+// codexCommandConfigValue reports the value the tokens' -c/--config overrides
 // assign key, in every spelling clap accepts: `-c k=v`, `-ck=v`, `-c=k=v`,
-// `--config k=v`, `--config=k=v` (#5238 review). A bare substring match cannot
+// `--config k=v`, `--config=k=v` (#5238 review). The caller passes the tokens
+// AFTER the agent executable so a wrapper's own options (ionice's -c, env's
+// operands) are never mistaken for codex's. A bare substring match cannot
 // make this call — `FOO=/tmp/check_for_update_on_startup codex` or `codex -c
 // model=check_for_update_on_startup` would read as "the operator already
 // chose", launch WITHOUT the flag, and re-expose the picker. Tokens arrive
 // unquoted from splitShellTokens; the key is whatever precedes the operand's
-// first '='. Repeated overrides resolve the way codex resolves them — the
-// last operand wins.
-func codexCommandConfigValue(command, key string) (string, bool) {
-	tokens, _ := splitShellTokens(command)
+// first '='. Scanning stops at the end-of-options terminator — `codex -- -c
+// x=y` passes that text as a prompt, not an override. Repeated overrides
+// resolve the way codex resolves them — the last operand wins.
+func codexCommandConfigValue(tokens []string, key string) (string, bool) {
 	var value string
 	found := false
 	for i, tok := range tokens {
+		if tok == "--" {
+			break
+		}
 		var operand string
 		switch {
 		case tok == "-c" || tok == "--config":
@@ -221,6 +251,30 @@ func codexCommandConfigValue(command, key string) (string, bool) {
 		}
 	}
 	return value, found
+}
+
+// skipCodexConfigOptions advances past codex's global -c/--config option
+// tokens — the same spellings codexCommandConfigValue reads — so
+// resumeProgram's subcommand check sees the token position that follows them
+// rather than treating the first -c as the subcommand slot. A dangling `-c`
+// at the end cannot consume a missing operand, so the scan stops on it.
+func skipCodexConfigOptions(tokens []string, i int) int {
+	for i < len(tokens) {
+		tok := tokens[i]
+		switch {
+		case tok == "-c" || tok == "--config":
+			if i+1 >= len(tokens) {
+				return i
+			}
+			i += 2
+		case strings.HasPrefix(tok, "--config="),
+			strings.HasPrefix(tok, "-c") && len(tok) > 2:
+			i++
+		default:
+			return i
+		}
+	}
+	return i
 }
 
 // TmuxSession represents a managed tmux session

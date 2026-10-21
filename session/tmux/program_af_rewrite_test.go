@@ -42,12 +42,31 @@ func TestRewriteProgramCmdByAf_KeepsTheDeclarationInStepWithResume(t *testing.T)
 			wantAdded: "--last",
 		},
 		{
-			// The #5238 flag injection made the splice a mid-command INSERTION
-			// — `codex resume --last -c …`, not an append — so the declaration
-			// must be re-derived as a splice or every account-scoped codex
-			// restore dies at the boundary (#5238 review).
-			name:      "codex splices resume --last inside the injected flag",
+			// The #5238 flag injection splices `resume --last` in after the
+			// injected -c — `codex -c … resume --last`, a positional extension
+			// of the launch command — so the declaration must grow with the
+			// rewrite or every account-scoped codex restore dies at the
+			// boundary (#5238 review).
+			name:      "codex splices resume --last behind the injected flag",
 			program:   "codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			// Same splice through an account-accepted wrapper: the executable
+			// is the codex operand inside `exec`, not the command's first
+			// word — a first-word proof would clear the declaration and the
+			// boundary would refuse the respawn (#5238 review).
+			name:      "exec codex wrapper keeps the proof across the splice",
+			program:   "exec codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			name:      "env codex wrapper keeps the proof across the splice",
+			program:   "env codex -c check_for_update_on_startup=false",
 			declared:  []string{"-c", "check_for_update_on_startup=false"},
 			agent:     "codex",
 			wantAdded: "--last",

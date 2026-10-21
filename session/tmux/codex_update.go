@@ -31,13 +31,6 @@ type codexUpdateDialog struct {
 // Enter only after the literal "Skip" row is visibly selected (#4712).
 func (t *TmuxSession) handleCodexUpdatePrompt(content string) bool {
 	dialog, promptPresent, promptActionable := t.inspectCodexUpdatePrompt(content)
-	// An operator who pinned the check back ON opted INTO the picker: af must
-	// never answer it for them — the documented opt-in has to mean the picker
-	// survives (#5238 review). Report it handled so readiness holds while a
-	// human answers, but send nothing.
-	if v, ok := codexCommandConfigValue(t.programCmd(), codexUpdateCheckConfigKey); ok && v == "true" {
-		return promptPresent
-	}
 	state := &t.codexUpdate
 
 	if state.skipConfirmed {

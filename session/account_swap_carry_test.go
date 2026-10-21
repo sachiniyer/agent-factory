@@ -188,10 +188,10 @@ func TestValidateAccountSwapCarriesCodexConversationFromRegisteredAccount(t *tes
 	require.Equal(t, source, plan.carry.srcHome)
 	require.Equal(t, "old", plan.carry.sourceAccount)
 	require.Equal(t, rel, plan.carry.transcript, "the rollout keeps its dated layout in the new home")
-	require.Equal(t, "codex resume "+carryTestID+" -c check_for_update_on_startup=false", plan.program)
+	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+carryTestID, plan.program)
 	generated, ok := sessionenv.GeneratedArgsBetween(plan.base, plan.program)
 	require.True(t, ok)
-	require.Equal(t, []string{"resume", carryTestID, "-c", "check_for_update_on_startup=false"}, generated)
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false", "resume", carryTestID}, generated)
 	require.Equal(t, generated, plan.proof.GeneratedArgs)
 
 	require.NoError(t, inst.CarryAccountSwapConversation())
@@ -547,7 +547,7 @@ func TestPendingCarryFollowsACodexForkForRestartRecovery(t *testing.T) {
 	require.NotNil(t, plan.carry)
 	require.Equal(t, forkID, plan.carry.id)
 	require.Equal(t, forkRel, plan.carry.transcript, "the fork exists only in the new account, which a committed carry accepts")
-	require.Equal(t, "codex resume "+forkID+" -c check_for_update_on_startup=false", plan.program)
+	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+forkID, plan.program)
 
 	stale := AgentRuntimeToken{agent: tmux.ProgramCodex, generation: inst.AgentRuntimeToken().generation + 1}
 	require.False(t, inst.RecordAccountSwapConversationForRuntime(stale,

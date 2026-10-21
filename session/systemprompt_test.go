@@ -103,8 +103,8 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 
 	result := injectSystemPrompt("codex --full-auto", skillTarget{})
 
-	if result != "codex --full-auto -c check_for_update_on_startup=false" {
-		t.Errorf("expected resolved form preserved with the update-check suppression appended, got %q", result)
+	if result != "codex -c check_for_update_on_startup=false --full-auto" {
+		t.Errorf("expected the update-check suppression in codex's global -c position (right after the executable), got %q", result)
 	}
 }
 
@@ -541,7 +541,14 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 				return
 			}
 			if !strings.HasPrefix(got, tt.resolved) {
-				t.Errorf("expected resolved form preserved as prefix, got %q", got)
+				// Codex's suppression flag splices in right after the
+				// executable (the global -c position), so the resolved text
+				// resumes behind it — the only non-append injection in the
+				// table (#5238).
+				spliced := strings.Replace(got, " -c check_for_update_on_startup=false", "", 1)
+				if spliced != tt.resolved {
+					t.Errorf("expected resolved form preserved as prefix (or spliced behind the codex flag), got %q", got)
+				}
 			}
 			if !strings.Contains(got, tt.want) {
 				t.Errorf("expected %q injected into %q, got %q", tt.want, tt.resolved, got)
