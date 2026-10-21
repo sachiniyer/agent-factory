@@ -213,29 +213,24 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	// degraded filesystem where each writeSpaceProbe consumes its full per-dir
 	// bound a hand-edited path with many distinct creatable parents would
 	// otherwise block for roughly ceil(len(dirs)/writeProbeConcurrency) ×
-	// probeTimeout on every retry. A shared deadline bounds the first batch
-	// launched under the semaphore; the in-flight probes each drain on their
-	// own per-dir bound, so the aggregate stays within one probeTimeout of the
-	// deadline rather than N batches of it.
+	// probeTimeout on every retry. The semaphore bounds the fan-out at all
+	// times — a hand-edited path with many creatable parents on a stalled mount
+	// followed by hundreds of later parents on the same responsive filesystem
+	// would otherwise start hundreds of concurrent 1 MiB writes once the first
+	// batch exhausts the semaphore and a later deadline fired, manufacturing
+	// ENOSPC on a filesystem a structural git failure does not write to or
+	// exhausting file descriptors; acquiring the semaphore for every probe (the
+	// first batch holds it until its probes drain on their per-dir bound, after
+	// which the remaining probes acquire it in batches of writeProbeConcurrency)
+	// keeps the fan-out within the bound the steady state caps.
 	//
-	// The deadline must not drop coverage of a later parent on a separate
-	// filesystem the way a sequential break would: a crafted relative path can
-	// place several creatable parents on a stalled mount before a later parent
-	// on a separate ENOSPC mount, and a per-input-order cutoff would discard
-	// that later parent's resource errno so the lost-restore classifier exhausts
-	// its bounded retries while the full filesystem remains the actual outage.
-	// Once the deadline elapses the first batch is already stalling on a
-	// degraded mount, so the manufacturing-ENOSPC and file-descriptor pressure
-	// the semaphore caps in the steady state does not apply to the remaining
-	// probes (a degraded mount does not complete the 1 MiB writes a writable
-	// mount would); launch the remaining probes concurrently without the
-	// semaphore so each distinct filesystem still gets its own probe within
-	// the per-dir bound. The remaining batch completes within one probeTimeout
-	// of the deadline (each probe is per-dir bounded), so the aggregate stays
-	// within ~2 × probeTimeout rather than ceil(len(dirs)/writeProbeConcurrency)
-	// × probeTimeout, and a later parent's ENOSPC reaches the chain instead of
-	// being truncated by input order.
-	probeDeadline := time.Now().Add(symlinkResolveTimeout)
+	// Cross-filesystem coverage is preserved: every dir is still probed (a
+	// later parent on a separate ENOSPC mount is not discarded by input order),
+	// the bound only serializes the probes into batches. The aggregate wait is
+	// ceil(len(dirs)/writeProbeConcurrency) × probeTimeout on a degraded
+	// filesystem, which is the bound the semaphore defends against in the
+	// steady state; the per-dir bound caps each probe, and a later parent's
+	// ENOSPC still reaches the chain once its batch acquires the semaphore.
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, writeProbeConcurrency)
@@ -244,29 +239,6 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 			continue
 		}
 		probed[dir] = true
-		if time.Now().After(probeDeadline) {
-			// The first batch held the semaphore past the deadline (a degraded
-			// filesystem where each writeSpaceProbe consumes its full per-dir
-			// bound). Launch the remaining probes concurrently without the
-			// semaphore so a later parent on a separate ENOSPC mount is not
-			// discarded by input order: each probe is per-dir bounded, so the
-			// remaining batch completes within one probeTimeout of the deadline
-			// rather than the N batches the semaphore would serialize, and the
-			// degraded mount that tripped the deadline does not complete the 1
-			// MiB writes a writable mount would (so the fan-out cap the
-			// semaphore defends against in the steady state does not apply here).
-			wg.Add(1)
-			go func(dir string) {
-				defer wg.Done()
-				if probeErr := writeSpaceProbe(dir); probeErr != nil {
-					mu.Lock()
-					joined = errors.Join(joined,
-						fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
-					mu.Unlock()
-				}
-			}(dir)
-			continue
-		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(dir string) {
@@ -422,7 +394,15 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// resolves `link` before `..` collapses the way git's chdir does, and
 	// filepath.Dir would clean the `..` away and lose the symlinked component.
 	worktreePath := g.worktreePath
+	// relBase is the relative worktree path the symlink-aware walk rebases
+	// onto repoPath. The plain-relative branch uses g.worktreePath directly; a
+	// same-drive drive-relative Windows path (D:link\..\wt) carries a volume
+	// prefix the rebase must strip (the lexical fallbacks the walk joins into
+	// the annotation use relBase so a D: prefix does not appear as a path
+	// component).
+	relBase := g.worktreePath
 	var creatableParents []string
+	resolveRelative := false
 	if isWindowsDriveRooted(worktreePath) {
 		// A Windows current-drive-rooted path (\wt or /wt) resolves against
 		// the current drive. The git child runs with cmd.Dir = repoPath (e.g.
@@ -454,10 +434,34 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// to a different directory and filesystem; ENOSPC can consequently be
 		// missed or attached spuriously).
 		if vol := filepath.VolumeName(worktreePath); strings.EqualFold(vol, filepath.VolumeName(repoPath)) {
-			worktreePath = filepath.Join(repoPath, strings.TrimPrefix(worktreePath, vol))
+			rest := strings.TrimPrefix(worktreePath, vol)
+			if strings.ContainsAny(rest, "/\\") {
+				// A same-drive path with a separator (for example
+				// `D:link\..\wt` or `D:link/sub`) carries traversal the
+				// kernel's chdir resolves component by component: the git
+				// child running with cmd.Dir = repoPath (`D:\repo`) resolves
+				// `D:link\..\wt` to `D:\repo\link\..\wt`, following `link`
+				// before `..` collapses it. filepath.Join would lexically
+				// collapse it to `D:\repo\wt`, after which it never reaches
+				// the symlink-aware walk, so a symlinked `link` targeting
+				// another filesystem would leave the probe on the repository
+				// filesystem and miss/attach ENOSPC. Rebase onto the repo's
+				// directory on the same drive without Joining the `..` away,
+				// and run the symlink-aware walk the way a plain relative path
+				// does. The lexical fallbacks the walk joins into the
+				// annotation use relBase (the volume-stripped path) so a `D:`
+				// prefix does not appear as a path component.
+				relBase = rest
+				resolveRelative = true
+			} else {
+				worktreePath = filepath.Join(repoPath, rest)
+			}
 		}
 	} else if !filepath.IsAbs(worktreePath) {
-		worktreePath = repoPath + string(filepath.Separator) + g.worktreePath
+		resolveRelative = true
+	}
+	if resolveRelative {
+		worktreePath = repoPath + string(filepath.Separator) + relBase
 		// Trim trailing separators (but preserve a filesystem root) so a
 		// trailing slash on the destination does not fold the final
 		// component into the parent resolution: filepath.Split("/repo/dest/")
@@ -495,7 +499,18 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// -> "C:", the current directory on that drive rather than its
 		// root), making the join relative and probing the daemon's cwd
 		// instead of the root Git writes into.
-		parent = strings.TrimRight(parent, string(filepath.Separator))
+		// Trim both Windows path separators from the parent the way the
+		// trailing-destination trim above trims both: on Windows a restored
+		// `worktreePath` of `link/.` leaves `parent` ending in `/` when the
+		// trim removes only `\`, and the final-dot branch below preserves the
+		// un-resolved parent as the probe target. `os.Lstat` follows a final
+		// symlink when the path ends in a separator, so a symlink to a nonempty
+		// directory would be seen as its target and write-probed — git rejects
+		// `link/.` without writing through the symlink, so a coincidental ENOSPC
+		// on the target's filesystem would stall the lost-restore loop on a
+		// structural "already exists" failure. Trimming both separators keeps the
+		// final component the way the non-trailing-slash case does.
+		parent = strings.TrimRight(parent, seps)
 		if parent == "" || parent == vol {
 			parent = vol + string(filepath.Separator)
 		}
@@ -524,7 +539,7 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			// accumulated before the timeout are independently known locations
 			// git wrote missing directories into, so probe them too rather than
 			// dropping the resource errno the classifier must read.
-			lexical := filepath.Join(repoPath, g.worktreePath)
+			lexical := filepath.Join(repoPath, relBase)
 			out := g.annotateGitWriteError(err, creatableParents...)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
@@ -546,12 +561,12 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			if base == ".." || base == "." {
 				isDir, dErr := tailIsDir(resolvedParent)
 				if dErr != nil {
-					lexical := filepath.Join(repoPath, g.worktreePath)
+					lexical := filepath.Join(repoPath, relBase)
 					out := g.annotateGitWriteError(err, creatableParents...)
 					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, dErr))
 				}
 				if !isDir {
-					lexical := filepath.Join(repoPath, g.worktreePath)
+					lexical := filepath.Join(repoPath, relBase)
 					out := g.annotateGitWriteError(err, creatableParents...)
 					return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, &os.PathError{Op: "stat", Path: resolvedParent, Err: syscall.ENOTDIR}))
 				}
@@ -614,7 +629,7 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			// the resolution error so the lost-restore classifier reads it
 			// alongside the git failure rather than dropping it, without
 			// write-probing a guessed lexical destination.
-			lexical := filepath.Join(repoPath, g.worktreePath)
+			lexical := filepath.Join(repoPath, relBase)
 			out := g.annotateGitWriteError(err, creatableParents...)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
@@ -660,6 +675,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	var ancestorStatPath string
 	for {
 		if time.Now().After(ancestorDeadline) {
+			// The shared deadline elapsed before the walk reached an existing
+			// ancestor: each stat returned ENOENT just before the per-call
+			// timeout, so the loop never set ancestorStatErr or reached the
+			// existing ancestor. A writable parent and common dir would leave
+			// the opaque Git failure with no environmental errno, charging the
+			// structural retry budget for a full filesystem on the mount the
+			// missing ancestor git creates the leading directories into — the
+			// same hazard a non-ENOENT stat error the existing-ancestor branch
+			// joins. Surface the typed non-answer the symlink walk joins on its
+			// shared deadline (fsprobe.ErrProbeTimedOut +
+			// context.DeadlineExceeded) so the classifier reads the bounded
+			// environmental non-answer the way it reads a stat-probe timeout,
+			// instead of bare structural silence.
+			ancestorStatErr = fmt.Errorf("ancestor stat search of %s did not answer within %s: %w: %w",
+				parentDir, symlinkResolveTimeout, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
+			ancestorStatPath = parentDir
 			break
 		}
 		if st, sErr := statSpaceProbe(parentDir); sErr == nil && st != nil {
