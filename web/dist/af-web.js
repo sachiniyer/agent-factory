@@ -7389,8 +7389,6 @@ function terminalChrome(opts) {
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
@@ -7407,20 +7405,19 @@ function terminalChrome(opts) {
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(tabUnavailable, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, retry, menu.el);
+  return { head, title, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
   const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
   close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => {
     event.stopPropagation();
     onClose();
   });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, close), glyph, label };
 }
 function terminalSurface(container, palette) {
   const style = getComputedStyle(container);
@@ -17417,7 +17414,6 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
-      [chrome.keyboard, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -17813,7 +17809,6 @@ var AppShell = class {
     this.headTitle.title = selected.title;
     this.headTitle.setAttribute("aria-label", selected.title);
     if (this.terminalChrome) {
-      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
     const warningText = archiveWarningText(selected);

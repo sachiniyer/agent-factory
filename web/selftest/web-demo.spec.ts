@@ -374,7 +374,7 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
   await shot(`${prefix}session-actions`);
   await actions.click();
   await page.locator(".af-pane-host .xterm").first().click();
-  await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
   if (!prefix) await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await shot(`${prefix}terminal-keyboard`);
   if (prefix === "phone-") {
@@ -385,7 +385,7 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
     await ctrl.click();
   }
   await page.keyboard.press("Control+]");
-  await expect(page.locator(".af-term-keyboard")).toBeHidden();
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 }
 
 /** Phone geometry and keyboard access supplement the pixel oracle. */

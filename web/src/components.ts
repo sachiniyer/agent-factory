@@ -145,8 +145,6 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
   const actions = h("div", { class: "af-term-actions" });
   actions.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
@@ -165,19 +163,18 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(tabUnavailable, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, retry, menu.el);
+  return { head, title, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */
 export function paneChrome(onClose: () => void) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
   const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
   close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => { event.stopPropagation(); onClose(); });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, close), glyph, label };
 }
 
 /** xterm requires resolved colors. ANSI colors remain the terminal's own palette. */

@@ -2155,7 +2155,7 @@ export class AppShell {
       [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.keyboard, this.header],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2675,7 +2675,6 @@ export class AppShell {
     this.headTitle.title = selected.title;
     this.headTitle.setAttribute("aria-label", selected.title);
     if (this.terminalChrome) {
-      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
     const warningText = archiveWarningText(selected);

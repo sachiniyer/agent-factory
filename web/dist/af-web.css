@@ -1018,8 +1018,7 @@ button:disabled,
   background: var(--af-surface-raised);
   color: var(--af-ink);
 }
-.af-term-menu[hidden],
-.af-term-keyboard[hidden] {
+.af-term-menu[hidden] {
   display: none;
 }
 .af-term-menu button {
@@ -1027,17 +1026,6 @@ button:disabled,
 }
 .af-term-menu button {
   text-align: left;
-}
-.af-term-keyboard,
-.af-pane-keyboard {
-  color: var(--af-ink);
-  font-size: var(--af-type-body);
-}
-.af-pane-keyboard {
-  display: none;
-}
-.af-kb-terminal .af-pane-focused .af-pane-keyboard {
-  display: inline;
 }
 .af-term-title-separator {
   color: var(--af-ink);
@@ -2163,11 +2151,6 @@ button:disabled,
   .af-term-title-separator {
     display: none;
   }
-  .af-term-keyboard {
-    grid-row: 1;
-    grid-column: 2;
-    white-space: nowrap;
-  }
   .af-term-head > .af-term-more-wrap {
     grid-row: 1;
     grid-column: 4;
@@ -2940,11 +2923,6 @@ textarea[class] {
   .af-session-first .af-term-title {
     order: 1;
     flex: 1;
-  }
-  .af-session-first .af-term-keyboard {
-    order: 2;
-    flex-shrink: 0;
-    font-size: var(--af-type-caption);
   }
   .af-session-first .af-term-new-group {
     order: 3;

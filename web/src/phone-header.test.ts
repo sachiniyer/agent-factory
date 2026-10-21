@@ -97,7 +97,6 @@ test("truncated session title retains the complete name for pointer and accessib
   assert.equal(chrome.title.title, title, "ellipsis must have a full-name route");
   assert.equal(chrome.title.textContent, title);
   assert.equal(chrome.title.getAttribute("aria-label"), title);
-  assert.equal((chrome.keyboard as unknown as Element).tagName, "span", "Keyboard is static");
   chrome.dispose();
 });
 
