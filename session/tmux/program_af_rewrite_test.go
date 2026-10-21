@@ -41,6 +41,17 @@ func TestRewriteProgramCmdByAf_KeepsTheDeclarationInStepWithResume(t *testing.T)
 			agent:     "codex",
 			wantAdded: "--last",
 		},
+		{
+			// The #5238 flag injection made the splice a mid-command INSERTION
+			// — `codex resume --last -c …`, not an append — so the declaration
+			// must be re-derived as a splice or every account-scoped codex
+			// restore dies at the boundary (#5238 review).
+			name:      "codex splices resume --last inside the injected flag",
+			program:   "codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := &TmuxSession{program: test.program, generatedArgs: test.declared}

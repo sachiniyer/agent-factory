@@ -296,6 +296,51 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			`codex -c 'check_for_update_on_startup = true'`,
 			`codex -c 'check_for_update_on_startup = true'`,
 		},
+		{
+			"a --config assignment is left alone",
+			"codex --config check_for_update_on_startup=true",
+			"codex --config check_for_update_on_startup=true",
+		},
+		{
+			"a --config=key assignment is left alone",
+			"codex --config=check_for_update_on_startup=true",
+			"codex --config=check_for_update_on_startup=true",
+		},
+		{
+			"a glued -ckey assignment is left alone",
+			"codex -ccheck_for_update_on_startup=false",
+			"codex -ccheck_for_update_on_startup=false",
+		},
+		{
+			"a -c=key assignment is left alone",
+			"codex -c=check_for_update_on_startup=false",
+			"codex -c=check_for_update_on_startup=false",
+		},
+		// The key's NAME appearing anywhere else proves nothing: an env
+		// assignment's value, another key's operand, or a script name that
+		// happens to contain it are not the operator choosing this override —
+		// a substring match would leave these launchable commands exposed to
+		// the picker (#5238 review).
+		{
+			"the key inside another -c operand is not the override",
+			"codex -c model=check_for_update_on_startup",
+			"codex -c model=check_for_update_on_startup " + arg,
+		},
+		{
+			"the key inside an env assignment is not the override",
+			"CODEX_HOME=/tmp/check_for_update_on_startup codex",
+			"CODEX_HOME=/tmp/check_for_update_on_startup codex " + arg,
+		},
+		{
+			"the key inside another --config operand is not the override",
+			"codex --config sandbox_mode=check_for_update_on_startup",
+			"codex --config sandbox_mode=check_for_update_on_startup " + arg,
+		},
+		{
+			"a dangling -c at the end still gets the flag",
+			"codex --model gpt-5 -c",
+			"codex --model gpt-5 -c " + arg,
+		},
 		// A program_overrides entry can point "codex" at another binary
 		// (#1116/#1131); appending a codex flag would make that binary exit on
 		// an unknown argument.
@@ -316,4 +361,45 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			}
 		})
 	}
+}
+
+// `-c check_for_update_on_startup=true` is the documented opt-back-in (#5238
+// review): the operator asked for the picker, so af must not answer it. The
+// handler reports the frame handled — the modal owns the pane until a human
+// answers — but sends nothing, in every -c/--config spelling.
+func TestCheckAndHandleTrustPrompt_CodexUpdateOptedInPickerIsHeldForTheOperator(t *testing.T) {
+	for _, program := range []string{
+		"codex -c check_for_update_on_startup=true",
+		"codex -ccheck_for_update_on_startup=true",
+		"codex -c=check_for_update_on_startup=true",
+		"codex --config check_for_update_on_startup=true",
+		"codex --config=check_for_update_on_startup=true",
+		// The key only wins when it is the override's KEY — an operator whose
+		// model happens to be named after it still gets the dismisser.
+		"codex -c check_for_update_on_startup=true -c model=x",
+	} {
+		t.Run(program, func(t *testing.T) {
+			session, commands := runTrustPromptSequence(t, program, codexCurrentUpdatePicker)
+
+			require.True(t, session.CheckAndHandleTrustPrompt(),
+				"a picker the operator opted into still owns the pane, so the frame is 'handled'")
+			require.Empty(t, sentKeystrokes(*commands),
+				"af answered a picker the operator explicitly opted into: %v", *commands)
+		})
+	}
+}
+
+// The opt-in is value-exact: `=false` (or any other value) is not an opt-in,
+// so the fallback dismisser still answers a rendered picker — the same posture
+// as before the flag existed. And a bare codex command navigates as always.
+func TestCheckAndHandleTrustPrompt_CodexUpdateOptInIsValueExact(t *testing.T) {
+	session, commands := runTrustPromptSequence(t, "codex -c check_for_update_on_startup=false",
+		codexCurrentUpdatePicker, codexCurrentUpdatePickerSkipSelected)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands),
+		"=false is not an opt-in: the picker the operator disabled still gets af's fallback navigation")
 }

@@ -63,3 +63,75 @@ func GeneratedArgsBetween(base, final string) ([]string, bool) {
 	copy(out, added)
 	return out, true
 }
+
+// GeneratedArgsByInsertion is GeneratedArgsBetween's sibling for rewrites that
+// are not positional extensions: the codex resume splice turns `codex -c k=v`
+// into `codex resume --last -c k=v`, inserting words mid-command rather than
+// appending them (#5238 review). Without it the rewrite would be "undescribable"
+// — the declaration cleared, the account-scoped resume refused, the pane dead.
+//
+// The claim it certifies is narrower than a generic diff, on purpose. It answers
+// yes only when EVERY word of base after the executable is already declared —
+// so the inserted block lands among words af authored — and the rewrite is a
+// pure insertion: a contiguous block of new words with every base word kept, in
+// order. The merged declaration then still enumerates the whole final command.
+//
+// Same fail-closed contract as GeneratedArgsBetween: a rewrite that replaces,
+// drops, or reorders a word, or a base carrying words af never declared, gets a
+// refusal — never a guess about which words were af's.
+func GeneratedArgsByInsertion(base, final string, declared []string) ([]string, bool) {
+	baseCall, ok := singleSimpleCall(base)
+	if !ok || !callIsLiteral(baseCall) || len(baseCall.Assigns) > 0 {
+		return nil, false
+	}
+	finalCall, ok := singleSimpleCall(final)
+	if !ok || !callIsLiteral(finalCall) || len(finalCall.Assigns) > 0 {
+		return nil, false
+	}
+	baseWords, ok := literalCommandArgs(baseCall.Args)
+	if !ok || len(baseWords) == 0 {
+		return nil, false
+	}
+	finalWords, ok := literalCommandArgs(finalCall.Args)
+	if !ok || len(finalWords) <= len(baseWords) {
+		return nil, false
+	}
+	// The executable is not negotiable, and every post-executable word of base
+	// must be a declared one — an insertion among USER words is unprovable the
+	// same way the extension path already treats them.
+	if finalWords[0] != baseWords[0] {
+		return nil, false
+	}
+	if len(baseWords)-1 != len(declared) {
+		return nil, false
+	}
+	for i, want := range declared {
+		if baseWords[i+1] != want {
+			return nil, false
+		}
+	}
+	// The insertion point is the first divergence after the executable; every
+	// base word after it must survive verbatim as final's tail (insertion only —
+	// a rewrite that also replaces or drops words is not describable this way).
+	p := 1
+	for p < len(baseWords) && baseWords[p] == finalWords[p] {
+		p++
+	}
+	tail := len(baseWords) - p
+	for i := 0; i < tail; i++ {
+		if finalWords[len(finalWords)-tail+i] != baseWords[p+i] {
+			return nil, false
+		}
+	}
+	inserted := finalWords[p : len(finalWords)-tail]
+	if len(inserted) == 0 {
+		return nil, false
+	}
+	// Splice the inserted block into the declaration at the point it landed:
+	// declared[:p-1] are the base words before the gap, declared[p-1:] after.
+	out := make([]string, 0, len(declared)+len(inserted))
+	out = append(out, declared[:p-1]...)
+	out = append(out, inserted...)
+	out = append(out, declared[p-1:]...)
+	return out, true
+}

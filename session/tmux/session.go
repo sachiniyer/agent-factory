@@ -173,17 +173,54 @@ const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 //   - A non-codex command is returned unchanged. A program_overrides entry can
 //     point "codex" at another binary (the #1116/#1131 class); appending a
 //     codex flag to it would make that binary exit on an unknown argument.
-//   - A command already carrying the key — either -c value form — is left
-//     alone, so a user's explicit choice wins: that is how an operator who
-//     wants the prompt gets it back.
+//   - A command already carrying the key — any -c/--config spelling, any
+//     value — is left alone, so a user's explicit choice wins. `=true` is the
+//     opt-back-in: handleCodexUpdatePrompt honors it by holding the picker
+//     for a human answer instead of navigating it.
 func EnsureCodexUpdateCheckDisabled(command string) string {
 	if DetectAgentFromCommand(command) != ProgramCodex {
 		return command
 	}
-	if strings.Contains(command, codexUpdateCheckConfigKey) {
+	if _, overridden := codexCommandConfigValue(command, codexUpdateCheckConfigKey); overridden {
 		return command
 	}
 	return command + " -c " + codexUpdateCheckConfigKey + "=false"
+}
+
+// codexCommandConfigValue reports the value a command's -c/--config overrides
+// assign key, in every spelling clap accepts: `-c k=v`, `-ck=v`, `-c=k=v`,
+// `--config k=v`, `--config=k=v` (#5238 review). A bare substring match cannot
+// make this call — `FOO=/tmp/check_for_update_on_startup codex` or `codex -c
+// model=check_for_update_on_startup` would read as "the operator already
+// chose", launch WITHOUT the flag, and re-expose the picker. Tokens arrive
+// unquoted from splitShellTokens; the key is whatever precedes the operand's
+// first '='. Repeated overrides resolve the way codex resolves them — the
+// last operand wins.
+func codexCommandConfigValue(command, key string) (string, bool) {
+	tokens, _ := splitShellTokens(command)
+	var value string
+	found := false
+	for i, tok := range tokens {
+		var operand string
+		switch {
+		case tok == "-c" || tok == "--config":
+			if i+1 >= len(tokens) {
+				continue
+			}
+			operand = tokens[i+1]
+		case strings.HasPrefix(tok, "--config="):
+			operand = tok[len("--config="):]
+		case strings.HasPrefix(tok, "-c") && len(tok) > 2:
+			operand = tok[2:]
+		default:
+			continue
+		}
+		operand = strings.TrimPrefix(operand, "=")
+		if k, v, ok := strings.Cut(operand, "="); ok && strings.TrimSpace(k) == key {
+			value, found = strings.TrimSpace(v), true
+		}
+	}
+	return value, found
 }
 
 // TmuxSession represents a managed tmux session
