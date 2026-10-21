@@ -1006,10 +1006,6 @@ button:disabled,
 .af-app[data-project-color] [data-af-theme=dark] {
   --af-accent: var(--af-project-accent-dark);
 }
-.af-app[data-project-color] .af-main-term::after {
-  border-width: calc(var(--af-space-1) / 2);
-  border-color: var(--af-accent);
-}
 .af-app[data-project-color] .af-appbar {
   background: var(--af-project-color);
   color: var(--af-project-ink);

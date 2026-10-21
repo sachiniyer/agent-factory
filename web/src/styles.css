@@ -1261,12 +1261,6 @@ button:disabled,
   --af-accent: var(--af-project-accent-dark);
 }
 
-/* The session pane keeps the project frame when the keyboard is elsewhere too. */
-.af-app[data-project-color] .af-main-term::after {
-  border-width: calc(var(--af-space-1) / 2);
-  border-color: var(--af-accent);
-}
-
 /* The app bar takes the raw project color, so the current project reads at a
  * glance. Controls with a raised surface stay as chips on the bar. */
 .af-app[data-project-color] .af-appbar {
