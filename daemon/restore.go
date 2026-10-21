@@ -537,7 +537,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(repoID, instance)
+	m.armRestoreConfirmation(repoID, instance, lostRestoreManual)
 	if settleErr != nil {
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",
