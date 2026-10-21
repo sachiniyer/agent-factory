@@ -155,7 +155,7 @@ func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string
 func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord) string {
 	parts := []string{
 		"ssh",
-		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHostsPath),
+		"-o", "UserKnownHostsFile=" + shellQuote(knownHostsPath),
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
 		// operator's matching Host block could hand OpenSSH a different key and
@@ -209,7 +209,7 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 	if user := strings.TrimSpace(record.User); user != "" {
 		target = user + "@" + target
 	}
-	parts = append(parts, shellQuoteSandbox(target))
+	parts = append(parts, shellQuote(target))
 	return strings.Join(parts, " ")
 }
 

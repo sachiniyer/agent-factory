@@ -501,7 +501,7 @@ func stubSSHStraggler(t *testing.T, printCmd string) string {
 	body := "#!/usr/bin/env bash\n" +
 		printCmd + "\n" +
 		"sleep 30 &\n" +
-		"echo $! > " + shSingleQuoteExec(pidFile) + "\n" +
+		"echo $! > " + shellQuote(pidFile) + "\n" +
 		"exit 0\n"
 	path := filepath.Join(dir, "ssh")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
