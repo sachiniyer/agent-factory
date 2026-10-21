@@ -362,7 +362,7 @@ work. The vocabulary is closed:
 |-------|---------------------|
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
-| `restore-gave-up` | The process is gone and automatic Lost-session recovery exhausted its attempt budget. See `lost_restore_failure` below. |
+| `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
 | `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
@@ -376,6 +376,24 @@ session remains Lost, and the daemon does not automatically retry it again. An
 explicit restore remains available; a successful runtime replacement clears the
 field. Because it is stored on the session record, daemon restarts and the TUI,
 web, and HTTP clients retain the same last error.
+
+What `attempts` counts depends on which verdict ended the loop, and `error` is
+the discriminator — there is no separate field naming the verdict:
+
+- **Failed-attempt exhaustion** — `attempts` counts consecutive FAILED restore
+  attempts that spent the structural budget (6 by default), and `error` is the
+  last attempt's failure: the spawn died before it could be confirmed alive,
+  the preserve push failed, and so on.
+- **Confirmed-flap give-up** — `attempts` counts CONFIRMED SUCCESSFUL restores
+  (4 inside a 30-minute window) that each went lost again anyway, and `error`
+  begins `the session was confirmed restored N times in 30m0s and went lost
+  again each time`. Four successes are not four failures: a consumer that
+  renders this as "4 attempts failed" inverts the evidence — every one of
+  those spawns worked, and the agent exited after it was confirmed up.
+
+The confirmed-flap count is in-memory evidence only: it does not survive a
+daemon restart the way this record does, and a restart re-opens the count at
+zero while the durable verdict stands.
 
 **`lost_restore_wait`** (object, omitted unless automatic recovery is waiting on
 the environment) — the non-terminal counterpart of `lost_restore_failure`:

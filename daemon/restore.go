@@ -324,13 +324,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.clearRemoteLoss(stateKey)
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
+		m.mu.Unlock()
 		// The manual off-ramp clears the confirmed-flap history on EVERY
 		// successful manual path: this probe-alive heal returns before the
 		// armRestoreConfirmation call that would reset it for the spawn path,
 		// so a stale window cannot outlive the operator's intervention and trip
 		// the bound on the next automatic cycle (#5238 review).
-		delete(m.lostRestoreConfirmations, stateKey)
-		m.mu.Unlock()
+		m.clearLostRestoreConfirmations(stateKey)
 		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
 			failure := fmt.Errorf(
 				"session %q was confirmed alive, but its healed state could not be written to disk: %w",

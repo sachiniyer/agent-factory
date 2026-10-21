@@ -485,3 +485,50 @@ func TestRecordLostRestoreFailure_PersistedFlapVerdictSeedsTerminal(t *testing.T
 		t.Fatalf("the seeded episode armed a retry for %v the durable gate refuses to run", st.nextAttempt)
 	}
 }
+
+// The archive-restore off-ramp must close the flap episode too (#5238 review).
+// A session that flapped, was archived, and is restored through `af sessions
+// restore` between two sweep ticks never passes through a live-edge the sweep
+// can observe — archived rows are not in its live set — so the pre-archive
+// confirmations ride forward onto the runtime the operator just replaced, and
+// the next loss can hit the bound on its first automatic pass. The restore
+// succeeding is the episode's close, the same contract the manual heal keeps.
+func TestRestoreArchived_ArchiveRestoreClearsConfirmedFlapHistory(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	if _, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID}); err != nil {
+		t.Fatalf("ArchiveSession: %v", err)
+	}
+
+	key := stableSessionKey(repoID, inst)
+	seedFlapHistory(manager, key, lostRestoreFlapMaxRestores-1)
+
+	if _, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	if got := flapCount(manager, key); got != 0 {
+		t.Fatalf("confirmed-flap history survived a successful archive restore: count = %d, want 0 — "+
+			"the next loss would inherit %d/%d toward the bound on a runtime the operator just replaced",
+			got, got, lostRestoreFlapMaxRestores)
+	}
+}
+
+// The remote arm of the same off-ramp: an archived sandbox session restored by
+// re-provision closes the flap episode its pre-archive confirmations counted.
+func TestRestoreArchived_RemoteReprovisionClearsConfirmedFlapHistory(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-archived", "http://127.0.0.1:1", session.Running)
+
+	key := stableSessionKey(repoID, inst)
+	seedFlapHistory(manager, key, lostRestoreFlapMaxRestores-1)
+
+	inst.SetStatusForTest(session.Archived)
+	if _, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-archived", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	if got := flapCount(manager, key); got != 0 {
+		t.Fatalf("confirmed-flap history survived a remote archive restore: count = %d, want 0", got)
+	}
+}

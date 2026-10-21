@@ -45,6 +45,19 @@ func (m *Manager) lostRestoreConfirmationCountLocked(stateKey string, now time.T
 	return len(times)
 }
 
+// clearLostRestoreConfirmations drops the session's confirmed-flap history.
+// The operator's explicit off-ramps — a successful manual restore heal and a
+// successful archive restore — close the episode the count was describing, so
+// a stale in-window count cannot trip the bound on the runtime they just
+// replaced (#5238 review). The automatic paths never call it: confirmations
+// must survive across successive restore cycles — that is the whole point of
+// the bound.
+func (m *Manager) clearLostRestoreConfirmations(stateKey string) {
+	m.mu.Lock()
+	delete(m.lostRestoreConfirmations, stateKey)
+	m.mu.Unlock()
+}
+
 // pruneLostRestoreConfirmations drops confirmations older than the flap
 // window. Entries append in poll order, so the slice is chronological and only
 // the leading edge can expire.
