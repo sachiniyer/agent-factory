@@ -186,6 +186,16 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
 		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
 	}},
+	"session/tmux/session.go:codexCommandConfigValue": {{
+		class: notAShell,
+		note: "strings.HasPrefix(tok, \"-c\") — codex's --config short flag, matched as text to read the " +
+			"operator's own -c overrides (#5238)",
+	}},
+	"session/tmux/session.go:skipCodexConfigOptions": {{
+		class: notAShell,
+		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
+			"codex's global options to the subcommand slot (#5238)",
+	}},
 }
 
 func TestShellSites_EveryShellSiteIsClassified(t *testing.T) {

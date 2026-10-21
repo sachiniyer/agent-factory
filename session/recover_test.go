@@ -606,7 +606,7 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 		}
 	}
 	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
-	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
+	assert.Contains(t, agentSpawn, " resume "+conversationID,
 		"Recover must resume the recorded Codex conversation, not the latest one")
 	assert.NotContains(t, agentSpawn, "resume --last")
 

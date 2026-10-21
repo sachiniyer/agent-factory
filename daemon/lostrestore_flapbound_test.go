@@ -95,8 +95,9 @@ func TestRestoreLostSessions_ConfirmedFlapGivesUpAtBound(t *testing.T) {
 		t.Fatalf("surfaced attempts = %d, want %d", data.LostRestoreFailure.Attempts, lostRestoreFlapMaxRestores)
 	}
 	// The diagnostic must tell the operator what to do next — the explicit
-	// restore off-ramp, naming THIS session.
-	hint := shellsuggest.Command("af", "sessions", "restore", inst.Title)
+	// restore off-ramp, naming THIS session. The title rides positionally, so
+	// the hint terminates options before it (#3432, #5436).
+	hint := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, inst.Title)
 	if !strings.Contains(data.LostRestoreFailure.Error, hint) {
 		t.Fatalf("surfaced flap reason = %q, want it to name the operator off-ramp %q",
 			data.LostRestoreFailure.Error, hint)
@@ -530,5 +531,91 @@ func TestRestoreArchived_RemoteReprovisionClearsConfirmedFlapHistory(t *testing.
 	}
 	if got := flapCount(manager, key); got != 0 {
 		t.Fatalf("confirmed-flap history survived a remote archive restore: count = %d, want 0", got)
+	}
+}
+
+// The give-up's advertised off-ramp must survive a title that begins with a
+// dash (#5436): `af sessions restore -worker` makes pflag read the title as a
+// flag and the command the operator runs back is the broken one. The hint is
+// built with PositionalCommand so every title rides behind `--`.
+func TestRestoreLostSessions_ConfirmedFlapGiveUpHintTerminatesOptions(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "-flapper", backend, true, session.Lost)
+	zeroRestoreBackoff(t)
+	for cycle := 0; cycle < lostRestoreFlapMaxRestores; cycle++ {
+		confirmedRestoreCycle(t, manager, repoID, inst)
+	}
+	inst.SetStatusForTest(session.Lost)
+	manager.RestoreLostSessions()
+
+	data := inst.ToInstanceData()
+	if data.LostRestoreFailure == nil {
+		t.Fatal("terminal session surfaced no restore failure")
+	}
+	hint := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, inst.Title)
+	if !strings.Contains(data.LostRestoreFailure.Error, hint) {
+		t.Fatalf("surfaced flap reason = %q, want the off-ramp behind an option terminator %q",
+			data.LostRestoreFailure.Error, hint)
+	}
+	if strings.Contains(data.LostRestoreFailure.Error, "restore "+inst.Title) {
+		t.Fatalf("dash-leading title surfaced unterminated in %q — pflag would read it as a flag",
+			data.LostRestoreFailure.Error)
+	}
+}
+
+// An automatic restore's pending confirmation arm must not survive the
+// archive off-ramp (#5436): when `af sessions archive` + `af sessions
+// restore` land while the previous automatic restore is still
+// awaitingConfirm, the new runtime's first poll answers charge the STALE
+// arm's confirmCountsFlap — one flap datapoint the operator's explicit
+// off-ramp never earned. The restore succeeding retires the whole episode
+// entry, the same contract the manual heal keeps.
+func TestRestoreArchived_ArchiveRestoreRetiresPendingConfirmation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "pending-arm")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	if _, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "pending-arm", RepoID: repoID}); err != nil {
+		t.Fatalf("ArchiveSession: %v", err)
+	}
+
+	key := stableSessionKey(repoID, inst)
+	manager.mu.Lock()
+	manager.lostRestoreStates[key] = &lostRestoreState{awaitingConfirm: true, confirmCountsFlap: true}
+	manager.mu.Unlock()
+
+	if _, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "pending-arm", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if st != nil {
+		t.Fatalf("the stale awaitingConfirm arm survived a successful archive restore: %+v — "+
+			"the new runtime's first confirmations would charge its flap datapoint", st)
+	}
+}
+
+// The remote arm of the same off-ramp: an archived sandbox session restored
+// by re-provision retires the pending automatic-restore arm it carried.
+func TestRestoreArchived_RemoteReprovisionRetiresPendingConfirmation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-pending-arm", "http://127.0.0.1:1", session.Running)
+
+	key := stableSessionKey(repoID, inst)
+	manager.mu.Lock()
+	manager.lostRestoreStates[key] = &lostRestoreState{awaitingConfirm: true, confirmCountsFlap: true}
+	manager.mu.Unlock()
+
+	inst.SetStatusForTest(session.Archived)
+	if _, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-pending-arm", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if st != nil {
+		t.Fatalf("the stale awaitingConfirm arm survived a remote archive restore: %+v", st)
 	}
 }
