@@ -372,6 +372,37 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			"env my-chat codex",
 		},
 		{
+			// A QUOTED `=` word is not an assignment — the shell runs a
+			// program literally named `FOO=bar` and `codex` is its
+			// argument. splitShellTokens strips the quotes, so the raw
+			// source decides (#5238 review).
+			"a quoted name=value word is the executable, not an assignment",
+			`"FOO=bar" codex`,
+			`"FOO=bar" codex`,
+		},
+		{
+			"a single-quoted name=value word is the executable, not an assignment",
+			`'FOO=bar' codex`,
+			`'FOO=bar' codex`,
+		},
+		{
+			"an escaped = is not an assignment operator",
+			`FOO\=bar codex`,
+			`FOO\=bar codex`,
+		},
+		{
+			// Quoting the VALUE keeps the word an assignment — the name=
+			// prefix is literal in the raw source.
+			"a quoted assignment value still prefixes the executable",
+			`FOO="a b" codex`,
+			`FOO="a b" codex ` + arg,
+		},
+		{
+			"a single-quoted assignment value still prefixes the executable",
+			`FOO='a b' codex`,
+			`FOO='a b' codex ` + arg,
+		},
+		{
 			"an assignment prefix still reaches the modeled executable",
 			"FOO=1 exec codex",
 			"FOO=1 exec codex " + arg,

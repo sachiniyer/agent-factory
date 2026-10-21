@@ -569,14 +569,27 @@ func findAgentTokenStrict(tokens []string) (int, string, error) {
 // token that merely names an agent is an argument, not the program (#5238
 // review): -1 means the executable is not provably placed, so the caller must
 // leave the command alone.
-func commandExecutableTokenIndex(tokens []string) int {
+//
+// The assignment check runs on each token's RAW source, not its unquoted
+// text: splitShellTokens strips quote provenance, so `"FOO=bar" codex` would
+// otherwise look like an assignment plus a codex executable when the shell
+// actually reads `FOO=bar` as the program name and `codex` as its argument
+// (#5238 review). A leading `name=` that survives quoting intact is the only
+// spelling POSIX recognizes as an assignment word.
+func commandExecutableTokenIndex(command string, tokens []string, ends []int) int {
 	i := 0
 	for i < len(tokens) {
-		if _, _, assignment := shellAssignment(tokens[i]); assignment {
-			i++
-			continue
+		start := 0
+		if i > 0 {
+			start = ends[i-1]
 		}
-		break
+		for start < ends[i] && (command[start] == ' ' || command[start] == '\t') {
+			start++
+		}
+		if _, _, assignment := shellAssignment(command[start:ends[i]]); !assignment {
+			break
+		}
+		i++
 	}
 	if i < len(tokens) && strings.EqualFold(baseCommand(tokens[i]), "exec") {
 		i++

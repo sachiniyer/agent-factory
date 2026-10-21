@@ -202,7 +202,7 @@ func EnsureCodexUpdateCheckDisabled(command string) string {
 	// through the wrapper grammar af actually models — never a later token
 	// that merely names codex (`my-chat --persona codex` would otherwise get
 	// `-c` spliced into an arbitrary program's arguments, #5238 review).
-	execIdx := commandExecutableTokenIndex(tokens)
+	execIdx := commandExecutableTokenIndex(command, tokens, ends)
 	if execIdx < 0 || strings.ToLower(filepath.Base(tokens[execIdx])) != ProgramCodex {
 		return command
 	}
