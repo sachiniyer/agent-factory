@@ -81,7 +81,6 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
-import { restoreShortcutFocus } from "./shortcut-focus.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -118,7 +117,6 @@ import {
   orderedSessions,
   renderLogin,
   sessionTabs,
-  canManageTabs,
   restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
@@ -3007,7 +3005,9 @@ function onKeydown(e: KeyboardEvent): void {
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected
+        ? (["shell", "vscode"] as const).filter((kind) => canCreateTabKind(actionableSelected, kind))
+        : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
@@ -3046,18 +3046,9 @@ function onKeydown(e: KeyboardEvent): void {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        // Control+] commonly leaves document.body as the nominal focus target.
-        // Focusing body is a no-op, which can leave the picker item focused after
-        // its hidden ancestors close; the next shortcut is then swallowed as a
-        // native-button key. Give rail navigation a stable DOM focus target.
-        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
-      });
+    case "newTab":
+      createSessionTab(action.tabKind);
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

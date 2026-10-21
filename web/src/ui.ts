@@ -889,7 +889,6 @@ export class AppShell {
     focusedTabSynth: string | null;
     focusedKind: number | null;
   } | null = null;
-  private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
     if (this.phoneSyncQueued) return;
@@ -901,40 +900,8 @@ export class AppShell {
   };
   private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected === true;
-    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
-    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    // appbarControls captures this before its media listener closes the phone
-    // disclosure. The composition pass is deliberately deferred until every
-    // owner-specific listener has run, so neither picker state nor its shortcut
-    // return may be sampled from the already-mutated DOM here.
-    const responsiveState = this.responsiveNewTabState;
-    this.responsiveNewTabState = null;
-    const pickerOpen = responsiveState?.trigger === pickerTrigger
-      ? responsiveState.open
-      : pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
-      (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
-    const reopenPicker = (): void => {
-      this.openNewTabPicker();
-      // Closing the old owner can synchronously close the picker and clear its
-      // return. Preserve a shortcut transaction across this intentional reparent.
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
-    };
-    if (!compositionChanged) {
-      // A store update can observe the new media-query value and recompose before
-      // the query's change listeners run. The owner listener then closes the picker,
-      // leaving this deferred pass with no composition work but a real open capture.
-      if (responsiveState?.trigger === pickerTrigger && responsiveState.open &&
-          pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
-      return;
-    }
+    if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
-    // Escape can finish the shortcut before this deferred composition pass. Its
-    // return has already closed an incidental Session actions disclosure, while
-    // leaving a user-opened one expanded. Carry that settled state through the
-    // move even when there is no longer an open picker to restore it for us.
     const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
@@ -942,15 +909,7 @@ export class AppShell {
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
     if (sessionActionsOpen) this.terminalChrome?.menu.open();
-    // Reparenting closes the old enclosing disclosure. Reopen through the new
-    // owner and capture its return state before restoring the focused item.
-    if (pickerOpen) {
-      reopenPicker();
-    }
-    // openNewTabPicker has restored focus to its first item. Do not overwrite it
-    // with the app-controls trigger focused by the preceding media listener: that
-    // focusout would immediately close the picker we just reopened.
-    if (!pickerOpen && focus && focus !== document.activeElement) {
+    if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
@@ -1037,23 +996,6 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
-  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  // Escape restores every enclosing disclosure a keyboard open changed before
-  // returning to navigation. Pointer opens have no entry and return to the button.
-  private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
-  private responsiveNewTabState: {
-    trigger: HTMLElement;
-    cancel?: () => void;
-    open: boolean;
-  } | null = null;
-  private readonly captureNewTabCancelReturn = (): void => {
-    const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    this.responsiveNewTabState = trigger ? {
-      trigger,
-      cancel: this.newTabCancelReturn.get(trigger),
-      open: trigger.getAttribute("aria-expanded") === "true",
-    } : null;
-  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1164,15 +1106,14 @@ export class AppShell {
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
     // Share one MediaQueryList so app-controls closes its old layout before
-    // syncPhone reparents and reopens the picker. Separate lists can dispatch
-    // in creation order and close the disclosure after syncPhone reopened it.
+    // syncPhone reparents the session controls.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []),
-    ], this.phone, this.captureNewTabCancelReturn, () => {
-      // The phone disclosure owns the carried desktop actions. A user dismissal
-      // retires that state, unlike layout and picker-return programmatic closes.
-      const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    ], this.phone, () => {}, () => {
+      // The phone disclosure owns the carried session actions. A user dismissal
+      // retires that state, unlike layout-driven programmatic closes.
+      const panel = this.terminalChrome?.menu.panel;
+      if (panel && this.appControls.panel.contains(panel)) this.terminalChrome?.menu.dismiss();
     }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
 
@@ -2070,201 +2011,6 @@ export class AppShell {
     return drop.landed;
   }
 
-  /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker(shortcutReturn?: () => void): void {
-    const slot = this.terminalChrome?.newTabSlot;
-    const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
-    if (!trigger || !slot) return;
-    // Capture the whole pre-shortcut state before exposing either nested control.
-    // Responsive recomposition calls this method again without a return callback;
-    // keep the original record until the picker itself closes.
-    if (shortcutReturn) {
-      const preserveAppControls = this.appControls.panel.contains(slot) &&
-        this.appControls.trigger.getAttribute("aria-expanded") === "true";
-      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
-      this.newTabCancelReturn.set(trigger, () => {
-        // Close inside-out before restoring focus outside either disclosure.
-        if (!preserveSessionActions) this.terminalChrome?.menu.close();
-        // Recomposition may have opened app controls after the shortcut began.
-        // Preserve it only when the user had already opened the phone disclosure.
-        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
-        shortcutReturn();
-      });
-    }
-    // Phone composition moves these controls into the app-controls disclosure.
-    // Ask the DOM owner, rather than guessing from viewport width.
-    if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabCancelReturn.has(trigger)) {
-        const wasHidden = this.appControls.panel.hidden;
-        this.newTabCancelReturn.set(trigger, () => {
-          // Recomposition can move the slot home and close its desktop disclosure.
-          if (!this.appControls.panel.contains(slot)) {
-            this.terminalChrome?.menu.open();
-            trigger.focus();
-            return;
-          }
-          if (wasHidden) this.appControls.close(true);
-          else this.appControls.trigger.focus(); // the phone's New tab button is hidden
-        });
-      }
-      this.appControls.open();
-    }
-    this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
-    else trigger.click();
-    slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-  }
-
-  /** The visible New tab button and its kind menu.
-   *
-   *  The old split control created a terminal from a plus and hid VS Code behind a
-   *  separate, unlabeled caret. Even the project's maintainer could not find that
-   *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut opens this same picker.
-   *
-   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
-   *  are bound to THIS instance and torn down with it — see the isConnected check
-   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  private newTabControl(selected: SessionData | null): HTMLElement {
-    const wrap = h("div", { class: "af-tab-new-wrap" });
-    const trigger = h(
-      "button",
-      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
-      icon("plus", "af-tab-new-plus"),
-      h("span", {}, "New tab"),
-      icon("chevron-down", "af-tab-new-caret"),
-    );
-    trigger.setAttribute("aria-haspopup", "menu");
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", "New tab · Terminal or VS Code");
-    const menu = h("div", { class: "af-tab-menu" });
-    menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Tab type");
-    menu.hidden = true;
-
-    let scrollParent: HTMLElement | null = null;
-    const positionMenu = (): void => {
-      // The menu is fixed so the tab bar's horizontal overflow cannot clip it. Anchor
-      // its right edge to the trigger's caret, then keep the whole box in the viewport.
-      const anchor = trigger.getBoundingClientRect();
-      const menuBox = menu.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
-      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
-      const below = anchor.bottom + gap;
-      const above = anchor.top - menuBox.height - gap;
-      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
-    };
-    const close = (): void => {
-      menu.hidden = true;
-      this.newTabCancelReturn.delete(trigger);
-      trigger.setAttribute("aria-expanded", "false");
-      document.removeEventListener("mousedown", onDocMouseDown);
-      window.removeEventListener("keydown", onKeyDown, true);
-      scrollParent?.removeEventListener("scroll", positionMenu);
-      scrollParent = null;
-      window.removeEventListener("resize", positionMenu);
-      wrap.removeEventListener("focusout", onFocusOut);
-      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
-    };
-    const onFocusOut = (e: FocusEvent): void => {
-      // Keyboard focus can leave the menu without a pointer event. Close before
-      // a sibling action receives Enter/Space so the capture listener cannot eat
-      // the modal's next Escape or navigate hidden menu items.
-      const next = e.relatedTarget as Node | null;
-      if (!next || !wrap.contains(next)) close();
-    };
-    const onDocMouseDown = (e: MouseEvent): void => {
-      // A rerender can detach this control while the menu is open; closing on a
-      // detached wrap is what unregisters these document listeners, so they can
-      // never accumulate across renders.
-      if (!wrap.isConnected || !wrap.contains(e.target as Node)) {
-        close();
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (!wrap.isConnected) {
-        close();
-        return;
-      }
-      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
-      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
-      const current = items.indexOf(document.activeElement as HTMLButtonElement);
-      // Tab can leave the picker open. Preserve the focused control's native
-      // activation rather than claiming Enter/Space for a nonexistent item.
-      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
-      // Own these keys before document's rail handler or xterm can act on them.
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
-        close();
-        if (returnAfterCancel) returnAfterCancel();
-        else trigger.focus();
-        return;
-      }
-      if (!items.length) return;
-      if (e.key === "Enter" || e.key === " ") {
-        items[current]?.click();
-        return;
-      }
-      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
-        : e.key === "ArrowDown" ? (current + 1) % items.length
-        : current <= 0 ? items.length - 1 : current - 1;
-      items[next].focus();
-    };
-    const open = (): void => {
-      this.newTabPickerPosition = positionMenu;
-      menu.hidden = false;
-      positionMenu();
-      trigger.setAttribute("aria-expanded", "true");
-      scrollParent = wrap.closest<HTMLElement>(".af-tabbar");
-      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
-      window.addEventListener("resize", positionMenu);
-      document.addEventListener("mousedown", onDocMouseDown);
-      wrap.addEventListener("focusout", onFocusOut);
-      // Window capture precedes the app's document capture listener, so menu
-      // navigation cannot also navigate sessions or send input to the agent.
-      window.addEventListener("keydown", onKeyDown, true);
-    };
-
-    const item = (label: string, kind: NewTabKind): HTMLElement => {
-      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
-      b.setAttribute("role", "menuitem");
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        this.terminalChrome?.menu.close();
-        this.appControls.close();
-        this.actions.newTab(kind);
-      });
-      return b;
-    };
-    // Offer only kinds the daemon would accept. The control itself is shown when
-    // ANY kind is creatable, so without this a session allowing only `web` would
-    // render a menu whose every entry createSessionTab silently rejects (#3060).
-    const offered: HTMLElement[] = [];
-    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
-      if (!selected || canCreateTabKind(selected, kind)) {
-        offered.push(item(label, kind));
-      }
-    }
-    menu.append(...offered);
-
-    trigger.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (menu.hidden) {
-        open();
-      } else {
-        close();
-      }
-    });
-    wrap.append(trigger, menu);
-    return wrap;
-  }
-
   private toggleFilterMenu(): void {
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
@@ -2348,6 +2094,7 @@ export class AppShell {
       title: selected.title,
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      newTab: (kind) => this.actions.newTab(kind),
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
@@ -2403,10 +2150,12 @@ export class AppShell {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
-      [chrome.title, this.header], [chrome.keyboard, this.header],
+      // Restore runs in reverse and inserts each node before its old next sibling,
+      // so a node must be listed before the sibling that follows it.
+      [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.keyboard, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2473,13 +2222,15 @@ export class AppShell {
       tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
         () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
     );
-    const unavailable = tabCreationUnavailableReason(selected);
-    if (unavailable === null) {
-      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
-    } else {
-      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
-      reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
-      this.terminalChrome?.newTabSlot.replaceChildren(reason);
+    const chrome = this.terminalChrome;
+    if (chrome) {
+      const unavailable = tabCreationUnavailableReason(selected);
+      chrome.newTerminal.hidden = unavailable !== null || !canCreateTabKind(selected, "shell");
+      chrome.newVSCode.hidden = unavailable !== null || !canCreateTabKind(selected, "vscode");
+      chrome.tabUnavailable.hidden = unavailable === null;
+      chrome.tabUnavailable.textContent = unavailable ?? "";
+      chrome.tabUnavailable.title = unavailable ?? "";
+      if (unavailable !== null) chrome.tabUnavailable.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
     }
     // Replacing every child resets a horizontally scrolled bar to its left edge.
     // Preserve the stable container's viewport so activating an off-screen tab does

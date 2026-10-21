@@ -23,9 +23,9 @@ test("session link: cold open, selection, clipboard, and hashchange", async ({ p
   await page.locator(".af-row").filter({ has: page.locator(".af-row-title", { hasText: b.title! }) }).click();
   await expect(page).toHaveURL(new RegExp(fragment(b.id) + "$"));
   expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await page.getByRole("button", { name: "More session actions", exact: true }).click();
   const copyLink = page.getByRole("button", { name: "Copy link", exact: true });
-  await expect(copyLink).toHaveAttribute("title", "Copy link");
-  await expect(copyLink).toHaveText("");
+  await expect(copyLink).toHaveAttribute("title", "Copy link to this session");
   await copyLink.click();
   await expect(page.locator(".af-toast")).toContainText("Link copied");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(new URL("/" + fragment(b.id), page.url()).href);
