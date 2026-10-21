@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -336,5 +339,70 @@ func TestResumeLimitedSessions_AccountSwapDoesNotFeedFlapHistory(t *testing.T) {
 	manager.RestoreLostSessions()
 	if inst.ToInstanceData().LostRestoreFailure != nil {
 		t.Fatal("an account-swap respawn was charged as a confirmed lost-restore, tripping the bound early")
+	}
+}
+
+// #5238 review: a MANUAL restore of a remote session can succeed through the
+// probe-alive heal — the sandbox answers alive, the Lost mark clears, and the
+// function returns BEFORE the respawn path's armRestoreConfirmation call that
+// resets the flap history. The off-ramp contract (an operator restore wipes
+// the confirmed-restore window) must hold on that arm too: otherwise a stale
+// history outlives the operator's intervention, and the next automatic cycle
+// hands the session a give-up verdict earned by runtimes the operator already
+// signed off on.
+func TestRestoreSession_RemoteProbeAliveClearsFlapHistory(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/agent/alive" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": true}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-heal", srv.URL, session.Lost)
+	key := stableSessionKey(repoID, inst)
+	seedFlapHistory(manager, key, lostRestoreFlapMaxRestores-1)
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-heal", RepoID: repoID}); err != nil {
+		t.Fatalf("manual remote restore through the probe-alive heal: %v", err)
+	}
+	if got := flapCount(manager, key); got != 0 {
+		t.Fatalf("manual probe-alive restore left %d stale confirmations: the operator off-ramp must reset the flap history on every successful path, want 0", got)
+	}
+}
+
+// #5238 review: for a remote probeAnsweredDead session the preserve-push arm
+// sits BEFORE the irreversible respawn, so a bound check placed only at the
+// respawn edge can be starved forever — every pass spends its attempt on a
+// push that keeps failing and returns before the bound is ever consulted, and
+// the #1892 watch-task slot stays held for the life of the outage. Once the
+// confirmations fill the window the terminal verdict must land before the
+// push is even attempted.
+func TestRestoreLostSessions_RemotePreserveRespectsFlapBound(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	srv, url := newPreservePushServer(t, false /* archive fails persistently */)
+	inst, backend := registerStartedRemoteTask(t, manager, repoID, repoPath, "remote-flap-preserve", url, session.Lost)
+	seedFlapHistory(manager, stableSessionKey(repoID, inst), lostRestoreFlapMaxRestores)
+
+	manager.RestoreLostSessions()
+
+	if got := srv.calls(); got != 0 {
+		t.Fatalf("a flap-bound session still spent %d preserve pushes: the bound must verdict before preservation is attempted, want 0", got)
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("a flap-bound session was re-provisioned: Recover calls = %d, want 0", got)
+	}
+	data := inst.ToInstanceData()
+	if data.LostRestoreFailure == nil {
+		t.Fatal("a remote session at the flap bound kept preserving instead of reaching the durable give-up")
+	}
+	if !strings.Contains(data.LostRestoreFailure.Error, "confirmed restored") {
+		t.Fatalf("failure = %q, want the flap-specific confirmed-restored diagnostic", data.LostRestoreFailure.Error)
 	}
 }

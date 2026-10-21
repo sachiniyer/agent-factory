@@ -524,6 +524,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.clearRemoteLoss(stableSessionKey(repoID, inst))
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
+		// Deliberately NOT clearing lostRestoreConfirmations here: the flap
+		// history is the bound's only memory of prior restore-die cycles, and a
+		// lucky blip-heal is not an operator intervention — clearing on an
+		// automatic heal would let a flapping session reset its own bound
+		// (#5238). The manual restore.go path is the off-ramp that clears it.
 		m.mu.Unlock()
 		if err := m.persistSettlement(repoID, key, inst); err != nil {
 			m.warn().Printf("restore of lost session %q was confirmed alive but its healed state is not yet durable: %v", inst.Title, err)
@@ -557,6 +562,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		//
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		//
+		// The confirmed-flap bound outranks preservation (#5238 review): a
+		// runtime already restored-confirmed-then-died enough times gets the
+		// terminal verdict NOW, before this arm can spend another pass — and
+		// hold the watch-task slot — on a preserve push that may keep failing
+		// under its own retry policy.
+		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
+			return
+		}
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
 			// The durable terminal verdict is a session fact, safe to read
 			// before the state lock — the same discipline lostRestoreFailed
@@ -686,11 +700,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// not at the top of the function, so a remote whose Lost mark was a blip the
 	// sandbox probe just healed never gets charged a cycle — and an arm on the
 	// very pass that confirms the previous cycle is included in the count.
-	m.mu.Lock()
-	confirmedRestores := m.lostRestoreConfirmationCountLocked(stateKey, nowFunc())
-	m.mu.Unlock()
-	if confirmedRestores >= lostRestoreFlapMaxRestores {
-		m.lostRestoreFlapGiveUp(key, repoID, inst, confirmedRestores)
+	if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
 		return
 	}
 

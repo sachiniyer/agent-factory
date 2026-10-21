@@ -57,6 +57,23 @@ func pruneLostRestoreConfirmations(times []time.Time, now time.Time) []time.Time
 	return times[drop:]
 }
 
+// lostRestoreFlapGiveUpIfBound commits the confirmed-flap terminal verdict and
+// reports true when the recorded confirmations already fill the window. Every
+// site about to take irreversible work calls it — the automatic respawn, and
+// the probeAnsweredDead preserve-and-reap arm, which can otherwise burn
+// preserve-push retries forever before the bound is ever reached (#5238
+// review).
+func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, inst *session.Instance) bool {
+	m.mu.Lock()
+	n := m.lostRestoreConfirmationCountLocked(stateKey, nowFunc())
+	m.mu.Unlock()
+	if n < lostRestoreFlapMaxRestores {
+		return false
+	}
+	m.lostRestoreFlapGiveUp(key, repoID, inst, n)
+	return true
+}
+
 // lostRestoreFlapGiveUp commits the confirmed-flap terminal verdict (#5238):
 // the same durable LostRestoreFailure the structural budget produces — the
 // entry gate's LostRestoreGaveUp check then stops every later automatic pass —
