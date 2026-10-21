@@ -325,6 +325,12 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
+		// The manual off-ramp clears the confirmed-flap history on EVERY
+		// successful manual path: this probe-alive heal returns before the
+		// armRestoreConfirmation call that would reset it for the spawn path,
+		// so a stale window cannot outlive the operator's intervention and trip
+		// the bound on the next automatic cycle (#5238 review).
+		m.clearLostRestoreConfirmations(stateKey)
 		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
 			failure := fmt.Errorf(
 				"session %q was confirmed alive, but its healed state could not be written to disk: %w",
@@ -537,7 +543,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(repoID, instance)
+	m.armRestoreConfirmation(repoID, instance, lostRestoreManual)
 	if settleErr != nil {
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",

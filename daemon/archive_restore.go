@@ -41,6 +41,11 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// (same session, new runtime), so nothing else can notice the swap; only this
 	// site knows it happened.
 	m.noteRuntimeReplaced(repoID, instance)
+	// The archive restore is the same explicit off-ramp the manual heal is: the
+	// pre-archive confirmations described the shelved runtime's cycle, and the
+	// poll sweep can sit between archive and restore forever — the flap
+	// episode ends here or a later loss inherits it (#5238 review).
+	m.clearLostRestoreConfirmations(stableSessionKey(repoID, instance))
 	m.persistRuntimeReplacement(repoID, title, instance)
 	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
@@ -341,6 +346,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err))
 	}
 	m.noteRuntimeReplaced(repoID, instance)
+	// Same off-ramp as the remote arm above: a successful archive restore
+	// closes the flap episode the pre-archive confirmations counted.
+	m.clearLostRestoreConfirmations(stableSessionKey(repoID, instance))
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
