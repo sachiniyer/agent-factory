@@ -632,26 +632,26 @@ test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)"
   assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
 });
 
-test("the paste sheet's backdrop dismiss ignores exactly the opening gesture's click (#5428)", () => {
+test("the paste sheet's backdrop dismiss ignores the opening gesture's click whatever its metadata (#5428)", () => {
   const opening = { pointerId: 2, pointerType: "touch" };
-  // The tap that opened the sheet carries the same pointer — swallowed however
-  // late its click arrives.
+  // iOS Safari <18.2 dispatches the tap's trailing click as a plain MouseEvent
+  // — no pointer fields at all.
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 2, pointerType: "touch" }, opening), true);
-  // A later tap is a new pointer id...
+    { detail: 0 }, opening), true);
+  // Safari 18.2 can label a touch click pointerType "mouse" (WebKit 282988).
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 3, pointerType: "touch" }, opening), false);
-  // ...a different pointer type is a different gesture even at the same id...
+    { detail: 0, pointerId: 1, pointerType: "mouse" }, opening), true);
+  // The Chromium shape — same pointer identity — is of course covered too.
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 2, pointerType: "pen" }, opening), false);
-  // ...and an assistive click never carries the opening pointer's type.
+    { detail: 0, pointerId: 2, pointerType: "touch" }, opening), true);
+  // A pointerless open arms nothing, so no click is ever swallowed; and once
+  // a fresh gesture's pointerdown disarms the marker, its click closes.
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 0, pointerType: "" }, opening), false);
-  // A pointerless open arms nothing, so no click is ever swallowed.
+    { detail: 0 }, undefined), false);
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 0, pointerType: "" }, undefined), false);
+    { detail: 0, pointerId: 2, pointerType: "touch" }, undefined), false);
   assert.equal(keybarSheetClickIsOpeningGesture(
-    { pointerId: 2, pointerType: "touch" }, undefined), false);
+    { detail: 1, pointerId: 9, pointerType: "touch" }, undefined), false);
 });
 
 test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {

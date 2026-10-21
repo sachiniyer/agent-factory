@@ -225,6 +225,33 @@ test("#5428 a tap whose clipboard read fails leaves the paste sheet open past th
     await expect(sheet).toHaveCount(0);
     await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
     expect(stream(), "a dismissed empty sheet pastes nothing").not.toContain("\x1b[200~");
+
+    // The two click shapes iOS Safari hands the trailing click: a plain
+    // MouseEvent before 18.2, and a touch click mislabeled pointerType
+    // "mouse" on 18.2 (WebKit bug 282988). Synthesized pointer events arm the
+    // sheet without the engine issuing a real trailing click, so each shape
+    // lands while the opening marker is still armed — and must not close it.
+    const pbox = (await paste.boundingBox())!;
+    const cx = pbox.x + pbox.width / 2, cy = pbox.y + pbox.height / 2;
+    const openArmed = async () => {
+      await paste.dispatchEvent("pointerdown",
+        { pointerId: 7, pointerType: "touch", isPrimary: true, clientX: cx, clientY: cy, bubbles: true });
+      await paste.dispatchEvent("pointerup",
+        { pointerId: 7, pointerType: "touch", isPrimary: true, clientX: cx, clientY: cy, bubbles: true });
+      await expect(sheet).toHaveCount(1);
+    };
+    await openArmed();
+    await sheet.evaluate(el => el.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await expect(sheet, "a metadata-less trailing click must not dismiss (pre-18.2 Safari)").toHaveCount(1);
+    await sheet.tap({ position: { x: 12, y: 12 } });
+    await expect(sheet, "a fresh pointerdown still disarms and its click dismisses").toHaveCount(0);
+    await openArmed();
+    await sheet.evaluate(el => el.dispatchEvent(
+      new PointerEvent("click", { bubbles: true, pointerId: 1, pointerType: "mouse" })));
+    await expect(sheet, "a mislabeled touch click must not dismiss (WebKit 282988)").toHaveCount(1);
+    await sheet.tap({ position: { x: 12, y: 12 } });
+    await expect(sheet).toHaveCount(0);
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
   } finally {
     try {
       await page.screenshot({ path: testInfo.outputPath("phone-keybar-paste-sheet.png") });

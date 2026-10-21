@@ -8681,7 +8681,7 @@ function keybarClickIsPointerless(event) {
   return event.detail === 0 && !event.pointerType;
 }
 function keybarSheetClickIsOpeningGesture(event, opening) {
-  return opening !== void 0 && event.pointerId === opening.pointerId && event.pointerType === opening.pointerType;
+  return opening !== void 0;
 }
 var TerminalKeybar = class {
   constructor(host, input, paste, refit, applicationCursor) {

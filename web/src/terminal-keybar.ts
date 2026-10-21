@@ -293,22 +293,22 @@ export function keybarClickIsPointerless(event: { detail: number; pointerType?: 
 }
 
 /**
- * True when a backdrop click belongs to the pointer gesture that opened the
- * paste sheet (#5428). The sheet is appended while that gesture is still in
- * flight, so its trailing click hit-tests the fresh full-screen backdrop and
- * would dismiss the sheet inside the same tap. Pointer identity is the key:
- * the trailing click is the first click after the open and carries the opening
- * pointer, and a later gesture can never match it — a new press either brings
- * a new pointerId or disarms the swallow at its pointerdown (engines that
- * reuse ids, e.g. touch on WebKit). The click's own detail is NOT part of the
- * key: Chromium counts it as 0 only for the first canceled-press click.
- * Pointerless opens record no gesture, so every click still dismisses.
+ * True while the sheet's opening-gesture marker is armed — whatever the
+ * backdrop click's own metadata reports (#5428). The marker arms only when a
+ * pointer gesture opened the sheet, and the click ending that gesture is the
+ * first click the fresh full-screen backdrop can receive; any genuinely new
+ * gesture disarms the marker at pointerdown before its click can arrive, so
+ * still-armed means this click IS the opening one. The event is deliberately
+ * not consulted: iOS Safari dispatches the trailing click as a plain
+ * MouseEvent with no pointer fields, or labels a touch click pointerType
+ * "mouse" (WebKit bug 282988) — either would fail an identity match and
+ * self-dismiss the sheet. Pointerless opens arm nothing, so every click
+ * still dismisses.
  */
 export function keybarSheetClickIsOpeningGesture(
-  event: { pointerId?: number; pointerType?: string },
+  event: { pointerId?: number; pointerType?: string; detail?: number },
   opening: { pointerId: number; pointerType: string } | undefined): boolean {
-  return opening !== undefined && event.pointerId === opening.pointerId &&
-    event.pointerType === opening.pointerType;
+  return opening !== undefined;
 }
 
 export class TerminalKeybar {
@@ -659,7 +659,7 @@ export class TerminalKeybar {
       // open past its own tap (#5428). Consumed either way; a later, separate
       // interaction always dismisses.
       const opening = this.pasteSheetGesture;
-      if (keybarSheetClickIsOpeningGesture(event as PointerEvent, opening)) {
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
         this.pasteSheetGesture = undefined;
         return;
       }
