@@ -45,16 +45,20 @@ func (m *Manager) lostRestoreConfirmationCountLocked(stateKey string, now time.T
 	return len(times)
 }
 
-// clearLostRestoreConfirmations drops the session's confirmed-flap history.
+// clearLostRestoreEpisode retires the session's whole in-memory restore
+// episode at once: the confirmed-flap history AND the pending retry state.
 // The operator's explicit off-ramps — a successful manual restore heal and a
-// successful archive restore — close the episode the count was describing, so
-// a stale in-window count cannot trip the bound on the runtime they just
-// replaced (#5238 review). The automatic paths never call it: confirmations
-// must survive across successive restore cycles — that is the whole point of
-// the bound.
-func (m *Manager) clearLostRestoreConfirmations(stateKey string) {
+// successful archive restore — close the episode both were describing, so a
+// stale in-window count cannot trip the bound on the runtime they just
+// replaced (#5238 review), and a still-pending automatic arm cannot charge
+// the new runtime's first confirmations to the old arm's confirmCountsFlap
+// (#5436). The automatic paths never call it: the state and the
+// confirmations must survive across successive restore cycles — that is the
+// whole point of the bound.
+func (m *Manager) clearLostRestoreEpisode(stateKey string) {
 	m.mu.Lock()
 	delete(m.lostRestoreConfirmations, stateKey)
+	delete(m.lostRestoreStates, stateKey)
 	m.mu.Unlock()
 }
 
@@ -94,7 +98,7 @@ func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, ins
 // in-memory flap history is kept: it IS the evidence, and nothing reads it
 // once the durable flag suppresses further restores anyway.
 func (m *Manager) lostRestoreFlapGiveUp(key, repoID, stateKey string, inst *session.Instance, confirmedRestores int) {
-	hint := shellsuggest.Command("af", "sessions", "restore", inst.Title)
+	hint := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, inst.Title)
 	flapErr := fmt.Errorf("the session was confirmed restored %d times in %s and went lost again each time — automatic restore is stopped; find out why the agent exits soon after launch, then bring it back with %s",
 		confirmedRestores, lostRestoreFlapWindow, hint)
 	inst.ClearLostRestoreWait()

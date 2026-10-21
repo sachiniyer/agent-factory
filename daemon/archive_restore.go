@@ -44,8 +44,11 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// The archive restore is the same explicit off-ramp the manual heal is: the
 	// pre-archive confirmations described the shelved runtime's cycle, and the
 	// poll sweep can sit between archive and restore forever — the flap
-	// episode ends here or a later loss inherits it (#5238 review).
-	m.clearLostRestoreConfirmations(stableSessionKey(repoID, instance))
+	// episode ends here or a later loss inherits it (#5238 review). A pending
+	// awaitingConfirm arm retires with it: the fresh runtime's answers would
+	// otherwise confirm the STALE arm and charge it one flap datapoint
+	// (#5436).
+	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
 	m.persistRuntimeReplacement(repoID, title, instance)
 	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
@@ -347,8 +350,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	m.noteRuntimeReplaced(repoID, instance)
 	// Same off-ramp as the remote arm above: a successful archive restore
-	// closes the flap episode the pre-archive confirmations counted.
-	m.clearLostRestoreConfirmations(stableSessionKey(repoID, instance))
+	// closes the flap episode the pre-archive confirmations counted, and
+	// retires a pending awaitingConfirm arm with it (#5436).
+	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
