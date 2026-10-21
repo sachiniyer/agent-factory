@@ -1142,3 +1142,204 @@ func TestAnnotateWorktreeAddError_AncestorStatSearchDeadlineSurfacesTypedNonAnsw
 		"the ancestor stat search deadline error must be named in the annotation so the lost-restore "+
 			"classifier reads it alongside the git failure: %v", out)
 }
+
+// TestAnnotateGitWriteError_AggregateDeadlineBoundsSemaphoreBatchWait pins the #5421-review
+// contract the aggregate write-probe wait does not scale with the number of creatable parents:
+// the semaphore caps the fan-out at writeProbeConcurrency, but without a shared deadline a
+// hand-edited path with many distinct creatable parents on a degraded mount (where each
+// writeSpaceProbe consumes its full per-dir bound) would serialize ceil(N/8) batches of
+// probeTimeout each, stalling the synchronous restore poll for minutes. A prior form
+// (3d8ddb3c9e) added a shared deadline but broke at it, dropping a later parent on a
+// separate ENOSPC mount whose ENOSPC the lost-restore classifier must read; a later form
+// (d872d3acf1) preserved coverage by launching the remaining probes without the semaphore
+// once the deadline elapsed, but that re-introduced the unbounded fan-out the semaphore caps
+// in the steady state (manufacturing ENOSPC or exhausting file descriptors on a filesystem a
+// structural git failure does not write to). The current form reinstates a shared aggregate
+// deadline at 2 × symlinkResolveTimeout that stops launching new probes once it elapses,
+// keeping the semaphore cap (the remaining probes are not launched without it) so the fan-out
+// stays within writeProbeConcurrency at all times, and the in-flight probes drain on their
+// own per-dir bound so the aggregate stays within ~2 × symlinkResolveTimeout + a single
+// probeTimeout rather than ceil(N/writeProbeConcurrency) × probeTimeout. A later parent on a
+// separate filesystem whose probe acquires the semaphore before the deadline still reaches the
+// chain the way the post-deadline coverage test pins; the common-dir probe below still covers
+// the independently known location.
+//
+// Deterministic in both directions: against the form that serialized every batch without a
+// deadline, 4 × writeProbeConcurrency parents that each block for symlinkResolveTimeout stalled
+// the loop for ~4 × symlinkResolveTimeout (4 batches of 8, each waiting its full bound); with
+// the aggregate deadline the loop stops launching at 2 × symlinkResolveTimeout, the first two
+// batches drain on their per-dir bound, and the elapsed stays under 3 × symlinkResolveTimeout
+// rather than scaling to ceil(N/writeProbeConcurrency) × symlinkResolveTimeout. The in-flight
+// count never exceeds writeProbeConcurrency (the semaphore cap is retained, the remaining
+// probes are not launched without it once the deadline elapses).
+func TestAnnotateGitWriteError_AggregateDeadlineBoundsSemaphoreBatchWait(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// writeProbeConcurrency parents each block for symlinkResolveTimeout (the per-dir
+	// bound a degraded mount consumes), so without the aggregate deadline the loop
+	// would serialize ceil(N/writeProbeConcurrency) batches of symlinkResolveTimeout.
+	// Use 4 × writeProbeConcurrency so the unbounded aggregate would be
+	// 4 × symlinkResolveTimeout, well past the 2 × symlinkResolveTimeout deadline.
+	dirs := make([]string, writeProbeConcurrency*4)
+	base := t.TempDir()
+	for i := range dirs {
+		dirs[i] = filepath.Join(base, fmt.Sprintf("d%d", i))
+	}
+
+	var mu sync.Mutex
+	var inFlight, maxInFlight, probeCount int
+	writeSpaceProbe = func(dir string) error {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		// Simulate a degraded mount where each probe consumes slightly more
+		// than the per-dir bound (symlinkResolveTimeout + 200ms, the same
+		// margin the AggregateDeadlineProbesLaterFilesystemAfterFirstBatchStalls
+		// stall uses) so the second batch is still in flight when the 2 x
+		// symlinkResolveTimeout aggregate deadline elapses; the deadline fires
+		// before the second batch releases the semaphore, so the third batch
+		// does not start. The unbounded aggregate would be
+		// ceil(len(dirs)/writeProbeConcurrency) x (symlinkResolveTimeout+200ms);
+		// the deadline stops launching new probes at 2 x symlinkResolveTimeout
+		// and the in-flight second batch drains on its per-dir bound.
+		time.Sleep(symlinkResolveTimeout + 200*time.Millisecond)
+		mu.Lock()
+		inFlight--
+		probeCount++
+		mu.Unlock()
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	start := time.Now()
+	g := &GitWorktree{}
+	g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
+	elapsed := time.Since(start)
+
+	// The aggregate deadline stops launching new probes at 2 x
+	// symlinkResolveTimeout, so the elapsed stays under 3 x symlinkResolveTimeout
+	// (the deadline plus the in-flight second batch's per-dir drain) rather than
+	// the ceil(len(dirs)/writeProbeConcurrency) x (symlinkResolveTimeout+200ms)
+	// the unbounded semaphore serialization would take for 4 x
+	// writeProbeConcurrency parents (~8.8s). The first two batches (16 probes)
+	// drain before the deadline stops the third, so the elapsed is bounded at
+	// ~2 x symlinkResolveTimeout + one per-dir drain.
+	require.Less(t, elapsed, 3*symlinkResolveTimeout,
+		"the aggregate write-probe wait must be bounded by the deadline + a single "+
+			"per-dir drain, not ceil(len(dirs)/writeProbeConcurrency) x probeTimeout: "+
+			"saw %v for %d dirs", elapsed, len(dirs))
+	// The semaphore cap is retained: the in-flight count never exceeds
+	// writeProbeConcurrency, so a hand-edited path with many creatable parents
+	// cannot start hundreds of simultaneous 1 MiB probes once the deadline elapses.
+	require.LessOrEqual(t, maxInFlight, writeProbeConcurrency,
+		"the write-probe fan-out must stay within writeProbeConcurrency even past the "+
+			"aggregate deadline so a degraded mount does not fan out unbounded resource "+
+			"use: saw %d in flight", maxInFlight)
+	// The first two batches (writeProbeConcurrency each) are probed before the
+	// 2 x symlinkResolveTimeout deadline elapses; the remaining batches are not
+	// launched once the deadline fires. The common-dir probe is a no-op here
+	// (gitCommonDir returns ""), so only the per-dir probes count.
+	require.LessOrEqual(t, probeCount, 2*writeProbeConcurrency,
+		"the aggregate deadline must stop launching new probes once it elapses, so only "+
+			"the first two batches (writeProbeConcurrency each) are probed before the deadline: "+
+			"saw %d probes", probeCount)
+}
+
+// TestAnnotateWorktreeAddError_RelativeWorktreePathMultipleTrailingDotsSymlinkedNonemptyDirSkipsDestinationProbe
+// pins the #5421-review contract for more than one trailing dot component after a symlinked
+// directory: `link/./.` with `link` targeting an existing nonempty directory is rejected by
+// `git worktree add` because the destination already exists, without writing through the
+// symlink. The earlier final-dot fix handled a single `.` (it preserved the un-resolved parent
+// so the lstat gate saw the symlink), but filepath.Split returns only the last component as
+// `base`, so `link/./.` left `parent` ending in `.` after the separator trim and
+// os.Lstat("link/.") followed the symlink to its target the way a trailing separator would;
+// the lstat gate saw the target directory rather than the symlink, the empty-dir gate did not
+// skip it, and the destination-directory probe write-probed the target's filesystem. A
+// coincidental ENOSPC on the target's filesystem would stall the lost-restore loop on a
+// structural "already exists" failure the way a single trailing dot or a trailing separator
+// would. The fix strips every trailing `.<sep>` from the un-resolved parent so the lstat gate
+// sees the symlink the way a single-dot destination does.
+//
+// Deterministic in both directions: against the form that preserved only the last dot, the
+// write probe targeted the symlink target and a write probe mocked to fail only there returned
+// ENOSPC, so errors.Is(out, syscall.ENOSPC) was true and the test failed; with the strip the
+// lstat gate sees the symlink, the empty-dir read skips the nonempty target, and the ENOSPC
+// never reaches the chain.
+func TestAnnotateWorktreeAddError_RelativeWorktreePathMultipleTrailingDotsSymlinkedNonemptyDirSkipsDestinationProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// <repo>/link points at a real nonempty directory on a distinct filesystem; `git
+	// worktree add link/./.` follows `link` to the directory and rejects the add
+	// because the destination already exists, without writing through the symlink.
+	// A coincidental ENOSPC on the target's filesystem must not stall the lost-restore
+	// loop on a structural failure freeing it cannot fix — the empty-dir gate skips a
+	// nonempty symlinked destination the way a single trailing dot or a non-dot final
+	// symlink does.
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "link"))
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "occupied"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "link")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// Resolve the symlink target the way the production code does so the expected path
+	// matches across hosts (macOS /var/folders -> /private/var/folders).
+	resolvedTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+
+	// Stat follows the symlink and reports a directory (the existing target); Lstat
+	// reports the symlink itself so the gate excludes it before the write probe targets
+	// the symlink's target. The empty-dir read counts the target's entries and skips the
+	// probe because the target is nonempty — git rejects the add without writing.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		// A coincidental ENOSPC on the symlink target's filesystem is the bug:
+		// git rejects `link/./.` without writing there, so freeing it cannot fix
+		// the structural failure and the probe must not target it.
+		if dir == resolvedTarget {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "link/./."}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"multiple trailing dots after a symlink to a nonempty directory must not "+
+			"write-probe the target — git rejects the add because the destination already "+
+			"exists, so a full target filesystem cannot fix the structural failure and must "+
+			"not stall the lost-restore loop: %v", out)
+	require.NotContains(t, probedDirs, resolvedTarget,
+		"the symlink target's filesystem must not be probed for multiple trailing dots "+
+			"after a symlink to a nonempty directory — git never writes there")
+}
