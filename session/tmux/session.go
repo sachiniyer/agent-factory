@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 const ProgramClaude = "claude"
@@ -199,11 +200,14 @@ const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 func EnsureCodexUpdateCheckDisabled(command string) string {
 	tokens, ends := splitShellTokens(command)
 	// The flag must land on codex's own argv, so the executable is located
-	// through the wrapper grammar af actually models — never a later token
-	// that merely names codex (`my-chat --persona codex` would otherwise get
-	// `-c` spliced into an arbitrary program's arguments, #5238 review).
-	execIdx := commandExecutableTokenIndex(command, tokens, ends)
-	if execIdx < 0 || strings.ToLower(filepath.Base(tokens[execIdx])) != ProgramCodex {
+	// through the account boundary's own parser — never a later token that
+	// merely names codex (`my-chat --persona codex`), never a bare-name
+	// spelling the boundary would not model (`./env codex` and `/tmp/exec
+	// codex` run a path-qualified file, not GNU env or the exec builtin),
+	// and never a compound or non-literal command the boundary refuses
+	// (#5238 review).
+	execIdx := sessionenv.CommandExecutableIndex(command)
+	if execIdx < 0 || execIdx >= len(tokens) || strings.ToLower(filepath.Base(tokens[execIdx])) != ProgramCodex {
 		return command
 	}
 	agentIdx := execIdx

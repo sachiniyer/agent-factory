@@ -372,6 +372,32 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			"env my-chat codex",
 		},
 		{
+			// A path-qualified env is a FILE named env, not the GNU
+			// wrapper the account boundary models — the same boundary
+			// grammar that decides injection must not read it as env
+			// (#5238 review).
+			"a path-qualified env is not the modeled env wrapper",
+			"./env codex",
+			"./env codex",
+		},
+		{
+			"an absolute env path is not the modeled env wrapper",
+			"/tmp/env codex",
+			"/tmp/env codex",
+		},
+		{
+			// Same for exec: the builtin only exists as a bare word; a
+			// file named exec is an ordinary program.
+			"a path-qualified exec is not the builtin",
+			"./exec codex",
+			"./exec codex",
+		},
+		{
+			"an absolute exec path is not the builtin",
+			"/tmp/exec codex",
+			"/tmp/exec codex",
+		},
+		{
 			// A QUOTED `=` word is not an assignment — the shell runs a
 			// program literally named `FOO=bar` and `codex` is its
 			// argument. splitShellTokens strips the quotes, so the raw

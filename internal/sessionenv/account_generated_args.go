@@ -186,3 +186,32 @@ func commandExecutableIndex(words []*syntax.Word) (int, bool) {
 	}
 	return offset, true
 }
+
+// CommandExecutableIndex answers "which word is the executable" for callers
+// outside this package, through the same parse the account boundary proves
+// launches with — a single simple literal call — and the same modeled
+// wrapper grammar as commandExecutableIndex above: shell-parsed leading
+// assignments, one bare `exec` (its `--` separator refuses), an `env`
+// invocation whose operands envcommand.Parse walks. The result is an index
+// into the command's flat word sequence — Assigns then Args, in source
+// order — which is also the sequence a whitespace tokenizer produces for a
+// literal call, so a caller can index its own token list with it.
+//
+// -1 means the executable is not provably placed and the caller must leave
+// the command alone. That covers every shape the boundary refuses or does
+// not model — a compound command, a non-literal word, a redirect — and the
+// spellings that merely LOOK like the wrappers: `./env codex` and
+// `/tmp/exec codex` run a path-qualified file, not GNU env or the exec
+// builtin, so their first word IS the executable and a later `codex` is its
+// argument (#5238 review).
+func CommandExecutableIndex(command string) int {
+	call, ok := singleSimpleCall(command)
+	if !ok || !callIsLiteral(call) {
+		return -1
+	}
+	idx, ok := commandExecutableIndex(call.Args)
+	if !ok {
+		return -1
+	}
+	return len(call.Assigns) + idx
+}
