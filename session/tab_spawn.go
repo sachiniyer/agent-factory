@@ -438,3 +438,22 @@ func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) err
 	}
 	return fmt.Errorf("failed to start process tab: %s", msg)
 }
+
+// SetDocsTabsPushMode sets the push mode of every docs tab for proposal slug
+// and returns how many tabs it changed or already had that mode.
+func (i *Instance) SetDocsTabsPushMode(slug, mode string) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	n := 0
+	for idx, tab := range i.Tabs {
+		if tab == nil || tab.Kind != TabKindDocs || tab.Proposal != slug {
+			continue
+		}
+		n++
+		if tab.PushMode != mode {
+			i.replaceTabFieldLocked(idx, func(c *Tab) { c.PushMode = mode })
+			i.touchLocked()
+		}
+	}
+	return n
+}

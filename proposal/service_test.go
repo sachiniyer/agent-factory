@@ -19,6 +19,23 @@ type fakeHost struct {
 	tabErr   error
 	closeErr error
 	events   []Change
+	prompts  []string
+	delivery Delivery
+	sendErr  error
+	pushes   []PushStatus
+}
+
+func (h *fakeHost) SendPrompt(sessionID, prompt string) (Delivery, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.prompts = append(h.prompts, prompt)
+	return h.delivery, h.sendErr
+}
+
+func (h *fakeHost) PublishPush(st PushStatus) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pushes = append(h.pushes, st)
 }
 
 func newFakeHost() *fakeHost {

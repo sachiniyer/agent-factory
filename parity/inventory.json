@@ -1585,6 +1585,25 @@
       "verdict": "real-gap",
       "issue": "TBD",
       "notes": "Proposal mode step 2a adds the docs tab kind (session.TabKindDocs) and creates it from af proposal start and attach. Step 2b renders it in the web UI as the proposal editor. The TUI shows a placeholder that says the tab is web only: goals.md lists a TUI editor as a non-goal."
+    },
+    {
+      "id": "proposal.push",
+      "title": "Send the user's proposal edits to the agent as a prompt",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/proposals_push.go proposalPushModeCmd/proposalSendCmd → POST /v1/SetProposalPushMode, SendProposalChanges (daemon/proposals_push.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Proposal mode step 3a (docs/dev/proposals/proposal-mode/api.md, Push) adds the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready. The CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal."
     }
   ],
   "ledger": {
@@ -1637,6 +1656,8 @@
       "af proposal add-doc": "proposal.docs",
       "af proposal cat": "proposal.docs",
       "af proposal write": "proposal.docs",
+      "af proposal push-mode": "proposal.push",
+      "af proposal send": "proposal.push",
       "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
@@ -1688,6 +1709,9 @@
       "POST /v1/SaveProposalDoc": "proposal.docs",
       "POST /v1/StartProposal": "proposal.agent-workflow",
       "POST /v1/WriteProposalDoc": "proposal.docs",
+      "POST /v1/SetProposalPushMode": "proposal.push",
+      "POST /v1/HoldProposalPush": "proposal.push",
+      "POST /v1/SendProposalChanges": "proposal.push",
       "POST /v1/AddTask": "task.add",
       "POST /v1/AccountLogin": "session.account-login",
       "POST /v1/ArchiveSession": "session.archive",
@@ -1918,6 +1942,10 @@
       "af proposal cat --help": "meta.discovery",
       "af proposal write --help": "meta.discovery",
       "af proposal write --session": "proposal.docs",
+      "af proposal push-mode --help": "meta.discovery",
+      "af proposal push-mode --session": "proposal.push",
+      "af proposal send --help": "meta.discovery",
+      "af proposal send --session": "proposal.push",
       "af proposal start --docs": "proposal.agent-workflow",
       "af projects add --help": "meta.discovery",
       "af projects delete --help": "meta.discovery",
