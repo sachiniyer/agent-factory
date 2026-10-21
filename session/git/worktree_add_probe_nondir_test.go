@@ -900,15 +900,20 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathFinalDotSymlinkedNonemptyD
 // degraded filesystem where each writeSpaceProbe consumes its full per-dir bound a hand-edited
 // path with many distinct creatable parents would otherwise block the synchronous restore poll
 // for roughly ceil(len(dirs)/writeProbeConcurrency) × probeTimeout on every retry. A shared
-// deadline stops launching new probes once it elapses; the in-flight probes each drain on their
-// own per-dir bound, so the aggregate stays within one probeTimeout of the deadline rather than
-// N batches of it.
+// deadline bounds the first batch launched under the semaphore; once it elapses the remaining
+// probes are launched concurrently without the semaphore so a later parent on a separate
+// filesystem is not discarded by input order (a per-input-order cutoff would drop a later
+// ENOSPC parent after several stalled parents). The in-flight probes each drain on their own
+// per-dir bound, and the concurrent remainder runs within a single per-dir bound, so the
+// aggregate stays within ~2 × probeTimeout of the deadline rather than
+// ceil(len(dirs)/writeProbeConcurrency) × probeTimeout, while every dir is still probed.
 //
-// Deterministic in both directions: against the form that started one goroutine per parent
-// with no aggregate deadline, every dir was probed across ceil(len(dirs)/writeProbeConcurrency)
-// batches and the count reached len(dirs); with the bound only the first batch (plus the one
-// probe that acquires the semaphore after the deadline elapses) runs, so the count stays at or
-// below writeProbeConcurrency+1 rather than the full set.
+// Deterministic in both directions: against the form that dropped the remaining dirs at the
+// deadline (a break), only the first batch (plus the one probe that acquires the semaphore
+// after the deadline) ran and the count stayed at or below writeProbeConcurrency+1; with the
+// concurrent-remainder form every dir is probed (the count reaches len(dirs)) while the
+// aggregate wait stays within ~2 × probeTimeout rather than the
+// ceil(len(dirs)/writeProbeConcurrency) × probeTimeout an unbounded sequential loop would take.
 func TestAnnotateGitWriteError_BoundsAggregateWaitAcrossSemaphoreBatches(t *testing.T) {
 	oldWrite := writeSpaceProbe
 	defer func() { writeSpaceProbe = oldWrite }()
@@ -917,10 +922,15 @@ func TestAnnotateGitWriteError_BoundsAggregateWaitAcrossSemaphoreBatches(t *test
 
 	// More dirs than writeProbeConcurrency so the bound is the limiter, not
 	// the number of dirs. Each probe blocks for just past one
-	// symlinkResolveTimeout so a degraded filesystem's per-dir bound is the
-	// time a batch consumes, and the shared deadline elapses during the first
-	// batch. Without the aggregate bound the loop would launch
-	// ceil(len(dirs)/writeProbeConcurrency) batches and probe every dir.
+	// symlinkResolveTimeout from its own start (a per-probe gate, not a shared
+	// one) so a degraded filesystem's per-dir bound is the time a batch
+	// consumes and the shared deadline elapses during the first batch; a
+	// shared gate would release every batch at the same instant and hide the
+	// ceil(len(dirs)/writeProbeConcurrency) × probeTimeout the bound exists
+	// to prevent. The first batch drains at probeTimeout, the deadline
+	// elapses during it, and the remaining probes launch concurrently and
+	// drain within a single per-dir bound, so the total stays within ~2 ×
+	// probeTimeout rather than N batches of it.
 	dirs := make([]string, writeProbeConcurrency*4)
 	base := t.TempDir()
 	for i := range dirs {
@@ -929,32 +939,101 @@ func TestAnnotateGitWriteError_BoundsAggregateWaitAcrossSemaphoreBatches(t *test
 
 	var probedMu sync.Mutex
 	var probedCount int
-	blockRelease := make(chan struct{})
-	time.AfterFunc(symlinkResolveTimeout+200*time.Millisecond, func() { close(blockRelease) })
+	perProbe := symlinkResolveTimeout + 200*time.Millisecond
 	writeSpaceProbe = func(dir string) error {
 		probedMu.Lock()
 		probedCount++
 		probedMu.Unlock()
+		time.Sleep(perProbe)
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{}
+	start := time.Now()
+	_ = g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
+	elapsed := time.Since(start)
+
+	probedMu.Lock()
+	count := probedCount
+	probedMu.Unlock()
+
+	// Every dir is probed — the concurrent remainder the deadline gate
+	// switches to does not drop a later parent on a separate filesystem the
+	// way a per-input-order break would.
+	require.Equal(t, len(dirs), count,
+		"the aggregate write-probe wait must not discard a later parent on a separate "+
+			"filesystem when the first batch stalls: every dir must still be probed so its "+
+			"resource errno reaches the chain (a per-input-order cutoff would drop coverage): "+
+			"saw %d of %d probes probed", count, len(dirs))
+	// The aggregate wait stays within ~2 × probeTimeout (the first batch's
+	// per-dir bound plus the remaining concurrent batch's per-dir bound),
+	// rather than the ceil(len(dirs)/writeProbeConcurrency) × probeTimeout an
+	// unbounded sequential loop would take: the first batch holds the
+	// semaphore past the deadline, the remaining probes launch concurrently
+	// without it, and each drains on its own per-dir bound.
+	unbounded := time.Duration(len(dirs)/writeProbeConcurrency) * perProbe
+	require.Less(t, elapsed, unbounded,
+		"the aggregate write-probe wait must stay within ~2 × probeTimeout once the deadline "+
+			"elapses, not ceil(len(dirs)/writeProbeConcurrency) × probeTimeout: saw %v, unbounded "+
+			"would be %v", elapsed, unbounded)
+}
+
+// TestAnnotateGitWriteError_AggregateDeadlineProbesLaterFilesystemAfterFirstBatchStalls pins
+// the #5421-review contract that the aggregate deadline must not discard a later parent on a
+// separate filesystem when the first writeProbeConcurrency parents stall: a crafted relative
+// path can place several creatable parents on a degraded mount before a later parent on a
+// separate ENOSPC mount, and a per-input-order cutoff at the deadline would drop that later
+// parent's resource errno so the lost-restore classifier exhausts its bounded retries while
+// the full filesystem remains the actual outage. The first batch holds the semaphore past the
+// deadline (each probe consumes its full per-dir bound on the degraded mount); the deadline
+// then launches the remaining probes concurrently without the semaphore so the later parent's
+// ENOSPC reaches the chain instead of being truncated by input order.
+//
+// Deterministic in both directions: against the form that broke at the deadline, the later
+// parent was dropped and its ENOSPC never reached the chain; with the concurrent-remainder
+// form the later parent is probed after the deadline and the ENOSPC reaches the chain.
+func TestAnnotateGitWriteError_AggregateDeadlineProbesLaterFilesystemAfterFirstBatchStalls(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// writeProbeConcurrency stalled parents fill the first batch and hold the
+	// semaphore past the deadline; a later parent on a separate filesystem
+	// returns ENOSPC and must still be probed once the deadline switches to
+	// the concurrent remainder.
+	stalled := make([]string, writeProbeConcurrency)
+	stalledBase := t.TempDir()
+	for i := range stalled {
+		stalled[i] = filepath.Join(stalledBase, fmt.Sprintf("stalled%d", i))
+	}
+	enospcDir := filepath.Join(t.TempDir(), "enospc")
+	dirs := append(stalled, enospcDir)
+
+	blockRelease := make(chan struct{})
+	time.AfterFunc(symlinkResolveTimeout+200*time.Millisecond, func() { close(blockRelease) })
+	writeSpaceProbe = func(dir string) error {
+		if dir == enospcDir {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		// Each stalled parent consumes its full per-dir bound so the first
+		// batch holds the semaphore past the deadline.
 		<-blockRelease
 		return nil
 	}
 	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
 
 	g := &GitWorktree{}
-	_ = g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
+	out := g.annotateGitWriteError(errors.New("git worktree add failed"), dirs...)
 
-	probedMu.Lock()
-	count := probedCount
-	probedMu.Unlock()
-
-	// The shared deadline stops the loop after the first batch acquires the
-	// semaphore and the deadline elapses; only that batch (plus the one
-	// probe that acquires the semaphore after the deadline) runs, not the
-	// full ceil(len(dirs)/writeProbeConcurrency) batches an unbounded loop
-	// would launch.
-	require.LessOrEqual(t, count, writeProbeConcurrency+1,
-		"the aggregate write-probe wait must be bounded by a shared deadline so a hand-edited "+
-			"path with many creatable parents cannot block for "+
-			"ceil(len(dirs)/writeProbeConcurrency) × probeTimeout: saw %d of %d probes probed",
-		count, len(dirs))
+	// The later parent's ENOSPC reaches the chain even though it sits after
+	// the stalled first batch: the deadline launches the remaining probes
+	// concurrently without the semaphore rather than dropping them at the
+	// cutoff, so the resource errno the subprocess's opaque ExitError drops
+	// still classifies the failure as environmental and the lost-restore loop
+	// waits for the full filesystem rather than exhausting its retries.
+	require.True(t, errors.Is(out, syscall.ENOSPC),
+		"a later parent on a separate ENOSPC mount must still be probed after the deadline "+
+			"elapsed while the first batch stalled: %v", out)
 }

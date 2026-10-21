@@ -213,10 +213,28 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 	// degraded filesystem where each writeSpaceProbe consumes its full per-dir
 	// bound a hand-edited path with many distinct creatable parents would
 	// otherwise block for roughly ceil(len(dirs)/writeProbeConcurrency) ×
-	// probeTimeout on every retry. A shared deadline stops launching new probes
-	// once it elapses; the in-flight probes each drain on their own per-dir
-	// bound, so the aggregate stays within one probeTimeout of the deadline
-	// rather than N batches of it.
+	// probeTimeout on every retry. A shared deadline bounds the first batch
+	// launched under the semaphore; the in-flight probes each drain on their
+	// own per-dir bound, so the aggregate stays within one probeTimeout of the
+	// deadline rather than N batches of it.
+	//
+	// The deadline must not drop coverage of a later parent on a separate
+	// filesystem the way a sequential break would: a crafted relative path can
+	// place several creatable parents on a stalled mount before a later parent
+	// on a separate ENOSPC mount, and a per-input-order cutoff would discard
+	// that later parent's resource errno so the lost-restore classifier exhausts
+	// its bounded retries while the full filesystem remains the actual outage.
+	// Once the deadline elapses the first batch is already stalling on a
+	// degraded mount, so the manufacturing-ENOSPC and file-descriptor pressure
+	// the semaphore caps in the steady state does not apply to the remaining
+	// probes (a degraded mount does not complete the 1 MiB writes a writable
+	// mount would); launch the remaining probes concurrently without the
+	// semaphore so each distinct filesystem still gets its own probe within
+	// the per-dir bound. The remaining batch completes within one probeTimeout
+	// of the deadline (each probe is per-dir bounded), so the aggregate stays
+	// within ~2 × probeTimeout rather than ceil(len(dirs)/writeProbeConcurrency)
+	// × probeTimeout, and a later parent's ENOSPC reaches the chain instead of
+	// being truncated by input order.
 	probeDeadline := time.Now().Add(symlinkResolveTimeout)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -225,10 +243,30 @@ func (g *GitWorktree) annotateGitWriteError(err error, dirs ...string) error {
 		if dir == "" || probed[dir] {
 			continue
 		}
-		if time.Now().After(probeDeadline) {
-			break
-		}
 		probed[dir] = true
+		if time.Now().After(probeDeadline) {
+			// The first batch held the semaphore past the deadline (a degraded
+			// filesystem where each writeSpaceProbe consumes its full per-dir
+			// bound). Launch the remaining probes concurrently without the
+			// semaphore so a later parent on a separate ENOSPC mount is not
+			// discarded by input order: each probe is per-dir bounded, so the
+			// remaining batch completes within one probeTimeout of the deadline
+			// rather than the N batches the semaphore would serialize, and the
+			// degraded mount that tripped the deadline does not complete the 1
+			// MiB writes a writable mount would (so the fan-out cap the
+			// semaphore defends against in the steady state does not apply here).
+			wg.Add(1)
+			go func(dir string) {
+				defer wg.Done()
+				if probeErr := writeSpaceProbe(dir); probeErr != nil {
+					mu.Lock()
+					joined = errors.Join(joined,
+						fmt.Errorf("write probe of %s also failed: %w", dir, probeErr))
+					mu.Unlock()
+				}
+			}(dir)
+			continue
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(dir string) {
@@ -407,7 +445,15 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// A path whose drive differs from the repo's resolves against the
 		// daemon's cwd on that drive, which the parent process cannot observe,
 		// so it is left unchanged the same way an un-rebased absolute path is.
-		if vol := filepath.VolumeName(worktreePath); vol == filepath.VolumeName(repoPath) {
+		// Windows drive letters are case-insensitive, so compare the
+		// volumes with strings.EqualFold: a worktreePath of `d:wt` against a
+		// repoPath of `D:\repo` is the same drive, and a case-mismatched
+		// spelling must not skip the rebase (the git child resolves `d:wt`
+		// against its `D:\repo` working directory, while the parent would
+		// otherwise probe the daemon's drive-relative `d:wt`, which may refer
+		// to a different directory and filesystem; ENOSPC can consequently be
+		// missed or attached spuriously).
+		if vol := filepath.VolumeName(worktreePath); strings.EqualFold(vol, filepath.VolumeName(repoPath)) {
 			worktreePath = filepath.Join(repoPath, strings.TrimPrefix(worktreePath, vol))
 		}
 	} else if !filepath.IsAbs(worktreePath) {
