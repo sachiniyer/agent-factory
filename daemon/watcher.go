@@ -141,10 +141,15 @@ type watcherSupervisor struct {
 	// lifelineExe is the af binary each watch command is started under as its
 	// watch lifeline (#5329, internal/watchlifeline), binding the command's
 	// lifetime to this daemon's; empty starts the shell directly.
-	// lifelineUnsupported latches once that binary is found not to speak the
-	// protocol, so later spawns fall back without retrying it.
+	// lifelineUnsupported records that a probe found the binary not to speak
+	// the protocol — one warning per degradation, cleared when a probe speaks
+	// it again. lifelineProbeHold suppresses probing only until its unix-nano
+	// deadline: a no-ack can be a transient launcher failure (systemd-run may
+	// exit before exec'ing the lifeline), so the probe retries after
+	// watchLifelineProbeRetry rather than latching off until daemon restart.
 	lifelineExe         string
 	lifelineUnsupported atomic.Bool
+	lifelineProbeHold   atomic.Int64
 	baseBackoff         time.Duration
 	maxBackoff          time.Duration
 	crashWindow         time.Duration
@@ -576,9 +581,8 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// The run's anchor pins the process-group number for the run's whole
 	// life: a live member that ignores the group's SIGTERM, so kill(-pgid)
 	// can only ever name this run's own group — while the watchdog signals
-	// it on a stop, and while the reaper cleans it up after the leader is
-	// gone (reapWatchGroupLeader). Its stdin pipe is held here, so this
-	// daemon's death ends it too.
+	// it and while the reaper cleans it (reapWatchGroupLeader). Its stdin
+	// pipe is held here, so this daemon's death ends it too.
 	anchorRelease := spawnWatchGroupAnchor(cmd.Process.Pid)
 	if anchorRelease == nil {
 		log.WarningLog.Printf("watch task %s: cannot spawn a process-group anchor for the watch command; "+

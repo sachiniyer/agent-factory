@@ -22,6 +22,15 @@ import (
 // not speaking the protocol.
 const watchLifelineAckTimeout = 10 * time.Second
 
+// watchLifelineProbeRetry bounds how long a failed lifeline probe suppresses
+// later probes. A missing ack is not proof the binary predates the protocol:
+// under systemd the lifeline execs through systemd-run, and a transient scope
+// creation failure exits before exec'ing anything, reading exactly like a
+// version skew. The probe is retried after this cooldown — a skewed binary
+// simply fails again at this cadence, while a launcher hiccup re-arms on its
+// own instead of silently orphaning watch children until daemon restart.
+const watchLifelineProbeRetry = time.Minute
+
 // resolveWatchLifelineExe names the binary the daemon execs as the watch
 // lifeline (#5329): its own.
 //
@@ -116,10 +125,16 @@ func (e *watchShellExit) Error() string {
 func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd), outputs ...*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
 	var execErr error
 	exe := s.lifelineExe
-	if exe != "" && !s.lifelineUnsupported.Load() {
+	if exe != "" && time.Now().UnixNano() >= s.lifelineProbeHold.Load() {
 		var spoke bool
 		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, configure, outputs)
 		if spoke {
+			// The binary answered the protocol — even an answer of "the shell
+			// would not start" proves it — so any earlier failure is cleared.
+			if s.lifelineUnsupported.Swap(false) {
+				log.InfoLog.Printf("watch task %s: %s speaks the watch lifeline protocol again; "+
+					"watch commands run under the lifeline", taskID, exe)
+			}
 			return cmd, lifeline, err
 		}
 	}
@@ -225,17 +240,21 @@ func drainProbeOutput(outputs []*os.File) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-// lifelineUnusable records, once per daemon, that watch commands now start
-// without a lifeline, and why — the only visible trace of a degraded spawn.
+// lifelineUnusable records that a lifeline probe failed and holds probing for
+// watchLifelineProbeRetry — never permanently, since a transient launcher
+// failure reads exactly like a missing protocol — and warns once per
+// degradation, the only visible trace of a degraded spawn.
 func (s *watcherSupervisor) lifelineUnusable(taskID, exe, reason string) {
+	s.lifelineProbeHold.Store(time.Now().Add(watchLifelineProbeRetry).UnixNano())
 	if s.lifelineUnsupported.Swap(true) {
 		return
 	}
 	log.WarningLog.Printf("watch task %s: %s does not speak the watch lifeline protocol (%s). "+
-		"Every watch command this daemon starts from now on runs without a lifeline, so a watch child can outlive "+
-		"this daemon if it dies uncleanly and hold its lock against the replacement (#5329). "+
-		"This usually means the af binary at that path was replaced while this daemon was running; "+
-		"restart the daemon (af daemon restart) so it runs the installed binary", taskID, exe, reason)
+		"Every watch command this daemon starts runs without a lifeline until the probe is retried in %s, so "+
+		"a watch child can outlive this daemon if it dies uncleanly and hold its lock against the replacement (#5329). "+
+		"This usually means the af binary at that path was replaced while this daemon was running, or that the "+
+		"launcher (such as systemd-run) failed transiently; if the warning repeats, "+
+		"restart the daemon (af daemon restart) so it runs the installed binary", taskID, exe, reason, watchLifelineProbeRetry)
 }
 
 // readWatchLifelineAck reads one line from the ack pipe f through its reader

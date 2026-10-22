@@ -414,6 +414,70 @@ func TestFallbackReapKeepsTheGroupNumberPinned(t *testing.T) {
 	}
 }
 
+// TestLifelineProbeRetriesAfterCooldown: a failed probe suppresses the
+// lifeline only for the retry cooldown, never for the daemon's life — a
+// launcher failure (a systemd-run scope hiccup) reads exactly like a missing
+// protocol, so latching off would silently reopen the orphaning until daemon
+// restart. Inside the cooldown the shell starts directly; after it the probe
+// runs again, and a speaking binary re-arms.
+func TestLifelineProbeRetriesAfterCooldown(t *testing.T) {
+	dir := t.TempDir()
+	oldAF := filepath.Join(dir, "af-old")
+	stub := "#!/bin/sh\necho 'Error: unknown command \"" + watchlifeline.Arg + "\" for \"af\"' >&2\nexit 1\n"
+	if err := os.WriteFile(oldAF, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestSupervisor(t, staticTasks())
+	realExe := s.lifelineExe
+	if realExe == "" {
+		t.Fatal("no lifeline executable resolved for this test binary")
+	}
+	s.lifelineExe = oldAF
+
+	if _, err := s.newTaskWatcher(watchTask("degraded", "true", dir)).runOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.lifelineUnsupported.Load() {
+		t.Fatal("the failed probe was not recorded")
+	}
+	if until := s.lifelineProbeHold.Load(); until <= time.Now().UnixNano() {
+		t.Fatal("a failed probe did not hold off the next probe")
+	}
+
+	// Inside the cooldown no probe runs — the shell starts directly even
+	// though the binary at lifelineExe now speaks the protocol.
+	s.lifelineExe = realExe
+	pidFile := filepath.Join(dir, "cooldown.pid")
+	if _, err := s.newTaskWatcher(watchTask("cooldown", "echo $$ > "+pidFile, dir)).runOnce(); err != nil {
+		t.Fatal(err)
+	}
+	shell, ok := readPIDFile(pidFile)
+	if !ok {
+		t.Fatal("the cooldown run did not record its shell pid")
+	}
+	if args := parentArgs(t, shell); strings.Contains(args, watchlifeline.Arg) {
+		t.Fatalf("a lifeline probe ran inside the cooldown (shell parent %q)", args)
+	}
+
+	// After the cooldown the probe runs again and a speaking binary clears
+	// the recorded failure.
+	s.lifelineProbeHold.Store(0)
+	pidFile2 := filepath.Join(dir, "recovered.pid")
+	if _, err := s.newTaskWatcher(watchTask("recovered", "echo $$ > "+pidFile2, dir)).runOnce(); err != nil {
+		t.Fatal(err)
+	}
+	shell2, ok := readPIDFile(pidFile2)
+	if !ok {
+		t.Fatal("the recovered run did not record its shell pid")
+	}
+	if args := parentArgs(t, shell2); !strings.Contains(args, watchlifeline.Arg) {
+		t.Fatalf("the post-cooldown run's shell parent is %q, want the watch lifeline", args)
+	}
+	if s.lifelineUnsupported.Load() {
+		t.Fatal("a successful probe did not clear the recorded failure")
+	}
+}
+
 // TestWatchGroupAnchorPinsUntilReleased pins the anchor's contract in a live
 // group: spawned while the leader runs, it survives the group's SIGTERM —
 // what a stop sends first — and still holds the group's number after the
