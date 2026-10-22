@@ -1289,6 +1289,12 @@ button:disabled,
     color: var(--af-ink);
   }
 }
+/* On a phone the tools are a raised popover, not part of the colored bar. */
+@media (max-width: 768px) {
+  .af-app[data-project-color] .af-appbar-tools {
+    color: var(--af-ink);
+  }
+}
 
 .af-term-head {
   display: flex;

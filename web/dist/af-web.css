@@ -1032,6 +1032,11 @@ button:disabled,
     color: var(--af-ink);
   }
 }
+@media (max-width: 768px) {
+  .af-app[data-project-color] .af-appbar-tools {
+    color: var(--af-ink);
+  }
+}
 .af-term-head {
   display: flex;
   align-items: center;

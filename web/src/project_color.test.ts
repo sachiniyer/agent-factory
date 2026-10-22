@@ -130,3 +130,11 @@ test("projectAccent keeps 4.5:1 contrast against each theme surface", () => {
   assert.equal(markInk(light), "#ffffff");
   assert.equal(markInk("#bd93f9"), "#1f1f1f");
 });
+
+test("the phone tools popover restores theme ink over the colored app bar's ink", () => {
+  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+  assert.match(
+    css,
+    /@media \(max-width: 768px\) \{\s*\.af-app\[data-project-color\] \.af-appbar-tools \{\s*color: var\(--af-ink\);/,
+  );
+});
