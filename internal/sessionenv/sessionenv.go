@@ -201,15 +201,17 @@ var agentNames = map[string]map[string]struct{}{
 	// so its per-agent allowlist is empty.
 	//
 	// The key MUST exist even though the set is empty. The docker provisioner
-	// derives the session's agent from AgentForCommand
-	// (dockerProvisioner.agentName), and resolveAgentCredentialMounts keys
-	// credential mounting off that result. devin is in agentCredentialFiles,
-	// but without this entry AgentForCommand("devin") returned "" — the
-	// empty-program fallback in agentName() does not cover a non-empty program
-	// — so a devin session resolved to "" and the devin credential mount was
-	// unreachable in production even after an image shipped the CLI. An empty
-	// set keeps the environment boundary at commonNames only while letting the
-	// credential mount fire.
+	// derives the session's agent through the shared grant predicate
+	// (GrantAgentForCommand, via dockerProvisioner.agentName), which classifies
+	// through the same supported-agent table — and
+	// resolveAgentCredentialMounts keys credential mounting off that result.
+	// devin is in agentCredentialFiles, but without this entry
+	// GrantAgentForCommand("devin") returned "" — the empty-program fallback in
+	// agentName() does not cover a non-empty program — so a devin session
+	// resolved to "" and the devin credential mount was unreachable in
+	// production even after an image shipped the CLI. An empty set keeps the
+	// environment boundary at commonNames only while letting the credential
+	// mount fire.
 	"devin": nameSet(),
 }
 
@@ -496,7 +498,7 @@ func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 //
 // The agent is derived from the command rather than taken from the caller,
 // because that is exactly what the launch paths do (TmuxSession.launchEnvironment
-// and hookProvisioner.environmentAgent both call AgentForCommand). A check that
+// and hookProvisioner.environmentAgent both classify the command itself). A check that
 // re-derived it differently could disagree with the resolution it is guarding —
 // the key a repo files an override under does not have to name the agent the
 // value actually runs.

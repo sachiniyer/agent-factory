@@ -136,10 +136,10 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
 		// best-effort list. See sshNoConfigFile.
 		"-F", sshNoConfigFile,
-		"-o", "User=" + shellQuoteSandbox(sshLoginUser(cfg)),
+		"-o", "User=" + shellQuote(sshLoginUser(cfg)),
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
-		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHosts),
+		"-o", "UserKnownHostsFile=" + shellQuote(knownHosts),
 		// The x/crypto client consulted ONE file, so this preserves today's
 		// semantics rather than tightening them.
 		//
@@ -235,9 +235,9 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
 		// Composition stays FILESYSTEM-PURE — the readability check lives in
 		// verifySSHIdentityFile, called from the provision path. See there.
-		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
+		parts = append(parts, "-i", shellQuote(expandUserPath(identity)))
 	}
-	parts = append(parts, shellQuoteSandbox(host))
+	parts = append(parts, shellQuote(host))
 	return strings.Join(parts, " "), nil
 }
 
@@ -366,11 +366,11 @@ func sshPinnedProxyCommand(dialAddr string, port int) (string, error) {
 			"connection to %s (af runs itself as ssh's ProxyCommand so every step dials the one address "+
 			"the session was provisioned on): %w", dialAddr, err)
 	}
-	inner := shellQuoteSandbox(relay) +
+	inner := shellQuote(relay) +
 		" " + sshrelay.Subcommand +
-		" " + shellQuoteSandbox(dialAddr) +
+		" " + shellQuote(dialAddr) +
 		" " + strconv.Itoa(port)
-	return "ProxyCommand=" + shellQuoteSandbox(escapeSSHPercent(inner)), nil
+	return "ProxyCommand=" + shellQuote(escapeSSHPercent(inner)), nil
 }
 
 // escapeSSHPercent doubles every `%` so ssh's percent expansion yields the literal

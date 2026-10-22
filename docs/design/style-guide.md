@@ -344,11 +344,13 @@ Escape closes the disclosure and returns focus to its trigger. The drawer, Tasks
 Config and nonterminal content retain their existing phone layouts.
 
 While a terminal owns the keyboard, show one 44px keybar above the soft keyboard,
-following the visual viewport and safe-area insets. Ctrl, Alt, Esc, Tab, ^C and
-Arrows share the row. Arrows replaces it with More keys and ← ↑ ↓ →; More keys restores the
-primary row. At 360px, six targets fit with 4px gaps and 8px horizontal insets.
-Hide the bar when ownership leaves the terminal or the viewport exceeds 768px.
-Refit the terminal so its last row remains above the bar.
+following the visual viewport and safe-area insets. Ctrl, Alt, Esc, Tab, ^C,
+Paste and Arrows share the row. Arrows replaces it with More keys and ← ↑ ↓ →; More keys restores the
+primary row. At 360px, seven targets fit with 4px gaps and 8px horizontal insets;
+below 348px the keys narrow to a 40px floor so the row still fits a 320px phone,
+while the 44px height never changes. Hide the bar when ownership leaves the
+terminal or the viewport exceeds 768px. Refit the terminal so its last row
+remains above the bar.
 
 With the soft keyboard closed, the terminal element must occupy at least 85% of
 the visual viewport at 360, 390 and 430px. Browser assertions enforce this in both
@@ -357,8 +359,10 @@ column one; the screen must stay inside the host with no horizontal scroll.
 Keep all targets at least 44px, truncate instead of wrapping, use existing
 tokens and static glyphs, and do not animate.
 
-Ctrl and Alt apply once to the next key, including the bar’s own keys. IME
-composition is sent unchanged and leaves the modifier armed.
+Ctrl and Alt apply once to the next key, including the bar’s own keys. Paste is
+exempt: a paste sends the clipboard verbatim and leaves any armed modifier
+armed, because a paste is not a keystroke. IME composition is sent unchanged
+and leaves the modifier armed.
 Double tap within 350ms to lock; tap again to release. An armed modifier has the
 selected-row surface, bold ink and accent edge. A locked modifier also has an
 accent outline and static ▸ marker. Buttons retain terminal focus on pointerdown;

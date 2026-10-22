@@ -166,3 +166,30 @@ func launchDeferredOrphanSweepIfReady(manager *Manager, stopCh <-chan struct{}, 
 		runDeferredOrphanSweepIfReady(manager)
 	}()
 }
+
+// dockerReapProtectedSlugs returns the af.session label slugs of every session
+// the manager knows about — live instances AND still-provisioning pending creates
+// (the #2549 window where a container exists but no Instance does yet) — so the
+// orphan-container sweep (#2194) never reaps a container whose session is alive or
+// mid-create. Titles are collected under the lock; slugging happens after so the
+// lock stays short.
+func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
+	m.mu.Lock()
+	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
+	for _, inst := range m.instances {
+		titles = append(titles, inst.Title)
+	}
+	for key, pending := range m.pendingCreates {
+		if _, settled := m.instances[key]; settled {
+			continue
+		}
+		titles = append(titles, pending.Title)
+	}
+	m.mu.Unlock()
+
+	slugs := make(map[string]bool, len(titles))
+	for _, t := range titles {
+		slugs[session.Slugify(t)] = true
+	}
+	return slugs
+}
