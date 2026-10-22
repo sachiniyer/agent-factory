@@ -765,14 +765,21 @@ func TestFallbackReapSkipsTheGroupKillWhenTheAnchorIsDead(t *testing.T) {
 
 	exited := watchLeaderExited
 	groupKill := watchGroupKill
+	anchorKill := watchAnchorKill
 	t.Cleanup(func() {
 		watchLeaderExited = exited
 		watchGroupKill = groupKill
+		watchAnchorKill = anchorKill
 	})
 	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
 	var signals []int
 	watchGroupKill = func(pid int, sig syscall.Signal) error {
 		signals = append(signals, pid)
+		return nil
+	}
+	var anchorSignals int
+	watchAnchorKill = func(*os.Process) error {
+		anchorSignals++
 		return nil
 	}
 
@@ -782,5 +789,8 @@ func TestFallbackReapSkipsTheGroupKillWhenTheAnchorIsDead(t *testing.T) {
 	}
 	if len(signals) != 0 {
 		t.Fatalf("post-reap group signals went to %v, want none", signals)
+	}
+	if anchorSignals != 0 {
+		t.Fatalf("release signalled the anchor %d time(s) after this daemon reaped it — its freed pid can name a stranger's process", anchorSignals)
 	}
 }

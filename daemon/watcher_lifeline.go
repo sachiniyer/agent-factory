@@ -328,22 +328,35 @@ var (
 	watchLeaderExited     = waitExitedUnreaped
 	watchGroupKill        = syscall.Kill
 	spawnWatchGroupAnchor = startWatchGroupAnchor
+	// watchAnchorKill is how release signals the anchor; a seam so tests can
+	// prove an anchor this daemon already reaped is never signalled again.
+	watchAnchorKill = (*os.Process).Kill
 )
 
 // watchGroupAnchor is a run's pinned process-group member: a child that
 // ignores the group's SIGTERM and lives until release is called or the
-// daemon dies (startWatchGroupAnchor).
+// daemon dies (startWatchGroupAnchor). reaped records that this daemon
+// collected the anchor's status — from that moment its pid is free and may
+// be reused, so nothing may ever signal it again (release honours it by
+// only closing the pipe). Owned by the run's reap sequence; not
+// goroutine-safe by design.
 type watchGroupAnchor struct {
-	cmd *exec.Cmd
-	w   *os.File // the daemon-held end of the anchor's stdin pipe
+	cmd    *exec.Cmd
+	w      *os.File // the daemon-held end of the anchor's stdin pipe
+	reaped bool
 }
 
 // release kills the anchor, reaps it, and closes the lifetime pipe's write
-// end. Every step is best-effort: calling it on an already-dead anchor —
-// the watchdog's group SIGKILL takes it with the group — is safe.
+// end — unless the daemon already reaped it (alive). Signalling a reaped
+// pid is kill(2) on a freed number — on darwin, where os.Process holds no
+// pidfd, possibly a reused stranger's process — so once reaped, release
+// only closes the pipe: the anchor is already gone.
 func (a *watchGroupAnchor) release() {
-	_ = a.cmd.Process.Kill()
-	_ = a.cmd.Wait()
+	if !a.reaped {
+		_ = watchAnchorKill(a.cmd.Process)
+		_ = a.cmd.Wait()
+		a.reaped = true
+	}
 	_ = a.w.Close()
 }
 
@@ -351,12 +364,17 @@ func (a *watchGroupAnchor) release() {
 // state in which its membership proves the group's number still names this
 // run. A dead-but-unreaped anchor — a zombie the watchdog's SIGKILL left —
 // still answers kill(pid,0), so the probe is wait4 with WNOHANG returning
-// 0: not reapable yet. When it reports dead it has reaped the zombie, so
-// the group is then empty for real and the number is truly free.
+// 0: not reapable yet. Reporting dead means the zombie was just reaped —
+// or already reaped, which wait4 reports as ECHILD — so either way the pid
+// is now free and release must never signal it again.
 func (a *watchGroupAnchor) alive() bool {
 	var ws syscall.WaitStatus
 	pid, err := syscall.Wait4(a.cmd.Process.Pid, &ws, syscall.WNOHANG, nil)
-	return err == nil && pid == 0
+	if pid == 0 && err == nil {
+		return true
+	}
+	a.reaped = true
+	return false
 }
 
 // startWatchGroupAnchor starts a child in the given process group and keeps
