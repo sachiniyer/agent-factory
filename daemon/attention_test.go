@@ -63,4 +63,14 @@ func TestClearAttentionOnInputDoesNotWaitForTheRepoStartLock(t *testing.T) {
 	require.Len(t, pending, 2, "the finished clear no longer blocks the next one")
 	pending[1]()
 	require.False(t, inst.HasAttention())
+
+	_, err = inst.SetAttention("C", time.Unix(300, 0))
+	require.NoError(t, err)
+	manager.clearAttentionOnInput(inst)
+	_, err = inst.SetAttention("D", time.Unix(400, 0))
+	require.NoError(t, err)
+	manager.clearAttentionOnInput(inst)
+	require.Len(t, pending, 3, "the key for D joins the clear already in flight")
+	pending[2]()
+	require.False(t, inst.HasAttention(), "the in-flight clear also clears the request the later key saw")
 }

@@ -108,12 +108,24 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	if seen == nil {
 		return
 	}
-	if _, busy := m.attentionClears.LoadOrStore(instance, struct{}{}); busy {
+	// The map holds the newest request a keystroke saw. A key that lands while a
+	// clear is in flight updates it, and the worker loops until it has cleared
+	// the request it last read.
+	if _, busy := m.attentionClears.Swap(instance, seen.SetAt); busy {
 		return
 	}
 	runAttentionClear(func() {
-		defer m.attentionClears.Delete(instance)
-		m.clearAttentionNow(instance, seen.SetAt)
+		for {
+			v, ok := m.attentionClears.Load(instance)
+			if !ok {
+				return
+			}
+			setAt := v.(time.Time)
+			m.clearAttentionNow(instance, setAt)
+			if m.attentionClears.CompareAndDelete(instance, setAt) {
+				return
+			}
+		}
 	})
 }
 

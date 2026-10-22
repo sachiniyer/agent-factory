@@ -125,6 +125,17 @@ func TestAttentionRoundTripsThroughStorage(t *testing.T) {
 	require.Equal(t, "need a token", i.Attention().Reason)
 }
 
+func TestRestoreAttentionKeepsAStoppedSessionClear(t *testing.T) {
+	i := &Instance{Title: "w", liveness: LiveRunning}
+	_, err := i.SetAttention("A", time.Unix(100, 0))
+	require.NoError(t, err)
+	previous, cleared := i.ClearAttention(time.Time{})
+	require.True(t, cleared)
+	moveLiveness(i, LiveLost)
+	i.RestoreAttention(previous)
+	require.False(t, i.HasAttention(), "a rollback must not put a request on a Lost session")
+}
+
 func TestNormalizeAttentionReasonCapsLength(t *testing.T) {
 	long := strings.Repeat("é", MaxAttentionReasonLen+10)
 	require.Len(t, []rune(NormalizeAttentionReason(long)), MaxAttentionReasonLen)

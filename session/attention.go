@@ -105,10 +105,13 @@ func (i *Instance) ClearAttention(setAt time.Time) (*Attention, bool) {
 
 // RestoreAttention puts back a value that SetAttention or ClearAttention
 // replaced, after the caller could not persist the change.
+// A liveness change between the mutation and the rollback may have stopped the
+// session, so the restored value goes through the same stopped-state check.
 func (i *Instance) RestoreAttention(a *Attention) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.attention = cloneAttention(a)
+	i.dropAttentionIfStoppedLocked()
 	i.touchLocked()
 }
 
