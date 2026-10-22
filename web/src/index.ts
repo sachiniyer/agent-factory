@@ -132,6 +132,7 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
+import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
 
@@ -2195,15 +2196,17 @@ function refreshRegisteredProjects(): void {
 
 /** Sets a project's color. A project known only from its sessions has no registry
  *  record to hold a color, so it is registered first (idempotent on the daemon). */
-function doSetProjectColor(root: string, color: string): void {
+const writeProjectColor = createLatestWriter(async (root, color) => {
   const tok = token;
   if (tok === null) return;
   const record = store.get().registeredProjects.find((r) => r.root === root);
-  const id = record ? Promise.resolve(record.id) : registerProject(root, tok).then((p) => p.id);
-  void id
-    .then((projectId) => setProjectColor(projectId, color, tok))
-    .then(() => refreshRegisteredProjects())
-    .catch((e: unknown) => surfaceMutationError(e));
+  const projectId = record ? record.id : (await registerProject(root, tok)).id;
+  await setProjectColor(projectId, color, tok);
+  refreshRegisteredProjects();
+}, (e: unknown) => surfaceMutationError(e));
+
+function doSetProjectColor(root: string, color: string): void {
+  void writeProjectColor(root, color);
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring

@@ -18332,6 +18332,31 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
   }
 }
 
+// src/project_color_writes.ts
+function createLatestWriter(write, onError) {
+  const waiting = /* @__PURE__ */ new Map();
+  const draining = /* @__PURE__ */ new Map();
+  const drain = async (key) => {
+    for (let value = waiting.get(key); value !== void 0; value = waiting.get(key)) {
+      waiting.delete(key);
+      try {
+        await write(key, value);
+      } catch (e) {
+        onError(e);
+      }
+    }
+    draining.delete(key);
+  };
+  return (key, value) => {
+    waiting.set(key, value);
+    const running = draining.get(key);
+    if (running) return running;
+    const started = drain(key);
+    draining.set(key, started);
+    return started;
+  };
+}
+
 // src/tab_delete_target.ts
 function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
@@ -19578,12 +19603,16 @@ function commitRegisteredProjects(projects) {
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
-function doSetProjectColor(root2, color) {
+var writeProjectColor = createLatestWriter(async (root2, color) => {
   const tok = token;
   if (tok === null) return;
   const record = store.get().registeredProjects.find((r) => r.root === root2);
-  const id = record ? Promise.resolve(record.id) : registerProject(root2, tok).then((p) => p.id);
-  void id.then((projectId) => setProjectColor(projectId, color, tok)).then(() => refreshRegisteredProjects()).catch((e) => surfaceMutationError(e));
+  const projectId = record ? record.id : (await registerProject(root2, tok)).id;
+  await setProjectColor(projectId, color, tok);
+  refreshRegisteredProjects();
+}, (e) => surfaceMutationError(e));
+function doSetProjectColor(root2, color) {
+  void writeProjectColor(root2, color);
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
