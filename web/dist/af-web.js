@@ -15934,7 +15934,12 @@ function projectFaviconPng(color, size) {
   ctx.scale(size / 512, size / 512);
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.roundRect(0, 0, 512, 512, 112);
+  ctx.moveTo(112, 0);
+  ctx.arcTo(512, 0, 512, 512, 112);
+  ctx.arcTo(512, 512, 0, 512, 112);
+  ctx.arcTo(0, 512, 0, 0, 112);
+  ctx.arcTo(0, 0, 512, 0, 112);
+  ctx.closePath();
   ctx.fill();
   ctx.fillStyle = markInk(color);
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
@@ -16755,6 +16760,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".

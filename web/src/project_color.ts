@@ -64,8 +64,14 @@ function projectFaviconPng(color: string, size: number): string | null {
   if (!ctx || typeof Path2D === "undefined") return null;
   ctx.scale(size / 512, size / 512);
   ctx.fillStyle = color;
+  // arcTo, not roundRect, which older Safari lacks.
   ctx.beginPath();
-  ctx.roundRect(0, 0, 512, 512, 112);
+  ctx.moveTo(112, 0);
+  ctx.arcTo(512, 0, 512, 512, 112);
+  ctx.arcTo(512, 512, 0, 512, 112);
+  ctx.arcTo(0, 512, 0, 0, 112);
+  ctx.arcTo(0, 0, 512, 0, 112);
+  ctx.closePath();
   ctx.fill();
   ctx.fillStyle = markInk(color);
   ctx.fill(new Path2D(FAVICON_MARK_PATH));

@@ -7,6 +7,7 @@ import type { RegisteredProject } from "./api.js";
 import {
   FAVICON_MARK_PATH,
   PROJECT_COLOR_PALETTE,
+  applyProjectFavicon,
   markInk,
   projectColor,
   projectFaviconDataUrl,
@@ -52,4 +53,40 @@ test("the favicon SVG paints the tile in the project color", () => {
 
 test("every palette color is a lowercase #rrggbb", () => {
   for (const c of PROJECT_COLOR_PALETTE) assert.match(c, /^#[0-9a-f]{6}$/);
+});
+
+test("the PNG favicon renders without roundRect and resets to the static icon", () => {
+  const calls: string[] = [];
+  const ctx = {
+    fillStyle: "",
+    scale: () => {},
+    beginPath: () => {},
+    moveTo: () => calls.push("moveTo"),
+    arcTo: () => calls.push("arcTo"),
+    closePath: () => {},
+    fill: () => {},
+  };
+  const canvas = { width: 0, height: 0, getContext: () => ctx, toDataURL: () => "data:image/png;base64,TILE" };
+  const attrs = new Map<string, string>([["href", "/icons/favicon-32.png"]]);
+  const link = {
+    type: "image/png",
+    sizes: { value: "32" },
+    dataset: {} as Record<string, string>,
+    getAttribute: (k: string) => attrs.get(k) ?? null,
+    setAttribute: (k: string, v: string) => void attrs.set(k, v),
+  };
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, Path2D: g.Path2D };
+  g.document = { createElement: () => canvas, querySelectorAll: () => [link] };
+  g.Path2D = class {};
+  try {
+    applyProjectFavicon("#16a34a");
+    assert.equal(attrs.get("href"), "data:image/png;base64,TILE");
+    assert.ok(calls.includes("arcTo"));
+    applyProjectFavicon(null);
+    assert.equal(attrs.get("href"), "/icons/favicon-32.png");
+  } finally {
+    g.document = saved.document;
+    g.Path2D = saved.Path2D;
+  }
 });
