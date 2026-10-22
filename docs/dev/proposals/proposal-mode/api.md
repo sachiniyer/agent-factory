@@ -166,14 +166,17 @@ Shapes:
   required, and it must be a lowercase hex commit id (7 to 64 characters). Any
   other value, such as a ref name, fails with `unknown base commit`.
 - The daemon first commits uncommitted edits of the doc as `external`. Then
-  "theirs" is the doc at the new head.
+  "theirs" is the doc at the new head. When that makes a commit and the save
+  writes nothing (no change, or a conflict), the daemon publishes the
+  external commit as a `proposal.changed` event.
 - If theirs is the same as the doc at `base`, the daemon writes `text` and
   commits it. Reply: `merged: false`.
 - If theirs changed, the daemon runs `git merge-file` with ours = `text`,
   base = the doc at `base`, theirs = the doc at head.
   - A clean merge: the daemon writes and commits the merged text. Reply:
     `merged: true`, and `text` is the merged text.
-  - A conflict: the daemon commits nothing and replies with status 409:
+  - A conflict: the daemon does not commit `text` and replies with status
+    409:
 
 ```json
 {"data": {"ours": "…", "theirs": "…", "base": "…", "head": "9c1d…"},

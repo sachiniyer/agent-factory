@@ -478,6 +478,10 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	}
 	res, err := r.store.Save(slug, doc, text, base)
 	if err != nil {
+		var conflict *ConflictError
+		if errors.As(err, &conflict) && conflict.snapshotted {
+			s.committed(r, slug, file, conflict.Versions.Head, AuthorExternal)
+		}
 		return nil, err
 	}
 	switch {

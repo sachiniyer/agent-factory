@@ -37,11 +37,14 @@ type ConflictData struct {
 }
 
 // ConflictError means the doc changed since the save's base and git merge-file
-// could not merge the two edits. Nothing was committed.
+// could not merge the two edits. The save commits nothing, but an external
+// edit on disk may have been committed first; then snapshotted is true and
+// Versions.Head is that commit.
 type ConflictError struct {
-	File     string
-	BaseRef  string
-	Versions ConflictData
+	File        string
+	BaseRef     string
+	Versions    ConflictData
+	snapshotted bool
 }
 
 func (e *ConflictError) Error() string {
@@ -108,7 +111,7 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 			if !clean {
 				return &ConflictError{File: file, BaseRef: baseCommit, Versions: ConflictData{
 					Ours: text, Theirs: theirs, Base: baseText, Head: head,
-				}}
+				}, snapshotted: snap != ""}
 			}
 			next, merged = out, true
 		}

@@ -383,8 +383,8 @@ func TestSaveConflictCommitsNothing(t *testing.T) {
 	if msg, _ := store.gitTrim("log", "-1", "--format=%B"); strings.Contains(msg, "Af-Author: human") {
 		t.Fatal("a conflict must not commit the save")
 	}
-	if ev := host.takeEvents(); len(ev) != 0 {
-		t.Fatalf("a conflict must publish nothing, got %+v", ev)
+	if ev := host.takeEvents(); len(ev) != 1 || ev[0].Author != AuthorExternal {
+		t.Fatalf("a conflict must publish only the external snapshot, got %+v", ev)
 	}
 	res, err := svc.Save(Target{SessionID: sessA}, "p", "goals", "resolved\n", v.Head)
 	if err != nil || res.Merged || res.Text != "resolved\n" {
@@ -575,6 +575,17 @@ func TestReadPublishesTheDiskEditItSnapshots(t *testing.T) {
 	}
 	if ev := host.takeEvents(); len(ev) != 1 || ev[0].Commit == nil || *ev[0].Commit != saved.Commit || ev[0].Author != AuthorExternal {
 		t.Fatalf("a no-op save that snapshots a disk edit must publish it, got %+v", ev)
+	}
+
+	editOnDisk(t, store, "p", "goals.md", "disk side\n")
+	bumpMtime(t, filepath.Join(store.SlugPath("p"), "goals.md"))
+	_, err = svc.Save(byRepo(), "p", "goals", "tab side\n", saved.Commit)
+	var conflict *ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("save = %v, want a conflict", err)
+	}
+	if ev := host.takeEvents(); len(ev) != 1 || ev[0].Commit == nil || *ev[0].Commit != conflict.Versions.Head || ev[0].Author != AuthorExternal {
+		t.Fatalf("a conflicting save that snapshots a disk edit must publish it, got %+v", ev)
 	}
 }
 
