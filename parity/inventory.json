@@ -562,8 +562,9 @@
         "status": "yes",
         "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
       },
-      "verdict": "deliberate",
-      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. The web rail is the surface that shows it; the TUI is not maintained in this fork. session.Instance owns the clear rules: typed input on the agent pane (daemon/attention.go attentionClearingBinding), the web showing the agent tab in a focused page (web/src/attention_seen.ts), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
+      "verdict": "real-gap",
+      "issue": "#5461",
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Only the web rail shows it so far: the TUI rail does not render InstanceData.Attention yet, so a TUI user gets no sign of the request (#5461). The generated theme.Attention colour is the token that work will use. session.Instance owns the clear rules: typed input on the agent pane (daemon/attention.go attentionClearingBinding), the web showing the agent tab in a focused page (web/src/attention_seen.ts), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",
