@@ -58,7 +58,7 @@ The rail shows state by glyph only. Hover a row to read its state in words.
 | --- | --- |
 | Blinking yellow circle | The agent asked for you with `af sessions attention`; hover the row for its reason |
 | No glyph | The agent is idle |
-| Muted spinner | Work is in progress |
+| Muted filled circle | Work is in progress |
 | Hollow circle | The agent process is dead, or a prompt was not delivered |
 | Dashed circle | The session is lost |
 | Diamond | A usage limit has been reached |
