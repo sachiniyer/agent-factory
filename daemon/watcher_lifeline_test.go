@@ -478,6 +478,52 @@ func TestLifelineProbeRetriesAfterCooldown(t *testing.T) {
 	}
 }
 
+// TestLifelineProbeWarnsOncePerDegradation pins the warning contract the
+// cooldown relies on: two consecutive failed probes produce exactly one
+// warning — a skewed binary must not spam the log every retry — a probe
+// that then speaks produces exactly one recovery line, and a fresh failure
+// after that warns again.
+func TestLifelineProbeWarnsOncePerDegradation(t *testing.T) {
+	dir := t.TempDir()
+	oldAF := filepath.Join(dir, "af-old")
+	stub := "#!/bin/sh\necho 'Error: unknown command \"" + watchlifeline.Arg + "\" for \"af\"' >&2\nexit 1\n"
+	if err := os.WriteFile(oldAF, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestSupervisor(t, staticTasks())
+	realExe := s.lifelineExe
+	if realExe == "" {
+		t.Fatal("no lifeline executable resolved for this test binary")
+	}
+	s.lifelineExe = oldAF
+	warnings := captureWarnings(t)
+	infos := captureInfo(t)
+
+	run := func(name string) {
+		t.Helper()
+		if _, err := s.newTaskWatcher(watchTask(name, "true", dir)).runOnce(); err != nil {
+			t.Fatalf("run %s: %v", name, err)
+		}
+		s.lifelineProbeHold.Store(0) // stand in for the cooldown having elapsed
+	}
+
+	run("first-fail")
+	run("second-fail")
+	if got := strings.Count(warnings.String(), "does not speak the watch lifeline protocol"); got != 1 {
+		t.Fatalf("two consecutive failed probes produced %d degrade warnings, want exactly 1", got)
+	}
+	s.lifelineExe = realExe
+	run("recovery")
+	if got := strings.Count(infos.String(), "speaks the watch lifeline protocol again"); got != 1 {
+		t.Fatalf("a speaking probe produced %d recovery lines, want exactly 1", got)
+	}
+	s.lifelineExe = oldAF
+	run("fresh-fail")
+	if got := strings.Count(warnings.String(), "does not speak the watch lifeline protocol"); got != 2 {
+		t.Fatalf("a failure after recovery produced %d total warnings, want exactly 2", got)
+	}
+}
+
 // TestWatchGroupAnchorPinsUntilReleased pins the anchor's contract in a live
 // group: spawned while the leader runs, it survives the group's SIGTERM —
 // what a stop sends first — and still holds the group's number after the
