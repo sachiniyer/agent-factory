@@ -52,3 +52,28 @@ test("keys write independently and a failure does not stop the next write", asyn
   assert.deepEqual(calls, ["/a=bad", "/b=#555555", "/a=#444444"]);
   assert.equal(errors.length, 1);
 });
+
+test("a queued choice keeps the connection it was made under, so a reconnect can fence it", async () => {
+  let generation = 1;
+  const sent: string[] = [];
+  const gate = deferred();
+  let first = true;
+  const set = createLatestWriter<{ color: string; connection: number }>(async (key, { color, connection }) => {
+    if (first) {
+      first = false;
+      await gate.promise;
+    }
+    if (connection !== generation) return;
+    sent.push(`${key}=${color}`);
+  }, (e) => assert.fail(String(e)));
+
+  const done = set("/a", { color: "#111111", connection: 1 });
+  set("/a", { color: "#222222", connection: 1 });
+  generation = 2;
+  gate.resolve();
+  await done;
+  assert.deepEqual(sent, []);
+
+  await set("/a", { color: "#333333", connection: 2 });
+  assert.deepEqual(sent, ["/a=#333333"]);
+});

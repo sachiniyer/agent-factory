@@ -2195,18 +2195,25 @@ function refreshRegisteredProjects(): void {
 }
 
 /** Sets a project's color. A project known only from its sessions has no registry
- *  record to hold a color, so it is registered first (idempotent on the daemon). */
-const writeProjectColor = createLatestWriter(async (root, color) => {
-  const tok = token;
-  if (tok === null) return;
-  const record = store.get().registeredProjects.find((r) => r.root === root);
-  const projectId = record ? record.id : (await registerProject(root, tok)).id;
-  await setProjectColor(projectId, color, tok);
-  refreshRegisteredProjects();
-}, (e: unknown) => surfaceMutationError(e));
+ *  record to hold a color, so it is registered first (idempotent on the daemon).
+ *  Each choice is fenced to the connection and credential it was made under. */
+const writeProjectColor = createLatestWriter<{ color: string; tok: string; connection: number }>(
+  async (root, { color, tok, connection }) => {
+    const current = (): boolean => connection === connectionGeneration && token === tok;
+    if (!current()) return;
+    const record = store.get().registeredProjects.find((r) => r.root === root);
+    const projectId = record ? record.id : (await registerProject(root, tok)).id;
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e: unknown) => surfaceMutationError(e),
+);
 
 function doSetProjectColor(root: string, color: string): void {
-  void writeProjectColor(root, color);
+  const tok = token;
+  if (tok === null) return;
+  void writeProjectColor(root, { color, tok, connection: connectionGeneration });
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring

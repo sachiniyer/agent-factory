@@ -18346,10 +18346,10 @@ function createLatestWriter(write, onError) {
   const waiting = /* @__PURE__ */ new Map();
   const draining = /* @__PURE__ */ new Map();
   const drain = async (key) => {
-    for (let value = waiting.get(key); value !== void 0; value = waiting.get(key)) {
+    for (let next = waiting.get(key); next !== void 0; next = waiting.get(key)) {
       waiting.delete(key);
       try {
-        await write(key, value);
+        await write(key, next.value);
       } catch (e) {
         onError(e);
       }
@@ -18357,7 +18357,7 @@ function createLatestWriter(write, onError) {
     draining.delete(key);
   };
   return (key, value) => {
-    waiting.set(key, value);
+    waiting.set(key, { value });
     const running = draining.get(key);
     if (running) return running;
     const started = drain(key);
@@ -19612,16 +19612,22 @@ function commitRegisteredProjects(projects) {
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
-var writeProjectColor = createLatestWriter(async (root2, color) => {
+var writeProjectColor = createLatestWriter(
+  async (root2, { color, tok, connection }) => {
+    const current = () => connection === connectionGeneration && token === tok;
+    if (!current()) return;
+    const record = store.get().registeredProjects.find((r) => r.root === root2);
+    const projectId = record ? record.id : (await registerProject(root2, tok)).id;
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e) => surfaceMutationError(e)
+);
+function doSetProjectColor(root2, color) {
   const tok = token;
   if (tok === null) return;
-  const record = store.get().registeredProjects.find((r) => r.root === root2);
-  const projectId = record ? record.id : (await registerProject(root2, tok)).id;
-  await setProjectColor(projectId, color, tok);
-  refreshRegisteredProjects();
-}, (e) => surfaceMutationError(e));
-function doSetProjectColor(root2, color) {
-  void writeProjectColor(root2, color);
+  void writeProjectColor(root2, { color, tok, connection: connectionGeneration });
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
