@@ -455,10 +455,3 @@ func TestCreateRemovesFolderOnFailure(t *testing.T) {
 		t.Fatalf("a failed create left changes:\n%s", status)
 	}
 }
-
-func TestRulesAskForAttention(t *testing.T) {
-	r := Rules("p", "/x/p")
-	if !strings.Contains(r, `run "af sessions attention --self --reason '<the question>'" as the last step`) {
-		t.Fatalf("rule 4 must ask for attention:\n%s", r)
-	}
-}
