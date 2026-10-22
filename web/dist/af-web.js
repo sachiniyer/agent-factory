@@ -18356,13 +18356,19 @@ function createLatestWriter(write, onError) {
     }
     draining.delete(key);
   };
-  return (key, value) => {
-    waiting.set(key, { value });
-    const running = draining.get(key);
-    if (running) return running;
-    const started = drain(key);
-    draining.set(key, started);
-    return started;
+  return {
+    set(key, value) {
+      waiting.set(key, { value });
+      const running = draining.get(key);
+      if (running) return running;
+      const started = drain(key);
+      draining.set(key, started);
+      return started;
+    },
+    cancel(key) {
+      waiting.delete(key);
+      return draining.get(key) ?? Promise.resolve();
+    }
   };
 }
 
@@ -19053,7 +19059,7 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(() => {
+        void projectColorWriter.cancel(root2).then(() => deleteProject(root2, tok)).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
@@ -19612,12 +19618,11 @@ function commitRegisteredProjects(projects) {
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
-var writeProjectColor = createLatestWriter(
-  async (root2, { color, tok, connection }) => {
+var projectColorWriter = createLatestWriter(
+  async (root2, { color, tok, connection, projectId: known }) => {
     const current = () => isCurrentConnection(connection, tok);
     if (!current()) return;
-    const record = store.get().registeredProjects.find((r) => r.root === root2);
-    const projectId = record ? record.id : (await registerProject(root2, tok)).id;
+    const projectId = known ?? (await registerProject(root2, tok)).id;
     if (!current()) return;
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();
@@ -19632,7 +19637,8 @@ function isCurrentConnection(connection, tok) {
 function doSetProjectColor(root2, color) {
   const tok = token;
   if (tok === null) return;
-  void writeProjectColor(root2, { color, tok, connection: connectionGeneration });
+  const projectId = store.get().registeredProjects.find((r) => r.root === root2)?.id ?? null;
+  void projectColorWriter.set(root2, { color, tok, connection: connectionGeneration, projectId });
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {

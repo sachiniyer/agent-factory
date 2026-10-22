@@ -16,7 +16,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: 
 test("a burst of choices writes the first, then only the latest, in order", async () => {
   const calls: string[] = [];
   const gates: Array<ReturnType<typeof deferred>> = [];
-  const set = createLatestWriter((key, value) => {
+  const { set } = createLatestWriter((key, value) => {
     calls.push(`${key}=${value}`);
     const gate = deferred();
     gates.push(gate);
@@ -40,7 +40,7 @@ test("a burst of choices writes the first, then only the latest, in order", asyn
 test("keys write independently and a failure does not stop the next write", async () => {
   const calls: string[] = [];
   const errors: unknown[] = [];
-  const set = createLatestWriter(async (key, value) => {
+  const { set } = createLatestWriter(async (key, value) => {
     calls.push(`${key}=${value}`);
     if (value === "bad") throw new Error("boom");
   }, (e) => errors.push(e));
@@ -57,7 +57,7 @@ test("a failed write reports the value it was made under, so a stale connection'
   let generation = 1;
   const surfaced: unknown[] = [];
   const gate = deferred();
-  const set = createLatestWriter<{ color: string; connection: number }>(
+  const { set } = createLatestWriter<{ color: string; connection: number }>(
     async () => {
       await gate.promise;
       throw new Error("unauthorized");
@@ -80,7 +80,7 @@ test("a queued choice keeps the connection it was made under, so a reconnect can
   const sent: string[] = [];
   const gate = deferred();
   let first = true;
-  const set = createLatestWriter<{ color: string; connection: number }>(async (key, { color, connection }) => {
+  const { set } = createLatestWriter<{ color: string; connection: number }>(async (key, { color, connection }) => {
     if (first) {
       first = false;
       await gate.promise;
@@ -98,4 +98,24 @@ test("a queued choice keeps the connection it was made under, so a reconnect can
 
   await set("/a", { color: "#333333", connection: 2 });
   assert.deepEqual(sent, ["/a=#333333"]);
+});
+
+test("cancel drops a waiting choice and settles after the in-flight write, so a delete lands last", async () => {
+  const log: string[] = [];
+  const gate = deferred();
+  const writer = createLatestWriter((key, value) => {
+    log.push(`write ${key}=${value}`);
+    return gate.promise;
+  }, (e) => assert.fail(String(e)));
+
+  void writer.set("/a", "#111111");
+  void writer.set("/a", "#222222");
+  const deleted = writer.cancel("/a").then(() => log.push("delete /a"));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(log, ["write /a=#111111"]);
+
+  gate.resolve();
+  await deleted;
+  assert.deepEqual(log, ["write /a=#111111", "delete /a"]);
+  await writer.cancel("/b");
 });

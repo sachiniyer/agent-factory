@@ -1154,7 +1154,8 @@ function openDeleteProject(root: string, label: string): void {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root, tok)
+        void projectColorWriter.cancel(root)
+          .then(() => deleteProject(root, tok))
           .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
@@ -2196,13 +2197,14 @@ function refreshRegisteredProjects(): void {
 
 /** Sets a project's color. A project known only from its sessions has no registry
  *  record to hold a color, so it is registered first (idempotent on the daemon).
- *  Each choice is fenced to the connection and credential it was made under. */
-const writeProjectColor = createLatestWriter<{ color: string; tok: string; connection: number }>(
-  async (root, { color, tok, connection }) => {
+ *  Each choice is fenced to the connection and credential it was made under, and
+ *  keeps the project id it was made for, so a rebind cannot turn it into a new
+ *  registration of the old root. Deleting the project cancels it (openDeleteProject). */
+const projectColorWriter = createLatestWriter<{ color: string; tok: string; connection: number; projectId: string | null }>(
+  async (root, { color, tok, connection, projectId: known }) => {
     const current = (): boolean => isCurrentConnection(connection, tok);
     if (!current()) return;
-    const record = store.get().registeredProjects.find((r) => r.root === root);
-    const projectId = record ? record.id : (await registerProject(root, tok)).id;
+    const projectId = known ?? (await registerProject(root, tok)).id;
     if (!current()) return;
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();
@@ -2219,7 +2221,8 @@ function isCurrentConnection(connection: number, tok: string): boolean {
 function doSetProjectColor(root: string, color: string): void {
   const tok = token;
   if (tok === null) return;
-  void writeProjectColor(root, { color, tok, connection: connectionGeneration });
+  const projectId = store.get().registeredProjects.find((r) => r.root === root)?.id ?? null;
+  void projectColorWriter.set(root, { color, tok, connection: connectionGeneration, projectId });
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
