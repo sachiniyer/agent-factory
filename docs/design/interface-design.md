@@ -314,6 +314,7 @@ show plane separation, not text readability claims.
 | dead | `#883b43` | `#e4c8cd` | 7.244:1 | 10.551:1 | 6.617:1 | 9.063:1 |
 | archived | `#4c566a` | `#d8dee9` | 7.008:1 | 12.201:1 | 6.401:1 | 10.481:1 |
 | limit-reached | `#73436b` | `#dbb9d5` | 7.269:1 | 9.350:1 | 6.639:1 | 8.032:1 |
+| attention | `#856200` | `#f5c400` | 5.327:1 | 10.030:1 | 4.866:1 | 8.616:1 |
 
 Surface text on accent: light **6.441:1**, dark **5.278:1**.
 Ink/muted hierarchy: light **1.693:1**, dark **1.689:1**.
@@ -376,7 +377,7 @@ TUI focus is an accent frame plus text. Web touch targets are at least 44px high
 
 No animated indicators: no spinner, pulse or cycling glyph. The one exception is
 the web rail's needs-attention dot, which blinks so a waiting agent is visible
-from across the screen, and is static under reduced motion. Connecting…,
+from across the screen, and is static and ringed under reduced motion. Connecting…,
 Creating… and Running are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.

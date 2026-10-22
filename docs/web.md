@@ -72,8 +72,8 @@ such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 Agents learn `af sessions attention --self` from the af skill, and run it only when
 they are blocked on a decision or question that only you can answer. The yellow
 circle clears when you type into the agent pane, view the agent tab, or when the
-agent starts work again after it went idle. It is static when your system asks for
-reduced motion.
+agent starts work again after it went idle. When your system asks for reduced
+motion, it does not blink and has a ring around it.
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the

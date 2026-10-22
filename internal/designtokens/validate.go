@@ -60,7 +60,7 @@ func validate(t Tokens) error {
 	// These are the only two component backgrounds. Selection uses raised with
 	// an accent marker, not a separate fill or a computed custom palette.
 	for _, bg := range []string{"surface", "surface-raised"} {
-		for _, fg := range append([]string{"ink", "ink-muted", "accent"}, stateColors(t)...) {
+		for _, fg := range append([]string{"ink", "ink-muted", "accent", "attention"}, stateColors(t)...) {
 			if err := contrastPair(t, fg, bg, 4.5); err != nil {
 				return err
 			}

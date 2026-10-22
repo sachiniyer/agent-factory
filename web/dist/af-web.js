@@ -6482,8 +6482,8 @@ function formatLimitReset(reset, now) {
 }
 
 // src/attention_seen.ts
-function attentionSeen(state, pageInFront2) {
-  if (!pageInFront2 || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
+function attentionSeen(state, paneExposed) {
+  if (!paneExposed || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
     return null;
   }
   if (!state.shownTabs.includes(0)) {
@@ -6492,23 +6492,26 @@ function attentionSeen(state, pageInFront2) {
   const s = state.sessions.find((x) => x.id === state.selectedId);
   return s && hasAttention(s) ? state.selectedId : null;
 }
+function agentPaneExposed(doc) {
+  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null;
+}
 var AttentionClearer = class {
   constructor(clear) {
     this.clear = clear;
   }
   sent = /* @__PURE__ */ new Set();
-  note(state, pageInFront2) {
-    const id = attentionSeen(state, pageInFront2);
+  note(state, paneExposed) {
+    const id = attentionSeen(state, paneExposed);
     if (id === null) {
       return;
     }
-    const s = state.sessions.find((x) => x.id === id);
-    const key = `${id}@${s?.attention?.set_at ?? ""}`;
+    const setAt = state.sessions.find((x) => x.id === id)?.attention?.set_at ?? "";
+    const key = `${id}@${setAt}`;
     if (this.sent.has(key)) {
       return;
     }
     this.sent.add(key);
-    this.clear(id).catch(() => this.sent.delete(key));
+    this.clear(id, setAt).catch(() => this.sent.delete(key));
   }
 };
 
@@ -7025,8 +7028,8 @@ async function killSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
-async function clearAttention(id, token2) {
-  await af("SetAttention", { id, clear: true }, token2);
+async function clearAttention(id, setAt, token2) {
+  await af("SetAttention", { id, clear: true, set_at: setAt }, token2);
 }
 async function archiveSession(id, title, token2) {
   const result = await af("ArchiveSession", { id, title, repo_id: "" }, token2);
@@ -18379,7 +18382,8 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     );
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
+  const main = h("div", { class: "af-row-main" }, title, stateLabel, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = previous ?? h("li", { class: cls });
   row.className = cls;
@@ -18533,13 +18537,10 @@ var pendingRestores = new PendingRestores(
 );
 var connectionGate = createLatestRequestGate();
 var attentionClearer = new AttentionClearer(
-  (id) => token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, token)
+  (id, setAt) => token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, setAt, token)
 );
-function pageInFront() {
-  return document.visibilityState === "visible" && document.hasFocus();
-}
 function noteAttentionSeen() {
-  attentionClearer.note(store.get(), pageInFront());
+  attentionClearer.note(store.get(), agentPaneExposed(document));
 }
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
@@ -18583,6 +18584,7 @@ function mount() {
   store.subscribe(noteAttentionSeen);
   window.addEventListener("focus", noteAttentionSeen);
   document.addEventListener("visibilitychange", noteAttentionSeen);
+  document.addEventListener("focusin", noteAttentionSeen);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
   watchSystemTheme();
