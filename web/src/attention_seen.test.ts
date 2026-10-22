@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AttentionClearer, attentionSeen, type AttentionView } from "./attention_seen.js";
+import { agentPaneExposed, AttentionClearer, attentionSeen, type AttentionView } from "./attention_seen.js";
 import { Liveness, type SessionData } from "./types.js";
 
 function session(id: string, setAt: string | null): SessionData {
@@ -45,14 +45,14 @@ test("attention_seen: the tasks view and other sessions do not count", () => {
 
 test("attention_seen: one clear per request, a new request clears again", async () => {
   const sent: string[] = [];
-  const c = new AttentionClearer(async (id) => {
-    sent.push(id);
+  const c = new AttentionClearer(async (id, setAt) => {
+    sent.push(`${id}@${setAt}`);
   });
   c.note(view(), true);
   c.note(view(), true);
-  assert.deepEqual(sent, ["a"]);
+  assert.deepEqual(sent, ["a@t1"]);
   c.note(view({ sessions: [session("a", "t2")] }), true);
-  assert.deepEqual(sent, ["a", "a"]);
+  assert.deepEqual(sent, ["a@t1", "a@t2"], "each clear names the request it saw");
 });
 
 test("attention_seen: a failed clear is retried on the next note", async () => {
@@ -66,4 +66,16 @@ test("attention_seen: a failed clear is retried on the next note", async () => {
   await Promise.resolve();
   c.note(view(), true);
   assert.equal(calls, 2);
+});
+
+test("attention_seen: a modal dialog over the pane hides it", () => {
+  const page = (modal: boolean, visibilityState: DocumentVisibilityState = "visible", focus = true) => ({
+    visibilityState,
+    hasFocus: () => focus,
+    querySelector: (sel: string) => (modal && sel === '[aria-modal="true"]' ? {} : null),
+  });
+  assert.equal(agentPaneExposed(page(false)), true);
+  assert.equal(agentPaneExposed(page(true)), false);
+  assert.equal(agentPaneExposed(page(false, "hidden")), false);
+  assert.equal(agentPaneExposed(page(false, "visible", false)), false);
 });

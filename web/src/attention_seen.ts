@@ -10,9 +10,9 @@ export interface AttentionView {
 }
 
 /** The id of the session whose attention request the user is now looking at:
- *  selected, its agent tab (index 0) shown in a pane, and the page in front. */
-export function attentionSeen(state: AttentionView, pageInFront: boolean): string | null {
-  if (!pageInFront || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
+ *  selected, its agent tab (index 0) shown in a pane, and the pane exposed. */
+export function attentionSeen(state: AttentionView, paneExposed: boolean): string | null {
+  if (!paneExposed || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
     return null;
   }
   if (!state.shownTabs.includes(0)) {
@@ -22,24 +22,37 @@ export function attentionSeen(state: AttentionView, pageInFront: boolean): strin
   return s && hasAttention(s) ? state.selectedId : null;
 }
 
+/** The parts of `document` that say whether the agent pane is in front of the user. */
+export interface PageView {
+  visibilityState: DocumentVisibilityState;
+  hasFocus(): boolean;
+  querySelector(selector: string): unknown;
+}
+
+/** True when the page is visible and focused and no modal dialog covers the pane. */
+export function agentPaneExposed(doc: PageView): boolean {
+  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null;
+}
+
 /** Sends one clear per attention request, keyed by its set_at, so repaints while
- *  the request is in flight do not repeat it. A failed clear may be retried. */
+ *  the request is in flight do not repeat it. The clear names that set_at, so it
+ *  cannot remove a newer request. A failed clear may be retried. */
 export class AttentionClearer {
   private sent = new Set<string>();
 
-  constructor(private readonly clear: (id: string) => Promise<void>) {}
+  constructor(private readonly clear: (id: string, setAt: string) => Promise<void>) {}
 
-  note(state: AttentionView, pageInFront: boolean): void {
-    const id = attentionSeen(state, pageInFront);
+  note(state: AttentionView, paneExposed: boolean): void {
+    const id = attentionSeen(state, paneExposed);
     if (id === null) {
       return;
     }
-    const s = state.sessions.find((x) => x.id === id);
-    const key = `${id}@${s?.attention?.set_at ?? ""}`;
+    const setAt = state.sessions.find((x) => x.id === id)?.attention?.set_at ?? "";
+    const key = `${id}@${setAt}`;
     if (this.sent.has(key)) {
       return;
     }
     this.sent.add(key);
-    this.clear(id).catch(() => this.sent.delete(key));
+    this.clear(id, setAt).catch(() => this.sent.delete(key));
   }
 }

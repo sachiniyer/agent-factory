@@ -3452,7 +3452,10 @@ export function sessionRow(
     );
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  // The glyph is aria-hidden and the rail shows no state words, so the option's
+  // accessible name carries the state in visually hidden text.
+  const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
+  const main = h("div", { class: "af-row-main" }, title, stateLabel, branch);
 
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"

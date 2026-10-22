@@ -198,6 +198,22 @@ test("an actionable row still opens on click and carries no disabled marker", ()
   assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
 });
 
+test("each rail option names its state in visually hidden text", () => {
+  const hidden = (el: RowElement): string[] => [
+    ...(el.className === "af-visually-hidden" ? [el.textContent.trim()] : []),
+    ...el.children.flatMap(hidden),
+  ];
+  const cases: Array<[Partial<SessionData>, string]> = [
+    [{ liveness: Liveness.Ready }, "Idle"],
+    [{ liveness: Liveness.Running }, "Working"],
+    [{ liveness: Liveness.Ready, attention: { set_at: "2026-10-22T00:00:00Z" } }, "Needs attention"],
+    [{ liveness: Liveness.Archived }, "Archived"],
+  ];
+  for (const [over, label] of cases) {
+    assert.deepEqual(hidden(row(over).el), [label]);
+  }
+});
+
 test("an unmanaged inert row stays disabled without a managed-row reason", () => {
   // A creating row has no session yet and no Kill button — the pre-existing
   // aria-disabled case the fix must not regress or over-explain.
