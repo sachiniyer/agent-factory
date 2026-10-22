@@ -22,6 +22,20 @@ const (
 		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents\n"
 )
 
+// The limit check runs before the working check, so a usage-limit banner wins
+// even if the working chrome is still on screen.
+func TestRefreshStatuses_ClaudeUsageLimitBeatsWorkingChrome(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	pane := "  ⎿  " + claudeLimitBanner + ".\n" + claudePaneWorking
+	backend := &stillPaneBackend{FakeBackend: session.NewFakeBackend(), content: pane}
+	inst := registerStarted(t, manager, repoID, repoPath, "clauding", backend, true, session.Running)
+
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLimitReached {
+		t.Fatalf("liveness = %v, want LiveLimitReached", got)
+	}
+}
+
 func TestRefreshStatuses_ClaudeWorkingBehindStillPaneStaysRunning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &stillPaneBackend{FakeBackend: session.NewFakeBackend(), content: claudePaneWorking}

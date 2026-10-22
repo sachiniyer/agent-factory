@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -38,6 +39,43 @@ func TestIsWorkingContentClaudeRealCapture(t *testing.T) {
 				t.Errorf("IsWorkingContent(%s, claude) = %v, want %v", tc.fixture, got, tc.want)
 			}
 		})
+	}
+}
+
+// These fixtures are claude_working_tool.ansi with the tool row replaced by the
+// text Claude Code prints, not live captures. A wrong "true" here holds a
+// session Running while it waits for the user, so `af sessions watch` hangs.
+func TestIsWorkingContentClaudeWaitingFrames(t *testing.T) {
+	tests := []struct {
+		fixture string
+		want    bool
+	}{
+		{"testdata/claude_idle_interrupted.ansi", false},
+		{"testdata/claude_usage_limit.ansi", false},
+		// Claude Code retries a rate-limited request without user input, so the
+		// turn is still running.
+		{"testdata/claude_working_api_retry.ansi", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.fixture, func(t *testing.T) {
+			raw, err := os.ReadFile(tc.fixture)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			if got := IsWorkingContent(string(raw), tmux.ProgramClaude); got != tc.want {
+				t.Errorf("IsWorkingContent(%s, claude) = %v, want %v", tc.fixture, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeUsageLimitFixtureIsALimitHit(t *testing.T) {
+	raw, err := os.ReadFile("testdata/claude_usage_limit.ansi")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if hit, _, _ := NewLimitDetector(nil).Check(string(raw), tmux.ProgramClaude, time.Now()); !hit {
+		t.Error("LimitDetector missed the usage-limit banner in claude_usage_limit.ansi")
 	}
 }
 
