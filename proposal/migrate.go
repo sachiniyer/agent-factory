@@ -3,7 +3,6 @@ package proposal
 import (
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"io"
 	"io/fs"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"golang.org/x/sys/unix"
 )
 
 // legacyGitDir is where builds before the git dir moved out of the docs
