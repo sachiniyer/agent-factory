@@ -124,7 +124,7 @@ func TestGroupKillPrecedesLeaderReap(t *testing.T) {
 		return kill(target, sig)
 	}
 
-	if _, err := reapWatchGroupLeader(cmd); err != nil {
+	if _, err := reapWatchGroupLeader(cmd, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := strconv.Itoa(-pid) + "/" + syscall.SIGKILL.String() + "/unreaped=true"
@@ -275,7 +275,7 @@ func TestReapFallbackKeepsTheWatchdogUntilExit(t *testing.T) {
 	}
 	pid := cmd.Process.Pid
 	var leaderRunning bool
-	if _, err := reapWatchGroupLeader(cmd, func() { leaderRunning = !processGone(pid) }); err != nil {
+	if _, err := reapWatchGroupLeader(cmd, nil, func() { leaderRunning = !processGone(pid) }); err != nil {
 		t.Fatal(err)
 	}
 	if leaderRunning {
@@ -396,7 +396,7 @@ func TestFallbackReapKeepsTheGroupNumberPinned(t *testing.T) {
 	pgid := cmd.Process.Pid
 
 	pinned := false
-	groupKilled, err := reapWatchGroupLeader(cmd, func() {
+	groupKilled, err := reapWatchGroupLeader(cmd, nil, func() {
 		pinned = syscall.Kill(-pgid, 0) == nil
 	})
 	if err != nil {
@@ -411,5 +411,37 @@ func TestFallbackReapKeepsTheGroupNumberPinned(t *testing.T) {
 	}
 	if len(unpinned) > 0 {
 		t.Fatalf("group signals sent with the number unpinned: %v", unpinned)
+	}
+}
+
+// TestWatchGroupAnchorPinsUntilReleased pins the anchor's contract in a live
+// group: spawned while the leader runs, it survives the group's SIGTERM —
+// what a stop sends first — and still holds the group's number after the
+// leader has been reaped, so a group signal in that window can only name
+// this group. Releasing it ends the group.
+func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	release := startWatchGroupAnchor(pgid)
+	if release == nil {
+		t.Fatal("the anchor could not join a group whose leader was running")
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM to the group: %v", err)
+	}
+	// The leader dies of the TERM (or the insurance KILL) and is reaped —
+	// after this only the anchor can answer for the group.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		t.Fatalf("the anchor did not pin the group past the leader's reap and the group's TERM: %v", err)
+	}
+	release()
+	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the group should be empty once the anchor is released, got %v", err)
 	}
 }

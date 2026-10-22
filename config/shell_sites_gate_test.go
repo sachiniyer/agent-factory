@@ -143,6 +143,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	}},
 
 	// ---- af-authored scripts ----
+	"daemon/watcher_lifeline.go:startWatchGroupAnchor": {{
+		class: afAuthored,
+		note: "the watch run's group anchor: a fixed `trap '' TERM; exec /bin/cat` that keeps the run's " +
+			"process group non-empty until it is reaped, so no group signal can name a reused number (#5329)",
+	}},
 	"config/claude_probe.go:probeClaudeCommand": {
 		{class: afAuthored, note: "zsh probe: source ~/.zshrc, then `which claude`"},
 		{class: afAuthored, note: "bash probe: -i so aliases are defined, then `type claude`"},

@@ -573,6 +573,17 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	if w.startedCh != nil {
 		w.startedOnce.Do(func() { close(w.startedCh) })
 	}
+	// The run's anchor pins the process-group number for the run's whole
+	// life: a live member that ignores the group's SIGTERM, so kill(-pgid)
+	// can only ever name this run's own group — while the watchdog signals
+	// it on a stop, and while the reaper cleans it up after the leader is
+	// gone (reapWatchGroupLeader). Its stdin pipe is held here, so this
+	// daemon's death ends it too.
+	anchorRelease := spawnWatchGroupAnchor(cmd.Process.Pid)
+	if anchorRelease == nil {
+		log.WarningLog.Printf("watch task %s: cannot spawn a process-group anchor for the watch command; "+
+			"if the leader's exit cannot be awaited without reaping it, the group cleanup kill is skipped", w.taskID)
+	}
 	_ = pw.Close() // the child holds its own dup
 	if stderrW != nil {
 		_ = stderrW.Close()
@@ -624,10 +635,10 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// not outlive the watcher. This also closes any inherited stdout/stderr
 	// write ends, so both reader goroutines are guaranteed to reach EOF. The
 	// watchdog is joined, and the kill sent, while the group's number is
-	// still pinned — by the unreaped leader, or by the anchor member on the
-	// fallback path — so neither can name a reused group
+	// still pinned — by the unreaped leader, and by the anchor member the
+	// run has kept since it started — so neither can name a reused group
 	// (reapWatchGroupLeader).
-	groupKilled, waitErr := reapWatchGroupLeader(cmd, func() {
+	groupKilled, waitErr := reapWatchGroupLeader(cmd, anchorRelease, func() {
 		close(leaderExited)
 		<-watchdogDone
 	})
