@@ -548,7 +548,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		stderrFile = stderrW
 	}
 
-	cmd, lifeline, err := w.sup.startWatchProcess(w.taskID, w.cmdStr, func(cmd *exec.Cmd) {
+	cmd, lifeline, err := w.sup.startWatchProcess(w.taskID, w.cmdStr, w.stopCh, func(cmd *exec.Cmd) {
 		cmd.Dir = w.dir
 		cmd.Env = env
 		// Own process group so the whole tree — including grandchildren the

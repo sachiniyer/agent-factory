@@ -31,6 +31,11 @@ const watchLifelineAckTimeout = 10 * time.Second
 // own instead of silently orphaning watch children until daemon restart.
 const watchLifelineProbeRetry = time.Minute
 
+// errWatchStopped aborts a run start: the watcher was stopped while its
+// lifeline probe was in flight, so the run never began and must not fall
+// back to a direct spawn.
+var errWatchStopped = errors.New("watch run stopped during the lifeline probe")
+
 // resolveWatchLifelineExe names the binary the daemon execs as the watch
 // lifeline (#5329): its own.
 //
@@ -81,7 +86,7 @@ func (l *watchLifeline) Close() {
 // own result stands. The lifeline is reaped, and it alone held the write end,
 // so the read ends at EOF; the timeout only bounds a broken invariant.
 func (l *watchLifeline) shellResult(waitErr error) error {
-	line, _ := readWatchLifelineAck(l.ackR, l.acks, time.Second)
+	line, _ := readWatchLifelineAck(l.ackR, l.acks, time.Second, nil)
 	code, sig, ok := watchlifeline.ParseExit(line)
 	switch {
 	case !ok:
@@ -122,12 +127,12 @@ func (e *watchShellExit) Error() string {
 // outputs are the read ends of the pipes configure attaches as stdout and
 // stderr. A binary that ran but did not speak the protocol wrote to them too,
 // so its output is drained from them before the shell gets the same pipes.
-func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure func(*exec.Cmd), outputs ...*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
+func (s *watcherSupervisor) startWatchProcess(taskID, script string, stop <-chan struct{}, configure func(*exec.Cmd), outputs ...*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err error) {
 	var execErr error
 	exe := s.lifelineExe
 	if exe != "" && time.Now().UnixNano() >= s.lifelineProbeHold.Load() {
 		var spoke bool
-		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, configure, outputs)
+		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, stop, configure, outputs)
 		if spoke {
 			// The binary answered the protocol — even an answer of "the shell
 			// would not start" proves it — so any earlier failure is cleared.
@@ -136,6 +141,10 @@ func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure f
 					"watch commands run under the lifeline", taskID, exe)
 			}
 			return cmd, lifeline, err
+		}
+		// A stopped watcher never falls back: its run must not start at all.
+		if errors.Is(err, errWatchStopped) {
+			return nil, nil, err
 		}
 	}
 	cmd = systemdunit.NewBoundChildCommand(s.shell, "-c", script)
@@ -157,7 +166,7 @@ func (s *watcherSupervisor) startWatchProcess(taskID, script string, configure f
 // when the lifeline could not even be exec'd, which the caller judges against
 // its own start; a binary that ran but did not speak the protocol is recorded
 // here.
-func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, configure func(*exec.Cmd), outputs []*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err, execErr error, spoke bool) {
+func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, stop <-chan struct{}, configure func(*exec.Cmd), outputs []*os.File) (cmd *exec.Cmd, lifeline *watchLifeline, err, execErr error, spoke bool) {
 	lifelineR, lifelineW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create watch lifeline pipe: %w", err), nil, true
@@ -188,7 +197,7 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		return nil, nil, nil, startErr, false
 	}
 
-	line, ackErr := readWatchLifelineAck(ackR, acks, watchLifelineAckTimeout)
+	line, ackErr := readWatchLifelineAck(ackR, acks, watchLifelineAckTimeout, stop)
 	supported, started, shellErr := watchlifeline.ParseAck(line)
 	if !supported || !started {
 		// The group's leader is this daemon's own unreaped child, so the group
@@ -199,6 +208,9 @@ func (s *watcherSupervisor) startWithLifeline(taskID, exe, script string, config
 		_, _ = reapWatchGroupLeader(cmd, nil)
 		_ = lifelineW.Close()
 		_ = ackR.Close()
+		if errors.Is(ackErr, errWatchStopped) {
+			return nil, nil, errWatchStopped, nil, false
+		}
 		if !supported {
 			reason := fmt.Sprintf("no ack: %s", describeWatchLifelineAck(line, ackErr, cmd))
 			// What it wrote is not the task's output — an older af's usage
@@ -258,8 +270,10 @@ func (s *watcherSupervisor) lifelineUnusable(taskID, exe, reason string) {
 }
 
 // readWatchLifelineAck reads one line from the ack pipe f through its reader
-// br, giving up after timeout.
-func readWatchLifelineAck(f *os.File, br *bufio.Reader, timeout time.Duration) (string, error) {
+// br, giving up after timeout or when stop closes — a watcher being stopped
+// cannot wait out the timeout (it exceeds the stop grace). A nil stop never
+// fires.
+func readWatchLifelineAck(f *os.File, br *bufio.Reader, timeout time.Duration, stop <-chan struct{}) (string, error) {
 	type result struct {
 		line string
 		err  error
@@ -272,8 +286,11 @@ func readWatchLifelineAck(f *os.File, br *bufio.Reader, timeout time.Duration) (
 	select {
 	case res := <-got:
 		return res.line, res.err
-	case <-time.After(timeout):
+	case <-stop:
 		// Closing the read end unblocks the reader goroutine.
+		_ = f.Close()
+		return "", errWatchStopped
+	case <-time.After(timeout):
 		_ = f.Close()
 		return "", fmt.Errorf("no ack within %s", timeout)
 	}

@@ -556,3 +556,42 @@ func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
 		t.Fatalf("the group should be empty once the anchor is released, got %v", err)
 	}
 }
+
+// TestStopDuringLifelineProbeAbortsTheRun: a stop during the ack wait ends
+// the run at once — stopWatchers joins the run loop, so waiting out the
+// 10-second timeout would exceed the stop grace — and the run must not fall
+// back to starting the shell directly.
+func TestStopDuringLifelineProbeAbortsTheRun(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "shell-ran")
+	mute := filepath.Join(dir, "af-mute")
+	// Never acks and never exits: without the stop channel the probe can
+	// only end at the 10-second timeout.
+	stub := "#!/bin/sh\nexec sleep 60\n"
+	if err := os.WriteFile(mute, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestSupervisor(t, staticTasks())
+	s.lifelineExe = mute
+
+	w := s.newTaskWatcher(watchTask("stopped", "touch "+marker+"; sleep 60", dir))
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.runOnce()
+		done <- err
+	}()
+	// Give the probe time to get in flight, then stop the watcher.
+	time.Sleep(200 * time.Millisecond)
+	close(w.stopCh)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errWatchStopped) {
+			t.Fatalf("runOnce returned %v, want the stopped error", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("a stopped watcher waited out the lifeline ack timeout")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the stopped run still spawned its shell directly")
+	}
+}
