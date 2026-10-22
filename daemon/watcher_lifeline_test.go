@@ -563,11 +563,13 @@ func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
 // the stale cooldown expires.
 func TestLifelineProbeSuccessClearsAPendingHold(t *testing.T) {
 	dir := t.TempDir()
+	up := filepath.Join(dir, "probe-up")
 	stall := filepath.Join(dir, "ack-now")
 	lagging := filepath.Join(dir, "af-lag")
-	// A lifeline that speaks the protocol but only once the test lets it:
-	// the probe is in flight while the racing failure below lands its hold.
-	stub := "#!/bin/sh\nwhile [ ! -f '" + stall + "' ]; do sleep 0.05; done\n" +
+	// A lifeline that speaks the protocol but only once the test lets it.
+	// The probe-up marker proves the daemon started the probe — its gate
+	// already ran — so the failure below lands while it is in flight.
+	stub := "#!/bin/sh\ntouch '" + up + "'\nwhile [ ! -f '" + stall + "' ]; do sleep 0.05; done\n" +
 		"printf '" + watchlifeline.AckStarted + "\\n' >&4\n" +
 		"printf '" + watchlifeline.AckExited + "0\\n' >&4\n"
 	if err := os.WriteFile(lagging, []byte(stub), 0o755); err != nil {
@@ -582,6 +584,15 @@ func TestLifelineProbeSuccessClearsAPendingHold(t *testing.T) {
 		_, err := w.runOnce()
 		done <- err
 	}()
+	for range 200 {
+		if _, err := os.Stat(up); err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, err := os.Stat(up); err != nil {
+		t.Fatal("the lifeline probe never started")
+	}
 	// What a concurrent failed probe records (lifelineUnusable) while this
 	// one is still waiting for its ack.
 	s.lifelineProbeHold.Store(time.Now().Add(watchLifelineProbeRetry).UnixNano())
