@@ -263,6 +263,18 @@ export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
   return "";
 }
 
+type FocusLike = Pick<HTMLElement, "getAttribute" | "textContent"> & { parentElement: { className: string } | null };
+
+/** Identifies a row control across a rebuild. The desktop icons and the phone menu
+ *  repeat the same labels, so the surface (parent group) is part of the key. */
+export function controlKey(el: FocusLike): { name: string; surface: string } {
+  return { name: el.getAttribute("aria-label") || el.textContent || "", surface: el.parentElement?.className ?? "" };
+}
+
+export function sameControlKey(a: { name: string; surface: string }, b: { name: string; surface: string }): boolean {
+  return a.name === b.name && a.surface === b.surface;
+}
+
 export interface TaskVerb {
   label: string;
   glyph: IconName;
@@ -322,7 +334,7 @@ export class TasksPane {
       .map((menu) => menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId));
     const active = document.activeElement as HTMLElement | null;
     const focusedId = active?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId;
-    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    const focused = active ? controlKey(active) : null;
     for (const menu of this.menus) menu.dispose();
     this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
@@ -330,10 +342,10 @@ export class TasksPane {
     for (const menu of this.menus) {
       if (openIds.has(menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId)) menu.open();
     }
-    if (focusedId && focusedName) {
+    if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
       const control = [...(row?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
-        .find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+        .find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
   }

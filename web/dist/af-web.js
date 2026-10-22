@@ -15327,6 +15327,12 @@ function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   }
   return "";
 }
+function controlKey(el2) {
+  return { name: el2.getAttribute("aria-label") || el2.textContent || "", surface: el2.parentElement?.className ?? "" };
+}
+function sameControlKey(a, b) {
+  return a.name === b.name && a.surface === b.surface;
+}
 function taskVerbs(t, actions2) {
   const triggerBlocked = canTrigger(t) ? void 0 : !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
   return [
@@ -15365,7 +15371,7 @@ var TasksPane = class {
     const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.closest("[data-task-id]")?.dataset.taskId));
     const active = document.activeElement;
     const focusedId = active?.closest("[data-task-id]")?.dataset.taskId;
-    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    const focused = active ? controlKey(active) : null;
     for (const menu of this.menus) menu.dispose();
     this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
@@ -15373,9 +15379,9 @@ var TasksPane = class {
     for (const menu of this.menus) {
       if (openIds.has(menu.el.closest("[data-task-id]")?.dataset.taskId)) menu.open();
     }
-    if (focusedId && focusedName) {
+    if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
-      const control = [...row?.querySelectorAll("button") ?? []].find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+      const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
   }

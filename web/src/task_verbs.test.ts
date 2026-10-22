@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { taskVerbs } from "./tasks.js";
+import { controlKey, sameControlKey, taskVerbs } from "./tasks.js";
 import type { TaskData } from "./types.js";
 
 function task(over: Partial<TaskData> = {}): TaskData {
@@ -39,4 +39,17 @@ test("a disabled task keeps Trigger in the list, blocked with a reason", () => {
 test("a watch task keeps Trigger in the list, blocked with a reason", () => {
   const trigger = taskVerbs(task({ cron_expr: "", watch_cmd: "true" }), noop).find((v) => v.label === "Trigger");
   assert.equal(trigger?.blocked, "Only scheduled tasks can be triggered");
+});
+
+test("a refresh restores focus to the same surface, not a same-named twin", () => {
+  const button = (surface: string, label: string | null, text: string) => ({
+    getAttribute: (name: string) => (name === "aria-label" ? label : null),
+    textContent: text,
+    parentElement: { className: surface },
+  });
+  const desktopEdit = controlKey(button("af-task-icons", "Edit", ""));
+  const phoneEdit = controlKey(button("af-term-menu", null, "Edit"));
+  assert.equal(desktopEdit.name, phoneEdit.name, "premise: both surfaces label the verb the same");
+  assert.equal(sameControlKey(desktopEdit, phoneEdit), false);
+  assert.equal(sameControlKey(phoneEdit, controlKey(button("af-term-menu", null, "Edit"))), true);
 });
