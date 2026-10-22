@@ -556,14 +556,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/status.ts rowDot (attention arm) → web/src/ui.ts sessionRow (blinking yellow dot; the reason in the row title)"
+        "pointer": "web/src/status.ts rowDot (attention arm) → web/src/ui.ts sessionRow (blinking yellow dot; the reason in the row title); web/src/attention_seen.ts AttentionClearer clears it via SetAttention when the agent tab is in view"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
       },
       "verdict": "deliberate",
-      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. The web rail is the surface that shows it; the TUI is not maintained in this fork. session.Instance owns the clear rules: typed input on the agent pane (daemon/attention.go attentionClearingBinding), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. The web rail is the surface that shows it; the TUI is not maintained in this fork. session.Instance owns the clear rules: typed input on the agent pane (daemon/attention.go attentionClearingBinding), the web showing the agent tab in a focused page (web/src/attention_seen.ts), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",
@@ -1744,6 +1744,7 @@
       "up": "tui.navigation"
     },
     "web_rpcs": {
+      "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
       "RegisterAccount": "session.accounts",
@@ -2417,6 +2418,17 @@
       }
     },
     "web_rpcs": {
+      "SetAttention": {
+        "reason": {
+          "ok": "The web only clears a request (clear: true). A reason belongs to setting one, which agents do with `af sessions attention --self`."
+        },
+        "repo_id": {
+          "ok": "The web addresses the session by its stable id, which wins over {title, repo_id} in SetAttentionRequest."
+        },
+        "title": {
+          "ok": "The web addresses the session by its stable id, which wins over {title, repo_id} in SetAttentionRequest."
+        }
+      },
       "ListAccounts": {
         "agent": {
           "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."

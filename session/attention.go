@@ -11,7 +11,8 @@ const MaxAttentionReasonLen = 500
 
 // Attention is an agent's explicit request for the user, set with
 // `af sessions attention --self`. It clears when the user types into the
-// agent pane, or when the agent starts work again after it went idle.
+// agent pane, opens the agent tab in the web UI, or when the agent starts work
+// again after it went idle.
 type Attention struct {
 	Reason string    `json:"reason,omitempty"`
 	SetAt  time.Time `json:"set_at"`
