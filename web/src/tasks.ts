@@ -263,6 +263,28 @@ export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
   return "";
 }
 
+export interface TaskVerb {
+  label: string;
+  glyph: IconName;
+  run: () => void;
+  /** Why the verb is unavailable; set means render it disabled. */
+  blocked?: string;
+}
+
+/** The row verbs both the desktop icons and the phone menu render, in order. */
+export function taskVerbs(t: TaskData, actions: Pick<TaskActions, "edit" | "trigger" | "remove">): TaskVerb[] {
+  const triggerBlocked = canTrigger(t)
+    ? undefined
+    : !t.enabled
+      ? "Enable the task to trigger it"
+      : "Only scheduled tasks can be triggered";
+  return [
+    { label: "Edit", glyph: "pencil", run: () => actions.edit(t) },
+    { label: "Trigger", glyph: "play", run: () => actions.trigger(t), blocked: triggerBlocked },
+    { label: "Remove", glyph: "trash", run: () => actions.remove(t) },
+  ];
+}
+
 /**
  * The tasks pane: build once (its `el` mounts into the app body), then
  * update(tasks) re-renders on a change. A small stateful class like the projects
@@ -411,35 +433,30 @@ export class TasksPane {
     toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
     toggle.addEventListener("click", () => this.actions.toggle(t));
 
-    const verbs: { label: string; glyph: IconName; run: () => void }[] = [
-      { label: "Edit", glyph: "pencil", run: () => this.actions.edit(t) },
-    ];
-    if (canTrigger(t)) {
-      verbs.push({ label: "Trigger", glyph: "play", run: () => this.actions.trigger(t) });
-    }
-    verbs.push({ label: "Remove", glyph: "trash", run: () => this.actions.remove(t) });
+    const verbs = taskVerbs(t, this.actions);
 
-    const iconBtns = verbs.map(({ label, glyph, run }) => {
-      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: label }, icon(glyph));
+    const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
       btn.setAttribute("aria-label", label);
-      btn.addEventListener("click", run);
+      if (blocked) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener("click", run);
+      }
       return btn;
     });
-    if (!canTrigger(t)) {
-      // Kept as a disabled slot so the icon columns line up across rows.
-      const why = !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
-      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: why }, icon("play"));
-      btn.setAttribute("aria-label", "Trigger");
-      btn.disabled = true;
-      iconBtns.splice(1, 0, btn);
-    }
 
     // Phones show the same verbs as a menu; CSS picks one of the two sets.
     const menu = actionsDisclosure(`Actions for ${t.name}`);
     this.menus.push(menu);
-    menu.panel.append(...verbs.map(({ label, glyph, run }) => {
+    menu.panel.append(...verbs.map(({ label, glyph, run, blocked }) => {
       const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
-      btn.addEventListener("click", run);
+      if (blocked) {
+        btn.disabled = true;
+        btn.title = blocked;
+      } else {
+        btn.addEventListener("click", run);
+      }
       return btn;
     }));
     menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
