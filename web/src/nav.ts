@@ -92,12 +92,15 @@ export type NavAction =
 /** Modifier flags the keybinds read. Alt gates the split-pane chords; Ctrl gates
  *  the ctrl+] detach. altGraph is `getModifierState("AltGraph")`: it excludes an
  *  AltGr-produced "]" (an AltGr key on many EU layouts) from the detach chord, since
- *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Shift and Meta
- *  are ignored so the chords never shadow a browser/OS shortcut. */
+ *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Meta is
+ *  ignored so the chords never shadow a browser/OS shortcut; Shift only picks the
+ *  t/T tab kind. */
 export interface KeyMods {
   alt?: boolean;
   ctrl?: boolean;
   altGraph?: boolean;
+  /** Picks the t/T tab kind; Caps Lock flips the key's case but not this. */
+  shift?: boolean;
 }
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
@@ -212,7 +215,7 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
     // t opens a terminal tab, T a VS Code tab; w closes the active non-agent tab.
     // Creation and closure each use their own capability verdict.
     if (key === "t" || key === "T") {
-      const tabKind = key === "t" ? "shell" : "vscode";
+      const tabKind = (mods.shift ?? key === "T") ? "vscode" : "shell";
       return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
     if (key === "w") {

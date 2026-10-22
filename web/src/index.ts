@@ -1549,6 +1549,10 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
+/** Session+kind creates in flight. The daemon names each CreateTab uniquely, so a
+ *  double-click would otherwise start two shells or VS Code servers. */
+const pendingTabCreates = new Set<string>();
+
 /** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
@@ -1566,19 +1570,27 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
     return;
   }
-  clearTabError();
   const selId = sel.id ?? "";
+  const pendingKey = `${selId}\u0000${kind}`;
+  if (pendingTabCreates.has(pendingKey)) {
+    return;
+  }
+  clearTabError();
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
   // rebind lands on the tab THIS create made.
   let createdName = "";
   guardedTabRebind(
     selId,
-    () =>
-      create(selId, sel.title, tok).then((name) => {
-        createdName = name;
-        return fetchProjectedSnapshot(tok);
-      }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok)
+        .then((name) => {
+          createdName = name;
+          return fetchProjectedSnapshot(tok);
+        })
+        .finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -3013,7 +3025,7 @@ function onKeydown(e: KeyboardEvent): void {
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey },
   );
   if (action.kind === "none") {
     // Not ours — including Escape while a terminal is focused, which now FORWARDS to

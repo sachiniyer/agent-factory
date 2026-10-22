@@ -6953,7 +6953,7 @@ function decideKey(key, ctx, mods = {}) {
       return { kind: "none" };
     }
     if (key === "t" || key === "T") {
-      const tabKind = key === "t" ? "shell" : "vscode";
+      const tabKind = mods.shift ?? key === "T" ? "vscode" : "shell";
       return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
     if (key === "w") {
@@ -19016,22 +19016,30 @@ function guardedTabRebind(selId, run, resolve, verb) {
     surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
   }).catch((e) => surfaceTabError(e));
 }
+var pendingTabCreates = /* @__PURE__ */ new Set();
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
   if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
     return;
   }
-  clearTabError();
   const selId = sel.id ?? "";
+  const pendingKey = `${selId}\0${kind}`;
+  if (pendingTabCreates.has(pendingKey)) {
+    return;
+  }
+  clearTabError();
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   let createdName = "";
   guardedTabRebind(
     selId,
-    () => create(selId, sel.title, tok).then((name) => {
-      createdName = name;
-      return fetchProjectedSnapshot(tok);
-    }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok).then((name) => {
+        createdName = name;
+        return fetchProjectedSnapshot(tok);
+      }).finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -19895,7 +19903,7 @@ function onKeydown(e) {
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") }
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey }
   );
   if (action.kind === "none") {
     return;

@@ -116,6 +116,30 @@ test("holding t creates one terminal tab, not one per key repeat", async ({ page
   expect(creates).toBe(1);
 });
 
+test("double-clicking a header tab button creates one tab", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  expect(session?.id).toBeTruthy();
+  let creates = 0;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/v1/CreateTab", async route => {
+    creates += 1;
+    await held;
+    await route.fulfill({ json: { data: null, error: { message: "header test refusal", daemon_rejected: true } } });
+  });
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  const terminal = page.getByRole("button", { name: "New terminal tab", exact: true });
+  await terminal.dblclick();
+  await expect.poll(() => creates).toBe(1);
+  release();
+  await expect(page.locator(".af-toast")).toContainText("header test refusal");
+  expect(creates).toBe(1);
+});
+
 test("phone header tab button dismisses an open More app controls menu", async ({ page, request }) => {
   const { controls } = await carrySessionActionsToPhone(page, request);
   await page.route("**/v1/CreateTab", route =>
