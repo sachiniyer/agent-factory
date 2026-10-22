@@ -43,7 +43,7 @@ func Open(repoID string) (*Store, error) {
 	return &Store{dir: filepath.Join(home, "repos", repoID, "proposals")}, nil
 }
 
-// Dir is the absolute path of the store repository.
+// Dir is the absolute path of the folder that holds the proposals.
 func (s *Store) Dir() string { return s.dir }
 
 // SlugPath is the absolute folder path of proposal slug.
@@ -54,7 +54,12 @@ func (s *Store) withLock(fn func() error) error {
 	if err := config.MkdirAllUnderAFHome(s.dir, 0o755); err != nil {
 		return fmt.Errorf("create proposal store: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(s.dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	dir, err := s.openStoreDir()
+	if err != nil {
+		return fmt.Errorf("open proposal store: %w", err)
+	}
+	dir.Close()
+	f, err := os.OpenFile(s.dir+".lock", os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open proposal store lock: %w", err)
 	}
@@ -92,8 +97,8 @@ func (s *Store) RequireSlug(slug string) error {
 	if err := ValidateSlug(slug); err != nil {
 		return err
 	}
-	info, err := os.Stat(s.SlugPath(slug))
-	if err == nil && info.IsDir() {
+	if dir, err := s.openSlugDir(slug); err == nil {
+		dir.Close()
 		return nil
 	}
 	slugs, _ := s.Slugs()
@@ -106,14 +111,14 @@ func (s *Store) RequireSlug(slug string) error {
 // Docs lists the doc files of proposal slug: built-in template names first in
 // template order, then the rest alphabetically.
 func (s *Store) Docs(slug string) ([]string, error) {
-	entries, err := os.ReadDir(s.SlugPath(slug))
+	entries, err := s.readSlugDir(slug)
 	if err != nil {
 		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
 		base, ok := strings.CutSuffix(e.Name(), ".md")
-		if !e.IsDir() && ok && namePattern.MatchString(base) {
+		if e.Type().IsRegular() && ok && namePattern.MatchString(base) {
 			names = append(names, base)
 		}
 	}
@@ -140,19 +145,25 @@ func (s *Store) Docs(slug string) ([]string, error) {
 // LastEdit is the newest modification time of any doc in proposal slug.
 func (s *Store) LastEdit(slug string) (time.Time, error) {
 	var latest time.Time
-	dir := s.SlugPath(slug)
-	if info, err := os.Stat(dir); err == nil {
-		latest = info.ModTime()
+	if dir, err := s.openSlugDir(slug); err == nil {
+		if info, err := dir.Stat(); err == nil {
+			latest = info.ModTime()
+		}
+		dir.Close()
 	}
 	docs, err := s.Docs(slug)
 	if err != nil {
 		return time.Time{}, err
 	}
 	for _, d := range docs {
-		info, err := os.Stat(filepath.Join(dir, d))
-		if err == nil && info.ModTime().After(latest) {
+		f, err := s.openDoc(slug, d)
+		if err != nil {
+			continue
+		}
+		if info, err := f.Stat(); err == nil && info.ModTime().After(latest) {
 			latest = info.ModTime()
 		}
+		f.Close()
 	}
 	return latest.UTC(), nil
 }
@@ -188,13 +199,13 @@ func (s *Store) Create(slug string, docs []string, by Committer) error {
 	}
 	return s.withLock(func() error {
 		dir := s.SlugPath(slug)
-		if _, err := os.Stat(dir); err == nil {
+		if _, err := os.Lstat(dir); err == nil {
 			return fmt.Errorf("proposal %q already exists: run af proposal attach %s to work on it", slug, slug)
 		}
 		if _, err := s.snapshot(); err != nil {
 			return err
 		}
-		if err := os.Mkdir(dir, 0o755); err != nil {
+		if err := s.mkSlugDir(slug); err != nil {
 			return fmt.Errorf("create proposal folder: %w", err)
 		}
 		if err := s.populate(slug, names, by); err != nil {
@@ -214,7 +225,7 @@ func (s *Store) populate(slug string, names []string, by Committer) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(s.SlugPath(slug), docFile(n)), []byte(text), 0o644); err != nil {
+		if err := s.createDoc(slug, docFile(n), []byte(text)); err != nil {
 			return err
 		}
 	}
@@ -253,8 +264,7 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 		if err := s.RequireSlug(slug); err != nil {
 			return err
 		}
-		path := filepath.Join(s.SlugPath(slug), docFile(n))
-		if _, err := os.Stat(path); err == nil {
+		if _, err := os.Lstat(filepath.Join(s.SlugPath(slug), docFile(n))); err == nil {
 			return fmt.Errorf("doc %s already exists in proposal %q", docFile(n), slug)
 		}
 		if _, err := s.snapshot(); err != nil {
@@ -264,7 +274,7 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		if err := s.createDoc(slug, docFile(n), []byte(text)); err != nil {
 			return err
 		}
 		_, err = s.commitPaths("add "+slug+"/"+docFile(n), by.Author, by.SessionID, slug+"/"+docFile(n))
@@ -273,8 +283,8 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 	return docFile(n), err
 }
 
-// docPath validates slug and doc and returns the doc's absolute path. The doc
-// must exist.
+// docPath validates slug and doc and returns the doc's absolute path and file
+// name. The doc must be a regular file reached without following a link.
 func (s *Store) docPath(slug, doc string) (string, string, error) {
 	n, err := NormalizeDocName(doc)
 	if err != nil {
@@ -283,21 +293,22 @@ func (s *Store) docPath(slug, doc string) (string, string, error) {
 	if err := s.RequireSlug(slug); err != nil {
 		return "", "", err
 	}
-	path := filepath.Join(s.SlugPath(slug), docFile(n))
-	if _, err := os.Stat(path); err != nil {
+	f, err := s.openDoc(slug, docFile(n))
+	if err != nil {
 		docs, _ := s.Docs(slug)
 		return "", "", fmt.Errorf("doc %s not found in proposal %q; existing docs: %s", docFile(n), slug, strings.Join(docs, ", "))
 	}
-	return path, docFile(n), nil
+	f.Close()
+	return filepath.Join(s.SlugPath(slug), docFile(n)), docFile(n), nil
 }
 
 // Read returns the text of an existing doc and its file name.
 func (s *Store) Read(slug, doc string) (string, string, error) {
-	path, file, err := s.docPath(slug, doc)
+	_, file, err := s.docPath(slug, doc)
 	if err != nil {
 		return "", "", err
 	}
-	data, err := os.ReadFile(path)
+	data, err := s.readDoc(slug, file)
 	if err != nil {
 		return "", "", err
 	}
@@ -312,7 +323,7 @@ func (s *Store) Write(slug, doc, text string, by Committer) (string, string, err
 	}
 	var file, commit string
 	err := s.withLock(func() error {
-		path, f, err := s.docPath(slug, doc)
+		_, f, err := s.docPath(slug, doc)
 		if err != nil {
 			return err
 		}
@@ -320,32 +331,11 @@ func (s *Store) Write(slug, doc, text string, by Committer) (string, string, err
 		if _, err := s.snapshot(); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(path, []byte(text)); err != nil {
+		if err := s.writeDoc(slug, file, []byte(text)); err != nil {
 			return err
 		}
 		commit, err = s.commitPaths("write "+slug+"/"+file, by.Author, by.SessionID, slug+"/"+file)
 		return err
 	})
 	return file, commit, err
-}
-
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".write-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
 }

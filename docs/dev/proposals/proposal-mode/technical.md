@@ -5,13 +5,35 @@
 There is one git repository for each project:
 
 ```
-<AF_HOME>/repos/<repoID>/proposals/      a git repo (git init on first use)
-  .lock                                  flock for every write and commit
-  auth-rework/
-    goals.md  technical.md  api.md
-  search-v2/
-    goals.md
+<AF_HOME>/repos/<repoID>/
+  proposals/                             the work tree: docs only
+    auth-rework/
+      goals.md  technical.md  api.md
+    search-v2/
+      goals.md
+  proposals.git/                         the git dir (git init on first use)
+  proposals.lock                         flock for every write and commit
 ```
+
+- Agents edit `proposals/` with their own file tools, so af treats
+  everything in it as untrusted:
+  - The git dir and the lock live beside the work tree, never in it. Every
+    git command passes `--git-dir` and `--work-tree`, so a `.git` folder or
+    `gitdir:` file that an agent plants in `proposals/` is ignored. A
+    `.gitattributes` there cannot name a filter or diff driver, because
+    drivers are defined only in config, and no config that git reads is in
+    the work tree. As a second guard, every command pins
+    `core.hooksPath`, `core.fsmonitor` and `core.attributesFile`, and diffs run
+    with `--no-ext-diff --no-textconv`.
+  - af does not follow a symlink inside `proposals/`. Each read and write
+    opens the store, slug and doc through directory fds with `O_NOFOLLOW`, and a
+    doc must be a regular file.
+- Builds before this layout kept the git dir at `proposals/.git`. On first use,
+  af imports its history once into `proposals.git`. It copies only
+  `objects/` (without alternates), `refs/` and `packed-refs`, and it does not
+  copy the config, hooks or attributes. If a symlink or special file is in
+  those folders, the import stops. When the import is done, af deletes the
+  old `.git`.
 
 - `<AF_HOME>` is `config.GetConfigDir()`. `<repoID>` is the project's ID. All
   worktrees of a repo share that ID (`config.ResolveMainRepoRoot`), so all
