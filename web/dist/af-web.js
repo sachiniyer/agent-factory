@@ -6953,6 +6953,7 @@ function decideKey(key, ctx, mods = {}) {
       return { kind: "none" };
     }
     if (key === "t" || key === "T") {
+      if (mods.ctrl || mods.meta) return { kind: "none" };
       const tabKind = mods.shift ?? key === "T" ? "vscode" : "shell";
       return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
@@ -19903,7 +19904,7 @@ function onKeydown(e) {
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey }
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey }
   );
   if (action.kind === "none") {
     return;
