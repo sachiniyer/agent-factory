@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -66,4 +67,29 @@ func TestSetProjectColorRejectsUnknownProjectAndBadColor(t *testing.T) {
 	require.ErrorContains(t, err, "not registered")
 	_, err = SetProjectColor(project.ID, "blue")
 	require.ErrorContains(t, err, "invalid project color")
+}
+
+func TestSetProjectColorIgnoresUnrelatedBrokenRecords(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	root := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	project, err := RegisterProject(root)
+	require.NoError(t, err)
+
+	dir, err := ProjectRegistryDir()
+	require.NoError(t, err)
+	broken := filepath.Join(dir, "prj_11111111111111111111111111111111")
+	require.NoError(t, os.MkdirAll(broken, 0o755))
+	require.NoError(t, os.WriteFile(projectRecordPath(dir, "prj_11111111111111111111111111111111"), []byte("{"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stray.txt"), []byte("x"), 0o644))
+	_, err = ListProjects()
+	require.Error(t, err, "the strict registry read still fails on the broken record")
+
+	updated, err := SetProjectColor(project.ID, "#16a34a")
+	require.NoError(t, err)
+	require.Equal(t, "#16a34a", updated.Color)
+
+	cleared, err := SetProjectColor(project.ID, "")
+	require.NoError(t, err)
+	require.Empty(t, cleared.Color)
 }

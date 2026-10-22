@@ -59,37 +59,51 @@ func SetProjectColor(id, color string) (Project, error) {
 
 	var updated Project
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		records, err := loadProjectRecords(dir)
+		record, err := readProjectRecord(dir, id)
 		if err != nil {
 			return err
 		}
-		for _, record := range records {
-			if record.ID != id {
-				continue
+		path := filepath.Join(dir, id, projectAppearanceFileName)
+		if normalized == "" {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("clear project color: %w", err)
 			}
-			path := filepath.Join(dir, id, projectAppearanceFileName)
-			if normalized == "" {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("clear project color: %w", err)
-				}
-			} else {
-				data, err := json.MarshalIndent(projectAppearance{Color: normalized}, "", "  ")
-				if err != nil {
-					return fmt.Errorf("marshal project appearance: %w", err)
-				}
-				if err := AtomicWriteFile(path, append(data, '\n'), 0o644); err != nil {
-					return fmt.Errorf("write project color: %w", err)
-				}
+		} else {
+			data, err := json.MarshalIndent(projectAppearance{Color: normalized}, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal project appearance: %w", err)
 			}
-			updated = projectFromRecord(record)
-			return nil
+			if err := AtomicWriteFile(path, append(data, '\n'), 0o644); err != nil {
+				return fmt.Errorf("write project color: %w", err)
+			}
 		}
-		return fmt.Errorf("project %s is not registered", id)
+		updated = projectFromRecord(record)
+		return nil
 	})
 	if err != nil {
 		return Project{}, err
 	}
 	return updated, nil
+}
+
+// readProjectRecord reads and validates only id's record. A color write needs
+// no registry-wide uniqueness proof, so unrelated broken records must not block it.
+func readProjectRecord(dir, id string) (projectRecord, error) {
+	data, err := os.ReadFile(projectRecordPath(dir, id))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return projectRecord{}, fmt.Errorf("project %s is not registered", id)
+		}
+		return projectRecord{}, fmt.Errorf("read project %s: %w", id, err)
+	}
+	var record projectRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return projectRecord{}, fmt.Errorf("parse project %s: %w", id, err)
+	}
+	if err := validateProjectRecord(id, record); err != nil {
+		return projectRecord{}, err
+	}
+	return record, nil
 }
 
 // loadProjectColor never fails the registry read: a missing or damaged
