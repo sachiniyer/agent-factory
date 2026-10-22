@@ -214,6 +214,7 @@ func (m *Manager) RestoreLostSessions() {
 	m.mu.Lock()
 	entries := make([]entry, 0, len(m.instances))
 	restored := make([]restoredEntry, 0)
+	flapConfirmed := make([]entry, 0)
 	episodeRetired := make([]entry, 0)
 	// live is the set of stable identities whose retry episode still describes a
 	// restorable runtime. Built here rather than reusing m.instances directly
@@ -271,6 +272,7 @@ func (m *Manager) RestoreLostSessions() {
 			// account-swap respawns never arm — neither can feed the history.
 			if st.confirmCountsFlap {
 				m.noteLostRestoreConfirmationLocked(stateKey, nowFunc())
+				flapConfirmed = append(flapConfirmed, entry{key: key, repoID: repoID, instance: inst})
 			}
 		}
 		delete(m.lostRestoreStates, stateKey)
@@ -294,6 +296,12 @@ func (m *Manager) RestoreLostSessions() {
 	}
 	for _, healed := range restored {
 		logLostRestoreSuccess(m.info(), healed.instance.Title, healed.repoID, healed.attempts)
+	}
+	// Each fresh confirmation lands on the durable record too — a restart
+	// that loses it lets the session buy bound-cycles by bouncing the daemon
+	// (#5436).
+	for _, c := range flapConfirmed {
+		m.persistLostRestoreConfirmations(c.repoID, c.key, c.instance)
 	}
 
 	// Stable order so multi-session recovery after an outage is deterministic
@@ -415,6 +423,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// elapsed, which a long poll interval or the 60s remote grace can outlast while
 	// the runtime was dead the whole time (#1917 round 6).
 	confirmedPriorAttempts := 0
+	confirmedPriorCountsFlap := false
 	if st.awaitingConfirm && m.confirmedAliveSinceSpawnLocked(repoID, inst, st) {
 		confirmedPriorAttempts = st.restoreAttempts()
 		// The same confirmation the sweep records for a still-live row — this
@@ -422,6 +431,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// retire the episode. One datapoint either way (#5238).
 		if st.confirmCountsFlap {
 			m.noteLostRestoreConfirmationLocked(stateKey, nowFunc())
+			confirmedPriorCountsFlap = true
 		}
 		st = &lostRestoreState{}
 		m.lostRestoreStates[stateKey] = st
@@ -449,6 +459,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// armed during its confirmation window must not charge the new one.
 		logLostRestoreSuccess(m.info(), inst.Title, repoID, confirmedPriorAttempts)
 		m.clearLostRestoreWaitDurable(repoID, inst)
+		if confirmedPriorCountsFlap {
+			m.persistLostRestoreConfirmations(repoID, key, inst)
+		}
 	}
 	if diedBeforeConfirm {
 		m.lostRestoreFailed(key, repoID, st, inst, deathErr)

@@ -26,10 +26,32 @@ var lostRestoreFlapWindow = 30 * time.Minute
 
 // noteLostRestoreConfirmationLocked records one CONFIRMED automatic
 // lost-session restore in the session's flap history, pruning entries the
-// window has already expired. Caller holds m.mu.
+// window has already expired. Caller holds m.mu; the caller that appended
+// then owes a persistLostRestoreConfirmations outside the lock so the
+// history is durable — a restart that loses it lets a flapping session buy
+// extra cycles mid-window (#5436).
 func (m *Manager) noteLostRestoreConfirmationLocked(stateKey string, now time.Time) {
 	times := pruneLostRestoreConfirmations(m.lostRestoreConfirmations[stateKey], now)
 	m.lostRestoreConfirmations[stateKey] = append(times, now)
+}
+
+// persistLostRestoreConfirmations mirrors the session's in-window flap
+// history onto its durable record and settles it. The map stays the runtime
+// truth — restoreInstances reseeds it from this field after a restart, so a
+// dropped write here is a confirmation the bound forgets (#5436). Like every
+// settlement the write is retried by the poll until it lands; the warning is
+// the only signal that has not happened yet.
+func (m *Manager) persistLostRestoreConfirmations(repoID, key string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	times := append([]time.Time(nil), m.lostRestoreConfirmations[stateKey]...)
+	m.mu.Unlock()
+	if !inst.SetLostRestoreConfirmations(times) {
+		return
+	}
+	if err := m.persistSettlement(repoID, key, inst); err != nil {
+		m.warn().Printf("restore of lost session %q recorded a confirmation the flap bound has not yet persisted: %v", inst.Title, err)
+	}
 }
 
 // lostRestoreConfirmationCountLocked reports how many confirmed automatic
@@ -45,21 +67,26 @@ func (m *Manager) lostRestoreConfirmationCountLocked(stateKey string, now time.T
 	return len(times)
 }
 
-// clearLostRestoreEpisode retires the session's whole in-memory restore
-// episode at once: the confirmed-flap history AND the pending retry state.
-// The operator's explicit off-ramps — a successful manual restore heal and a
-// successful archive restore — close the episode both were describing, so a
-// stale in-window count cannot trip the bound on the runtime they just
-// replaced (#5238 review), and a still-pending automatic arm cannot charge
-// the new runtime's first confirmations to the old arm's confirmCountsFlap
-// (#5436). The automatic paths never call it: the state and the
+// clearLostRestoreEpisode retires the session's whole restore episode at
+// once: the confirmed-flap history AND the pending retry state, in memory
+// AND on the session record. The operator's explicit off-ramps — a
+// successful manual restore heal and a successful archive restore — close
+// the episode both were describing, so a stale in-window count cannot trip
+// the bound on the runtime they just replaced (#5238 review), and a
+// still-pending automatic arm cannot charge the new runtime's first
+// confirmations to the old arm's confirmCountsFlap (#5436). The persisted
+// copy clears here too — the caller's own settlement write (every call site
+// persists the restored instance immediately after) then carries the
+// clearance to disk, so a restart cannot reseed a history the off-ramp
+// already retired. The automatic paths never call it: the state and the
 // confirmations must survive across successive restore cycles — that is the
 // whole point of the bound.
-func (m *Manager) clearLostRestoreEpisode(stateKey string) {
+func (m *Manager) clearLostRestoreEpisode(stateKey string, inst *session.Instance) {
 	m.mu.Lock()
 	delete(m.lostRestoreConfirmations, stateKey)
 	delete(m.lostRestoreStates, stateKey)
 	m.mu.Unlock()
+	inst.ClearLostRestoreConfirmations()
 }
 
 // pruneLostRestoreConfirmations drops confirmations older than the flap

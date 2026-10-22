@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -51,6 +56,16 @@ func seedFlapHistory(m *Manager, key string, n int) {
 	for i := 0; i < n; i++ {
 		m.noteLostRestoreConfirmationLocked(key, nowFunc())
 	}
+}
+
+// stageTmuxSession stands up a detached live tmux session under the test's
+// isolated socket. A persisted row reloading through FromInstanceData runs
+// Start(false) — a real attach/respawn — and a missing session makes the load
+// spawn the row's program (which exits instantly in tests) and drop the row.
+func stageTmuxSession(t *testing.T, name string) {
+	t.Helper()
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sh").CombinedOutput()
+	require.NoError(t, err, string(out))
 }
 
 // TestRestoreLostSessions_ConfirmedFlapGivesUpAtBound is the reported bug end
@@ -617,5 +632,131 @@ func TestRestoreArchived_RemoteReprovisionRetiresPendingConfirmation(t *testing.
 	manager.mu.Unlock()
 	if st != nil {
 		t.Fatalf("the stale awaitingConfirm arm survived a remote archive restore: %+v", st)
+	}
+}
+
+// #5436 item 1: the confirmed-flap bound's evidence lives only in memory on
+// master, so a daemon restart mid-window resets the count — a session that
+// flapped three times can flap four more after a bounce, inside one window.
+// The history must ride the session record like lost_restore_wait does, and a
+// restarted daemon must reseed from it: same bound, same window.
+func TestRestoreLostSessions_ConfirmationsSurviveDaemonRestart(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	repoID := repo.ID
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "restart-flapper", "restart-flap-task")
+	inst.SetBackend(backend)
+	zeroRestoreBackoff(t)
+	key := daemonInstanceKey(repoID, inst.Title)
+	stateKey := stableSessionKey(repoID, inst)
+
+	for cycle := 0; cycle < lostRestoreFlapMaxRestores-1; cycle++ {
+		confirmedRestoreCycle(t, manager, repoID, inst)
+	}
+	if got := flapCount(manager, stateKey); got != lostRestoreFlapMaxRestores-1 {
+		t.Fatalf("setup: confirmed restores = %d, want %d", got, lostRestoreFlapMaxRestores-1)
+	}
+	// The durable copy must already be on disk before the bounce — a crash
+	// before it lands is the exact window the bound loses.
+	if rec := recordFor(t, repoID, inst.Title); rec == nil || len(rec.LostRestoreConfirmations) != lostRestoreFlapMaxRestores-1 {
+		t.Fatalf("persisted confirmations = %#v, want %d timestamps on the session record", rec, lostRestoreFlapMaxRestores-1)
+	}
+
+	// Restart: a fresh Manager on the same home reseeds the in-memory map
+	// from the durable record. The reloaded local row re-enters Start(false)
+	// for its worktree binding, so the tmux session the row claims must exist
+	// under the isolated socket — the fake backend never made one.
+	stageTmuxSession(t, "af_restart-flapper")
+	m2, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager for the restarted daemon: %v", err)
+	}
+	if err := m2.RestoreInstances(); err != nil {
+		t.Fatalf("restart load: %v", err)
+	}
+	m2.mu.Lock()
+	reloaded := m2.instances[key]
+	m2.mu.Unlock()
+	if reloaded == nil {
+		t.Fatal("the session did not survive the restart load")
+	}
+	if got := flapCount(m2, stableSessionKey(repoID, reloaded)); got != lostRestoreFlapMaxRestores-1 {
+		t.Fatalf("flap history after restart = %d, want %d — a restart must not reset the bound's count", got, lostRestoreFlapMaxRestores-1)
+	}
+
+	// And the bound still trips on the NEXT confirmed cycle: the carried
+	// history counts, not just survives as data.
+	reloaded.SetBackend(backend)
+	confirmedRestoreCycle(t, m2, repoID, reloaded)
+	reloaded.SetStatusForTest(session.Lost)
+	m2.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != lostRestoreFlapMaxRestores {
+		t.Fatalf("post-restart spawns = %d, want %d (the carried history must still reach the bound)", got, lostRestoreFlapMaxRestores)
+	}
+	if reloaded.ToInstanceData().LostRestoreFailure == nil {
+		t.Fatal("the bound did not fire after a restart with a full in-window history")
+	}
+}
+
+// The window is wall-clock, not generation-relative: confirmations older than
+// lostRestoreFlapWindow at load time must expire during seeding, or a daemon
+// downed longer than the window would credit the old episode.
+func TestRestoreLostSessions_ExpiredConfirmationsDropOnRestart(t *testing.T) {
+	advance := withFrozenClock(t)
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	repoID := repo.ID
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "stale-flapper", "stale-flap-task")
+	inst.SetBackend(backend)
+	zeroRestoreBackoff(t)
+	key := daemonInstanceKey(repoID, inst.Title)
+
+	for cycle := 0; cycle < lostRestoreFlapMaxRestores-1; cycle++ {
+		confirmedRestoreCycle(t, manager, repoID, inst)
+	}
+	if rec := recordFor(t, repoID, inst.Title); rec == nil || len(rec.LostRestoreConfirmations) != lostRestoreFlapMaxRestores-1 {
+		t.Fatalf("setup: persisted confirmations = %#v, want %d", rec, lostRestoreFlapMaxRestores-1)
+	}
+	// The daemon stayed down past the window's edge.
+	advance(lostRestoreFlapWindow + time.Minute)
+
+	stageTmuxSession(t, "af_stale-flapper")
+	m2, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager for the restarted daemon: %v", err)
+	}
+	if err := m2.RestoreInstances(); err != nil {
+		t.Fatalf("restart load: %v", err)
+	}
+	m2.mu.Lock()
+	reloaded := m2.instances[key]
+	m2.mu.Unlock()
+	if reloaded == nil {
+		t.Fatal("the session did not survive the restart load")
+	}
+	if got := flapCount(m2, stableSessionKey(repoID, reloaded)); got != 0 {
+		t.Fatalf("expired confirmations reseeded %d entries, want 0 — the window is wall-clock", got)
 	}
 }

@@ -116,6 +116,14 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// LostRestoreConfirmations persists the rolling confirmed-restore
+	// timestamps the confirmed-flap bound counts (#5238): a daemon restart
+	// drops the in-memory map, so the bound's evidence rides the record or a
+	// restart could buy a flapping session extra cycles mid-window (#5436).
+	// Timestamps rather than a count because window membership is wall-clock —
+	// load-time seeding prunes entries the window already expired. A row that
+	// reloads inert drops it on load for the same reason as the wait above.
+	LostRestoreConfirmations []time.Time `json:"lost_restore_confirmations,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is

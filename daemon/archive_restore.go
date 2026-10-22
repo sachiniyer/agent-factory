@@ -48,7 +48,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// awaitingConfirm arm retires with it: the fresh runtime's answers would
 	// otherwise confirm the STALE arm and charge it one flap datapoint
 	// (#5436).
-	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
+	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance), instance)
 	m.persistRuntimeReplacement(repoID, title, instance)
 	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
@@ -352,7 +352,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Same off-ramp as the remote arm above: a successful archive restore
 	// closes the flap episode the pre-archive confirmations counted, and
 	// retires a pending awaitingConfirm arm with it (#5436).
-	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
+	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance), instance)
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))

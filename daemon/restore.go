@@ -329,7 +329,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// the bound on the next automatic cycle (#5238 review), and a pending
 		// automatic arm cannot charge the healed runtime's answers to the old
 		// episode (#5436).
-		m.clearLostRestoreEpisode(stateKey)
+		m.clearLostRestoreEpisode(stateKey, instance)
 		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
 			failure := fmt.Errorf(
 				"session %q was confirmed alive, but its healed state could not be written to disk: %w",

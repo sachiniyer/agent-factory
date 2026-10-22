@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -40,6 +41,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		ArchiveWarning:           i.archiveWarning,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
+		LostRestoreConfirmations: append([]time.Time(nil), i.lostRestoreConfirmations...),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
@@ -379,6 +381,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
+		lostRestoreConfirmations: append([]time.Time(nil), data.LostRestoreConfirmations...),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,
@@ -560,7 +563,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// a lie, and an explicit restore starts a fresh episode anyway, so each
 	// inert load drops it rather than mirror the stale record.
 	inertReturn := func() *Instance {
-		if instance.ClearLostRestoreWait() {
+		waitCleared := instance.ClearLostRestoreWait()
+		// Same retirement for the flap bound's durable history: an
+		// unreachable row's confirmations can never feed the map, and a
+		// later explicit restore starts a fresh episode that must not
+		// inherit them (#5436).
+		confsCleared := instance.ClearLostRestoreConfirmations()
+		if waitCleared || confsCleared {
 			// The wait was persisted, so clearing it only in memory leaves
 			// the stale field in instances.json — a crash before the next
 			// write would let the disk-fallback API re-derive a wait no
