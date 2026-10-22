@@ -19059,18 +19059,22 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void projectColorWriter.cancel(root2).then(() => deleteProject(root2, tok)).then(() => {
-          if (modal === m) closeModal();
-        }).catch((e) => {
-          if (isMutationCommittedError(e)) {
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root2).then(() => {
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root2, tok).then(() => {
             if (modal === m) closeModal();
-            requestResync();
-            refreshRegisteredProjects();
-            surfaceTabError(e);
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
+          }).catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
         });
       },
       onCancel: closeModal
