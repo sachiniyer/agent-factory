@@ -579,10 +579,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		w.startedOnce.Do(func() { close(w.startedCh) })
 	}
 	// The run's anchor pins the process-group number for the run's whole
-	// life: a live member that ignores the group's SIGTERM, so kill(-pgid)
-	// can only ever name this run's own group — while the watchdog signals
-	// it and while the reaper cleans it (reapWatchGroupLeader). Its stdin
-	// pipe is held here, so this daemon's death ends it too.
+	// life: a live member that ignores the group's SIGTERM — proven before
+	// the spawn returns — so kill(-pgid) can only ever name this run's own
+	// group, while the watchdog signals it and while the reaper cleans it
+	// (reapWatchGroupLeader). Its stdin pipe is held here, so this
+	// daemon's death ends it too.
 	anchorRelease := spawnWatchGroupAnchor(cmd.Process.Pid)
 	if anchorRelease == nil {
 		log.WarningLog.Printf("watch task %s: cannot spawn a process-group anchor for the watch command; "+

@@ -36,6 +36,12 @@ const watchLifelineProbeRetry = time.Minute
 // back to a direct spawn.
 var errWatchStopped = errors.New("watch run stopped during the lifeline probe")
 
+// watchAnchorReadyTimeout bounds the wait for the anchor's ready byte
+// (startWatchGroupAnchor). A working /bin/sh writes it within milliseconds
+// of exec; the bound only protects the run start from a /bin/sh that runs
+// but cannot install the trap.
+const watchAnchorReadyTimeout = 5 * time.Second
+
 // resolveWatchLifelineExe names the binary the daemon execs as the watch
 // lifeline (#5329): its own.
 //
@@ -325,32 +331,62 @@ var (
 )
 
 // startWatchGroupAnchor starts a child in the given process group and keeps
-// it a live member until the returned release is called: the shell ignores
-// the group's SIGTERM, then execs cat blocked on a pipe whose write end
-// stays here — this daemon's death closes the pipe and ends the anchor too.
-// While it lives the group is never empty, so the group's number cannot be
-// freed and reused to name someone else's group (reapWatchGroupLeader). It
-// is spawned when the run starts, while the just-started leader guarantees
-// the group is joinable, and pinned for the run's whole life.
-// Best-effort: nil when the group cannot be joined — it is already empty —
-// or the spawn fails, a missing /bin/sh included.
+// it a live member until the returned release is called: the shell installs
+// its TERM-ignoring trap, reports ready on fd 3, then blocks in read on a
+// pipe whose write end stays here — this daemon's death closes the pipe,
+// the read hits EOF, and the anchor exits too. While it lives the group is
+// never empty, so the group's number cannot be freed and reused to name
+// someone else's group (reapWatchGroupLeader). It is spawned when the run
+// starts, while the just-started leader guarantees the group is joinable,
+// and pinned for the run's whole life.
+//
+// The ready byte is what makes the spawn trustworthy: until the shell has
+// run `trap`, a group SIGTERM — a stop that lands right after the spawn —
+// kills the anchor before it ever becomes a member worth the name, and on
+// darwin its zombie then answers kill(-pgid) with EPERM instead of holding
+// the group. Returning only after the byte means the anchor the caller gets
+// is already TERM-immune. Best-effort: nil when the group cannot be joined —
+// it is already empty — when the spawn fails, a missing /bin/sh included, or
+// when the shell never reaches its ready write.
 func startWatchGroupAnchor(pgid int) (release func()) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil
 	}
-	// Absolute paths, like the run's own spawn: a PATH lookup would let
-	// whatever sh or cat comes first in the daemon's inherited PATH run in
-	// this group.
-	anchor := exec.Command("/bin/sh", "-c", "trap '' TERM; exec /bin/cat")
-	anchor.Stdin = r
-	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
-	if err := anchor.Start(); err != nil {
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
 		_ = r.Close()
 		_ = w.Close()
 		return nil
 	}
+	// The absolute sh path, like the run's own spawn: a PATH lookup would
+	// let whatever sh comes first in the daemon's inherited PATH run in
+	// this group. Everything after exec is shell builtins — no second binary
+	// can go missing between the ready write and the block. fd 3 is the
+	// ready report; the trap is installed before it.
+	anchor := exec.Command("/bin/sh", "-c", "trap '' TERM; printf x >&3; while read x; do :; done")
+	anchor.Stdin = r
+	anchor.ExtraFiles = []*os.File{readyW}
+	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	if err := anchor.Start(); err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		_ = readyR.Close()
+		_ = readyW.Close()
+		return nil
+	}
 	_ = r.Close()
+	_ = readyW.Close()
+	_ = readyR.SetReadDeadline(time.Now().Add(watchAnchorReadyTimeout))
+	var ready [1]byte
+	if _, err := readyR.Read(ready[:]); err != nil {
+		_ = anchor.Process.Kill()
+		_ = anchor.Wait()
+		_ = w.Close()
+		_ = readyR.Close()
+		return nil
+	}
+	_ = readyR.Close()
 	return func() {
 		_ = anchor.Process.Kill()
 		_ = anchor.Wait()
