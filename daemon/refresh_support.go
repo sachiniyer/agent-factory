@@ -142,7 +142,14 @@ func (m *Manager) refreshLocked() error {
 	}
 	owed := persistLoadRuntimeReplacements(refreshed)
 	m.attachCredentialsToAll(refreshed)
+	prior := m.instances
 	m.instances = refreshed
+	// A repo that was corrupt/unreadable at startup and has since been
+	// repaired materializes HERE, not at restoreInstances — its durable
+	// confirmations are just as live, so the bound's history seeds for rows
+	// this refresh introduces rather than waiting for the next restart
+	// (#5436 review).
+	m.reseedLostRestoreConfirmationsLocked(nowFunc(), refreshed, prior)
 	// Replaced wholesale, never merged: the ghost set is a projection of what is on
 	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
 	// ghost, or its slot would be held twice — once by the ghost and once by the

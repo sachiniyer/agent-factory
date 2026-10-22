@@ -562,13 +562,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// wait means "an automatic retry is armed"; on an unreachable row that is
 	// a lie, and an explicit restore starts a fresh episode anyway, so each
 	// inert load drops it rather than mirror the stale record.
-	inertReturn := func() *Instance {
+	inertReturn := func(dropFlapHistory bool) *Instance {
 		waitCleared := instance.ClearLostRestoreWait()
 		// Same retirement for the flap bound's durable history: an
 		// unreachable row's confirmations can never feed the map, and a
 		// later explicit restore starts a fresh episode that must not
-		// inherit them (#5436).
-		confsCleared := instance.ClearLostRestoreConfirmations()
+		// inherit them (#5436). A pending account swap is the exception —
+		// the row stays scheduler-eligible and the live swap flow leaves
+		// the history alone, so a restart must not retire what the
+		// running daemon would have kept.
+		confsCleared := dropFlapHistory && instance.ClearLostRestoreConfirmations()
 		if waitCleared || confsCleared {
 			// The wait was persisted, so clearing it only in memory leaves
 			// the stale field in instances.json — a crash before the next
@@ -585,7 +588,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// would synthesize a fresh conventional tmux name and make the retry target a
 	// session that never belonged to this tombstone.
 	if worktreeReaped {
-		return inertReturn(), nil
+		return inertReturn(true), nil
 	}
 
 	// A relocation-recovery record says the persisted worktree path is not yet
@@ -594,7 +597,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// agent in a stale or replaced directory. An explicit bounded archive/restore
 	// retry owns resolving the record before any runtime may use the path again.
 	if restoredRelocationRecovery {
-		return inertReturn(), nil
+		return inertReturn(true), nil
 	}
 
 	// An uncertain startup loads INERT. Re-running Start(false) would probe or
@@ -603,7 +606,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// worktree and exact tmux binding above remain available for inspection and an
 	// explicit user kill, while the daemon status loop leaves the record alone.
 	if data.StartupStateUnknown {
-		return inertReturn(), nil
+		return inertReturn(true), nil
 	}
 
 	// An automatic account choice is durable before its replacement starts. Keep
@@ -612,7 +615,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// conversation resume before the pending notice and task are delivered.
 	if data.PendingAccountSwap != nil {
 		instance.started = true
-		return inertReturn(), nil
+		return inertReturn(false), nil
 	}
 
 	// An archived session (#1028) loads INERT: its tmux was torn down and its
@@ -628,7 +631,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// tmux-less for the same reason (its TmuxName entries reference sessions
 	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
 	if liveness == LiveArchived {
-		return inertReturn(), nil
+		return inertReturn(true), nil
 	}
 
 	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
@@ -645,7 +648,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.touchLocked()
 		}
 		instance.mu.Unlock()
-		return inertReturn(), nil
+		return inertReturn(true), nil
 	}
 
 	if err := instance.Start(false); err != nil {
@@ -654,7 +657,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// establish a safe runtime boundary. Keep the row inert and explicitly
 			// killable so storage retains every exact tmux cleanup handle.
 			instance.MarkStartupStateUnknown()
-			return inertReturn(), nil
+			return inertReturn(true), nil
 		}
 		if errors.Is(err, tmux.ErrSpawnDirMissing) {
 			// The tmux session is gone and its persisted worktree is missing:

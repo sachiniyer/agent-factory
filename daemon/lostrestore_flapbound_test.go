@@ -760,3 +760,85 @@ func TestRestoreLostSessions_ExpiredConfirmationsDropOnRestart(t *testing.T) {
 		t.Fatalf("expired confirmations reseeded %d entries, want 0 — the window is wall-clock", got)
 	}
 }
+
+// The manual restore RPC is the same off-ramp the probe-alive heal and the
+// archive paths take: it clears the in-memory episode in armRestoreConfirmation
+// — and it must clear the durable copy just the same. That delete used to run
+// AFTER the restore's settlement write, so instances.json kept the retired
+// timestamps and a mid-window restart reseeded them — the next losses could
+// trip the bound on credit the operator already spent (#5436 review).
+func TestRestoreSession_ManualRestoreClearsPersistedFlapHistory(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
+	key := stableSessionKey(repoID, inst)
+	seedFlapHistory(manager, key, lostRestoreFlapMaxRestores-1)
+	// Mirror what the confirmation edges leave: history in the map AND on the
+	// session's durable record.
+	manager.mu.Lock()
+	inst.SetLostRestoreConfirmations(append([]time.Time(nil), manager.lostRestoreConfirmations[key]...))
+	manager.mu.Unlock()
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "flapper", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+	if got := flapCount(manager, key); got != 0 {
+		t.Fatalf("in-memory history after manual restore = %d, want 0", got)
+	}
+	if got := inst.LostRestoreConfirmationsSnapshot(); len(got) != 0 {
+		t.Fatalf("durable history on the instance after manual restore = %v, want cleared", got)
+	}
+	if rec := recordFor(t, repoID, inst.Title); rec == nil || len(rec.LostRestoreConfirmations) != 0 {
+		t.Fatalf("persisted confirmations = %#v after a manual restore, want the field cleared", rec)
+	}
+}
+
+// The refresh poll can introduce a row restoreInstances never saw — a repo
+// whose instances.json was corrupt at startup and repaired mid-life. Its
+// durable confirmations are just as live as the startup set's, so the reseed
+// must run there too, scoped to the rows the poll actually adds: rows already
+// tracked keep their in-memory history (it can hold confirmations the record
+// has not settled yet), and a re-materialized row must not have the map
+// overwritten from disk (#5436 review).
+func TestReseedLostRestoreConfirmations_SeedsNewSkipsExisting(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	now := nowFunc()
+	priorInst, err := session.NewInstance(session.InstanceOptions{Title: "prior", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance prior: %v", err)
+	}
+	freshInst, err := session.NewInstance(session.InstanceOptions{Title: "fresh", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance fresh: %v", err)
+	}
+	clobberInst, err := session.NewInstance(session.InstanceOptions{Title: "clobber", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance clobber: %v", err)
+	}
+	priorInst.SetLostRestoreConfirmations([]time.Time{now.Add(-time.Minute)})
+	freshInst.SetLostRestoreConfirmations([]time.Time{now.Add(-time.Minute), now})
+	clobberInst.SetLostRestoreConfirmations([]time.Time{now.Add(-time.Hour)})
+
+	priorKey := daemonInstanceKey(repoID, "prior")
+	freshKey := daemonInstanceKey(repoID, "fresh")
+	clobberKey := daemonInstanceKey(repoID, "clobber")
+	prior := map[string]*session.Instance{priorKey: priorInst}
+	loaded := map[string]*session.Instance{priorKey: priorInst, freshKey: freshInst, clobberKey: clobberInst}
+
+	// In-memory truth for the clobber row must win over its (stale) disk copy.
+	clobberStateKey := stableSessionKey(repoID, clobberInst)
+	manager.mu.Lock()
+	manager.lostRestoreConfirmations[clobberStateKey] = []time.Time{now, now}
+	manager.reseedLostRestoreConfirmationsLocked(now, loaded, prior)
+	manager.mu.Unlock()
+
+	if got := flapCount(manager, stableSessionKey(repoID, priorInst)); got != 0 {
+		t.Fatalf("a row already tracked was (re)seeded: count = %d, want 0", got)
+	}
+	if got := flapCount(manager, stableSessionKey(repoID, freshInst)); got != 2 {
+		t.Fatalf("the newly loaded row seeded %d confirmations, want 2", got)
+	}
+	if got := flapCount(manager, clobberStateKey); got != 2 {
+		t.Fatalf("a disk snapshot overwrote in-memory history: count = %d, want the live 2", got)
+	}
+}

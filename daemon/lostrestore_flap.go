@@ -43,10 +43,16 @@ func (m *Manager) noteLostRestoreConfirmationLocked(stateKey string, now time.Ti
 // the only signal that has not happened yet.
 func (m *Manager) persistLostRestoreConfirmations(repoID, key string, inst *session.Instance) {
 	stateKey := stableSessionKey(repoID, inst)
+	// Snapshot and instance update are one critical section: an off-ramp
+	// clear that ran between a separate read and write could let a stale
+	// snapshot overwrite the retired episode, and persistSettlement
+	// serializes the instance as it stands at write time — so whichever
+	// ordering the locks give the two mutations is what reaches disk.
 	m.mu.Lock()
 	times := append([]time.Time(nil), m.lostRestoreConfirmations[stateKey]...)
+	changed := inst.SetLostRestoreConfirmations(times)
 	m.mu.Unlock()
-	if !inst.SetLostRestoreConfirmations(times) {
+	if !changed {
 		return
 	}
 	if err := m.persistSettlement(repoID, key, inst); err != nil {
@@ -87,6 +93,35 @@ func (m *Manager) clearLostRestoreEpisode(stateKey string, inst *session.Instanc
 	delete(m.lostRestoreStates, stateKey)
 	m.mu.Unlock()
 	inst.ClearLostRestoreConfirmations()
+}
+
+// reseedLostRestoreConfirmationsLocked seeds the bound's in-memory history
+// from each loaded instance's durable copy, for rows this load (re)introduced
+// — startup's whole map, or the subset a repaired repo adds on a later poll.
+// Timestamps older than the window prune here exactly as they do at append
+// time. A row already tracked keeps its in-memory history: the map is the
+// runtime truth and may hold confirmations the record has not settled yet.
+// Caller holds m.mu.
+func (m *Manager) reseedLostRestoreConfirmationsLocked(now time.Time, loaded, prior map[string]*session.Instance) {
+	for key, inst := range loaded {
+		if prior != nil {
+			if _, existed := prior[key]; existed {
+				continue
+			}
+		}
+		times := inst.LostRestoreConfirmationsSnapshot()
+		if len(times) == 0 {
+			continue
+		}
+		repoID, _ := splitDaemonInstanceKey(key)
+		stateKey := stableSessionKey(repoID, inst)
+		if _, seeded := m.lostRestoreConfirmations[stateKey]; seeded {
+			continue
+		}
+		if pruned := pruneLostRestoreConfirmations(times, now); len(pruned) > 0 {
+			m.lostRestoreConfirmations[stateKey] = pruned
+		}
+	}
 }
 
 // pruneLostRestoreConfirmations drops confirmations older than the flap

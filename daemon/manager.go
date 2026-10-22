@@ -887,19 +887,7 @@ func (m *Manager) restoreInstances() error {
 	// Reseed the confirmed-flap bound's history from the durable copies: the
 	// in-memory map was dropped with the previous generation, and a restart
 	// mid-window must not let a flapping session buy extra cycles (#5436).
-	// Timestamps older than the window prune here exactly as they do at
-	// append time.
-	now := nowFunc()
-	for key, inst := range instances {
-		times := inst.LostRestoreConfirmationsSnapshot()
-		if len(times) == 0 {
-			continue
-		}
-		repoID, _ := splitDaemonInstanceKey(key)
-		if pruned := pruneLostRestoreConfirmations(times, now); len(pruned) > 0 {
-			m.lostRestoreConfirmations[stableSessionKey(repoID, inst)] = pruned
-		}
-	}
+	m.reseedLostRestoreConfirmationsLocked(nowFunc(), instances, nil)
 	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
 	// instances.json was corrupted and dropped at startup. A full restart always
 	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
