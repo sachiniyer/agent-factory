@@ -137,6 +137,18 @@ func (s *Store) createDoc(slug, file string, data []byte) error {
 	return f.Close()
 }
 
+func (s *Store) removeDoc(slug, file string) error {
+	dir, err := s.openSlugDir(slug)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if err := unix.Unlinkat(int(dir.Fd()), file, 0); err != nil {
+		return &fs.PathError{Op: "remove", Path: filepath.Join(s.SlugPath(slug), file), Err: err}
+	}
+	return nil
+}
+
 // writeDoc atomically replaces doc file of proposal slug. The rename replaces
 // a link at that name rather than writing through it.
 func (s *Store) writeDoc(slug, file string, data []byte) error {

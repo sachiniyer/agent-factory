@@ -278,6 +278,11 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 			return err
 		}
 		_, err = s.commitPaths("add "+slug+"/"+docFile(n), by.Author, by.SessionID, slug+"/"+docFile(n))
+		if err != nil {
+			if rmErr := s.removeDoc(slug, docFile(n)); rmErr != nil {
+				return fmt.Errorf("%w (and failed to remove %s: %v)", err, docFile(n), rmErr)
+			}
+		}
 		return err
 	})
 	return docFile(n), err
