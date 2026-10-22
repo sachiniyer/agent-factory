@@ -3,13 +3,14 @@ package proposal
 import (
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // legacyGitDir is where builds before the git dir moved out of the docs
@@ -68,7 +69,7 @@ func copyTreeFromRoot(root *os.Root, name, dst string) error {
 		target := filepath.Join(dst, filepath.FromSlash(p))
 		switch {
 		case d.IsDir():
-			return os.MkdirAll(target, 0o755)
+			return config.MkdirAllUnderAFHome(target, 0o755)
 		case d.Type().IsRegular():
 			return copyRegularFromRoot(root, p, target)
 		}

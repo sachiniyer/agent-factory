@@ -138,8 +138,6 @@ var auditedMkdir = map[string]struct {
 		"Creates one metadata directory after validateDirectoryNoSymlink checks its immediate parent; ENOENT if gone."},
 	"internal/upgradetxn/storage.go:createDurableDirectory": {1,
 		"Requires filepath.Dir(path) == parent and validates that parent before creating its immediate child; ENOENT if gone."},
-	"proposal/store.go:Store.Create": {1,
-		"Creates one proposal folder directly beneath the store, which withLock has just created through config.MkdirAllUnderAFHome; ENOENT if gone."},
 }
 
 func TestAuditedMkdirSites(t *testing.T) {
