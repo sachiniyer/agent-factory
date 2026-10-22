@@ -403,14 +403,18 @@ func (s *Service) Changes(sessionID string) (*Changes, error) {
 	if err != nil {
 		return c, err
 	}
-	s.publishSnapshot(r, before)
+	s.publishSnapshot(r, before, "")
 	return c, nil
 }
 
-// publishSnapshot publishes the docs that commits after before changed. It is
-// for the external snapshot a call took before doing its own work.
-func (s *Service) publishSnapshot(r *resolved, before string) {
+// publishSnapshot publishes the docs that the external snapshot a call took
+// before its own work changed: the commits after before, up to the parent of
+// own, the call's own commit, or up to HEAD when own is "".
+func (s *Service) publishSnapshot(r *resolved, before, own string) {
 	after, err := r.store.Head()
+	if own != "" {
+		after, err = r.store.gitTrim("rev-parse", "--verify", own+"^")
+	}
 	if err != nil || before == "" || after == before {
 		return
 	}
@@ -508,10 +512,15 @@ func (s *Service) Write(t Target, slug, doc, text string, author Author) (*DocRe
 	if err != nil {
 		return nil, err
 	}
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
 	file, commit, err := r.store.Write(slug, doc, text, by)
 	if err != nil {
 		return nil, err
 	}
+	s.publishSnapshot(r, before, commit)
 	if commit != "" {
 		s.committed(r, slug, file, commit, author)
 	}
