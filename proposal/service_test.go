@@ -540,6 +540,44 @@ func TestScanSkipsTheDaemonsOwnWrites(t *testing.T) {
 	}
 }
 
+func TestReadPublishesTheDiskEditItSnapshots(t *testing.T) {
+	svc, host, store := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	in := WatchInput{RepoIDs: []string{testRepoID}}
+	svc.Scan(in)
+	host.takeEvents()
+
+	editOnDisk(t, store, "p", "goals.md", "disk edit\n")
+	bumpMtime(t, filepath.Join(store.SlugPath("p"), "goals.md"))
+	res, err := svc.Read(byRepo(), "p", "goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := host.takeEvents()
+	if len(ev) != 1 || ev[0].Commit == nil || *ev[0].Commit != res.Commit || ev[0].Author != AuthorExternal {
+		t.Fatalf("a read that snapshots a disk edit must publish it, got %+v", ev)
+	}
+	if _, err := svc.Read(byRepo(), "p", "goals"); err != nil {
+		t.Fatal(err)
+	}
+	svc.Scan(in)
+	if ev := host.takeEvents(); len(ev) != 0 {
+		t.Fatalf("an unchanged read and the next scan must publish nothing, got %+v", ev)
+	}
+
+	editOnDisk(t, store, "p", "goals.md", "another\n")
+	bumpMtime(t, filepath.Join(store.SlugPath("p"), "goals.md"))
+	saved, err := svc.Save(byRepo(), "p", "goals", "another\n", res.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := host.takeEvents(); len(ev) != 1 || ev[0].Commit == nil || *ev[0].Commit != saved.Commit || ev[0].Author != AuthorExternal {
+		t.Fatalf("a no-op save that snapshots a disk edit must publish it, got %+v", ev)
+	}
+}
+
 func TestScanFollowsAttachChanges(t *testing.T) {
 	svc, host, store := newTestService(t)
 	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {

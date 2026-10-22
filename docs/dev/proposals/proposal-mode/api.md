@@ -154,8 +154,8 @@ Shapes:
   built-in templates.
 - `author` is `human`, `agent` or `external`. `agent` needs `session_id`, and
   the commit records that session. The Docs tab sends `human`.
-- `ReadProposalDoc` first commits uncommitted edits of that doc as `external`.
-  Then `text` is the doc at `commit`, and the tab can send that `commit` as
+- `ReadProposalDoc` first commits uncommitted edits of that doc as `external`,
+  and publishes that commit as a `proposal.changed` event. Then `text` is the doc at `commit`, and the tab can send that `commit` as
   the `base` of its next save.
 
 ### Save and merge

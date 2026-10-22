@@ -434,11 +434,15 @@ func (s *Service) Read(t Target, slug, doc string) (*ReadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	text, file, commit, err := r.store.ReadAt(slug, doc)
+	text, file, commit, snapshotted, err := r.store.ReadAt(slug, doc)
 	if err != nil {
 		return nil, err
 	}
-	s.seen(r, slug, file)
+	if snapshotted {
+		s.committed(r, slug, file, commit, AuthorExternal)
+	} else {
+		s.seen(r, slug, file)
+	}
 	return &ReadResult{Slug: slug, Doc: file, Text: text, Commit: commit}, nil
 }
 
@@ -476,9 +480,12 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	if err != nil {
 		return nil, err
 	}
-	if res.saved {
+	switch {
+	case res.saved:
 		s.committed(r, slug, file, res.Commit, AuthorHuman)
-	} else {
+	case res.snapshotted:
+		s.committed(r, slug, file, res.Commit, AuthorExternal)
+	default:
 		s.seen(r, slug, file)
 	}
 	return &SaveDocResult{Slug: slug, Doc: file, SaveResult: *res}, nil

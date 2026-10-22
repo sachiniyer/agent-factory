@@ -110,16 +110,19 @@ func TemplateNames() ([]string, error) {
 // ReadAt returns an existing doc together with the commit it is at. It first
 // commits uncommitted edits of that doc as external, so the text is exactly the
 // doc at the returned commit and can serve as the base of a later Save.
-func (s *Store) ReadAt(slug, doc string) (text, file, commit string, err error) {
+// snapshotted is true when it made that external commit.
+func (s *Store) ReadAt(slug, doc string) (text, file, commit string, snapshotted bool, err error) {
 	err = s.withLock(func() error {
 		_, f, err := s.docPath(slug, doc)
 		if err != nil {
 			return err
 		}
 		file = f
-		if _, err := s.commitPaths("snapshot external edits", AuthorExternal, "", slug+"/"+f); err != nil {
+		snap, err := s.commitPaths("snapshot external edits", AuthorExternal, "", slug+"/"+f)
+		if err != nil {
 			return err
 		}
+		snapshotted = snap != ""
 		if commit, err = s.head(); err != nil {
 			return err
 		}
@@ -130,5 +133,5 @@ func (s *Store) ReadAt(slug, doc string) (text, file, commit string, err error) 
 		text = string(data)
 		return nil
 	})
-	return text, file, commit, err
+	return text, file, commit, snapshotted, err
 }

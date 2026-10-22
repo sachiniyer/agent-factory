@@ -23,6 +23,8 @@ type SaveResult struct {
 	Merged bool   `json:"merged"`
 	// saved is true when the save made a human commit.
 	saved bool
+	// snapshotted is true when the save first committed an external edit.
+	snapshotted bool
 }
 
 // ConflictData is what a conflicting save sends back: the three versions and
@@ -80,7 +82,8 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 		if err != nil {
 			return fmt.Errorf("unknown base commit %q: read the doc again", base)
 		}
-		if _, err := s.commitPaths("snapshot external edits", AuthorExternal, "", rel); err != nil {
+		snap, err := s.commitPaths("snapshot external edits", AuthorExternal, "", rel)
+		if err != nil {
 			return err
 		}
 		head, err := s.head()
@@ -122,7 +125,7 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 				commit = c
 			}
 		}
-		res = &SaveResult{Text: next, Commit: commit, Merged: merged, saved: commit != head}
+		res = &SaveResult{Text: next, Commit: commit, Merged: merged, saved: commit != head, snapshotted: snap != ""}
 		return nil
 	})
 	return res, err
