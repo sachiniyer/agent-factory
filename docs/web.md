@@ -75,7 +75,7 @@ selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, selecting a terminal gives it the screen: one compact row holds
-**Toggle sessions**, the truncating session title, static Keyboard state, the
+**Toggle sessions**, the truncating session title, the
 **Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
 choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its

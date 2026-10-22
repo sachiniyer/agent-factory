@@ -26,7 +26,7 @@ hand-captured, cropped, or retouched:
 | `session-actions.png` · `terminal-keyboard.png` · the same two with `phone-` · `split-panes.png` | Terminal actions, keyboard ownership and split chrome |
 | `create-compact.png` · `create-defaults.png` · `session-lifecycle.png` · `kill-confirmation.png` · `task-actions.png` · `remove-task.png` · `edit-task.png` · `config-dirty.png` · `add-account.png` · `account-error.png` · `assistant-error.png` · `add-project.png` · `login.png` · `unavailable.png` | Form disclosures, confirmations and recovery; failure and sign-in responses are controlled recorder fixtures |
 | `phone-create.png` · `phone-tasks.png` · `phone-config.png` · `phone-add-account.png` | Phone forms and management views |
-| the same forty-two, `-dark` | One still per scene, dark theme |
+| the same forty, `-dark` | One still per scene, dark theme |
 
 `docs/assets/tui/` holds the TUI's own media, produced by a different recorder
 (`scripts/container/record-demo.sh`, which drives real Codex sessions through
