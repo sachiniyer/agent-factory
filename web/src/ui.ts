@@ -1173,7 +1173,7 @@ export class AppShell {
       // retires that state, unlike layout and picker-return programmatic closes.
       const slot = this.terminalChrome?.newTabSlot;
       if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
-    });
+    }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
 
     const header = h(

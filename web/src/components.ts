@@ -54,6 +54,7 @@ export function appbarControls(
   phone = window.matchMedia("(max-width: 768px)"),
   beforeSync: () => void = () => {},
   onDismiss: () => void = () => {},
+  emptyFocus: () => HTMLElement | null = () => null,
 ) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
@@ -68,8 +69,11 @@ export function appbarControls(
   const hasContent = () => Array.from(menu.panel.children).some((child) => !(child as HTMLElement).hidden);
   const syncTrigger = () => {
     const empty = !hasContent();
-    if (empty && menu.trigger.getAttribute("aria-expanded") === "true") menu.close();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
     menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
   };
   const sync = () => {
     beforeSync();

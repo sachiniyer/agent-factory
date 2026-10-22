@@ -7293,7 +7293,7 @@ function actionsDisclosure(label = "Session actions", enabled = () => true, onDi
 }
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
-}) {
+}, emptyFocus = () => null) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
@@ -7307,8 +7307,11 @@ function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"
   const hasContent = () => Array.from(menu.panel.children).some((child) => !child.hidden);
   const syncTrigger = () => {
     const empty = !hasContent();
-    if (empty && menu.trigger.getAttribute("aria-expanded") === "true") menu.close();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
     menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
   };
   const sync = () => {
     beforeSync();
@@ -15324,6 +15327,14 @@ function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   }
   return "";
 }
+function taskVerbs(t, actions2) {
+  const triggerBlocked = canTrigger(t) ? void 0 : !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
+  return [
+    { label: "Edit", glyph: "pencil", run: () => actions2.edit(t) },
+    { label: "Trigger", glyph: "play", run: () => actions2.trigger(t), blocked: triggerBlocked },
+    { label: "Remove", glyph: "trash", run: () => actions2.remove(t) }
+  ];
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -15448,31 +15459,27 @@ var TasksPane = class {
     toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
     toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
     toggle.addEventListener("click", () => this.actions.toggle(t));
-    const verbs = [
-      { label: "Edit", glyph: "pencil", run: () => this.actions.edit(t) }
-    ];
-    if (canTrigger(t)) {
-      verbs.push({ label: "Trigger", glyph: "play", run: () => this.actions.trigger(t) });
-    }
-    verbs.push({ label: "Remove", glyph: "trash", run: () => this.actions.remove(t) });
-    const iconBtns = verbs.map(({ label, glyph, run }) => {
-      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: label }, icon(glyph));
+    const verbs = taskVerbs(t, this.actions);
+    const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
       btn.setAttribute("aria-label", label);
-      btn.addEventListener("click", run);
+      if (blocked) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener("click", run);
+      }
       return btn;
     });
-    if (!canTrigger(t)) {
-      const why = !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
-      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: why }, icon("play"));
-      btn.setAttribute("aria-label", "Trigger");
-      btn.disabled = true;
-      iconBtns.splice(1, 0, btn);
-    }
     const menu = actionsDisclosure(`Actions for ${t.name}`);
     this.menus.push(menu);
-    menu.panel.append(...verbs.map(({ label, glyph, run }) => {
+    menu.panel.append(...verbs.map(({ label, glyph, run, blocked }) => {
       const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
-      btn.addEventListener("click", run);
+      if (blocked) {
+        btn.disabled = true;
+        btn.title = blocked;
+      } else {
+        btn.addEventListener("click", run);
+      }
       return btn;
     }));
     menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
@@ -16416,7 +16423,7 @@ var AppShell = class {
     ], this.phone, this.captureNewTabCancelReturn, () => {
       const slot = this.terminalChrome?.newTabSlot;
       if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
-    });
+    }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     const header = h(
       "header",
