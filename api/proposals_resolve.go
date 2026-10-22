@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/proposal"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -49,6 +51,13 @@ func (c proposalCaller) author() proposal.Author {
 // pane never falls back to an external commit.
 func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, err error) {
 	if proposalSessionFlag != "" {
+		if apiclient.IsRemoteTarget() {
+			data, err := remoteProposalSession(proposalSessionFlag)
+			if err != nil {
+				return nil, false, err
+			}
+			return data, true, nil
+		}
 		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return nil, false, err
@@ -67,6 +76,36 @@ func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, er
 		return nil, false, fmt.Errorf("cannot resolve the calling af session (pass --session <title> to name one): %w", err)
 	}
 	return data, true, nil
+}
+
+// remoteProposalSession finds a session on a remote daemon by title. There
+// --repo is a path on the daemon host, so it narrows the match by the project
+// root the daemon reports and is never resolved on this machine. A relative or
+// ~ path cannot be compared here, so it does not narrow.
+func remoteProposalSession(title string) (*session.InstanceData, error) {
+	if repoFlag == "" || !filepath.IsAbs(repoFlag) {
+		data, _, err := getSessionByTitle(title)
+		return data, err
+	}
+	all, _, _, err := snapshotRead(daemon.SnapshotRequest{})
+	if err != nil {
+		return nil, err
+	}
+	want := filepath.Clean(repoFlag)
+	var matches []session.InstanceData
+	for i := range all {
+		root := sessionRepoRoot(&all[i])
+		if all[i].Title == title && root != "" && pathutil.IsAtOrInside(want, filepath.Clean(root)) {
+			matches = append(matches, all[i])
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("session %q %w in project %s on the daemon at %s", title, errTitleNotFound, repoFlag, apiclient.RemoteTargetURL())
+	}
+	if paths := session.DedupeSorted(repoPathsOf(matches)); len(paths) > 1 {
+		return nil, session.AmbiguousTitleError(title, paths)
+	}
+	return &matches[0], nil
 }
 
 func callerForSession(data *session.InstanceData) (*proposalCaller, error) {

@@ -230,6 +230,35 @@ func TestProposalRemoteSendsRepoPath(t *testing.T) {
 	}
 }
 
+func TestProposalRemoteSessionUsesDaemonHostRepo(t *testing.T) {
+	setupRepoForCmd(t)
+	t.Setenv("TMUX", "")
+	t.Setenv("AF_DAEMON_URL", "http://127.0.0.1:1")
+	repoFlag = "/srv/remote-only/app"
+	proposalSessionFlag = "me"
+	t.Cleanup(func() { proposalSessionFlag = "" })
+	const otherID = "44444444-4444-4444-8444-444444444444"
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{
+			{ID: otherID, Title: "me", Path: "/srv/other", Worktree: session.GitWorktreeData{RepoPath: "/srv/other"}},
+			{ID: proposalTestSessionID, Title: "me", Path: "/srv/remote-only/app", Worktree: session.GitWorktreeData{RepoPath: "/srv/remote-only/app"}},
+		}, nil
+	})
+	var got daemon.PullProposalChangesRequest
+	prev := callProposalRoute
+	callProposalRoute = func(method string, req, resp any) error {
+		got = req.(daemon.PullProposalChangesRequest)
+		return nil
+	}
+	t.Cleanup(func() { callProposalRoute = prev })
+	if _, err := runCmdCaptureStdout(t, proposalChangesCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != proposalTestSessionID {
+		t.Fatalf("session_id = %q, want the session in --repo on the daemon host", got.SessionID)
+	}
+}
+
 func TestProposalStartAttachesSelfAndPrintsRules(t *testing.T) {
 	setupRepoForCmd(t)
 	stubProposalSelf(t)
