@@ -283,14 +283,19 @@ func TestReapFallbackKeepsTheWatchdogUntilExit(t *testing.T) {
 	}
 }
 
-// TestSkippedGroupKillDoesNotWedgeTheRun: when the group cleanup kill is
-// skipped, something the script backgrounded can still hold the run's stdout
-// after the shell exits. The run must end anyway, within the stop grace, and
-// say why — otherwise stop, reload and shutdown wait on that process forever.
+// TestSkippedGroupKillDoesNotWedgeTheRun: when the leader's exit cannot be
+// awaited without reaping AND the group cannot be pinned, the group cleanup
+// kill is skipped — and something the script backgrounded can still hold the
+// run's stdout after the shell exits. The run must end anyway, within the
+// stop grace, and say why — otherwise stop, reload and shutdown wait on that
+// process forever.
 func TestSkippedGroupKillDoesNotWedgeTheRun(t *testing.T) {
 	exited := watchLeaderExited
 	t.Cleanup(func() { watchLeaderExited = exited })
 	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
+	anchor := spawnWatchGroupAnchor
+	t.Cleanup(func() { spawnWatchGroupAnchor = anchor })
+	spawnWatchGroupAnchor = func(int) func() { return nil }
 
 	s, _ := newTestSupervisor(t, staticTasks())
 	s.lifelineExe = "" // a lifeline would kill the leftover itself on the shell's exit
@@ -354,5 +359,57 @@ func TestFailedProbeOutputStaysOutOfTheTask(t *testing.T) {
 	}
 	if got := warnings.String(); !strings.Contains(got, "probe-stdout") || !strings.Contains(got, "probe-stderr") {
 		t.Fatalf("fallback warning %q does not carry what the probe printed", got)
+	}
+}
+
+// TestFallbackReapKeepsTheGroupNumberPinned pins the property the stop
+// watchdog's group signals rely on when the leader's exit can only be
+// observed by reaping it: the group's number must still name this run's
+// group while beforeKill disarms the watchdog — the window every watchdog
+// signal in flight lands in — and while the cleanup kill is sent. Before the
+// anchor, the reap freed the number first: kill(-pgid, 0) answered ESRCH
+// inside beforeKill, so a signal landing there could hit a reused group. The
+// leader must still be running when the anchor joins — a group reduced to a
+// leader zombie can already be unjoinable — so it stays up for the probe.
+func TestFallbackReapKeepsTheGroupNumberPinned(t *testing.T) {
+	exited := watchLeaderExited
+	t.Cleanup(func() { watchLeaderExited = exited })
+	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
+
+	kill := watchGroupKill
+	t.Cleanup(func() { watchGroupKill = kill })
+	var unpinned []string
+	watchGroupKill = func(target int, sig syscall.Signal) error {
+		// Signal 0 answers ESRCH only once the group is gone — the leader
+		// reaped and nothing else keeping its number reserved.
+		if err := kill(target, 0); errors.Is(err, syscall.ESRCH) {
+			unpinned = append(unpinned, sig.String())
+		}
+		return kill(target, sig)
+	}
+
+	cmd := exec.Command("sleep", "0.5")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+
+	pinned := false
+	groupKilled, err := reapWatchGroupLeader(cmd, func() {
+		pinned = syscall.Kill(-pgid, 0) == nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned {
+		t.Fatal("the group number was released before the watchdog was disarmed; " +
+			"a stop signal landing in this window could reach a reused group")
+	}
+	if !groupKilled {
+		t.Fatal("the group cleanup kill was skipped although the number stayed pinned")
+	}
+	if len(unpinned) > 0 {
+		t.Fatalf("group signals sent with the number unpinned: %v", unpinned)
 	}
 }

@@ -623,8 +623,10 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// Group-kill on every exit path (#769): backgrounded grandchildren must
 	// not outlive the watcher. This also closes any inherited stdout/stderr
 	// write ends, so both reader goroutines are guaranteed to reach EOF. The
-	// watchdog is joined, and the kill sent, while the leader is still
-	// unreaped, so neither can name a reused group (reapWatchGroupLeader).
+	// watchdog is joined, and the kill sent, while the group's number is
+	// still pinned — by the unreaped leader, or by the anchor member on the
+	// fallback path — so neither can name a reused group
+	// (reapWatchGroupLeader).
 	groupKilled, waitErr := reapWatchGroupLeader(cmd, func() {
 		close(leaderExited)
 		<-watchdogDone
