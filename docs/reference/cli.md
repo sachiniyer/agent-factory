@@ -1766,8 +1766,9 @@ Ask the user for attention, or clear the request
 Mark a session as needing the user. The web rail shows a blinking yellow
 dot on the row, and the reason in the row tooltip.
 
-Agents run this with --self when they need a decision or input they cannot
-get any other way, as the last step before they stop and wait.
+Agents run this with --self only when they are blocked on a decision or
+question that only the user can answer, as the last step before they stop.
+They do not run it when a task has simply finished.
 
 The request clears when the user types into the agent pane, opens the agent
 tab in the web UI, or when the agent starts work again after it went idle.

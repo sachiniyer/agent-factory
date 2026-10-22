@@ -130,7 +130,7 @@ Creating or prompting a session: the prompt is the entire contract, because the 
 
 // afUsageAttentionInside is inside-only: the user scans many sessions at once,
 // and an agent that stops to wait gives no other sign that it needs them.
-const afUsageAttentionInside = `Asking for the user: the user watches many sessions at once and cannot tell that you are waiting on them. When you stop because you need a decision, an answer, an approval, or other input from the user, run "af sessions attention --self --reason '<what you need, in one line>'" as the LAST step before you stop, after you write the question in your reply. Do not run it when you simply finished and have nothing to ask. It clears on its own when the user replies; "af sessions attention --self --clear" removes it if you no longer need them.`
+const afUsageAttentionInside = `Asking for the user: the user watches many sessions at once and cannot tell that you are blocked on them. Run "af sessions attention --self --reason '<what you need, in one line>'" only when you are blocked on a decision or question that only the user can answer, as the last step before you stop, after you write the question in your reply. Do not run it when a task has simply finished or at the end of an ordinary turn. It clears on its own when the user replies; "af sessions attention --self --clear" removes it if you no longer need them.`
 
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
 // self-archive, and doing so kills it.
