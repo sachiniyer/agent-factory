@@ -201,8 +201,9 @@ func (s *Service) PushTick(targets []PushTarget) {
 func (s *Service) runPush(sessionID string) error {
 	s.mu.Lock()
 	var savedAt time.Time
+	var sendNow bool
 	if e := s.push[sessionID]; e != nil {
-		savedAt = e.lastSave
+		savedAt, sendNow = e.lastSave, e.sendNow
 		e.lastSave, e.sendNow = time.Time{}, false
 	}
 	s.mu.Unlock()
@@ -246,6 +247,9 @@ func (s *Service) runPush(sessionID string) error {
 		default:
 			if e.lastSave.IsZero() {
 				e.lastSave = savedAt
+			}
+			if sendNow && !e.held {
+				e.sendNow = true
 			}
 			e.notBefore = now.Add(PushQuiet)
 		}
