@@ -122,7 +122,7 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 			}
 			c, err := s.commitPaths("save "+rel, AuthorHuman, "", rel)
 			if err != nil {
-				return err
+				return s.restoreDoc(slug, file, data, err)
 			}
 			if c != "" {
 				commit = c

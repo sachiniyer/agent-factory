@@ -395,7 +395,32 @@ func (s *Service) Changes(sessionID string) (*Changes, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.store.Changes(r.session.ID)
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
+	c, err := r.store.Changes(r.session.ID)
+	if err != nil {
+		return c, err
+	}
+	s.publishSnapshot(r, before)
+	return c, nil
+}
+
+// publishSnapshot publishes the docs that commits after before changed. It is
+// for the external snapshot a call took before doing its own work.
+func (s *Service) publishSnapshot(r *resolved, before string) {
+	after, err := r.store.Head()
+	if err != nil || before == "" || after == before {
+		return
+	}
+	docs, err := r.store.changedDocs(before, after)
+	if err != nil {
+		return
+	}
+	for _, d := range docs {
+		s.committed(r, d.slug, d.file, after, AuthorExternal)
+	}
 }
 
 // Checkpoint commits the session's edits to its proposal.
