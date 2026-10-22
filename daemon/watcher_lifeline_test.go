@@ -649,3 +649,82 @@ func TestStopDuringLifelineProbeAbortsTheRun(t *testing.T) {
 		t.Fatal("the stopped run still spawned its shell directly")
 	}
 }
+
+// anchorGroupMember returns the pid of a member of process group pgid other
+// than the leader, or -1 when none is visible. ps's pid/pgid fields read the
+// same on Linux and macOS.
+func anchorGroupMember(t *testing.T, pgid, leaderPID int) int {
+	t.Helper()
+	out, err := exec.Command("ps", "-eo", "pid=,pgid=").Output()
+	if err != nil {
+		t.Fatalf("ps pid,pgid: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		pg, err2 := strconv.Atoi(fields[1])
+		if err1 == nil && err2 == nil && pg == pgid && pid != leaderPID {
+			return pid
+		}
+	}
+	return -1
+}
+
+// TestWatchGroupAnchorImmediateTermKeepsItAlive covers the window a stop
+// racing the spawn hits: the group's TERM landing the moment
+// startWatchGroupAnchor returns. An anchor that has not yet run `trap`
+// dies of it, and on darwin its unreaped zombie then answers kill(-pgid)
+// with EPERM instead of holding the group (the CI failure for #5348). The
+// ready byte the spawn now waits for is written only after the trap is
+// installed, so a returned anchor must already be TERM-immune.
+//
+// Aliveness is "not reapable yet" — wait4 with WNOHANG returning 0 — never
+// kill(pid, 0): an unreaped zombie still answers a pid probe, which is how
+// the old window could look pinned while the anchor was already dead.
+func TestWatchGroupAnchorImmediateTermKeepsItAlive(t *testing.T) {
+	leader := exec.Command("sleep", "30")
+	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := leader.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	defer func() {
+		_ = leader.Process.Kill()
+		_ = leader.Wait()
+	}()
+
+	release := startWatchGroupAnchor(pgid)
+	if release == nil {
+		t.Skip("no anchor could join the group")
+	}
+	defer release()
+
+	// The group's own TERM is what races the trap: send it the moment the
+	// spawn returns, the earliest a caller's cleanup kill could land.
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM to the group: %v", err)
+	}
+	anchorPID := -1
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && anchorPID < 0 {
+		anchorPID = anchorGroupMember(t, pgid, leader.Process.Pid)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if anchorPID < 0 {
+		t.Fatal("no non-leader member in the run's group")
+	}
+	// Let a fatal TERM be delivered before probing; a pending one can still
+	// read as running for a few scheduler ticks.
+	time.Sleep(150 * time.Millisecond)
+	var ws syscall.WaitStatus
+	wpid, err := syscall.Wait4(anchorPID, &ws, syscall.WNOHANG, nil)
+	if err != nil {
+		t.Fatalf("wait4 anchor pid %d: %v", anchorPID, err)
+	}
+	if wpid == anchorPID {
+		t.Fatalf("the anchor died of the group's TERM (%v) — it was counted as pinned before its trap was installed", ws)
+	}
+}
