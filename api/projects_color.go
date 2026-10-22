@@ -26,11 +26,17 @@ favicon with this color, so you can find the project's tab or window quickly.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		project, err := config.ResolveProjectSelector(args[0])
-		if err != nil {
-			return jsonError(err)
+		// An id goes to the daemon verbatim, as for `rebind`: the daemon reads only
+		// that record, so an unrelated broken one cannot block the change.
+		id := args[0]
+		if config.ValidateProjectID(id) != nil {
+			project, err := config.ResolveProjectSelector(id)
+			if err != nil {
+				return jsonError(err)
+			}
+			id = project.ID
 		}
-		updated, err := setProjectColorViaDaemon(daemon.SetProjectColorRequest{ID: project.ID, Color: args[1]})
+		updated, err := setProjectColorViaDaemon(daemon.SetProjectColorRequest{ID: id, Color: args[1]})
 		if err != nil {
 			return jsonError(err)
 		}
