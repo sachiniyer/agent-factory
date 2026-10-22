@@ -151,6 +151,18 @@ func TestIsWorkingContentClaudeReadsCurrentComposerOnly(t *testing.T) {
 	}
 }
 
+func TestIsWorkingContentClaudeDialogBelowStaleComposer(t *testing.T) {
+	stale := claudePane("✻ Orbiting… (2m 14s · ↓ 10.1k tokens)", "❯ ",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 2 agents")
+	raw, err := os.ReadFile("testdata/claude_permission_prompt.ansi")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if IsWorkingContent(stale+"\n"+string(raw), tmux.ProgramClaude) {
+		t.Error("IsWorkingContent read a stale composer frame above a live permission dialog; the session waits for the user and must read Ready")
+	}
+}
+
 func TestIsWorkingContentClaudeIgnoresOtherAgentsPanes(t *testing.T) {
 	raw, err := os.ReadFile("testdata/claude_working_thinking.ansi")
 	if err != nil {

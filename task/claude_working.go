@@ -24,8 +24,10 @@ var (
 // pane lines: a rule, a line that starts with "❯", any wrapped input lines, and
 // a second rule. It returns the indexes of both rules.
 //
-// A permission or question dialog replaces the composer with a box that has no
-// such pair, so it reports false there.
+// Only the last two rules count. A permission or question dialog replaces the
+// composer with a box that has no such pair, and an older composer frame
+// printed or quoted in the transcript above it must not stand in for the live
+// one.
 func claudeComposer(lines []string) (top, bottom int, ok bool) {
 	var rules []int
 	for i, line := range lines {
@@ -33,11 +35,12 @@ func claudeComposer(lines []string) (top, bottom int, ok bool) {
 			rules = append(rules, i)
 		}
 	}
-	for k := len(rules) - 1; k > 0; k-- {
-		top, bottom = rules[k-1], rules[k]
-		if top+1 < bottom && strings.HasPrefix(lines[top+1], "❯") {
-			return top, bottom, true
-		}
+	if len(rules) < 2 {
+		return -1, -1, false
+	}
+	top, bottom = rules[len(rules)-2], rules[len(rules)-1]
+	if top+1 < bottom && strings.HasPrefix(lines[top+1], "❯") {
+		return top, bottom, true
 	}
 	return -1, -1, false
 }
