@@ -88,6 +88,29 @@ func TestSetProjectColorRejectsSymlinkedRecordDirectory(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestSetProjectColorRefusesSymlinkedAppearanceFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	root := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	project, err := RegisterProject(root)
+	require.NoError(t, err)
+
+	dir, err := ProjectRegistryDir()
+	require.NoError(t, err)
+	target := filepath.Join(base, "appearance-target.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{"color":"#000000"}`), 0o644))
+	link := filepath.Join(dir, project.ID, projectAppearanceFileName)
+	require.NoError(t, os.Symlink(target, link))
+
+	for _, color := range []string{"#16a34a", ""} {
+		_, err = SetProjectColor(project.ID, color)
+		require.ErrorIs(t, err, ErrManagedFileSymlink, color)
+		info, err := os.Lstat(link)
+		require.NoError(t, err)
+		require.NotZero(t, info.Mode()&os.ModeSymlink, color)
+	}
+}
+
 func TestSetProjectColorIgnoresUnrelatedBrokenRecords(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))

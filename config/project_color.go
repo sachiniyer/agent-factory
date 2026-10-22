@@ -65,7 +65,7 @@ func SetProjectColor(id, color string) (Project, error) {
 		}
 		path := filepath.Join(dir, id, projectAppearanceFileName)
 		if normalized == "" {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := RemoveFileRefusingLink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("clear project color: %w", err)
 			}
 		} else {
@@ -73,7 +73,7 @@ func SetProjectColor(id, color string) (Project, error) {
 			if err != nil {
 				return fmt.Errorf("marshal project appearance: %w", err)
 			}
-			if err := AtomicWriteFile(path, append(data, '\n'), 0o644); err != nil {
+			if err := AtomicWriteFileRefusingLink(path, append(data, '\n'), 0o644); err != nil {
 				return fmt.Errorf("write project color: %w", err)
 			}
 		}
