@@ -89,6 +89,18 @@ func SetProjectColor(id, color string) (Project, error) {
 // readProjectRecord reads and validates only id's record. A color write needs
 // no registry-wide uniqueness proof, so unrelated broken records must not block it.
 func readProjectRecord(dir, id string) (projectRecord, error) {
+	info, err := os.Lstat(filepath.Join(dir, id))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return projectRecord{}, fmt.Errorf("project %s is not registered", id)
+		}
+		return projectRecord{}, fmt.Errorf("read project %s: %w", id, err)
+	}
+	// Same rule as loadProjectRecordsDetailed: a symlink is not a record, and
+	// following it would write appearance.json outside the registry.
+	if !info.IsDir() {
+		return projectRecord{}, fmt.Errorf("read project registry: record %s is not a directory", id)
+	}
 	data, err := os.ReadFile(projectRecordPath(dir, id))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

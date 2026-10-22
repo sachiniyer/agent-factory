@@ -69,6 +69,25 @@ func TestSetProjectColorRejectsUnknownProjectAndBadColor(t *testing.T) {
 	require.ErrorContains(t, err, "invalid project color")
 }
 
+func TestSetProjectColorRejectsSymlinkedRecordDirectory(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	root := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	project, err := RegisterProject(root)
+	require.NoError(t, err)
+
+	dir, err := ProjectRegistryDir()
+	require.NoError(t, err)
+	outside := filepath.Join(base, "outside")
+	require.NoError(t, os.Rename(filepath.Join(dir, project.ID), outside))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, project.ID)))
+
+	_, err = SetProjectColor(project.ID, "#16a34a")
+	require.ErrorContains(t, err, "is not a directory")
+	_, err = os.Stat(filepath.Join(outside, projectAppearanceFileName))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestSetProjectColorIgnoresUnrelatedBrokenRecords(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
