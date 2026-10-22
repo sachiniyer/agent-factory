@@ -99,6 +99,21 @@ func (s *Store) initialized() bool {
 	return err == nil && info.IsDir()
 }
 
+// present reports whether the store has a repository. A legacy in-folder
+// repository is imported first, so read paths see its history.
+func (s *Store) present() (bool, error) {
+	if s.initialized() {
+		return true, nil
+	}
+	if info, err := os.Lstat(s.legacyGitDir()); err != nil || !info.IsDir() {
+		return false, nil
+	}
+	if err := s.withLock(func() error { return nil }); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ensureRepo creates the store repository with one empty root commit, so HEAD
 // always names a commit that cursors can point at. A store made by a build
 // that kept its git dir inside the docs folder is imported instead. The
@@ -127,7 +142,11 @@ func (s *Store) ensureRepo() error {
 	if err != nil {
 		return fmt.Errorf("import proposal history from %s: %w; move that folder away to start a new history", s.legacyGitDir(), err)
 	}
-	if !legacy {
+	if legacy {
+		if _, err := s.gitIn(tmp, nil, "read-tree", "HEAD"); err != nil {
+			return err
+		}
+	} else {
 		if _, err := s.gitIn(tmp, nil, "commit", "-q", "--allow-empty", "-m", commitMessage("initialize proposal store", AuthorExternal, "")); err != nil {
 			return err
 		}

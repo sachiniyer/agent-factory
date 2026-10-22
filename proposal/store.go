@@ -336,11 +336,27 @@ func (s *Store) Write(slug, doc, text string, by Committer) (string, string, err
 		if _, err := s.snapshot(); err != nil {
 			return err
 		}
+		old, err := s.readDoc(slug, file)
+		if err != nil {
+			return err
+		}
 		if err := s.writeDoc(slug, file, []byte(text)); err != nil {
 			return err
 		}
 		commit, err = s.commitPaths("write "+slug+"/"+file, by.Author, by.SessionID, slug+"/"+file)
-		return err
+		if err != nil {
+			return s.restoreDoc(slug, file, old, err)
+		}
+		return nil
 	})
 	return file, commit, err
+}
+
+// restoreDoc puts back the text a failed commit was about to replace, so a
+// retry is not snapshotted as an external edit.
+func (s *Store) restoreDoc(slug, file string, old []byte, cause error) error {
+	if err := s.writeDoc(slug, file, old); err != nil {
+		return fmt.Errorf("%w (and failed to restore %s: %v)", cause, file, err)
+	}
+	return cause
 }

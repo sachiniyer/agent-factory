@@ -3,7 +3,9 @@ package proposal
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 )
 
@@ -76,8 +78,11 @@ func (s *Store) stage(pathspecs []string) error {
 			continue
 		}
 		data, err := s.readDoc(slug, file)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSymlink) {
 			continue
+		}
+		if err != nil {
+			return err
 		}
 		present[d] = true
 		if tracked[d] == blobID(data) {

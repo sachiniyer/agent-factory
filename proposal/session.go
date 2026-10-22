@@ -23,8 +23,8 @@ func (s *Store) Attached(sessionID string) (string, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return "", err
 	}
-	if !s.initialized() {
-		return "", nil
+	if ok, err := s.present(); !ok || err != nil {
+		return "", err
 	}
 	return s.attachedLocked(sessionID)
 }
@@ -43,8 +43,8 @@ func (s *Store) attachedLocked(sessionID string) (string, error) {
 // Attachments maps each attached session ID to its slug.
 func (s *Store) Attachments() (map[string]string, error) {
 	got := map[string]string{}
-	if !s.initialized() {
-		return got, nil
+	if ok, err := s.present(); !ok || err != nil {
+		return got, err
 	}
 	out, err := s.git(nil, "for-each-ref", "--format=%(refname)", attachRefPrefix)
 	if err != nil {
@@ -119,8 +119,8 @@ func (s *Store) Detach(sessionID string) (string, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return "", err
 	}
-	if !s.initialized() {
-		return "", nil
+	if ok, err := s.present(); !ok || err != nil {
+		return "", err
 	}
 	var slug string
 	err := s.withLock(func() error {
@@ -163,7 +163,9 @@ func (s *Store) Changes(sessionID string) (*Changes, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, err
 	}
-	if !s.initialized() {
+	if ok, err := s.present(); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, ErrNotAttached
 	}
 	var res *Changes
@@ -209,7 +211,9 @@ func (s *Store) Checkpoint(sessionID string) (*Checkpoint, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, err
 	}
-	if !s.initialized() {
+	if ok, err := s.present(); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, ErrNotAttached
 	}
 	var res *Checkpoint
