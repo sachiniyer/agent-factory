@@ -14,17 +14,25 @@ var ErrAttentionNotLive = errors.New("attention applies only to a live agent")
 // request. The reason is shown in a row tooltip, not a document.
 const MaxAttentionReasonLen = 500
 
+// attentionAnswerIdle is how long the agent must stay idle before a Running
+// edge counts as the user's answer. A shorter still spell is the agent pausing
+// inside its own turn — one quiet poll between `attention --self` and its
+// closing message — and the output after it is not new work.
+const attentionAnswerIdle = 10 * time.Second
+
 // Attention is an agent's explicit request for the user, set with
 // `af sessions attention --self`. It clears when the user types into the
 // agent pane, opens the agent tab in the web UI, or when the agent starts work
-// again after it went idle.
+// again after it was idle for attentionAnswerIdle.
 type Attention struct {
 	Reason string    `json:"reason,omitempty"`
 	SetAt  time.Time `json:"set_at"`
-	// SeenIdle records that the agent went idle after it asked. The agent asks
-	// while it is still running, so only a Running edge after an idle one is
-	// the user's answer starting new work.
-	SeenIdle bool `json:"seen_idle,omitempty"`
+	// SeenIdle records that the agent went idle after it asked, and IdleSince
+	// when. The agent asks while it is still running, so only a Running edge
+	// after a long enough idle spell is the user's answer starting new work. A
+	// record without IdleSince predates it and counts as long enough.
+	SeenIdle  bool      `json:"seen_idle,omitempty"`
+	IdleSince time.Time `json:"idle_since,omitzero"`
 }
 
 func cloneAttention(a *Attention) *Attention {
@@ -112,13 +120,34 @@ func (i *Instance) noteAttentionLivenessLocked() {
 	}
 	switch i.liveness {
 	case LiveReady:
-		i.attention.SeenIdle = true
-	case LiveRunning:
-		if i.attention.SeenIdle {
-			i.attention = nil
+		if !i.attention.SeenIdle {
+			i.attention.SeenIdle = true
+			i.attention.IdleSince = instanceNow().UTC()
 		}
+	case LiveRunning:
+		if !i.attention.SeenIdle {
+			return
+		}
+		since := i.attention.IdleSince
+		if since.IsZero() || instanceNow().Sub(since) >= attentionAnswerIdle {
+			i.attention = nil
+			return
+		}
+		i.attention.SeenIdle = false
+		i.attention.IdleSince = time.Time{}
 	case LivenessUnset:
 	default:
+		i.attention = nil
+	}
+}
+
+// dropAttentionIfStoppedLocked removes a request on a session that is not
+// live. Paths that set liveness without noteStateChangeLocked call it, so no
+// path reaches Lost, Dead, Archived or LimitReached with a request still set.
+// Caller holds i.mu for writing, or owns i before it is shared.
+func (i *Instance) dropAttentionIfStoppedLocked() {
+	switch i.liveness {
+	case LiveArchived, LiveLost, LiveDead, LiveLimitReached:
 		i.attention = nil
 	}
 }

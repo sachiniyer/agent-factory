@@ -407,6 +407,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		rootRecreateContext: data.RootRecreateContext,
 		attention:           cloneAttention(data.Attention),
 	}
+	instance.dropAttentionIfStoppedLocked()
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
@@ -637,6 +638,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.liveness = LiveLost
 			instance.touchLocked()
 		}
+		instance.dropAttentionIfStoppedLocked()
 		instance.mu.Unlock()
 		return inertReturn(), nil
 	}
@@ -660,6 +662,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.mu.Lock()
 			instance.liveness = LiveLost
 			instance.started = true
+			instance.dropAttentionIfStoppedLocked()
 			instance.touchLocked()
 			instance.mu.Unlock()
 			return instance, nil
