@@ -16864,6 +16864,7 @@ var AppShell = class {
     }
     const activeBefore = document.activeElement;
     let restoreChangedFocus;
+    const reopened = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
@@ -16883,7 +16884,11 @@ var AppShell = class {
           (target) => this.rowActions(target, s.id === state.selectedId),
           previous
         );
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : void 0;
+        if (menu) {
+          menu.open();
+          reopened.push(menu);
+        }
         if (focusedName) restoreChangedFocus = () => row.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
       },
@@ -16905,6 +16910,7 @@ var AppShell = class {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
