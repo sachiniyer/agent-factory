@@ -445,33 +445,34 @@ func TestLifelineProbeRetriesAfterCooldown(t *testing.T) {
 	}
 
 	// Inside the cooldown no probe runs — the shell starts directly even
-	// though the binary at lifelineExe now speaks the protocol.
+	// though the binary at lifelineExe now speaks the protocol. The shell
+	// records its own parent's args: it is gone before the test can ps it.
 	s.lifelineExe = realExe
-	pidFile := filepath.Join(dir, "cooldown.pid")
-	if _, err := s.newTaskWatcher(watchTask("cooldown", "echo $$ > "+pidFile, dir)).runOnce(); err != nil {
+	parentArgsFile := filepath.Join(dir, "cooldown.parent")
+	if _, err := s.newTaskWatcher(watchTask("cooldown", "ps -o args= -p $PPID > "+parentArgsFile, dir)).runOnce(); err != nil {
 		t.Fatal(err)
 	}
-	shell, ok := readPIDFile(pidFile)
-	if !ok {
-		t.Fatal("the cooldown run did not record its shell pid")
+	cooldownParent, err := os.ReadFile(parentArgsFile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if args := parentArgs(t, shell); strings.Contains(args, watchlifeline.Arg) {
-		t.Fatalf("a lifeline probe ran inside the cooldown (shell parent %q)", args)
+	if strings.Contains(string(cooldownParent), watchlifeline.Arg) {
+		t.Fatalf("a lifeline probe ran inside the cooldown (shell parent %q)", cooldownParent)
 	}
 
 	// After the cooldown the probe runs again and a speaking binary clears
 	// the recorded failure.
 	s.lifelineProbeHold.Store(0)
-	pidFile2 := filepath.Join(dir, "recovered.pid")
-	if _, err := s.newTaskWatcher(watchTask("recovered", "echo $$ > "+pidFile2, dir)).runOnce(); err != nil {
+	parentArgsFile2 := filepath.Join(dir, "recovered.parent")
+	if _, err := s.newTaskWatcher(watchTask("recovered", "ps -o args= -p $PPID > "+parentArgsFile2, dir)).runOnce(); err != nil {
 		t.Fatal(err)
 	}
-	shell2, ok := readPIDFile(pidFile2)
-	if !ok {
-		t.Fatal("the recovered run did not record its shell pid")
+	recoveredParent, err := os.ReadFile(parentArgsFile2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if args := parentArgs(t, shell2); !strings.Contains(args, watchlifeline.Arg) {
-		t.Fatalf("the post-cooldown run's shell parent is %q, want the watch lifeline", args)
+	if !strings.Contains(string(recoveredParent), watchlifeline.Arg) {
+		t.Fatalf("the post-cooldown run's shell parent is %q, want the watch lifeline", recoveredParent)
 	}
 	if s.lifelineUnsupported.Load() {
 		t.Fatal("a successful probe did not clear the recorded failure")
