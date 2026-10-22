@@ -716,7 +716,7 @@ func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
 		t.Fatalf("breaker message missing the stdout tail, got:\n%s", got)
 	}
 	statuses := rec.statusesSnapshot()
-	if got, want := statuses[len(statuses)-1], "ab970002:errored: exit status 1: lock contention detected"; got != want {
+	if got, want := statuses[len(statuses)-1], "ab970002:errored: exit status 1: death rattle"; got != want {
 		t.Fatalf("persisted status = %q, want %q", got, want)
 	}
 }
