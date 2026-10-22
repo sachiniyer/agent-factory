@@ -76,15 +76,15 @@ Keyboard: navigation</pre></section>
 </div>
 
 <h3>Terminal chrome</h3>
-<p>Use surface with ink title, heading type and border for an unfocused frame. Keyboard ownership adds the accent outline and the word Keyboard, never ready green. Use space-2 chrome insets; terminal content gets no decorative padding. Preserve agent ANSI output and ctrl&#43;] exit.</p>
+<p>Use surface with ink title, heading type and border for an unfocused frame. Keyboard ownership adds the accent outline, never ready green, and no separate Keyboard label. Use space-2 chrome insets; terminal content gets no decorative padding. Preserve agent ANSI output and ctrl&#43;] exit.</p>
 
 <div class="sg-pair">
-<section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
+<section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-focus"><strong>tidy-tests · Agent</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
 <figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Rules applied · Real web screen · agent-tab · light</figcaption></figure>
 </div>
 <div class="sg-pair">
-<section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
+<section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>┌ tidy-tests · Agent ───────────┐
 │ $ ./test.sh                  │
 │ 2 tests passed               │
 └ ctrl+] · Return to sessions ─┘</pre></section>
@@ -92,12 +92,12 @@ Keyboard: navigation</pre></section>
 </div>
 
 <div class="sg-pair">
-<section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
+<section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-focus"><strong>tidy-tests · Agent</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
 <figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Rules applied · Real web screen · agent-tab · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
-<section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
+<section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>┌ tidy-tests · Agent ───────────┐
 │ $ ./test.sh                  │
 │ 2 tests passed               │
 └ ctrl+] · Return to sessions ─┘</pre></section>
