@@ -153,26 +153,46 @@ func commitMessage(subject string, author Author, sessionID string) string {
 	return msg
 }
 
-// commitPaths stages pathspecs and commits them when anything changed. It
-// returns the new commit, or "" when there was nothing to commit.
+// commitPaths stages the docs that pathspecs name and commits them when
+// anything changed. It returns the new commit, or "" when there was nothing to
+// commit. On failure the index goes back to HEAD. It uses only plumbing that
+// reads the index, so git never scans the docs folder (see stage).
 func (s *Store) commitPaths(subject string, author Author, sessionID string, pathspecs ...string) (string, error) {
-	addArgs := append([]string{"add", "-A", "--"}, pathspecs...)
-	if _, err := s.git(nil, addArgs...); err != nil {
+	commit, err := s.commitStaged(subject, author, sessionID, pathspecs)
+	if err != nil {
+		_, _ = s.git(nil, "read-tree", "HEAD")
+	}
+	return commit, err
+}
+
+func (s *Store) commitStaged(subject string, author Author, sessionID string, pathspecs []string) (string, error) {
+	if err := s.stage(pathspecs); err != nil {
 		return "", err
 	}
-	diffArgs := append([]string{"diff", "--no-ext-diff", "--cached", "--quiet", "--"}, pathspecs...)
-	_, err := s.git(nil, diffArgs...)
-	if err == nil {
+	head, err := s.head()
+	if err != nil {
+		return "", err
+	}
+	tree, err := s.gitTrim("write-tree")
+	if err != nil {
+		return "", err
+	}
+	headTree, err := s.gitTrim("rev-parse", "--verify", head+"^{tree}")
+	if err != nil {
+		return "", err
+	}
+	if tree == headTree {
 		return "", nil
 	}
-	if !isExitCode(err, 1) {
+	out, err := s.git([]byte(commitMessage(subject, author, sessionID)), "commit-tree", tree, "-p", head)
+	if err != nil {
 		return "", err
 	}
-	commitArgs := append([]string{"commit", "-q", "-m", commitMessage(subject, author, sessionID), "--"}, pathspecs...)
-	if _, err := s.git(nil, commitArgs...); err != nil {
+	commit := strings.TrimSpace(out)
+	if _, err := s.git(nil, "update-ref", "HEAD", commit, head); err != nil {
 		return "", err
 	}
-	return s.head()
+	return commit, nil
 }
 
 // snapshot commits every uncommitted change outside the excluded pathspecs as

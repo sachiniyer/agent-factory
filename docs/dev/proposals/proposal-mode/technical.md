@@ -25,6 +25,12 @@ There is one git repository for each project:
     the work tree. As a second guard, every command pins
     `core.hooksPath`, `core.fsmonitor` and `core.attributesFile`, and diffs run
     with `--no-ext-diff --no-textconv`.
+  - git never scans `proposals/`. af reads each doc (`<slug>/<name>.md`)
+    itself, writes it with `hash-object --no-filters`, and commits with
+    `update-index`, `write-tree`, `commit-tree` and `update-ref`. A
+    `.gitignore`, `.gitattributes` or nested repository in the folder
+    cannot hide a doc, change it, or get into the history. Patches are made
+    with `--text`.
   - af does not follow a symlink inside `proposals/`. Each read and write
     opens the store, slug and doc through directory fds with `O_NOFOLLOW`, and a
     doc must be a regular file.

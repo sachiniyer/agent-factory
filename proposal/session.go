@@ -86,14 +86,13 @@ func (s *Store) Attach(slug, sessionID string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := s.git(nil, "update-ref", attachRefPrefix+sessionID, strings.TrimSpace(blob)); err != nil {
-			return err
-		}
 		head, err := s.head()
 		if err != nil {
 			return err
 		}
-		_, err = s.git(nil, "update-ref", cursorRefPrefix+sessionID, head)
+		tx := "update " + attachRefPrefix + sessionID + " " + strings.TrimSpace(blob) + "\n" +
+			"update " + cursorRefPrefix + sessionID + " " + head + "\n"
+		_, err = s.git([]byte(tx), "update-ref", "--stdin")
 		return err
 	})
 }
@@ -317,7 +316,7 @@ func (s *Store) commitDiff(commit, slug string) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	patch, err := s.git(nil, "show", "--format=", "--patch", "--no-ext-diff", "--no-textconv", rel, commit)
+	patch, err := s.git(nil, "show", "--format=", "--patch", "--text", "--no-ext-diff", "--no-textconv", rel, commit)
 	if err != nil {
 		return nil, "", err
 	}
