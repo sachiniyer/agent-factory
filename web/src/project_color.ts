@@ -125,6 +125,7 @@ export function projectColorRow(current: string | null, label: string, onPick: (
     swatch.setAttribute("aria-label", `Color ${label} ${color}`);
     swatch.setAttribute("title", color);
     swatch.setAttribute("aria-pressed", current === color ? "true" : "false");
+    swatch.dataset.projectFocus = `color:${color}`;
     swatch.addEventListener("click", pick(color));
     return swatch;
   });
@@ -136,6 +137,7 @@ export function projectColorRow(current: string | null, label: string, onPick: (
   const custom = h("button", { type: "button", class: "af-project-swatch af-project-swatch-custom" }, "+");
   custom.setAttribute("aria-label", `Custom color for ${label}`);
   custom.setAttribute("title", "Custom color");
+  custom.dataset.projectFocus = "color:custom";
   custom.addEventListener("click", (e) => {
     e.stopPropagation();
     try {
@@ -146,6 +148,7 @@ export function projectColorRow(current: string | null, label: string, onPick: (
   });
   const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
   clear.disabled = current === null;
+  clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));
   const row = h(
     "div",

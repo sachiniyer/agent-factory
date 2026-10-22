@@ -10,6 +10,7 @@ import {
   applyProjectFavicon,
   markInk,
   projectColor,
+  projectColorRow,
   projectFaviconDataUrl,
   projectFaviconSvg,
 } from "./project_color.js";
@@ -53,6 +54,29 @@ test("the favicon SVG paints the tile in the project color", () => {
 
 test("every palette color is a lowercase #rrggbb", () => {
   for (const c of PROJECT_COLOR_PALETTE) assert.match(c, /^#[0-9a-f]{6}$/);
+});
+
+test("every color control carries a project-focus key so a menu rebuild keeps focus", () => {
+  class El {
+    dataset: Record<string, string> = {};
+    children: El[] = [];
+    style = { setProperty: () => {} };
+    setAttribute() {}
+    addEventListener() {}
+    append(child: El | string) {
+      if (typeof child !== "string") this.children.push(child);
+    }
+  }
+  const g = globalThis as Record<string, unknown>;
+  const saved = g.document;
+  g.document = { createElement: () => new El() };
+  try {
+    const row = projectColorRow("#16a34a", "todo-cli", () => {}) as unknown as El;
+    const keys = row.children.map((c) => c.dataset.projectFocus).filter((k) => k !== undefined);
+    assert.deepEqual(keys, [...PROJECT_COLOR_PALETTE.map((c) => `color:${c}`), "color:custom", "color:clear"]);
+  } finally {
+    g.document = saved;
+  }
 });
 
 test("the PNG favicon renders without roundRect and resets to the static icon", () => {
