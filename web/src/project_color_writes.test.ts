@@ -53,6 +53,28 @@ test("keys write independently and a failure does not stop the next write", asyn
   assert.equal(errors.length, 1);
 });
 
+test("a failed write reports the value it was made under, so a stale connection's error can be fenced", async () => {
+  let generation = 1;
+  const surfaced: unknown[] = [];
+  const gate = deferred();
+  const set = createLatestWriter<{ color: string; connection: number }>(
+    async () => {
+      await gate.promise;
+      throw new Error("unauthorized");
+    },
+    (e, key, { connection }) => {
+      assert.equal(key, "/a");
+      if (connection === generation) surfaced.push(e);
+    },
+  );
+
+  const done = set("/a", { color: "#111111", connection: 1 });
+  generation = 2;
+  gate.resolve();
+  await done;
+  assert.deepEqual(surfaced, []);
+});
+
 test("a queued choice keeps the connection it was made under, so a reconnect can fence it", async () => {
   let generation = 1;
   const sent: string[] = [];

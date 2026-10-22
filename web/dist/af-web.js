@@ -18351,7 +18351,7 @@ function createLatestWriter(write, onError) {
       try {
         await write(key, next.value);
       } catch (e) {
-        onError(e);
+        onError(e, key, next.value);
       }
     }
     draining.delete(key);
@@ -19614,7 +19614,7 @@ function refreshRegisteredProjects() {
 }
 var writeProjectColor = createLatestWriter(
   async (root2, { color, tok, connection }) => {
-    const current = () => connection === connectionGeneration && token === tok;
+    const current = () => isCurrentConnection(connection, tok);
     if (!current()) return;
     const record = store.get().registeredProjects.find((r) => r.root === root2);
     const projectId = record ? record.id : (await registerProject(root2, tok)).id;
@@ -19622,8 +19622,13 @@ var writeProjectColor = createLatestWriter(
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();
   },
-  (e) => surfaceMutationError(e)
+  (e, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  }
 );
+function isCurrentConnection(connection, tok) {
+  return connection === connectionGeneration && token === tok;
+}
 function doSetProjectColor(root2, color) {
   const tok = token;
   if (tok === null) return;

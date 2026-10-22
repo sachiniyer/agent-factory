@@ -2199,7 +2199,7 @@ function refreshRegisteredProjects(): void {
  *  Each choice is fenced to the connection and credential it was made under. */
 const writeProjectColor = createLatestWriter<{ color: string; tok: string; connection: number }>(
   async (root, { color, tok, connection }) => {
-    const current = (): boolean => connection === connectionGeneration && token === tok;
+    const current = (): boolean => isCurrentConnection(connection, tok);
     if (!current()) return;
     const record = store.get().registeredProjects.find((r) => r.root === root);
     const projectId = record ? record.id : (await registerProject(root, tok)).id;
@@ -2207,8 +2207,14 @@ const writeProjectColor = createLatestWriter<{ color: string; tok: string; conne
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();
   },
-  (e: unknown) => surfaceMutationError(e),
+  (e: unknown, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  },
 );
+
+function isCurrentConnection(connection: number, tok: string): boolean {
+  return connection === connectionGeneration && token === tok;
+}
 
 function doSetProjectColor(root: string, color: string): void {
   const tok = token;

@@ -4,7 +4,7 @@
  *  returned promise settles once that key has nothing left to write. */
 export function createLatestWriter<T>(
   write: (key: string, value: T) => Promise<void>,
-  onError: (e: unknown) => void,
+  onError: (e: unknown, key: string, value: T) => void,
 ): (key: string, value: T) => Promise<void> {
   const waiting = new Map<string, { value: T }>();
   const draining = new Map<string, Promise<void>>();
@@ -14,7 +14,7 @@ export function createLatestWriter<T>(
       try {
         await write(key, next.value);
       } catch (e) {
-        onError(e);
+        onError(e, key, next.value);
       }
     }
     draining.delete(key);
