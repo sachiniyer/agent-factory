@@ -382,6 +382,12 @@ func (i *Instance) AddDocsTab(slug, requestedName string) (*Tab, error) {
 	}
 	tab := newDocsTab(slug)
 	tab.Name = uniqueTabName(i.Tabs, base)
+	for _, t := range i.Tabs {
+		if t != nil && t.Kind == TabKindDocs && t.Proposal == slug {
+			tab.PushMode = t.PushMode
+			break
+		}
+	}
 	i.Tabs = append(i.Tabs, tab)
 	i.touchLocked()
 	return tab, nil
