@@ -295,7 +295,7 @@ func TestSkippedGroupKillDoesNotWedgeTheRun(t *testing.T) {
 	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
 	anchor := spawnWatchGroupAnchor
 	t.Cleanup(func() { spawnWatchGroupAnchor = anchor })
-	spawnWatchGroupAnchor = func(int) func() { return nil }
+	spawnWatchGroupAnchor = func(int) *watchGroupAnchor { return nil }
 
 	s, _ := newTestSupervisor(t, staticTasks())
 	s.lifelineExe = "" // a lifeline would kill the leftover itself on the shell's exit
@@ -537,8 +537,8 @@ func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	pgid := cmd.Process.Pid
-	release := startWatchGroupAnchor(pgid)
-	if release == nil {
+	anchor := startWatchGroupAnchor(pgid)
+	if anchor == nil {
 		t.Fatal("the anchor could not join a group whose leader was running")
 	}
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
@@ -551,7 +551,7 @@ func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
 	if err := syscall.Kill(-pgid, 0); err != nil {
 		t.Fatalf("the anchor did not pin the group past the leader's reap and the group's TERM: %v", err)
 	}
-	release()
+	anchor.release()
 	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("the group should be empty once the anchor is released, got %v", err)
 	}
@@ -696,11 +696,11 @@ func TestWatchGroupAnchorImmediateTermKeepsItAlive(t *testing.T) {
 		_ = leader.Wait()
 	}()
 
-	release := startWatchGroupAnchor(pgid)
-	if release == nil {
+	anchor := startWatchGroupAnchor(pgid)
+	if anchor == nil {
 		t.Skip("no anchor could join the group")
 	}
-	defer release()
+	defer anchor.release()
 
 	// The group's own TERM is what races the trap: send it the moment the
 	// spawn returns, the earliest a caller's cleanup kill could land.
@@ -726,5 +726,61 @@ func TestWatchGroupAnchorImmediateTermKeepsItAlive(t *testing.T) {
 	}
 	if wpid == anchorPID {
 		t.Fatalf("the anchor died of the group's TERM (%v) — it was counted as pinned before its trap was installed", ws)
+	}
+}
+
+// TestFallbackReapSkipsTheGroupKillWhenTheAnchorIsDead covers the watchdog's
+// grace escalation: its group SIGKILL takes the anchor with everything else
+// — the trap covers only SIGTERM. The leader's reap then frees the group's
+// number with no live member left to vouch for it, so the post-reap cleanup
+// kill must be skipped: the escalation already reached everything that kill
+// could, and sending it anyway could name a group the number was given to.
+func TestFallbackReapSkipsTheGroupKillWhenTheAnchorIsDead(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	anchor := startWatchGroupAnchor(pgid)
+	if anchor == nil {
+		t.Skip("no anchor could join the group")
+	}
+	defer anchor.release()
+
+	// The watchdog's escalation: one SIGKILL for the whole group — the
+	// anchor dies with what it was pinning.
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL the group: %v", err)
+	}
+	// Let the kill make the anchor reapable — a pending-but-undelivered one
+	// still reads as running.
+	deadline := time.Now().Add(2 * time.Second)
+	for anchor.alive() {
+		if time.Now().After(deadline) {
+			t.Fatal("the anchor survived the group's SIGKILL")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	exited := watchLeaderExited
+	groupKill := watchGroupKill
+	t.Cleanup(func() {
+		watchLeaderExited = exited
+		watchGroupKill = groupKill
+	})
+	watchLeaderExited = func(int) error { return errors.New("stubbed: no unreaped wait") }
+	var signals []int
+	watchGroupKill = func(pid int, sig syscall.Signal) error {
+		signals = append(signals, pid)
+		return nil
+	}
+
+	groupKilled, _ := reapWatchGroupLeader(cmd, anchor)
+	if groupKilled {
+		t.Fatal("a group signal was sent after the leader's reap with only a dead anchor to pin the number")
+	}
+	if len(signals) != 0 {
+		t.Fatalf("post-reap group signals went to %v, want none", signals)
 	}
 }

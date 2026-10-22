@@ -330,8 +330,37 @@ var (
 	spawnWatchGroupAnchor = startWatchGroupAnchor
 )
 
+// watchGroupAnchor is a run's pinned process-group member: a child that
+// ignores the group's SIGTERM and lives until release is called or the
+// daemon dies (startWatchGroupAnchor).
+type watchGroupAnchor struct {
+	cmd *exec.Cmd
+	w   *os.File // the daemon-held end of the anchor's stdin pipe
+}
+
+// release kills the anchor, reaps it, and closes the lifetime pipe's write
+// end. Every step is best-effort: calling it on an already-dead anchor —
+// the watchdog's group SIGKILL takes it with the group — is safe.
+func (a *watchGroupAnchor) release() {
+	_ = a.cmd.Process.Kill()
+	_ = a.cmd.Wait()
+	_ = a.w.Close()
+}
+
+// alive reports whether the anchor is still running, which is the only
+// state in which its membership proves the group's number still names this
+// run. A dead-but-unreaped anchor — a zombie the watchdog's SIGKILL left —
+// still answers kill(pid,0), so the probe is wait4 with WNOHANG returning
+// 0: not reapable yet. When it reports dead it has reaped the zombie, so
+// the group is then empty for real and the number is truly free.
+func (a *watchGroupAnchor) alive() bool {
+	var ws syscall.WaitStatus
+	pid, err := syscall.Wait4(a.cmd.Process.Pid, &ws, syscall.WNOHANG, nil)
+	return err == nil && pid == 0
+}
+
 // startWatchGroupAnchor starts a child in the given process group and keeps
-// it a live member until the returned release is called: the shell installs
+// it a live member until release is called: the shell installs
 // its TERM-ignoring trap, reports ready on fd 3, then blocks in read on a
 // pipe whose write end stays here — this daemon's death closes the pipe,
 // the read hits EOF, and the anchor exits too. While it lives the group is
@@ -348,7 +377,7 @@ var (
 // is already TERM-immune. Best-effort: nil when the group cannot be joined —
 // it is already empty — when the spawn fails, a missing /bin/sh included, or
 // when the shell never reaches its ready write.
-func startWatchGroupAnchor(pgid int) (release func()) {
+func startWatchGroupAnchor(pgid int) *watchGroupAnchor {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil
@@ -387,11 +416,7 @@ func startWatchGroupAnchor(pgid int) (release func()) {
 		return nil
 	}
 	_ = readyR.Close()
-	return func() {
-		_ = anchor.Process.Kill()
-		_ = anchor.Wait()
-		_ = w.Close()
-	}
+	return &watchGroupAnchor{cmd: anchor, w: w}
 }
 
 // reapWatchGroupLeader waits for the run's process-group leader to exit,
@@ -404,9 +429,9 @@ func startWatchGroupAnchor(pgid int) (release func()) {
 //
 // beforeKill, when non-nil, runs after the leader has exited and before the
 // group kill; the stop watchdog uses it to finish any signal it is sending
-// while the number is still pinned. anchorRelease is the run's anchor member
+// while the number is still pinned. anchor is the run's anchor member
 // (startWatchGroupAnchor, spawned when the run started) or nil when the run
-// has none; it is called only after the group kill it pins. groupKilled
+// has none; it is released only after the group kill it pins. groupKilled
 // reports whether the cleanup kill was sent; when it was not, leftovers may
 // still hold the run's pipes (awaitWatchReaders).
 //
@@ -419,13 +444,21 @@ func startWatchGroupAnchor(pgid int) (release func()) {
 // run that started without one gets a last join attempt while the leader —
 // running, or a zombie only this daemon may reap — still keeps the group
 // non-empty; only when no anchor can be had is the kill skipped.
-func reapWatchGroupLeader(cmd *exec.Cmd, anchorRelease func(), beforeKill ...func()) (groupKilled bool, err error) {
+//
+// And once the leader is reaped a group signal is sent only while a LIVE
+// anchor proves the number: the same watchdog escalation that SIGKILLs the
+// group kills the anchor too — its trap covers only SIGTERM — leaving a
+// zombie that can no longer vouch for the number (on darwin it answers
+// kill(-pgid) with EPERM). After that escalation the group is already dead,
+// the kill has nothing left to do, and sending it anyway could name a group
+// the number was reassigned to; a dead anchor gets the kill skipped.
+func reapWatchGroupLeader(cmd *exec.Cmd, anchor *watchGroupAnchor, beforeKill ...func()) (groupKilled bool, err error) {
 	pid := cmd.Process.Pid
 	if err := watchLeaderExited(pid); err != nil {
-		if anchorRelease == nil {
-			anchorRelease = spawnWatchGroupAnchor(pid)
+		if anchor == nil {
+			anchor = spawnWatchGroupAnchor(pid)
 		}
-		if anchorRelease == nil {
+		if anchor == nil {
 			log.WarningLog.Printf("watch command pid %d: cannot wait for its exit without reaping it (%v), "+
 				"and its process group cannot be pinned; skipping the group cleanup kill", pid, err)
 		} else {
@@ -436,19 +469,25 @@ func reapWatchGroupLeader(cmd *exec.Cmd, anchorRelease func(), beforeKill ...fun
 		for _, f := range beforeKill {
 			f()
 		}
-		if anchorRelease == nil {
+		if anchor == nil {
+			return false, waitErr
+		}
+		if !anchor.alive() {
+			log.WarningLog.Printf("watch command pid %d: its process-group anchor is already dead; "+
+				"skipping the post-reap cleanup kill — the group's number is no longer pinned", pid)
+			anchor.release()
 			return false, waitErr
 		}
 		_ = watchGroupKill(-pid, syscall.SIGKILL)
-		anchorRelease()
+		anchor.release()
 		return true, waitErr
 	}
 	for _, f := range beforeKill {
 		f()
 	}
 	_ = watchGroupKill(-pid, syscall.SIGKILL)
-	if anchorRelease != nil {
-		anchorRelease()
+	if anchor != nil {
+		anchor.release()
 	}
 	return true, cmd.Wait()
 }
