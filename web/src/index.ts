@@ -120,7 +120,7 @@ import {
   restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
-  canCreateTabKind,
+  offeredNewTabKinds,
   canCloseTabs,
   tabIdentity,
   tabRealId,
@@ -1563,7 +1563,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   // so a loopback client can still create tabs.
   // Per KIND, not one bool: the daemon answers separately for each, so a session
   // that may open a web tab but not a shell must be offered exactly that (#3060).
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
     return;
   }
   clearTabError();
@@ -3006,7 +3006,7 @@ function onKeydown(e: KeyboardEvent): void {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       newTabKinds: actionableSelected
-        ? (["shell", "vscode"] as const).filter((kind) => canCreateTabKind(actionableSelected, kind))
+        ? offeredNewTabKinds(actionableSelected)
         : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
@@ -3047,7 +3047,8 @@ function onKeydown(e: KeyboardEvent): void {
       else switchTab(action.index);
       break;
     case "newTab":
-      createSessionTab(action.tabKind);
+      // Each create round-trips with no pending guard, so a held key would spawn one tab per repeat.
+      if (!e.repeat) createSessionTab(action.tabKind);
       break;
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);

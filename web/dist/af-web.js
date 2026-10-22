@@ -16175,6 +16175,10 @@ function canMutateTabRoster(s) {
 function canCloseTabs(s) {
   return canMutateTabRoster(s);
 }
+function offeredNewTabKinds(s) {
+  if (tabCreationUnavailableReason(s) !== null) return [];
+  return NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(s, kind));
+}
 function tabCreationUnavailableReason(s) {
   const projected = s.tab_kinds;
   if (projected && projected.length > 0 && !isArchived(s)) {
@@ -17365,7 +17369,10 @@ var AppShell = class {
       title: selected.title,
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
-      newTab: (kind) => this.actions.newTab(kind),
+      newTab: (kind) => {
+        if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
+        this.actions.newTab(kind);
+      },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.()
@@ -17472,8 +17479,9 @@ var AppShell = class {
     const chrome = this.terminalChrome;
     if (chrome) {
       const unavailable = tabCreationUnavailableReason(selected);
-      chrome.newTerminal.hidden = unavailable !== null || !canCreateTabKind(selected, "shell");
-      chrome.newVSCode.hidden = unavailable !== null || !canCreateTabKind(selected, "vscode");
+      const offered = offeredNewTabKinds(selected);
+      chrome.newTerminal.hidden = !offered.includes("shell");
+      chrome.newVSCode.hidden = !offered.includes("vscode");
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";
@@ -19011,7 +19019,7 @@ function guardedTabRebind(selId, run, resolve, verb) {
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
     return;
   }
   clearTabError();
@@ -19881,7 +19889,7 @@ function onKeydown(e) {
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      newTabKinds: actionableSelected ? ["shell", "vscode"].filter((kind) => canCreateTabKind(actionableSelected, kind)) : [],
+      newTabKinds: actionableSelected ? offeredNewTabKinds(actionableSelected) : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
@@ -19912,7 +19920,7 @@ function onKeydown(e) {
       else switchTab(action.index);
       break;
     case "newTab":
-      createSessionTab(action.tabKind);
+      if (!e.repeat) createSessionTab(action.tabKind);
       break;
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);

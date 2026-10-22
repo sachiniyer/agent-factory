@@ -557,6 +557,12 @@ export function canCloseTabs(s: SessionData): boolean {
   return canMutateTabRoster(s);
 }
 
+/** The kinds the header buttons and the t/T shortcuts may create right now. */
+export function offeredNewTabKinds(s: SessionData): NewTabKind[] {
+  if (tabCreationUnavailableReason(s) !== null) return [];
+  return NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(s, kind));
+}
+
 /** A visible explanation for every state in which the tab bar cannot offer its
  *  new-tab control. Returning null means creation is available. This stays
  *  separate from canManageTabs because "archived" and "runtime-fixed" have
@@ -2094,7 +2100,10 @@ export class AppShell {
       title: selected.title,
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
-      newTab: (kind) => this.actions.newTab(kind),
+      newTab: (kind) => {
+        if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
+        this.actions.newTab(kind);
+      },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
@@ -2225,8 +2234,9 @@ export class AppShell {
     const chrome = this.terminalChrome;
     if (chrome) {
       const unavailable = tabCreationUnavailableReason(selected);
-      chrome.newTerminal.hidden = unavailable !== null || !canCreateTabKind(selected, "shell");
-      chrome.newVSCode.hidden = unavailable !== null || !canCreateTabKind(selected, "vscode");
+      const offered = offeredNewTabKinds(selected);
+      chrome.newTerminal.hidden = !offered.includes("shell");
+      chrome.newVSCode.hidden = !offered.includes("vscode");
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";
