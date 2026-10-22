@@ -196,6 +196,26 @@ func TestServiceTabCloseFailureKeepsAttachment(t *testing.T) {
 	}
 }
 
+func TestServiceRefusesOffBoxSessions(t *testing.T) {
+	svc, host, store := newTestService(t)
+	if _, err := svc.Start(sessB, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	host.sessions[sessA] = Session{ID: sessA, Title: "alpha", RepoID: testRepoID, OffBox: true}
+	if _, err := svc.Start(sessA, "q", []string{"goals"}); err == nil || !strings.Contains(err.Error(), "off-box") {
+		t.Fatalf("start = %v, want the off-box refusal", err)
+	}
+	if err := store.RequireSlug("q"); err == nil {
+		t.Fatal("a refused start must not create the proposal")
+	}
+	if _, err := svc.Attach(sessA, "p"); err == nil || !strings.Contains(err.Error(), "off-box") {
+		t.Fatalf("attach = %v, want the off-box refusal", err)
+	}
+	if got, _ := store.Attached(sessA); got != "" || len(host.tabs) != 1 {
+		t.Fatalf("a refused attach must change nothing, got attached %q, tabs %v", got, host.tabs)
+	}
+}
+
 func TestServiceAttachReportsTabError(t *testing.T) {
 	svc, host, _ := newTestService(t)
 	host.tabErr = errors.New("session is not started")

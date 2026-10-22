@@ -69,6 +69,9 @@ An empty `edits` array means that nobody else changed the proposal.
   and no session, the error asks for `--repo`, because the current directory
   does not name a project on the remote host.
 - Unknown slug: the error lists the slugs that exist.
+- Off-box session (docker, ssh, sandbox): `start` and `attach` fail, because
+  the agent cannot open the docs on the daemon host. The error asks for a
+  session with a local worktree. See future.md for remote agents.
 
 ## HTTP (step 2)
 

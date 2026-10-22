@@ -17,6 +17,9 @@ type Session struct {
 	ID     string
 	Title  string
 	RepoID string
+	// OffBox is true when the session's workspace is not on the daemon host
+	// (docker, ssh, sandbox), so its agent cannot open the store's files.
+	OffBox bool
 }
 
 // Host is the daemon side of the service: session lookup, the session's Docs
@@ -283,6 +286,9 @@ func (s *Service) Start(sessionID, slug string, docs []string) (*Summary, error)
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseOffBox(r); err != nil {
+		return nil, err
+	}
 	if len(docs) == 0 {
 		docs = BuiltinTemplates
 	}
@@ -312,7 +318,17 @@ func (s *Service) Attach(sessionID, slug string) (*Summary, error) {
 	return s.attach(r, slug)
 }
 
+func refuseOffBox(r *resolved) error {
+	if !r.session.OffBox {
+		return nil
+	}
+	return fmt.Errorf("session %q runs off-box (docker/ssh/sandbox), so its agent cannot open the proposal docs on the daemon host: start or attach the proposal from a session with a local worktree", r.session.Title)
+}
+
 func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
+	if err := refuseOffBox(r); err != nil {
+		return nil, err
+	}
 	previous, err := r.store.Attached(r.session.ID)
 	if err != nil {
 		return nil, err

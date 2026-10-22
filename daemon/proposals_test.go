@@ -64,6 +64,19 @@ func TestProposalRoutes_StartOpensDocsTabAndDetachClosesIt(t *testing.T) {
 	require.Empty(t, docsTabsOf(t, manager, data.ID))
 }
 
+func TestProposalRoutes_StartRefusesOffBoxSession(t *testing.T) {
+	manager, _, data := createRealKillSession(t, "sandboxed")
+	instance, _, _, _, _, err := manager.resolveActionSession(data.ID, "", "")
+	require.NoError(t, err)
+	instance.SetBackend(remoteTypeBackend{session.NewFakeBackend()})
+	cs := &controlServer{manager: manager}
+
+	code, env := postProposalRoute(t, cs, "StartProposal", StartProposalRequest{SessionID: data.ID, Slug: "auth", Docs: []string{"goals"}})
+	require.NotEqual(t, http.StatusOK, code, env)
+	require.Contains(t, env["error"].(map[string]any)["message"], "off-box")
+	require.Empty(t, docsTabsOf(t, manager, data.ID))
+}
+
 func TestProposalRoutes_SaveMergesAndConflictsWith409(t *testing.T) {
 	manager, repo, data := createRealKillSession(t, "editor")
 	cs := &controlServer{manager: manager}

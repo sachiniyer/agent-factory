@@ -36,7 +36,8 @@ func (h proposalHost) Session(id string) (proposal.Session, error) {
 	if instance == nil && data != nil {
 		title = data.Title
 	}
-	return proposal.Session{ID: resolvedID, Title: title, RepoID: repoID}, nil
+	offBox := instance != nil && instance.Capabilities().Workspace != session.WorkspaceLocalWorktree
+	return proposal.Session{ID: resolvedID, Title: title, RepoID: repoID, OffBox: offBox}, nil
 }
 
 func (h proposalHost) SessionTitles(repoID string) map[string]string {
