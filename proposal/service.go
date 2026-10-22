@@ -404,7 +404,18 @@ func (s *Service) Checkpoint(sessionID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.store.Checkpoint(r.session.ID)
+	cp, err := r.store.Checkpoint(r.session.ID)
+	if err != nil || cp.Commit == "" {
+		return cp, err
+	}
+	files, _, err := r.store.commitDiff(cp.Commit, cp.Slug)
+	if err != nil {
+		return cp, nil
+	}
+	for _, f := range files {
+		s.committed(r, cp.Slug, f, cp.Commit, AuthorAgent)
+	}
+	return cp, nil
 }
 
 func agentCommitter(r *resolved) Committer {
