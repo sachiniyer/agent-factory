@@ -7268,11 +7268,12 @@ function placeMenu(trigger, panel) {
   for (let node = trigger.parentElement; node; node = node.parentElement) {
     const overflow = getComputedStyle(node).overflowY;
     if (overflow === "visible" || overflow === "") continue;
-    const box = node.getBoundingClientRect();
-    top = Math.max(top, box.top);
-    bottom = Math.min(bottom, box.bottom);
+    const clip = node.getBoundingClientRect();
+    top = Math.max(top, clip.top);
+    bottom = Math.min(bottom, clip.bottom);
   }
-  const needed = panel.getBoundingClientRect().height;
+  const box = panel.getBoundingClientRect();
+  const needed = box.height + Math.max(0, box.top - anchor.bottom);
   const below = bottom - anchor.bottom;
   const above = anchor.top - top;
   if (needed > below && above > below) panel.classList.add("af-menu-up");
