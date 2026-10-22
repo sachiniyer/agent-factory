@@ -74,8 +74,19 @@ test("attention_seen: a modal dialog over the pane hides it", () => {
     hasFocus: () => focus,
     querySelector: (sel: string) => (modal && sel === '[aria-modal="true"]' ? {} : null),
   });
-  assert.equal(agentPaneExposed(page(false)), true);
-  assert.equal(agentPaneExposed(page(true)), false);
-  assert.equal(agentPaneExposed(page(false, "hidden")), false);
-  assert.equal(agentPaneExposed(page(false, "visible", false)), false);
+  assert.equal(agentPaneExposed(page(false), false), true);
+  assert.equal(agentPaneExposed(page(true), false), false);
+  assert.equal(agentPaneExposed(page(false, "hidden"), false), false);
+  assert.equal(agentPaneExposed(page(false, "visible", false), false), false);
+});
+
+test("attention_seen: the open drawer hides the pane only on a narrow viewport", () => {
+  const page = (drawerOpen: boolean) => ({
+    visibilityState: "visible" as DocumentVisibilityState,
+    hasFocus: () => true,
+    querySelector: (sel: string) => (drawerOpen && sel === ".af-app.af-nav-open" ? {} : null),
+  });
+  assert.equal(agentPaneExposed(page(true), true), false);
+  assert.equal(agentPaneExposed(page(false), true), true);
+  assert.equal(agentPaneExposed(page(true), false), true, "a wide rail sits beside the pane");
 });

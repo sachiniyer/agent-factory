@@ -6492,8 +6492,8 @@ function attentionSeen(state, paneExposed) {
   const s = state.sessions.find((x) => x.id === state.selectedId);
   return s && hasAttention(s) ? state.selectedId : null;
 }
-function agentPaneExposed(doc) {
-  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null;
+function agentPaneExposed(doc, narrow) {
+  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null && !(narrow && doc.querySelector(".af-app.af-nav-open") !== null);
 }
 var AttentionClearer = class {
   constructor(clear) {
@@ -18539,8 +18539,9 @@ var connectionGate = createLatestRequestGate();
 var attentionClearer = new AttentionClearer(
   (id, setAt) => token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, setAt, token)
 );
+var narrowViewport = window.matchMedia("(max-width: 768px)");
 function noteAttentionSeen() {
-  attentionClearer.note(store.get(), agentPaneExposed(document));
+  attentionClearer.note(store.get(), agentPaneExposed(document, narrowViewport.matches));
 }
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);

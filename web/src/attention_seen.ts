@@ -29,9 +29,16 @@ export interface PageView {
   querySelector(selector: string): unknown;
 }
 
-/** True when the page is visible and focused and no modal dialog covers the pane. */
-export function agentPaneExposed(doc: PageView): boolean {
-  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null;
+/** True when the page is visible and focused, and neither a modal dialog nor the
+ *  open session drawer covers the pane. The drawer covers it only on a narrow
+ *  viewport; on a wide one the rail sits beside the pane. */
+export function agentPaneExposed(doc: PageView, narrow: boolean): boolean {
+  return (
+    doc.visibilityState === "visible" &&
+    doc.hasFocus() &&
+    doc.querySelector('[aria-modal="true"]') === null &&
+    !(narrow && doc.querySelector(".af-app.af-nav-open") !== null)
+  );
 }
 
 /** Sends one clear per attention request, keyed by its set_at, so repaints while

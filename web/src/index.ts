@@ -210,8 +210,10 @@ const attentionClearer = new AttentionClearer((id, setAt) =>
   token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, setAt, token),
 );
 
+const narrowViewport = window.matchMedia("(max-width: 768px)");
+
 function noteAttentionSeen(): void {
-  attentionClearer.note(store.get(), agentPaneExposed(document));
+  attentionClearer.note(store.get(), agentPaneExposed(document, narrowViewport.matches));
 }
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
