@@ -744,20 +744,20 @@ func TestTailBufferCaps(t *testing.T) {
 	}
 
 	b.add(strings.Repeat("x", 3*watcherTailMaxBytes))
-	if first := b.firstLine(); len(first) != watcherTailMaxBytes || strings.Trim(first, "x") != "" {
-		t.Fatalf("overlong line not truncated to the byte cap: len=%d", len(first))
+	if last := b.lastLine(); len(last) != watcherTailMaxBytes || strings.Trim(last, "x") != "" {
+		t.Fatalf("overlong line not truncated to the byte cap: len=%d", len(last))
 	}
 
 	summary := failureSummary(errors.New("exit status 1"), b)
 	if !strings.HasPrefix(summary, "errored: exit status 1: xxx") {
-		t.Fatalf("summary = %.60q..., want errored prefix + first line", summary)
+		t.Fatalf("summary = %.60q..., want errored prefix + newest line", summary)
 	}
 	if len(summary) > watcherStatusSummaryMax+len("…") {
 		t.Fatalf("summary length %d exceeds cap %d", len(summary), watcherStatusSummaryMax)
 	}
 
-	if empty := (&tailBuffer{}); empty.logSuffix() != "" || empty.firstLine() != "" {
-		t.Fatalf("empty tail must render nothing, got %q / %q", empty.logSuffix(), empty.firstLine())
+	if empty := (&tailBuffer{}); empty.logSuffix() != "" || empty.lastLine() != "" {
+		t.Fatalf("empty tail must render nothing, got %q / %q", empty.logSuffix(), empty.lastLine())
 	}
 }
 
@@ -842,9 +842,32 @@ func TestFailureSummaryUTF8(t *testing.T) {
 	// rune boundary by tailBuffer.add.
 	big := &tailBuffer{}
 	big.add(strings.Repeat("世", watcherTailMaxBytes)) // 3*2048 bytes in
-	first := big.firstLine()
-	if len(first) > watcherTailMaxBytes || !utf8.ValidString(first) || strings.ContainsRune(first, utf8.RuneError) {
-		t.Fatalf("tail line not rune-truncated: len=%d valid=%v", len(first), utf8.ValidString(first))
+	last := big.lastLine()
+	if len(last) > watcherTailMaxBytes || !utf8.ValidString(last) || strings.ContainsRune(last, utf8.RuneError) {
+		t.Fatalf("tail line not rune-truncated: len=%d valid=%v", len(last), utf8.ValidString(last))
+	}
+}
+
+// TestFailureSummaryUsesNewestTailLine pins #5441: the persisted
+// last_run_status must carry the tail's NEWEST line — the one that names the
+// failure — not the oldest. A Python traceback's first line is always the
+// constant "Traceback (most recent call last):"; the diagnostic
+// ("BlockingIOError: ...") is the last. This fails on master, where
+// failureSummary persisted tail.firstLine().
+func TestFailureSummaryUsesNewestTailLine(t *testing.T) {
+	b := &tailBuffer{}
+	for _, line := range []string{
+		"Traceback (most recent call last):",
+		`  File "/home/u/watch/monitor.py", line 252, in <module>`,
+		"    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+		"BlockingIOError: [Errno 11] Resource temporarily unavailable",
+	} {
+		b.add(line)
+	}
+	summary := failureSummary(errors.New("exit status 1"), b)
+	want := "errored: exit status 1: BlockingIOError: [Errno 11] Resource temporarily unavailable"
+	if summary != want {
+		t.Fatalf("summary = %q, want %q (newest tail line, not the oldest)", summary, want)
 	}
 }
 
