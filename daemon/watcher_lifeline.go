@@ -135,11 +135,15 @@ func (s *watcherSupervisor) startWatchProcess(taskID, script string, stop <-chan
 		cmd, lifeline, err, execErr, spoke = s.startWithLifeline(taskID, exe, script, stop, configure, outputs)
 		if spoke {
 			// The binary answered the protocol — even an answer of "the shell
-			// would not start" proves it — so any earlier failure is cleared.
+			// would not start" proves it — so any earlier failure is cleared,
+			// including a probe hold a racing failed probe just stored
+			// (lifelineUnusable): it must not keep suppressing probes the
+			// answer just proved will succeed.
 			if s.lifelineUnsupported.Swap(false) {
 				log.InfoLog.Printf("watch task %s: %s speaks the watch lifeline protocol again; "+
 					"watch commands run under the lifeline", taskID, exe)
 			}
+			s.lifelineProbeHold.Store(0)
 			return cmd, lifeline, err
 		}
 		// A stopped watcher never falls back: its run must not start at all.

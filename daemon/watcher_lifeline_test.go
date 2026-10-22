@@ -557,6 +557,49 @@ func TestWatchGroupAnchorPinsUntilReleased(t *testing.T) {
 	}
 }
 
+// TestLifelineProbeSuccessClearsAPendingHold: when a probe succeeds, any
+// probe hold a racing failed probe left behind must be cleared — otherwise
+// later runs keep bypassing a lifeline that was just proven to work until
+// the stale cooldown expires.
+func TestLifelineProbeSuccessClearsAPendingHold(t *testing.T) {
+	dir := t.TempDir()
+	stall := filepath.Join(dir, "ack-now")
+	lagging := filepath.Join(dir, "af-lag")
+	// A lifeline that speaks the protocol but only once the test lets it:
+	// the probe is in flight while the racing failure below lands its hold.
+	stub := "#!/bin/sh\nwhile [ ! -f '" + stall + "' ]; do sleep 0.05; done\n" +
+		"printf '" + watchlifeline.AckStarted + "\\n' >&4\n" +
+		"printf '" + watchlifeline.AckExited + "0\\n' >&4\n"
+	if err := os.WriteFile(lagging, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestSupervisor(t, staticTasks())
+	s.lifelineExe = lagging
+
+	w := s.newTaskWatcher(watchTask("raced", "true", dir))
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.runOnce()
+		done <- err
+	}()
+	// What a concurrent failed probe records (lifelineUnusable) while this
+	// one is still waiting for its ack.
+	s.lifelineProbeHold.Store(time.Now().Add(watchLifelineProbeRetry).UnixNano())
+	s.lifelineUnsupported.Store(true)
+	if err := os.WriteFile(stall, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if until := s.lifelineProbeHold.Load(); until != 0 {
+		t.Fatal("a speaking probe did not clear the hold a racing failed probe left")
+	}
+	if s.lifelineUnsupported.Load() {
+		t.Fatal("a speaking probe did not clear the recorded failure")
+	}
+}
+
 // TestStopDuringLifelineProbeAbortsTheRun: a stop during the ack wait ends
 // the run at once — stopWatchers joins the run loop, so waiting out the
 // 10-second timeout would exceed the stop grace — and the run must not fall
