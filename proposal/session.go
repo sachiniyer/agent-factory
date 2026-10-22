@@ -317,7 +317,7 @@ func (s *Store) commitDiff(commit, slug string) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	patch, err := s.git(nil, "show", "--format=", "--patch", rel, commit)
+	patch, err := s.git(nil, "show", "--format=", "--patch", "--no-ext-diff", "--no-textconv", rel, commit)
 	if err != nil {
 		return nil, "", err
 	}

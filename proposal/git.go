@@ -7,8 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/config"
 )
 
 const (
@@ -34,6 +32,7 @@ func gitEnv() []string {
 	return append(env,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME="+committerName,
 		"GIT_AUTHOR_EMAIL="+committerEmail,
@@ -42,17 +41,39 @@ func gitEnv() []string {
 	)
 }
 
-var gitFixedConfig = []string{
-	"-c", "core.hooksPath=" + os.DevNull,
-	"-c", "commit.gpgSign=false",
-	"-c", "core.autocrlf=false",
-	"-c", "core.quotePath=false",
-	"-c", "init.defaultBranch=main",
+// gitFixedConfig pins the settings that could make git run a program. The
+// repository config already lives outside the folder agents write; this is
+// defence in depth.
+var gitFixedConfig = gitConfigArgs(
+	"core.hooksPath="+os.DevNull,
+	"core.fsmonitor=false",
+	"core.attributesFile="+os.DevNull,
+	"commit.gpgSign=false",
+	"core.autocrlf=false",
+	"core.quotePath=false",
+	"init.defaultBranch=main",
+)
+
+func gitConfigArgs(settings ...string) []string {
+	var args []string
+	for _, kv := range settings {
+		args = append(args, "-c", kv)
+	}
+	return args
 }
 
+// gitDir is the store's git directory. It sits beside the docs folder, not in
+// it, so nothing an agent writes there (a .git dir or file, a config) can
+// choose the repository af commits to or a program git runs.
+func (s *Store) gitDir() string { return s.dir + ".git" }
+
 func (s *Store) git(stdin []byte, args ...string) (string, error) {
-	full := append(append([]string{"-C", s.dir}, gitFixedConfig...), args...)
-	cmd := exec.Command("git", full...)
+	return s.gitIn(s.gitDir(), stdin, args...)
+}
+
+func (s *Store) gitIn(gitDir string, stdin []byte, args ...string) (string, error) {
+	full := append([]string{"--git-dir=" + gitDir, "--work-tree=" + s.dir, "-C", s.dir}, gitFixedConfig...)
+	cmd := exec.Command("git", append(full, args...)...)
 	cmd.Env = gitEnv()
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -72,28 +93,50 @@ func (s *Store) gitTrim(args ...string) (string, error) {
 }
 
 func (s *Store) initialized() bool {
-	_, err := os.Stat(filepath.Join(s.dir, ".git"))
-	return err == nil
+	info, err := os.Lstat(s.gitDir())
+	return err == nil && info.IsDir()
 }
 
 // ensureRepo creates the store repository with one empty root commit, so HEAD
-// always names a commit that cursors can point at. Call it with the lock held.
+// always names a commit that cursors can point at. A store made by a build
+// that kept its git dir inside the docs folder is imported instead. The
+// repository is built in a temporary directory and renamed into place, so a
+// crash never leaves a half-made one. Call it with the lock held.
 func (s *Store) ensureRepo() error {
 	if s.initialized() {
 		return nil
 	}
-	if _, err := s.git(nil, "init", "-q", "--template="); err != nil {
+	tmp, err := os.MkdirTemp(filepath.Dir(s.dir), filepath.Base(s.gitDir())+".init-")
+	if err != nil {
 		return err
 	}
-	info := filepath.Join(s.dir, ".git", "info")
-	if err := config.MkdirAllUnderAFHome(info, 0o755); err != nil {
+	defer os.RemoveAll(tmp)
+	if _, err := s.gitIn(tmp, nil, "init", "-q", "--template="); err != nil {
+		return err
+	}
+	info := filepath.Join(tmp, "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(info, "exclude"), []byte(excludePatterns), 0o644); err != nil {
 		return err
 	}
-	_, err := s.git(nil, "commit", "-q", "--allow-empty", "-m", commitMessage("initialize proposal store", AuthorExternal, ""))
-	return err
+	legacy, err := s.importLegacyGitDir(tmp)
+	if err != nil {
+		return fmt.Errorf("import proposal history from %s: %w; move that folder away to start a new history", s.legacyGitDir(), err)
+	}
+	if !legacy {
+		if _, err := s.gitIn(tmp, nil, "commit", "-q", "--allow-empty", "-m", commitMessage("initialize proposal store", AuthorExternal, "")); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, s.gitDir()); err != nil {
+		return err
+	}
+	if legacy {
+		return os.RemoveAll(s.legacyGitDir())
+	}
+	return nil
 }
 
 func (s *Store) head() (string, error) {
@@ -115,7 +158,7 @@ func (s *Store) commitPaths(subject string, author Author, sessionID string, pat
 	if _, err := s.git(nil, addArgs...); err != nil {
 		return "", err
 	}
-	diffArgs := append([]string{"diff", "--cached", "--quiet", "--"}, pathspecs...)
+	diffArgs := append([]string{"diff", "--no-ext-diff", "--cached", "--quiet", "--"}, pathspecs...)
 	_, err := s.git(nil, diffArgs...)
 	if err == nil {
 		return "", nil
