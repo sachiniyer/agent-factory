@@ -1349,6 +1349,7 @@ export class AppShell {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
