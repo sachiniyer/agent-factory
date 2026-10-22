@@ -71,7 +71,7 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	s.setStatus = rec.setStatus
 	// Never let the crashWindow recovery timer reach the real task store from
 	// a test that shrinks the window but keeps the recorder seams.
-	s.recoverStatus = func(string, string) (bool, error) { return false, nil }
+	s.recoverStatus = func(string, string, string) (bool, error) { return false, nil }
 	s.recordDrops = func(string, int, time.Time) error { return nil }
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -215,8 +215,9 @@ func TestWatcherBackoffAndCrashLoopBreaker(t *testing.T) {
 	// empty: the persisted summary is just the errored prefix and exit status
 	// (#797), with no stray separator.
 	statuses := rec.statusesSnapshot()
-	if got := statuses[len(statuses)-1]; got != "bbbb0001:errored: exit status 3" {
-		t.Fatalf("breaker status = %q, want %q", got, "bbbb0001:errored: exit status 3")
+	want := "bbbb0001:errored: gave up after 5 failures in 10m0s (last: exit status 3)"
+	if got := statuses[len(statuses)-1]; got != want {
+		t.Fatalf("breaker status = %q, want %q", got, want)
 	}
 
 	events := rec.eventsSnapshot()
@@ -958,9 +959,9 @@ func TestWatcherRecoveryLeavesNonTerminalStatus(t *testing.T) {
 	var calls atomic.Int32
 	s, _ := newTestSupervisor(t, task.LoadTasks)
 	s.crashWindow = 60 * time.Millisecond
-	s.recoverStatus = func(taskID, status string) (bool, error) {
+	s.recoverStatus = func(taskID, expected, status string) (bool, error) {
 		calls.Add(1)
-		return task.RecoverStaleWatcherStatus(taskID, status)
+		return task.RecoverStaleWatcherStatus(taskID, expected, status)
 	}
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -978,6 +979,46 @@ func TestWatcherRecoveryLeavesNonTerminalStatus(t *testing.T) {
 	}
 }
 
+// TestWatcherRecoveryLeavesFreshTerminalStatus pins the compare-and-swap
+// half of the rule: the recovery retires ONLY the terminal value the watcher
+// was armed over. An arming refusal committed during the window is newer
+// evidence — it must survive even though it is itself a terminal status.
+func TestWatcherRecoveryLeavesFreshTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("ec770004", `sleep 5`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	const armedOver = "errored: gave up after 5 failures in 10m0s (last: exit status 1): boom"
+	_, err := task.UpdateTaskStatus(tsk.ID, nil, armedOver)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	s, _ := newTestSupervisor(t, task.LoadTasks)
+	s.crashWindow = 60 * time.Millisecond
+	s.recoverStatus = func(taskID, expected, status string) (bool, error) {
+		calls.Add(1)
+		require.Equal(t, armedOver, expected, "recovery must compare against the arm-time status")
+		return task.RecoverStaleWatcherStatus(taskID, expected, status)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// A fresh refusal lands inside the window, after the watcher armed.
+	const refusal = "errored: not armed — target session is archived"
+	_, err = task.UpdateTaskStatus(tsk.ID, nil, refusal)
+	require.NoError(t, err)
+
+	waitUntil(t, 5*time.Second, "recovery timer to fire", func() bool {
+		return calls.Load() > 0
+	})
+	time.Sleep(3 * s.crashWindow) // let any late second write land
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	if stored.LastRunStatus != refusal {
+		t.Fatalf("fresh terminal status was clobbered: %q, want %q", stored.LastRunStatus, refusal)
+	}
+}
+
 // TestWatcherRecoveryNeverFiresWhileCrashLooping pins the other side of the
 // crashWindow gate: a still-crash-looping watch never has a run alive a full
 // window, so the recovery write can never fire and a stale terminal status
@@ -987,7 +1028,7 @@ func TestWatcherRecoveryNeverFiresWhileCrashLooping(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ec770003", `exit 1`, dir)))
 	s.crashWindow = 200 * time.Millisecond
-	s.recoverStatus = func(string, string) (bool, error) {
+	s.recoverStatus = func(string, string, string) (bool, error) {
 		calls.Add(1)
 		return false, nil
 	}

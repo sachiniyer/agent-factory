@@ -25,7 +25,9 @@ const WatchRateDropStatus = "dropped: event rate limit exceeded"
 // live overlay this durable guard cannot rely on an in-memory terminalStatus
 // latch, so it inspects the on-disk LastRunStatus directly.
 func isTerminalWatcherStatus(status string) bool {
-	return status == "stopped" || strings.HasPrefix(status, "errored:")
+	// The bare "errored" form is the pre-#797 persisted value; the TUI still
+	// renders it (ui/task_pane.go), so the terminal predicate must too.
+	return status == "stopped" || status == "errored" || strings.HasPrefix(status, "errored:")
 }
 
 // RecordWatchRateDrops advances a task's cumulative rate-drop count to total

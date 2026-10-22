@@ -8,21 +8,26 @@ import (
 
 // RecoverStaleWatcherStatus retires a stale terminal last_run_status once a
 // watch process has proven healthy for a full crash window (#5441): the
-// daemon's recovery timer calls it with status "started" when a run has been
-// continuously alive for watcherCrashWindow. The write is conditional — only
-// a persisted watcher terminal outcome ("stopped", or any "errored:*" breaker
-// or arming-refusal summary per isTerminalWatcherStatus) is replaced; a
-// non-terminal value already on disk ("sent", a rate-drop or usage-limit
-// record, or "") is newer evidence and is left untouched. Check and write are
-// one critical section under the task-file lock — the same discipline
-// RecordWatchRateDrops uses — so a delivery landing in the window can never
-// be clobbered. LastRunAt is preserved: it tracks event deliveries, not
-// supervision changes.
+// daemon's recovery timer calls it with status "started" and expected set to
+// the last_run_status the watcher observed when it was armed. The write is a
+// compare-and-swap — the status is replaced only when the persisted value is
+// still that same terminal outcome ("stopped", or an "errored"/"errored:*"
+// breaker or arming-refusal summary per isTerminalWatcherStatus). A newer
+// value on disk — a fresh arming refusal, a delivered "sent", a rate-drop or
+// usage-limit record — is never touched, and an expected value that was not
+// terminal to begin with (a fresh task, a delivered one) earns no write
+// either. Check and write are one critical section under the task-file
+// lock — the same discipline RecordWatchRateDrops uses — so anything
+// committed in the window can never be clobbered. LastRunAt is preserved: it
+// tracks event deliveries, not supervision changes.
 //
 // Returns true only when a terminal status was actually replaced.
-func RecoverStaleWatcherStatus(taskID, status string) (bool, error) {
+func RecoverStaleWatcherStatus(taskID, expected, status string) (bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
 		return false, err
+	}
+	if !isTerminalWatcherStatus(expected) {
+		return false, nil
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
@@ -44,7 +49,7 @@ func RecoverStaleWatcherStatus(taskID, status string) (bool, error) {
 				continue
 			}
 			found = true
-			if !isTerminalWatcherStatus(tasks[i].LastRunStatus) {
+			if tasks[i].LastRunStatus != expected {
 				return nil
 			}
 			tasks[i].LastRunStatus = status

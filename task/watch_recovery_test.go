@@ -11,27 +11,33 @@ import (
 
 // TestRecoverStaleWatcherStatusRetiresTerminalOnly pins the crashWindow
 // recovery rule (#5441): a watch that proves healthy for a full crash window
-// earns "started" back ONLY when the persisted status is still a terminal
-// watcher outcome. A delivered, dropped, parked, or empty status is newer
-// evidence and is never clobbered — and LastRunAt is never touched.
+// earns "started" back ONLY as a compare-and-swap over the exact terminal
+// status the watcher was armed with. A newer value on disk — a fresh arming
+// refusal, a delivered or parked outcome — is newer evidence and is never
+// clobbered, and LastRunAt is never touched.
 func TestRecoverStaleWatcherStatusRetiresTerminalOnly(t *testing.T) {
 	created := time.Date(2026, time.October, 22, 11, 0, 0, 0, time.UTC)
 	deliveredAt := created.Add(time.Hour)
+	const giveUp = "errored: gave up after 5 failures in 10m0s (last: exit status 1): boom"
 	cases := []struct {
 		name      string
-		status    string
+		stored    string
+		expected  string
 		want      string
 		recovered bool
 	}{
-		{"clean stop", "stopped", "started", true},
-		{"breaker give-up", "errored: gave up after 5 failures in 10m0s (last: exit status 1): boom", "started", true},
-		{"one-off error", "errored: exit status 1: boom", "started", true},
-		{"arming refusal", "errored: not armed — target session is archived", "started", true},
-		{"delivered", "sent", "sent", false},
-		{"rate drop", WatchRateDropStatus, WatchRateDropStatus, false},
-		{"usage-limit park", "parked: usage limit", "parked: usage limit", false},
-		{"never ran", "", "", false},
-		{"already recovered", "started", "started", false},
+		{"clean stop", "stopped", "stopped", "started", true},
+		{"breaker give-up", giveUp, giveUp, "started", true},
+		{"one-off error", "errored: exit status 1: boom", "errored: exit status 1: boom", "started", true},
+		{"arming refusal", "errored: not armed — target session is archived", "errored: not armed — target session is archived", "started", true},
+		{"legacy bare errored", "errored", "errored", "started", true},
+		{"fresh refusal over armed give-up", "errored: not armed — target session is archived", giveUp, "errored: not armed — target session is archived", false},
+		{"delivered over armed give-up", "sent", giveUp, "sent", false},
+		{"rate drop over armed give-up", WatchRateDropStatus, giveUp, WatchRateDropStatus, false},
+		{"usage-limit park over armed give-up", "parked: usage limit", giveUp, "parked: usage limit", false},
+		{"delivered is terminal-ineligible", "sent", "sent", "sent", false},
+		{"empty is terminal-ineligible", "", "", "", false},
+		{"already recovered", "started", "started", "started", false},
 	}
 	for _, c := range cases {
 		c := c
@@ -41,10 +47,10 @@ func TestRecoverStaleWatcherStatusRetiresTerminalOnly(t *testing.T) {
 				ID: "f9a0b1c2", Name: "watcher", WatchCmd: "watch.sh",
 				Enabled: true, CreatedAt: created,
 			}))
-			_, err := UpdateTaskStatus("f9a0b1c2", &deliveredAt, c.status)
+			_, err := UpdateTaskStatus("f9a0b1c2", &deliveredAt, c.stored)
 			require.NoError(t, err)
 
-			recovered, err := RecoverStaleWatcherStatus("f9a0b1c2", "started")
+			recovered, err := RecoverStaleWatcherStatus("f9a0b1c2", c.expected, "started")
 			require.NoError(t, err)
 			assert.Equal(t, c.recovered, recovered)
 
@@ -62,10 +68,10 @@ func TestRecoverStaleWatcherStatusRetiresTerminalOnly(t *testing.T) {
 // task reports not-found rather than fabricating a row.
 func TestRecoverStaleWatcherStatusRejectsMissingAndInvalid(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	if _, err := RecoverStaleWatcherStatus("not a task id", "started"); err == nil {
+	if _, err := RecoverStaleWatcherStatus("not a task id", "stopped", "started"); err == nil {
 		t.Fatal("expected validation error for malformed task id")
 	}
-	recovered, err := RecoverStaleWatcherStatus("f9a0b1c3", "started")
+	recovered, err := RecoverStaleWatcherStatus("f9a0b1c3", "stopped", "started")
 	require.Error(t, err)
 	assert.False(t, recovered)
 }

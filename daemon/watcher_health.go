@@ -37,10 +37,11 @@ func (w *taskWatcher) setRunAlive(alive bool) {
 // statusMu serializes the write against a terminal publication racing in on
 // the same task — giveUpSummary's persist takes the same mutex — and the
 // runAlive check under mu keeps a callback that outlived its own run from
-// writing over a fresher terminal outcome. The store-side write is itself
-// conditional: only a persisted "stopped"/"errored:*" becomes
-// watchRecoveredStatus; a delivered, dropped, or parked outcome committed in
-// the window is never clobbered.
+// writing over a fresher terminal outcome. The store-side write is itself a
+// compare-and-swap: only the exact terminal value this watcher was armed
+// over (armStatus) becomes watchRecoveredStatus; a fresher terminal outcome
+// committed in the window — a fresh arming refusal — or a delivered,
+// dropped, or parked one is never clobbered.
 func (w *taskWatcher) recoverStaleTerminalStatus() {
 	if w.stopRequested() {
 		return
@@ -53,7 +54,7 @@ func (w *taskWatcher) recoverStaleTerminalStatus() {
 	if !alive {
 		return
 	}
-	recovered, err := w.sup.recoverStatus(w.taskID, watchRecoveredStatus)
+	recovered, err := w.sup.recoverStatus(w.taskID, w.armStatus, watchRecoveredStatus)
 	if err != nil {
 		log.WarningLog.Printf("watch task %s: could not retire a stale terminal status: %v", w.taskID, err)
 		return
