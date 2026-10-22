@@ -2020,6 +2020,13 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SetAttentionRequest": {
+        "cli": {
+          "set_at": {
+            "ok": "The CLI clears whatever request is current: `af sessions attention --clear` is an explicit ask to remove it. Only the web, which clears on sight, names the request it saw."
+          }
+        }
+      },
       "SnapshotRequest": {
         "cli": {
           "created_after": {

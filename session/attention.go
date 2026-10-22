@@ -1,9 +1,14 @@
 package session
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
+
+// ErrAttentionNotLive rejects an attention request on a session whose agent is
+// not running or waiting: Lost, Dead, Archived, or stopped at a usage limit.
+var ErrAttentionNotLive = errors.New("attention applies only to a live agent")
 
 // MaxAttentionReasonLen bounds the reason an agent attaches to an attention
 // request. The reason is shown in a row tooltip, not a document.
@@ -54,23 +59,35 @@ func (i *Instance) HasAttention() bool {
 }
 
 // SetAttention records an attention request and returns the previous value,
-// so a caller whose persist fails can put it back with RestoreAttention.
-func (i *Instance) SetAttention(reason string, now time.Time) *Attention {
+// so a caller whose persist fails can put it back with RestoreAttention. It
+// checks liveness under the same lock that liveness changes take, so a
+// transition either lands first and is refused here, or lands after and clears
+// the request.
+func (i *Instance) SetAttention(reason string, now time.Time) (*Attention, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	switch i.liveness {
+	case LiveArchived, LiveLost, LiveDead, LiveLimitReached:
+		return nil, ErrAttentionNotLive
+	}
 	previous := i.attention
 	i.attention = &Attention{Reason: NormalizeAttentionReason(reason), SetAt: now.UTC()}
+	// A status decision captured before the request must not mark it seen idle
+	// or clear it; the poll re-observes on its next tick.
+	i.stateEpoch++
 	i.touchLocked()
-	return previous
+	return previous, nil
 }
 
-// ClearAttention removes the attention request. It returns the removed value
-// and whether there was one to remove.
-func (i *Instance) ClearAttention() (*Attention, bool) {
+// ClearAttention removes the attention request. A non-zero setAt clears it
+// only while it is still the request set at that time, so a client that saw an
+// older request cannot erase a newer one. It returns the removed value and
+// whether there was one to remove.
+func (i *Instance) ClearAttention(setAt time.Time) (*Attention, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	previous := i.attention
-	if previous == nil {
+	if previous == nil || (!setAt.IsZero() && !previous.SetAt.Equal(setAt)) {
 		return nil, false
 	}
 	i.attention = nil

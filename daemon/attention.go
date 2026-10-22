@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -9,13 +11,15 @@ import (
 
 // SetAttentionRequest sets or clears a session's attention request. ID is the
 // stable id and wins over {Title, RepoID} when set. Clear removes the request;
-// otherwise Reason is an optional short note for the user.
+// otherwise Reason is an optional short note for the user. SetAt, with Clear,
+// clears the request only while it is still the one set at that RFC 3339 time.
 type SetAttentionRequest struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
 	Reason string `json:"reason"`
 	Clear  bool   `json:"clear"`
+	SetAt  string `json:"set_at,omitempty"`
 }
 
 // SetAttentionResponse names the session the daemon resolved. OK is always
@@ -54,10 +58,10 @@ func (m *Manager) SetAttention(req SetAttentionRequest) (string, string, error) 
 	if instance == nil {
 		return "", "", fmt.Errorf("session %q is not loaded by the daemon", title)
 	}
-	switch instance.GetLiveness() {
-	case session.LiveArchived, session.LiveLost, session.LiveDead:
-		if !req.Clear {
-			return "", "", fmt.Errorf("session %q is not running; attention applies only to a live agent", title)
+	var setAt time.Time
+	if req.Clear && req.SetAt != "" {
+		if setAt, err = time.Parse(time.RFC3339Nano, req.SetAt); err != nil {
+			return "", "", fmt.Errorf("set_at %q is not an RFC 3339 time: %w", req.SetAt, err)
 		}
 	}
 
@@ -68,12 +72,15 @@ func (m *Manager) SetAttention(req SetAttentionRequest) (string, string, error) 
 	var previous *session.Attention
 	if req.Clear {
 		var cleared bool
-		previous, cleared = instance.ClearAttention()
+		previous, cleared = instance.ClearAttention(setAt)
 		if !cleared {
 			return id, title, nil
 		}
 	} else {
-		previous = instance.SetAttention(req.Reason, nowFunc())
+		previous, err = instance.SetAttention(req.Reason, nowFunc())
+		if err != nil {
+			return "", "", fmt.Errorf("session %q is lost, dead, archived, or at a usage limit: %w", title, err)
+		}
 	}
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
@@ -98,7 +105,7 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
-	previous, cleared := instance.ClearAttention()
+	previous, cleared := instance.ClearAttention(time.Time{})
 	if !cleared {
 		return
 	}
@@ -126,9 +133,18 @@ func (b attentionClearingBinding) input(p []byte) error {
 	return err
 }
 
-// isTypedInput rejects frames that start with ESC. The browser terminal answers
-// focus, cursor, and device queries on its own with escape sequences, and those
-// replies must not count as the user answering.
+// The markers around a paste when the agent enabled bracketed-paste mode.
+var (
+	bracketedPasteStart = []byte("\x1b[200~")
+	bracketedPasteEnd   = []byte("\x1b[201~")
+)
+
+// isTypedInput rejects frames that start with ESC, except a bracketed paste. The
+// browser terminal answers focus, cursor, and device queries on its own with
+// escape sequences, and those replies must not count as the user answering.
 func isTypedInput(p []byte) bool {
+	if rest, ok := bytes.CutPrefix(p, bracketedPasteStart); ok {
+		return len(rest) > 0 && !bytes.Equal(rest, bracketedPasteEnd)
+	}
 	return len(p) > 0 && p[0] != 0x1b
 }
