@@ -83,7 +83,7 @@ test("every color control carries a project-focus key so a menu rebuild keeps fo
   }
 });
 
-test("the PNG favicon renders without roundRect and resets to the static icon", () => {
+test("the PNG favicon renders without roundRect and redraws the default mark on reset", () => {
   const calls: string[] = [];
   const ctx = {
     fillStyle: "",
@@ -111,8 +111,11 @@ test("the PNG favicon renders without roundRect and resets to the static icon", 
     applyProjectFavicon("#16a34a");
     assert.equal(attrs.get("href"), "data:image/png;base64,TILE");
     assert.ok(calls.includes("arcTo"));
+    const drawn = calls.length;
+    attrs.set("href", "/icons/favicon-32.png");
     applyProjectFavicon(null);
-    assert.equal(attrs.get("href"), "/icons/favicon-32.png");
+    assert.equal(attrs.get("href"), "data:image/png;base64,TILE");
+    assert.ok(calls.length > drawn);
   } finally {
     g.document = saved.document;
     g.Path2D = saved.Path2D;
