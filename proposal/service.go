@@ -317,11 +317,16 @@ func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
+	if previous != "" && previous != slug {
+		if err := r.store.RequireSlug(slug); err != nil {
+			return nil, err
+		}
+		if _, err := s.host.CloseDocsTabs(r.session.ID, previous); err != nil {
+			return nil, fmt.Errorf("still attached to %s: closing its Docs tab failed: %w", previous, err)
+		}
+	}
 	if err := r.store.Attach(slug, r.session.ID); err != nil {
 		return nil, err
-	}
-	if previous != "" && previous != slug {
-		_, _ = s.host.CloseDocsTabs(r.session.ID, previous)
 	}
 	info, err := s.summary(r, slug)
 	if err != nil {
@@ -351,15 +356,19 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	slug, err := r.store.Detach(r.session.ID)
+	slug, err := r.store.Attached(r.session.ID)
 	if err != nil {
 		return nil, err
 	}
 	res := &DetachResult{Slug: slug, Detached: slug != ""}
-	if slug != "" {
-		if res.Tab, err = s.host.CloseDocsTabs(r.session.ID, slug); err != nil {
-			return nil, fmt.Errorf("detached from %s, but closing its Docs tab failed: %w", slug, err)
-		}
+	if slug == "" {
+		return res, nil
+	}
+	if res.Tab, err = s.host.CloseDocsTabs(r.session.ID, slug); err != nil {
+		return nil, fmt.Errorf("still attached to %s: closing its Docs tab failed: %w", slug, err)
+	}
+	if _, err := r.store.Detach(r.session.ID); err != nil {
+		return nil, err
 	}
 	return res, nil
 }

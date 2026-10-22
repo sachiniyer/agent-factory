@@ -17,6 +17,7 @@ type fakeHost struct {
 	sessions map[string]Session
 	tabs     map[string]string // session id + "/" + slug → tab name
 	tabErr   error
+	closeErr error
 	events   []Change
 }
 
@@ -57,6 +58,9 @@ func (h *fakeHost) EnsureDocsTab(sessionID, slug string) (string, error) {
 }
 
 func (h *fakeHost) CloseDocsTabs(sessionID, slug string) (string, error) {
+	if h.closeErr != nil {
+		return "", h.closeErr
+	}
 	name, ok := h.tabs[sessionID+"/"+slug]
 	if !ok {
 		return "", nil
@@ -153,6 +157,42 @@ func TestServiceStartAttachDetachTabs(t *testing.T) {
 	}
 	if _, err := svc.Attach(sessA, ""); err == nil || !strings.Contains(err.Error(), "existing proposals: p, q") {
 		t.Fatalf("attach with no slug when detached = %v, want the slug list", err)
+	}
+}
+
+func TestServiceTabCloseFailureKeepsAttachment(t *testing.T) {
+	svc, host, store := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Start(sessB, "q", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	host.closeErr = errors.New("session is archived")
+	if _, err := svc.Attach(sessA, "q"); err == nil {
+		t.Fatal("attach must fail when the old Docs tab cannot close")
+	}
+	if _, err := svc.Detach(sessA); err == nil {
+		t.Fatal("detach must fail when the Docs tab cannot close")
+	}
+	if got, _ := store.Attached(sessA); got != "p" {
+		t.Fatalf("attached = %q, want p kept so a retry closes its tab", got)
+	}
+	host.closeErr = nil
+	if _, err := svc.Attach(sessA, "q"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := host.tabs[sessA+"/p"]; ok {
+		t.Fatal("the retry must close the old Docs tab")
+	}
+	host.closeErr = errors.New("session is archived")
+	if _, err := svc.Detach(sessA); err == nil {
+		t.Fatal("detach must fail when the Docs tab cannot close")
+	}
+	host.closeErr = nil
+	res, err := svc.Detach(sessA)
+	if err != nil || res.Slug != "q" || res.Tab != "docs" {
+		t.Fatalf("detach retry = %+v, %v; want q and its tab closed", res, err)
 	}
 }
 

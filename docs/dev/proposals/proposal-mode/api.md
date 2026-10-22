@@ -147,7 +147,9 @@ Shapes:
   create the tab when the session has none for the slug. `tab` is absent when
   the daemon cannot create it; then `tab_error` holds the reason. Detach closes
   the session's Docs tabs for the slug, and its `tab` is the closed tab name or
-  `""`.
+  `""`. Detach, and an attach that moves the session to another slug, close the
+  old Docs tabs first. When that close fails, the request fails and the
+  attachment does not change, so a retry closes them.
 - `docs` in `StartProposal` is a list of doc names. Empty means all five
   built-in templates.
 - `author` is `human`, `agent` or `external`. `agent` needs `session_id`, and
