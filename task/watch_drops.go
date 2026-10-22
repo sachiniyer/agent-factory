@@ -18,7 +18,7 @@ const WatchRateDropStatus = "dropped: event rate limit exceeded"
 // outcome that a drop flush must not overwrite. It mirrors the live-overlay
 // terminal latch in daemon/watcher_drop_visibility.go (applyLiveDropState):
 // "stopped" (a clean script exit) and any "errored:" outcome (the crash-loop
-// breaker's failureSummary, or an arming refusal's "errored: not armed — …")
+// breaker's giveUpSummary, or an arming refusal's "errored: not armed — …")
 // are both newer-than-the-drop terminal outcomes that deliberately record
 // without advancing LastRunAt, so a stop-time drop flush passing lastDroppedAt
 // would otherwise satisfy the LastRunAt guard and clobber them. Unlike the
