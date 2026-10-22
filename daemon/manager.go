@@ -34,6 +34,9 @@ type Manager struct {
 	live atomic.Pointer[config.Config]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// attentionClears holds the instances with an input-driven attention clear
+	// in flight, so a burst of keystrokes starts one clear, not one per key.
+	attentionClears sync.Map
 	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
 	// advisory launch check and before personal policy is locked.
 	accountSwapAfterManualPrecheckForTest func()

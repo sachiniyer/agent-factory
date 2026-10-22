@@ -91,13 +91,35 @@ func (m *Manager) SetAttention(req SetAttentionRequest) (string, string, error) 
 	return id, title, nil
 }
 
+// runAttentionClear runs an input-driven clear off the keystroke path. Tests
+// replace it to run the clear at a chosen moment.
+var runAttentionClear = func(clear func()) { go clear() }
+
 // clearAttentionOnInput clears the attention request when the user types into
-// the agent pane. It is on the keystroke path, so the common case is one
-// read lock and a return.
+// the agent pane. It is on the keystroke path, so it never waits: the common
+// case is one read lock and a return, and the clear itself runs elsewhere,
+// because it takes the repo start lock that a sibling's create holds for its
+// whole run.
 func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
-	if instance == nil || !instance.HasAttention() {
+	if instance == nil {
 		return
 	}
+	seen := instance.Attention()
+	if seen == nil {
+		return
+	}
+	if _, busy := m.attentionClears.LoadOrStore(instance, struct{}{}); busy {
+		return
+	}
+	runAttentionClear(func() {
+		defer m.attentionClears.Delete(instance)
+		m.clearAttentionNow(instance, seen.SetAt)
+	})
+}
+
+// clearAttentionNow clears and persists the request set at setAt, under the
+// repo start lock. A request set after the keystroke stays.
+func (m *Manager) clearAttentionNow(instance *session.Instance, setAt time.Time) {
 	repoID, ok := m.repoIDForInstance(instance)
 	if !ok {
 		return
@@ -105,7 +127,7 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
-	previous, cleared := instance.ClearAttention(time.Time{})
+	previous, cleared := instance.ClearAttention(setAt)
 	if !cleared {
 		return
 	}
