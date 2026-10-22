@@ -137,6 +137,8 @@ let appliedColor: string | null = null;
 let appliedAttention = false;
 let blinkTimer: ReturnType<typeof setInterval> | null = null;
 let blinkInverted = false;
+let lastBlinkAt = 0;
+let motionQuery: MediaQueryList | null = null;
 const faviconHrefs = new Map<string, string | null>();
 
 /** Points every favicon link at the project-colored mark, or back at the default
@@ -147,22 +149,42 @@ export function applyProjectFavicon(color: string | null, attention = false): vo
   if (appliedColor !== color) faviconHrefs.clear();
   appliedColor = color;
   appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+
+function restartBlink(): void {
   if (blinkTimer !== null) {
     clearInterval(blinkTimer);
     blinkTimer = null;
   }
-  blinkInverted = attention;
-  if (attention && !prefersReducedMotion()) {
-    blinkTimer = setInterval(() => {
-      blinkInverted = !blinkInverted;
-      paintFavicon();
-    }, FAVICON_BLINK_MS);
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
   }
+}
+
+// Chrome runs timers in a long-hidden tab about once a minute. A late tick shows
+// the attention frame instead of toggling, so a throttled tab holds that frame
+// rather than showing the plain mark for a minute at a time.
+function blinkTick(): void {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
   paintFavicon();
 }
 
 function prefersReducedMotion(): boolean {
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
 }
 
 function paintFavicon(): void {

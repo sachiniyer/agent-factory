@@ -16058,27 +16058,44 @@ var appliedColor = null;
 var appliedAttention = false;
 var blinkTimer = null;
 var blinkInverted = false;
+var lastBlinkAt = 0;
+var motionQuery = null;
 var faviconHrefs = /* @__PURE__ */ new Map();
 function applyProjectFavicon(color, attention = false) {
   if (appliedColor === color && appliedAttention === attention) return;
   if (appliedColor !== color) faviconHrefs.clear();
   appliedColor = color;
   appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+function restartBlink() {
   if (blinkTimer !== null) {
     clearInterval(blinkTimer);
     blinkTimer = null;
   }
-  blinkInverted = attention;
-  if (attention && !prefersReducedMotion()) {
-    blinkTimer = setInterval(() => {
-      blinkInverted = !blinkInverted;
-      paintFavicon();
-    }, FAVICON_BLINK_MS);
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
   }
+}
+function blinkTick() {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
   paintFavicon();
 }
 function prefersReducedMotion() {
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
 }
 function paintFavicon() {
   const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
