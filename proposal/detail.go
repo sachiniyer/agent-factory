@@ -38,8 +38,8 @@ func CountOpenQuestions(text string) int {
 // Head returns the store's HEAD commit, or "" when the store has no repository
 // yet.
 func (s *Store) Head() (string, error) {
-	if !s.initialized() {
-		return "", nil
+	if ok, err := s.present(); err != nil || !ok {
+		return "", err
 	}
 	return s.head()
 }
@@ -64,11 +64,11 @@ func (s *Store) Detail(slug string) (*Detail, error) {
 		name := strings.TrimSuffix(f, ".md")
 		used[name] = true
 		d.Docs = append(d.Docs, DocRef{Name: name, File: f})
-		data, err := s.readDoc(slug, f)
-		if err != nil {
-			return nil, err
+		// A doc af cannot read still belongs in the list, so the user can
+		// find and repair it.
+		if data, err := s.readDoc(slug, f); err == nil {
+			d.OpenQuestions += CountOpenQuestions(string(data))
 		}
-		d.OpenQuestions += CountOpenQuestions(string(data))
 	}
 	names, err := TemplateNames()
 	if err != nil {
