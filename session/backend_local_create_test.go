@@ -403,9 +403,7 @@ func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 
 	plan, err := inst.PrepareCreateLaunch()
 	require.NoError(t, err)
-	newFiles, err := newCodexRolloutFiles(plan.ConversationCapture())
-	require.NoError(t, err)
-	require.Empty(t, newFiles,
+	require.Empty(t, newCodexRolloutFiles(plan.ConversationCapture()),
 		"the rollout should not exist when the before-image is taken")
 	require.NoError(t, inst.LaunchPreparedCreate(plan))
 	t.Cleanup(func() { _ = inst.CloseAttachOnly() })

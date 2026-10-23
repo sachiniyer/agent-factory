@@ -324,37 +324,6 @@ func ConversationSelectorArgs(program string) []string {
 	return nil
 }
 
-// CodexResumeSelection returns the arguments of command's resume subcommand —
-// every token from "resume" onward — so callers see the target AND its flags:
-// an explicit id, --last, or nothing (Codex's own picker), plus modifiers like
-// --all, which drops the working-directory scope --last normally applies. It
-// reports resume=false when command does not resume a Codex conversation.
-// ConversationSelectorArgs truncates to two words for refusal text; this form
-// preserves the tail because receipt routing must honor --all (#5471 review).
-func CodexResumeSelection(command string) (selector []string, resume bool) {
-	tokens, _ := splitShellTokens(command)
-	agentIdx, agent := findAgentToken(tokens)
-	if agent != ProgramCodex {
-		return nil, false
-	}
-	idx := codexSubcommandIndex(tokens[agentIdx+1:])
-	if idx < 0 {
-		return nil, false
-	}
-	idx += agentIdx + 1
-	if idx < len(tokens) && (tokens[idx] == "exec" || tokens[idx] == "e") {
-		execIdx := codexExecSubcommandIndex(tokens[idx+1:])
-		if execIdx < 0 {
-			return nil, false
-		}
-		idx += execIdx + 1
-	}
-	if idx >= len(tokens) || tokens[idx] != "resume" {
-		return nil, false
-	}
-	return append([]string(nil), tokens[idx:]...), true
-}
-
 // codexSubcommandIndex returns the first Codex subcommand or prompt token
 // after consuming the global options accepted before it. Value-taking options
 // are listed explicitly so a value named "resume" is never mistaken for the
