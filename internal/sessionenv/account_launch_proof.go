@@ -82,12 +82,14 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 		if !mergeOK {
 			return AccountLaunchProof{}, false
 		}
-		proof := AccountLaunchProof{GeneratedArgs: merged}
-		words, ok := accountBaseWords(base)
-		if ok && filepath.IsAbs(words[0]) {
-			proof.TrustedExecutable = words[0]
-		}
-		return proof, true
+		// The insertion branch is reached only with a pane-recorded declaration
+		// (trustedBaseArgs from the pane fallback), so the executable provenance
+		// is the pane's recording, not the base's first word: an untrusted
+		// absolute override records an empty TrustedExecutable deliberately, and
+		// inferring the path here would launder a repository-controlled executable
+		// into the account boundary's trust. The caller seeds the recorded
+		// provenance; this function does not infer it from the base string.
+		return AccountLaunchProof{GeneratedArgs: merged}, true
 	}
 	proof := AccountLaunchProof{GeneratedArgs: added}
 	if trustedBaseArgs == nil {

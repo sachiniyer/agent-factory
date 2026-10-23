@@ -577,6 +577,15 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		{"codex exec", ProgramCodex, "codex exec --foo bar", "codex exec resume " + id + " --foo bar", true},
 		{"codex quoted path", ProgramCodex, "'/path with spaces/codex' --model gpt-5", "'/path with spaces/codex' resume " + id + " --model gpt-5", true},
 		{"codex already resume", ProgramCodex, "codex resume --last", "codex resume --last", false},
+		// Global -c/--config options sit before the subcommand in codex's
+		// grammar, so the id splice must land after them rather than ahead of
+		// them — `codex resume <id> -c k=v` reorders the option after the
+		// subcommand, which codex rejects. Mirrors resumeProgram's --last
+		// splice, which already skips these options.
+		{"codex config option", ProgramCodex, "codex -c check_for_update_on_startup=false", "codex -c check_for_update_on_startup=false resume " + id, true},
+		{"codex config option already resume", ProgramCodex, "codex -c check_for_update_on_startup=false resume", "codex -c check_for_update_on_startup=false resume", false},
+		{"codex config option exec", ProgramCodex, "codex -c check_for_update_on_startup=false exec foo", "codex -c check_for_update_on_startup=false exec resume " + id + " foo", true},
+		{"codex attached config option", ProgramCodex, "codex --config=k=v", "codex --config=k=v resume " + id, true},
 		{"amp bare", ProgramAmp, "amp", "amp threads continue " + id, true},
 		{"amp with global flag", ProgramAmp, "amp --no-ide", "amp --no-ide threads continue " + id, true},
 		{"amp quoted path", ProgramAmp, "'/path with spaces/amp' --no-ide", "'/path with spaces/amp' --no-ide threads continue " + id, true},

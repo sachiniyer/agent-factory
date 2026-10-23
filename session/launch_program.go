@@ -43,7 +43,18 @@ import (
 // the pane-fallback path resets trustBase to false — and paneGeneratedArgs is
 // ignored whenever trustBase is set, so the built-in claude override keeps its
 // exact declared word.
-func accountLaunchProof(base, final string, trustBase bool, paneGeneratedArgs []string) sessionenv.AccountLaunchProof {
+//
+// paneTrustedExecutable is the pane's recorded executable provenance
+// (TmuxSession.TrustedExecutable), paired with paneGeneratedArgs. A pane
+// launched from an untrusted absolute override records an empty
+// TrustedExecutable deliberately, so the proof carries that empty provenance
+// instead of the base's first word — inferring the path would launder a
+// repository-controlled executable into the account boundary's trust, the same
+// rule a fresh launch enforces by refusing a path-qualified executable whose
+// exact path did not come from af's built-in detection
+// (internal/sessionenv/account.go:47-54). It is empty unless the pane-fallback
+// path seeded from ResolvedPaneProgram.
+func accountLaunchProof(base, final string, trustBase bool, paneGeneratedArgs []string, paneTrustedExecutable string) sessionenv.AccountLaunchProof {
 	var trustedBaseArgs []string
 	if trustBase {
 		// DefaultConfig appends this exact word. GetClaudeCommand may return an
@@ -61,6 +72,16 @@ func accountLaunchProof(base, final string, trustBase bool, paneGeneratedArgs []
 	proof, ok := sessionenv.GenerateAccountLaunchProof(base, final, trustedBaseArgs)
 	if !ok {
 		return sessionenv.AccountLaunchProof{}
+	}
+	// The pane-fallback base may be an untrusted absolute override whose
+	// recorded proof left TrustedExecutable empty: GenerateAccountLaunchProof
+	// derives the declared args from the recorded declaration but infers the
+	// executable from the base string, which would trust a path the launcher
+	// never vouched for. Replace it with the pane's recorded provenance so the
+	// proof carries exactly what the launch recorded — empty for an untrusted
+	// override, the detected path for a built-in one — and nothing more.
+	if len(paneGeneratedArgs) > 0 {
+		proof.TrustedExecutable = paneTrustedExecutable
 	}
 	return proof
 }

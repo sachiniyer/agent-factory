@@ -250,7 +250,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			runtimeProgram = resolution.command
 			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
 			setLaunchProgram(tmuxSession, program,
-				accountLaunchProof(resolution.command, program, resolution.trustBase, nil))
+				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
@@ -321,7 +321,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
-			proof = accountLaunchProof(base, program, resolution.trustBase, nil)
+			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)
 

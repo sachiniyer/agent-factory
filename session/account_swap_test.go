@@ -897,10 +897,11 @@ func TestValidateAccountSwapAdmitsCodexPaneFallbackFreshPlan(t *testing.T) {
 // TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan is the carry variant
 // of the #5433 regression: the same pane-fallback base, but the swap resumes the
 // outgoing codex conversation — ResumeProgramWithConversationID splices
-// `resume <id>` immediately after the executable, ahead of the flag — producing
-// a mid-command insertion GeneratedArgsBetween refuses. The proof must merge
-// via the GeneratedArgsByInsertion fallback, the way the tmux rewrite path
-// already does, or the swap is refused.
+// `resume <id>` after the global -c option (the position codex's grammar
+// requires), so the splice is a positional extension of the flagged base. The
+// proof must still seed the pane's recorded flag declaration, because the
+// recompute alone describes only the appended resume words and leaves af's own
+// flag undeclared.
 func TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan(t *testing.T) {
 	inst, target := flaggedPaneSwapOsInstance(t, true)
 	source := registerAccount(t, tmux.ProgramCodex, "old")
@@ -910,37 +911,42 @@ func TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan(t *testing.T) {
 	writeCarryFile(t, source, rel, codexRollout(inst.GetWorktreePath()))
 
 	require.NoError(t, inst.ValidateAccountSwap("work"),
-		"a carried swap that splices resume ahead of af's flagged pane base must still be provable")
+		"a carried swap that resumes the outgoing codex conversation must still be provable")
 	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
 	require.NotNil(t, plan)
 	require.NotNil(t, plan.carry, "a same-agent swap with a recorded codex conversation must carry it")
-	// ResumeProgramWithConversationID splices `resume <id>` right after the
-	// codex executable; because the flagged pane base already carries the flag
-	// after it, the splice lands BEFORE the flag and injectSystemPrompt leaves
-	// it (the key is already present) — the mid-command insertion shape that
-	// forced the GeneratedArgsByInsertion fallback.
-	require.Equal(t, "codex resume "+carryTestID+" -c check_for_update_on_startup=false", plan.program,
-		"the resume splice lands ahead of af's authored flag, leaving the flag in place")
+	// ResumeProgramWithConversationID skips the global -c option and splices
+	// `resume <id>` after it — `codex -c k=v resume <id>` — so the flag stays
+	// before the subcommand (the placement codex's grammar requires) and the
+	// resume words append after it. injectSystemPrompt leaves the flag in place
+	// because it is already present.
+	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+carryTestID, plan.program,
+		"the resume splice lands after the global option, keeping the flag before the subcommand")
 	require.Equal(t,
-		[]string{"resume", carryTestID, "-c", "check_for_update_on_startup=false"},
+		[]string{"-c", "check_for_update_on_startup=false", "resume", carryTestID},
 		plan.proof.GeneratedArgs,
-		"the proof merges the inserted resume and the recorded flag into one declaration")
+		"the proof declares the recorded flag and the appended resume words")
 
 	// The proof must satisfy the account boundary, the same check the
 	// ApplyAccount step inside validateAccountSwapPlan just passed.
 	scope := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: target, GeneratedArgs: plan.proof.GeneratedArgs}
 	_, err := sessionenv.ApplyAccount(nil, plan.program, scope)
-	require.NoError(t, err, "the merged declaration must satisfy the account boundary")
+	require.NoError(t, err, "the declared flag and resume words must satisfy the account boundary")
 
 	// Without the seeding the swap is still refused — proving the fix is what
-	// admits it, not a coincidental accept. base == flagged pane program and
-	// the insertion shape are both unprovable without the recorded declaration.
+	// admits it, not a coincidental accept. GeneratedArgsBetween describes only
+	// the appended resume words, leaving the pane's recorded flag undeclared,
+	// so ApplyAccount refuses the flag as a user argument the proof did not
+	// vouch for.
 	unproof := sessionenv.AccountLaunchProof{}
 	if p, ok := sessionenv.GenerateAccountLaunchProof(plan.base, plan.program, nil); ok {
 		unproof = p
 	}
-	require.Empty(t, unproof.GeneratedArgs,
-		"a recompute with no trusted base args cannot describe the mid-command resume insertion")
+	require.Equal(t, []string{"resume", carryTestID}, unproof.GeneratedArgs,
+		"a recompute with no trusted base args describes the appended resume words but not af's flag")
+	unscoped := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: target, GeneratedArgs: unproof.GeneratedArgs}
+	_, err = sessionenv.ApplyAccount(nil, plan.program, unscoped)
+	require.Error(t, err, "the recompute omits the flag, so the account boundary refuses it as undeclared")
 }
 
 // TestValidateAccountSwapAdmitsCodexPaneFallbackControlRuntimeBase confirms the
@@ -982,4 +988,47 @@ func TestValidateAccountSwapAdmitsCodexPaneFallbackControlRuntimeBase(t *testing
 	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, plan.proof.GeneratedArgs,
 		"a clean base describes the injected flag as an ordinary trailing extension")
 	_ = target
+}
+
+// TestAccountLaunchProofSeedsRecordedTrustedExecutableNotInferred is the
+// #5479 review's executable-provenance finding: an untrusted absolute override
+// (e.g. a repository-controlled /worktree/tools/codex) records an empty
+// TrustedExecutable deliberately, because the path is not af's built-in
+// detection. Generating the launch proof from the pane's recorded declaration
+// must carry that empty provenance, not infer the base's first word as trusted
+// — otherwise the account boundary accepts the repository-controlled
+// executable and exposes the selected credential directory to it. The recorded
+// detected path is kept the same way.
+func TestAccountLaunchProofSeedsRecordedTrustedExecutableNotInferred(t *testing.T) {
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+
+	// An untrusted absolute override: the pane recorded the injected flag but
+	// deliberately left TrustedExecutable empty. The proof must carry that
+	// empty provenance so the account boundary refuses the path-qualified
+	// executable, exactly as a fresh launch would.
+	untrustedBase := "/worktree/tools/codex -c check_for_update_on_startup=false"
+	untrustedProof := accountLaunchProof(untrustedBase, untrustedBase, false, declared, "")
+	require.Empty(t, untrustedProof.TrustedExecutable,
+		"an untrusted absolute override records an empty TrustedExecutable; the proof must not infer the base's first word")
+	require.Equal(t, declared, untrustedProof.GeneratedArgs,
+		"the recorded declaration is the proof regardless of executable provenance")
+	err := sessionenv.ValidateAccountCommand(untrustedBase, sessionenv.Account{
+		Agent: tmux.ProgramCodex, Name: "work", Dir: "/afhome/accounts/codex/work",
+		TrustedExecutable: untrustedProof.TrustedExecutable, GeneratedArgs: untrustedProof.GeneratedArgs,
+	})
+	require.Error(t, err,
+		"the account boundary refuses a path-qualified executable whose exact path did not come from af's built-in detection")
+
+	// A built-in detected absolute path records that path as the TrustedExecutable;
+	// the proof carries it so the boundary trusts exactly what af detected.
+	const detected = "/opt/af-detected/codex"
+	trustedBase := detected + " -c check_for_update_on_startup=false"
+	trustedProof := accountLaunchProof(trustedBase, trustedBase, false, declared, detected)
+	require.Equal(t, detected, trustedProof.TrustedExecutable,
+		"a built-in detected path is the provenance the proof carries, not a re-derivation from the base string")
+	require.Equal(t, declared, trustedProof.GeneratedArgs)
+	require.NoError(t, sessionenv.ValidateAccountCommand(trustedBase, sessionenv.Account{
+		Agent: tmux.ProgramCodex, Name: "work", Dir: "/afhome/accounts/codex/work",
+		TrustedExecutable: trustedProof.TrustedExecutable, GeneratedArgs: trustedProof.GeneratedArgs,
+	}), "the detected path is exactly what the boundary trusts")
 }

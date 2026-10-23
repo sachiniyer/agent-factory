@@ -419,6 +419,25 @@ func (i *Instance) ResolvedPaneGeneratedArgs() []string {
 	return ts.GeneratedArgs()
 }
 
+// ResolvedPaneTrustedExecutable returns the exact executable path af's built-in
+// program detection recorded for the local agent pane's frozen program, or empty
+// when the launch recorded none. It surfaces TmuxSession.TrustedExecutable so a
+// launch proof seeded from the pane's frozen program (the #5433 pane-fallback)
+// carries the pane's recorded executable provenance instead of inferring the
+// base's first word: an untrusted absolute override records an empty
+// TrustedExecutable deliberately, and inferring the path would launder a
+// repository-controlled executable into the account boundary's trust
+// (internal/sessionenv/account.go:47-54, account_command.go:269-276).
+func (i *Instance) ResolvedPaneTrustedExecutable() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return ""
+	}
+	return ts.TrustedExecutable()
+}
+
 // RuntimeProgram returns durable evidence of the override-resolved base command
 // used by the last positively established agent runtime. It is intentionally
 // empty for legacy or uncertain records; Program is intent, not runtime proof.

@@ -65,7 +65,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 		program = prepareLaunchConversation(i, program)
 	}
 	program = injectSystemPrompt(program, resolveSkillTarget(i, program))
-	return program, accountLaunchProof(declarationBase, program, trustBase, nil)
+	return program, accountLaunchProof(declarationBase, program, trustBase, nil, "")
 }
 
 // AccountSelection reports the current account and whether af selected it. A
@@ -228,6 +228,14 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// af's words or keep the positional-extension shape GeneratedArgsBetween
 	// already describes.
 	var paneGeneratedArgs []string
+	// paneTrustedExecutable is the executable provenance the pane recorded
+	// alongside paneGeneratedArgs. It is empty for an untrusted absolute
+	// override (the launcher never vouched for the path) and the detected path
+	// for a built-in launch; carrying it through the proof keeps an untrusted
+	// override rejected rather than letting the proof infer the base's first
+	// word, which would launder a repository-controlled executable into the
+	// account boundary's trust.
+	var paneTrustedExecutable string
 	// A cross-agent swap resolves the target enum's own command and namespace;
 	// a same-agent one keeps the recorded program. With program_overrides.aider
 	// = "codex" running a codex pane, `--to codex` whose override resolves to
@@ -291,6 +299,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		if !runtimeEstablished && resolution.command != "" &&
 			resolution.command == i.ResolvedPaneProgram() {
 			paneGeneratedArgs = i.ResolvedPaneGeneratedArgs()
+			paneTrustedExecutable = i.ResolvedPaneTrustedExecutable()
 		}
 	}
 	resolvedProgram := resolution.command
@@ -376,7 +385,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 				preflight.ProgramError(agent, resolvedProgram, err))
 		}
 	}
-	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase, paneGeneratedArgs)
+	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase, paneGeneratedArgs, paneTrustedExecutable)
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}

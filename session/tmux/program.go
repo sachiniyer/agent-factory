@@ -53,6 +53,22 @@ func (t *TmuxSession) GeneratedArgs() []string {
 	return append([]string(nil), t.generatedArgs...)
 }
 
+// TrustedExecutable returns the exact path af's built-in program detection
+// recorded for this pane's program (AccountLaunchProof.TrustedExecutable), or
+// empty when the launch did not record one. A pane launched from an untrusted
+// absolute override records an empty TrustedExecutable deliberately, so the
+// account boundary rejects the path-qualified executable rather than trusting
+// a name the launcher did not pick. Callers that seed an account launch proof
+// from the pane's frozen program pass this alongside GeneratedArgs so the
+// proof carries the pane's recorded executable provenance instead of inferring
+// the base's first word — the same rule a fresh launch follows
+// (internal/sessionenv/account.go:47-54).
+func (t *TmuxSession) TrustedExecutable() string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return t.trustedExecutable
+}
+
 // programCmd returns the pane's program command string under programMu.
 func (t *TmuxSession) programCmd() string {
 	t.programMu.RLock()

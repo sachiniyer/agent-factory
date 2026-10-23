@@ -624,11 +624,17 @@ func TestGenerateAccountLaunchProof_PaneFallbackFailsClosedWhenRecordedDeclarati
 	}
 }
 
-// An insertion whose base executable is an absolute path keeps the
-// TrustedExecutable the extension path would — a wrapper-anchored or alias
-// launched pane still carries its provenance across the splice. Relative
-// spellings stay empty for the same reason a non-insertion base does.
-func TestGenerateAccountLaunchProof_PaneFallbackInsertionKeepsAbsoluteExecutableProvenance(t *testing.T) {
+// An insertion whose base executable is an absolute path does NOT infer that
+// path as TrustedExecutable: the insertion branch is reached only with a
+// pane-recorded declaration (trustedBaseArgs from the pane fallback), and the
+// pane's recorded proof is the provenance the caller seeds — an untrusted
+// absolute override records an empty TrustedExecutable deliberately, so inferring
+// the base's first word would launder a repository-controlled executable into
+// the account boundary's trust. GenerateAccountLaunchProof leaves
+// TrustedExecutable empty here; accountLaunchProof seeds the pane's recorded
+// value. The same fail-closed applies to a relative spelling, whose path can
+// never be provenance.
+func TestGenerateAccountLaunchProof_PaneFallbackInsertionDoesNotInferExecutableProvenance(t *testing.T) {
 	const executable = "/opt/codex"
 	base := executable + " -c check_for_update_on_startup=false"
 	final := executable + " resume abc -c check_for_update_on_startup=false"
@@ -636,15 +642,28 @@ func TestGenerateAccountLaunchProof_PaneFallbackInsertionKeepsAbsoluteExecutable
 
 	proof, ok := GenerateAccountLaunchProof(base, final, declared)
 	require.True(t, ok)
-	require.Equal(t, executable, proof.TrustedExecutable,
-		"an absolute base executable keeps its provenance across the insertion merge")
+	require.Empty(t, proof.TrustedExecutable,
+		"an absolute base executable's provenance is the pane's recording, not the base string; the insertion merge must not infer it")
 	require.Equal(t,
 		[]string{"resume", "abc", "-c", "check_for_update_on_startup=false"}, proof.GeneratedArgs)
 
-	require.NoError(t, ValidateAccountCommand(final, Account{
+	// Without the pane's recorded TrustedExecutable, an absolute path is not
+	// trusted: the account boundary rejects a path-qualified executable whose
+	// exact path did not come from af's built-in detection.
+	require.Error(t, ValidateAccountCommand(final, Account{
 		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
 		TrustedExecutable: proof.TrustedExecutable, GeneratedArgs: proof.GeneratedArgs,
-	}))
+	}), "an absolute executable is not trusted without the pane's recorded provenance")
+
+	// The caller seeds the pane's recorded provenance: an untrusted absolute
+	// override records an empty TrustedExecutable (refused above), while a
+	// built-in detection records the exact path (trusted). accountLaunchProof
+	// replaces the proof's TrustedExecutable with the pane's recording, so the
+	// boundary accepts a detected path and refuses an untrusted one.
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
+		TrustedExecutable: executable, GeneratedArgs: proof.GeneratedArgs,
+	}), "the pane's recorded detected path is the provenance the boundary trusts")
 
 	// A relative executable spelling keeps the same fail-closed on identity
 	// the extension path keeps: its arguments can be declared, its path
