@@ -470,3 +470,39 @@ func resolveSymlinkTail(ctx context.Context, cur string, tailParts []string) (st
 	}
 	return cur, false, nil, creatableParents
 }
+
+// hasPathTraversal reports whether path contains a `..` component that
+// filepath.Dir/Join would lexically collapse, so the symlink-aware walk is
+// needed to follow a symlinked component before `..` the way the kernel's
+// chdir does. On Windows both `\` and `/` are valid separators.
+func hasPathTraversal(path string) bool {
+	p := strings.ReplaceAll(path, "/", string(filepath.Separator))
+	for _, part := range strings.Split(p, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// gitdirFromGitfile reads a `.git` gitfile (the file `git worktree add` writes
+// at a worktree root pointing at the worktree's gitdir) and returns the gitdir
+// path it names, resolved relative to the gitfile's directory. A non-gitfile
+// `.git` entry (not starting with `gitdir:`) or an unreadable file returns ok
+// = false. The caller uses this to distinguish a gitfile from a failed `git
+// worktree add` (whose gitdir may no longer exist) from one a pre-existing
+// registered worktree left behind — the latter is not partial-attempt debris.
+func gitdirFromGitfile(gitfile string) (string, bool) {
+	b, err := os.ReadFile(gitfile)
+	if err != nil {
+		return "", false
+	}
+	dir := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	if dir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(filepath.Dir(gitfile), dir)
+	}
+	return dir, true
+}
