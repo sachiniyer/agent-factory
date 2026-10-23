@@ -553,6 +553,16 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		resolveRelative = true
 		resolveQualified = true
 	}
+	// A missing repository is a structural failure (git cannot enter its
+	// cmd.Dir), so the worktree add never writes anything. The ancestor walk
+	// and creatable-parent loop below already skip a missing repo, but the
+	// symlink-resolution error and timeout returns above write-probe the
+	// creatable parents the walk accumulated before a dangling link or timeout
+	// (for example ../dangling/wt with a missing repo). Skip all probes once
+	// the repository boundary is missing, before the resolution block can probe.
+	if repoMissing {
+		return g.annotateGitWriteError(err)
+	}
 	if resolveRelative {
 		// A current-drive-rooted Windows path was qualified with the
 		// repository's volume above (for example `\base\link\..\wt` ->
@@ -789,18 +799,6 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			out := g.annotateGitWriteError(err, creatableParents...)
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
-	}
-	// A missing repository is a structural failure (git cannot enter its
-	// cmd.Dir), so the worktree add never writes anything. The ancestor walk
-	// and creatable-parent loop below already skip a missing repo, but the
-	// immediate parent queue and destination probes did not. A relative
-	// worktreePath that traverses above the repo (for example ../dest) resolves
-	// outside the missing repo, and Git exits before creating the destination;
-	// an ENOSPC from any resolved destination is unrelated and would convert the
-	// structural missing-repository failure into an indefinite environmental
-	// retry. Skip all probes once the repository boundary is missing.
-	if repoMissing {
-		return g.annotateGitWriteError(err)
 	}
 	dirs := []string{filepath.Dir(worktreePath)}
 	// When the destination's parent does not exist yet (a nested relative

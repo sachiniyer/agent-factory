@@ -726,3 +726,82 @@ func TestAnnotateWorktreeAddError_AbsoluteWorktreePathTrailingSepPreservesFinalS
 		"the write probe must not target the symlink target's parent (the trailing separator must "+
 			"not make Lstat follow the final symlink the way a non-trailing-separator path does not)")
 }
+
+// TestAnnotateWorktreeAddError_MissingRepoPathSkipsResolutionErrorCreatableParentProbe pins the
+// contract the #5421 review added: when a restored record's relative repoPath no longer exists
+// (repoMissing) and a relative worktreePath traverses above the missing repo into a dangling
+// symlink (for example ../dangling/wt, where ../dangling is a symlink whose target does not
+// exist), the symlink-resolution tail walk records the missing repo's parent (the launch cwd) as
+// a creatable parent before surfacing the dangling-link resolution error. That resolution-error
+// return (and the timeout return) write-probe the accumulated creatable parents, but the git child
+// cannot enter its cmd.Dir when the repo is missing, so it exits before creating the destination
+// — a coincidental ENOSPC on the creatable parent is unrelated and would convert the structural
+// missing-repository failure into an indefinite environmental retry. The missing-repository guard
+// runs before the resolution block so neither the error nor the timeout return can probe those
+// unrelated parents.
+//
+// Deterministic in both directions: against the form that guarded only after the resolution block
+// the dangling-link resolution error returned early and write-probed the launch cwd, and a write
+// probe mocked to fail only there surfaced ENOSPC, so errors.Is(out, syscall.ENOSPC) was true and
+// the test failed; with the guard ahead of resolution the resolution block never runs for a
+// missing repo, the launch cwd is never probed, and the structural git failure is the only answer.
+func TestAnnotateWorktreeAddError_MissingRepoPathSkipsResolutionErrorCreatableParentProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// The repo is intentionally NOT created: a restored record with a relative
+	// repoPath that no longer exists. The git child cannot enter its cmd.Dir,
+	// so the worktree add is a structural missing-repository failure before it
+	// writes anything.
+
+	// A dangling symlink above the missing repo: ../dangling traverses out of
+	// the missing repo into a symlink whose target does not exist, so the
+	// resolution tail walk records the missing repo's parent (the launch cwd)
+	// as a creatable parent before surfacing the dangling-link error.
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "does-not-exist"), filepath.Join(launchCwd, "dangling")))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// The mock stat returns ENOENT for every path (the existing-destination
+	// probe stays silent); the evalSymlinksSpaceProbe and lstatSpaceProbe seams
+	// are the real fsprobe lookups so the repo-boundary gate sees the missing
+	// repo and the tail walk follows the dangling symlink to a resolution error.
+	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	resolvedLaunchCwd, err := filepath.EvalSymlinks(launchCwd)
+	require.NoError(t, err)
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		// A coincidental ENOSPC on the missing repo's parent (the launch cwd)
+		// is the bug: the dangling symlink never lets git reach the repo, so
+		// freeing it cannot fix the structural missing-repository failure.
+		if dir == resolvedLaunchCwd {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "../dangling/wt"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a missing repo is a structural failure (git cannot enter its cmd.Dir), so the dangling-link "+
+			"resolution error must not write-probe the missing repo's parent the way a creatable "+
+			"worktree parent is probed — a coincidental ENOSPC on the launch cwd would turn the "+
+			"structural missing-repository failure into an indefinite environmental retry: %v", out)
+	require.NotContains(t, probedDirs, resolvedLaunchCwd,
+		"the missing repo's parent (the launch cwd) must not be probed when the repo is missing — the "+
+			"resolution-error return bypassed the repo-boundary guard, so the guard now runs before "+
+			"the resolution block can probe these unrelated parents")
+}
