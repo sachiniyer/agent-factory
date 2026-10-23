@@ -93,14 +93,14 @@ type SnapshotResponse struct {
 	//
 	// Lifecycle: seeded from the startup refresh (refreshDaemonInstances with
 	// existing==nil) and trimmed by the polling path to drop repaired repos — a
-	// previously-skipped repo whose instances.json now parses falls out of the
-	// set so list/get/whoami stop refusing the now-complete snapshot without
-	// waiting for a daemon restart. It never gains a mid-life-corrupted repo:
-	// a repo that becomes corrupted mid-life keeps its prior in-memory rows via
-	// re-hydration, so its sessions remain in the snapshot and it is correctly
-	// NOT reported as skipped until the daemon restarts and re-runs startup. See
-	// daemon.daemon.go::refreshDaemonInstances and
-	// snapshot.go::retainStillSkipped for the skip lifecycle.
+	// previously-skipped repo whose instances.json now parses AND re-materializes
+	// its rows falls out of the set so list/get/whoami stop refusing the
+	// now-complete snapshot without waiting for a daemon restart. It never gains
+	// a mid-life-corrupted repo: a repo that becomes corrupted mid-life keeps its
+	// prior in-memory rows via re-hydration, so its sessions remain in the
+	// snapshot and it is correctly NOT reported as skipped until the daemon
+	// restarts and re-runs startup. See daemon.daemon.go::refreshDaemonInstances
+	// and snapshot.go::retainStillSkipped for the skip lifecycle.
 	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
 }
 
@@ -146,9 +146,13 @@ const SkippedRepoReasonNewerSchemaInstancesJSON = "newer-schema-instances-json"
 // tmux session a Live row points at is gone, not the file (#4876). It is kept
 // apart from the corrupted/unreadable reasons because the file is fine: the
 // remedy is to restore or delete the unloadable sessions, not to repair a JSON
-// error that is not there. Carried on the polling path only (a previously-
-// skipped repo whose stale reason it rewrites); a fresh repo with unloadable
-// rows at startup is out of this fix's scope.
+// error that is not there. Carried on BOTH the startup and the polling refresh:
+// at startup it arms the orphan-sweep deferral (a repo whose rows dropped
+// contributes the same zero rows to the protected-slug set as a corrupted one,
+// so the sweep must spare its live containers, #4998 follow-up) and refuses the
+// partial snapshot on the wire; on poll it rewrites a previously-skipped
+// repo's stale reason to the accurate one. A mid-life row failure stays
+// invisible to the set (the prior in-memory rows are re-hydrated).
 const SkippedRepoReasonRowsFailedToLoad = "rows-failed-to-load"
 
 // skippedRepoReasonForReadError names the reason for a repo the loader could
@@ -161,11 +165,12 @@ func skippedRepoReasonForReadError(err error) string {
 	return SkippedRepoReasonUnreadableInstancesJSON
 }
 
-// SkippedRepos returns the repos dropped at daemon startup due to a corrupted
-// instances.json (#603), scoped to repoID (all repos when empty). It is the wire
-// surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or caveat
-// rather than silently serving a partial list as complete (#730's principle
-// extended to the wire surface #1029 PR 2 introduced).
+// SkippedRepos returns the repos dropped at daemon startup due to a
+// corrupted/unreadable instances.json, or a file that parsed but whose rows
+// failed to load (#603), scoped to repoID (all repos when empty). It is the
+// wire surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or
+// caveat rather than silently serving a partial list as complete (#730's
+// principle extended to the wire surface #1029 PR 2 introduced).
 //
 // Seeded from the most recent startup refresh and trimmed by the polling path
 // to drop repaired repos, but never gains a mid-life-corrupted one: a repo

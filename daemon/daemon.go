@@ -656,15 +656,16 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
-	// skipped collects repos whose instances.json failed to read or parse, so the
-	// Snapshot RPC can carry the drop to clients instead of silently serving a
-	// partial list (#603 closed over the wire). Collected on every refresh, but
-	// only the startup call (existing==nil) genuinely drops rows — the polling
-	// path re-hydrates a corrupted repo's prior in-memory rows, so its sessions
-	// stay in the snapshot and the caller (restoreInstances vs refreshLocked)
-	// decides whether the set is authoritative for the snapshot: seed at
-	// startup, then trim repaired repos on poll without ever adding a
-	// mid-life-corrupted one (see retainStillSkipped).
+	// skipped collects repos whose instances.json failed to read, parse, or
+	// whose rows failed to load, so the Snapshot RPC can carry the drop to
+	// clients instead of silently serving a partial list (#603 closed over the
+	// wire). Collected on every refresh, but only the startup call
+	// (existing==nil) genuinely drops rows — the polling path re-hydrates a
+	// corrupted repo's prior in-memory rows, so its sessions stay in the
+	// snapshot and the caller (restoreInstances vs refreshLocked) decides
+	// whether the set is authoritative for the snapshot: seed at startup, then
+	// trim repaired repos on poll without ever adding a mid-life-corrupted one
+	// (see retainStillSkipped).
 	var skipped []SkippedRepo
 	// An unreadable repo is skipped exactly like a corrupt one, with its own
 	// reason so the refusal can say "could not be read" rather than "corrupted"
@@ -813,10 +814,11 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			materialized++
 		}
 		// Parsed but not fully loadable is NOT a repair: retract the "repaired"
-		// signal so the repo stays skipped, and on poll record a rows-failed
-		// skip entry whose reason rewrites the stale one (#4812, #4876). The
-		// partial-loss and self-healing rationale lives in the helper.
-		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
+		// signal so the repo stays skipped, and record a rows-failed skip entry
+		// whose reason rewrites the stale one on poll and arms the startup
+		// orphan-sweep deferral (#4812, #4876, #4998 follow-up). The partial-loss
+		// and self-healing rationale lives in the helper.
+		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, skipped)
 	}
 	refreshRowOutcomes.prune(allInstances)
 

@@ -21,8 +21,9 @@ var configDirForReap = config.GetConfigDir
 // sweep can see predates create admission; a new CreateSession cannot manufacture
 // a candidate midway through the destructive pass (#2632).
 //
-// When skippedRepos is non-empty the daemon's session view is known-incomplete: a
-// repo whose instances.json was corrupted/unreadable contributed zero rows to
+// When skippedRepos is non-empty the daemon's session view is known-incomplete:
+// a repo whose instances.json was corrupted/unreadable, OR parsed but whose
+// rows failed to materialize, contributed zero (or a partial set of) rows to
 // m.instances, so the protected-slug set omits that repo's still-running
 // containers. Running the sweep in that state would force-remove live
 // containers the sweep cannot distinguish from genuine orphans — the same
@@ -30,10 +31,10 @@ var configDirForReap = config.GetConfigDir
 // sweep's slug-collision branch already follows (session/orphan_reaper.go). The
 // sweep is deferred instead, and runDeferredOrphanSweepIfReady re-runs it once
 // the poll loop drains the skip set (a skipped repo whose instances.json now
-// parses re-materializes its rows, so the protected set is complete again). This
-// bounds the #2194 regression to one polling interval: genuine orphans survive
-// un-reaped only until the view is complete, while a skipped repo's live
-// container is never force-killed.
+// parses AND re-materializes its rows drains the set, so the protected set is
+// complete again). This bounds the #2194 regression to one polling interval:
+// genuine orphans survive un-reaped only until the view is complete, while a
+// skipped repo's live container is never force-killed.
 func sweepStartupOrphanContainers(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
@@ -45,7 +46,7 @@ func sweepStartupOrphanContainers(manager *Manager) {
 	if skipped > 0 {
 		manager.deferredOrphanSweepArmed = true
 		manager.mu.Unlock()
-		log.WarningLog.Printf("orphan sweep: deferring the destructive pass; %d repo(s) have unreadable instances.json — their live containers cannot be distinguished from genuine orphans. The sweep will re-run once the skip set drains on the next polling refresh.", skipped)
+		log.WarningLog.Printf("orphan sweep: deferring the destructive pass; %d repo(s) have an incomplete instances view (corrupted/unreadable instances.json or rows that failed to load) — their live containers cannot be distinguished from genuine orphans. The sweep will re-run once the skip set drains on the next polling refresh.", skipped)
 		return
 	}
 	manager.mu.Unlock()
@@ -108,7 +109,7 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	for _, t := range titles {
 		slugs[session.Slugify(t)] = true
 	}
-	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses, so the protected set is complete.")
+	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses AND its rows re-materialize, so the protected set is complete.")
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
 }

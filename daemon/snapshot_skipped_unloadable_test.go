@@ -39,9 +39,13 @@ func failingFromInstanceForRefreshFor(t *testing.T, failTitles ...string) {
 // at the unit level: a repo whose instances.json parses but whose every row
 // fails fromInstanceDataForRefresh is NOT in reread (a non-empty file that
 // yields nothing loadable is not a "read AND parsed" repair) and contributes no
-// rows. Pre-fix, reread[repoID] was set the instant json.Unmarshal succeeded,
-// before the materialize loop, so retainStillSkipped cleared the skip set on the
-// "parses" signal alone (#4812).
+// rows. It IS reported in the skip set with the rows-failed-to-load reason, so
+// the startup orphan sweep defers (the repo's live containers cannot be
+// distinguished from genuine orphans) and list/get/whoami refuse the partial
+// snapshot instead of silently serving it — the same refusal the polling path
+// makes (#4998 follow-up). Pre-fix, reread[repoID] was set the instant
+// json.Unmarshal succeeded, before the materialize loop, so retainStillSkipped
+// cleared the skip set on the "parses" signal alone (#4812).
 func TestRefreshDaemonInstances_ParsesButZeroRowsRetractsReread(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	failingFromInstanceForRefreshFor(t, "stuck")
@@ -55,7 +59,8 @@ func TestRefreshDaemonInstances_ParsesButZeroRowsRetractsReread(t *testing.T) {
 
 	got, _, skipped, reread, err := refreshDaemonInstances(nil)
 	require.NoError(t, err, "a file that parses but yields no rows must not fail the refresh")
-	require.Empty(t, skipped, "a file that PARSED is not a parse failure, so it is not reported as skipped")
+	require.Equal(t, []SkippedRepo{{RepoID: "r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, skipped,
+		"a file that parsed but yields no loadable rows is skipped with the rows-failed reason, NOT the corrupted one (the file is fine) so the startup sweep defers and the wire refuses the partial list")
 	require.NotContains(t, reread, "r",
 		"a parses-but-zero-rows repo is retracted from reread: it is not a repaired snapshot")
 	require.Nil(t, got[daemonInstanceKey("r", "stuck")],
@@ -258,4 +263,52 @@ func TestManager_RefreshLocked_PartialRowFailureStaysSkipped(t *testing.T) {
 		"the loadable row is still served")
 	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")],
 		"the unloadable row is dropped")
+}
+
+// TestStartup_ParsesButUnloadableRepoReportedOnSnapshotWire pins the wire
+// surface the fix widens: a FRESH repo whose instances.json parses but whose
+// row fails to materialize at STARTUP is now carried in the Snapshot RPC's
+// SkippedRepos (with the rows-failed reason), so a CLI list/get/whoami can
+// refuse the partial snapshot instead of silently serving the loadable rows as
+// if they were the complete answer — the same refusal the polling path already
+// makes for this class. Pre-fix the repo was absent from the skip set at
+// startup, so the wire silently served a partial list AND the startup orphan
+// sweep reaped the unloadable row's still-running container.
+func TestStartup_ParsesButUnloadableRepoReportedOnSnapshotWire(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	failingFromInstanceForRefreshFor(t, "stuck")
+	_ = captureWarnings(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok", ID: "id-ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	unloadableJSON, err := json.Marshal([]session.InstanceData{{Title: "stuck", ID: "id-stuck"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("stuck-r", unloadableJSON))
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: m}
+
+	// All-repo Snapshot: the healthy session is present and the parses-but-
+	// unloadable repo is named in SkippedRepos with the rows-failed reason.
+	var resp SnapshotResponse
+	require.NoError(t, cs.Snapshot(SnapshotRequest{}, &resp))
+	require.Equal(t, []string{"ok"}, snapshotFilterTitles(resp.Instances), "the loadable row is served")
+	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		resp.SkippedRepos, "the parses-but-unloadable repo is reported so a CLI list can refuse the partial snapshot")
+
+	// Scoped to the unloadable repo: Instances is empty AND SkippedRepos names
+	// it, so a scoped list refuses rather than returning [] with err == nil.
+	resp = SnapshotResponse{}
+	require.NoError(t, cs.Snapshot(SnapshotRequest{RepoID: "stuck-r"}, &resp))
+	require.Empty(t, resp.Instances, "the unloadable row is not served")
+	require.Equal(t, []string{"stuck-r"}, skippedRepoIDs(resp.SkippedRepos),
+		"a scoped read to the unloadable repo names it as skipped")
+
+	// Scoped to the healthy repo: no skip pollutes the scoped read.
+	resp = SnapshotResponse{}
+	require.NoError(t, cs.Snapshot(SnapshotRequest{RepoID: "valid-r"}, &resp))
+	require.Equal(t, []string{"ok"}, snapshotFilterTitles(resp.Instances))
+	require.Empty(t, resp.SkippedRepos, "a scoped read to a healthy repo reports no skip")
 }

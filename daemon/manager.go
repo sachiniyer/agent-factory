@@ -129,21 +129,24 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
-	// skippedRepos names repos whose instances.json was corrupted or unreadable
-	// and dropped at daemon startup (#603, #4783), seeded by restoreInstances and
-	// trimmed by the polling refresh — only once it re-reads a repo successfully
-	// — without ever adding one that fails mid-life. The Snapshot RPC reads it to carry the drop to
-	// clients instead of silently serving a partial list as complete (#730's
-	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
-	// m.mu.
+	// skippedRepos names repos whose instances.json was corrupted/unreadable,
+	// or parsed but whose rows failed to load, and dropped at daemon startup
+	// (#603, #4783, #4998 follow-up), seeded by restoreInstances and trimmed by
+	// the polling refresh — only once it re-reads a repo AND re-materializes its
+	// rows — without ever adding one that fails mid-life. The Snapshot RPC reads
+	// it to carry the drop to clients instead of silently serving a partial list
+	// as complete (#730's principle extended to the wire surface #1029 PR 2
+	// introduced), and the startup orphan sweep reads it to defer the destructive
+	// docker pass until the protected-slug set is complete. Guarded by m.mu.
 	skippedRepos []SkippedRepo
 	// deferredOrphanSweepArmed is set at startup when the orphan-container sweep
 	// was deferred because skippedRepos was non-empty — the daemon's session view
-	// is known-incomplete, so the sweep's protected-slug set cannot distinguish a
-	// skipped repo's live container from a genuine orphan. The poll loop runs the
-	// deferred sweep once the skip set drains to empty (every skipped repo's
-	// instances.json parsed), by which point the protected set is complete again.
-	// Guarded by m.mu.
+	// is known-incomplete (a corrupted/unreadable file OR a parses-but-unloadable
+	// one), so the sweep's protected-slug set cannot distinguish a skipped repo's
+	// live container from a genuine orphan. The poll loop runs the deferred sweep
+	// once the skip set drains to empty (every skipped repo's instances.json
+	// parsed AND its rows re-materialized), by which point the protected set is
+	// complete again. Guarded by m.mu.
 	deferredOrphanSweepArmed bool
 	// deferredOrphanSweepInFlight tracks whether the deferred orphan sweep
 	// worker is currently running, so the poll loop does not launch a second
@@ -885,9 +888,11 @@ func (m *Manager) restoreInstances() error {
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
 	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
-	// instances.json was corrupted and dropped at startup. A full restart always
-	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
-	// recomputes the set from scratch (#603 closed over the wire).
+	// instances.json was corrupted/unreadable, or parsed but whose rows failed to
+	// load, so their live containers are spared by the startup orphan sweep and
+	// list/get/whoami refuse the partial snapshot. A full restart always re-runs
+	// this path with existing==nil, so a repaired-and-restarted daemon recomputes
+	// the set from scratch (#603 closed over the wire; #4998 follow-up).
 	m.skippedRepos = skipped
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	// Re-park every on_complete obligation the previous generation left durable
