@@ -39,12 +39,12 @@ func TestAddDocRollsBackWhenCommitFails(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA)
 	unlock := plantRefLock(t, s, "refs/heads/main")
-	if _, err := s.AddDoc("p", "notes", agent(sessA)); err == nil {
+	if _, _, err := s.AddDoc("p", "notes", agent(sessA)); err == nil {
 		t.Fatal("AddDoc succeeded with the branch ref locked")
 	}
 	unlock()
 	assertAbsent(t, filepath.Join(s.SlugPath("p"), "notes.md"))
-	if _, err := s.AddDoc("p", "notes", agent(sessA)); err != nil {
+	if _, _, err := s.AddDoc("p", "notes", agent(sessA)); err != nil {
 		t.Fatalf("retry AddDoc: %v", err)
 	}
 	if out, err := s.git(nil, "log", "-1", "--format=%(trailers:key=Af-Author,valueonly)", "--", "p/notes.md"); err != nil || strings.TrimSpace(out) != "agent" {
