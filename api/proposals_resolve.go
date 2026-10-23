@@ -81,11 +81,14 @@ func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, er
 // remoteProposalSession finds a session on a remote daemon by title. There
 // --repo is a path on the daemon host, so it narrows the match by the project
 // root the daemon reports and is never resolved on this machine. A relative or
-// ~ path cannot be compared here, so it does not narrow.
+// ~ path cannot be compared here, so it is refused rather than dropped.
 func remoteProposalSession(title string) (*session.InstanceData, error) {
-	if repoFlag == "" || !filepath.IsAbs(repoFlag) {
+	if repoFlag == "" {
 		data, _, err := getSessionByTitle(title)
 		return data, err
+	}
+	if !filepath.IsAbs(repoFlag) {
+		return nil, fmt.Errorf("--repo %q must be an absolute path on the daemon host at %s to scope --session %q", repoFlag, apiclient.RemoteTargetURL(), title)
 	}
 	all, _, _, err := snapshotRead(daemon.SnapshotRequest{})
 	if err != nil {
