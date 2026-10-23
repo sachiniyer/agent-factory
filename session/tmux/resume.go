@@ -250,6 +250,15 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
 		insertAt := agentIdx + 1
+		// Global -c/--config options — including af's own
+		// check_for_update_on_startup injection, which lands right after the
+		// executable (#5238) — sit before the subcommand in codex's grammar.
+		// Skip them so the exec/resume test reads the real subcommand
+		// position, and the splice lands after them: `codex -c k=v resume
+		// --last` keeps the flag in the global position clap accepts, and
+		// `codex -c k=v exec …` still splices to `… exec resume <id>`.
+		// Mirrors resumeProgram's codex case (#5433).
+		insertAt = skipCodexConfigOptions(tokens, insertAt)
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
 			insertAt++
 		}

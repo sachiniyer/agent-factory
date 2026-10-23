@@ -577,6 +577,58 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		{"codex exec", ProgramCodex, "codex exec --foo bar", "codex exec resume " + id + " --foo bar", true},
 		{"codex quoted path", ProgramCodex, "'/path with spaces/codex' --model gpt-5", "'/path with spaces/codex' resume " + id + " --model gpt-5", true},
 		{"codex already resume", ProgramCodex, "codex resume --last", "codex resume --last", false},
+		// Codex global -c/--config options — including af's own
+		// check_for_update_on_startup injection, which lands right after the
+		// executable (#5238) — sit before the subcommand, so the splice goes
+		// BEHIND them and the flag stays global. The exec/resume check must
+		// skip them rather than reading the -c operand as the subcommand slot
+		// (#5433 — the conversation-id variant was left reading the raw slot,
+		// so a program like `codex -c model=gpt-5 exec --json` was rewritten to
+		// `codex resume <id> -c model=gpt-5 exec --json`, which codex's clap
+		// parser rejects, and `codex -c k=v resume --last` got a second resume
+		// spliced instead of being declined). Mirrors resumeProgram's rows.
+		{
+			"codex injected -c keeps the flag global",
+			ProgramCodex, "codex -c check_for_update_on_startup=false",
+			"codex -c check_for_update_on_startup=false resume " + id, true,
+		},
+		{
+			"codex --config= keeps the flag global",
+			ProgramCodex, "codex --config=check_for_update_on_startup=false",
+			"codex --config=check_for_update_on_startup=false resume " + id, true,
+		},
+		{
+			"exec codex wrapper keeps the flag global",
+			ProgramCodex, "exec codex -c check_for_update_on_startup=false",
+			"exec codex -c check_for_update_on_startup=false resume " + id, true,
+		},
+		{
+			"env codex wrapper keeps the flag global",
+			ProgramCodex, "env codex -c check_for_update_on_startup=false",
+			"env codex -c check_for_update_on_startup=false resume " + id, true,
+		},
+		{
+			// The hard-failure shape from the report: an exec behind a global
+			// -c was rewritten to `codex resume <id> -c … exec …`, which codex
+			// consumes `exec` as the resume PROMPT positional and then rejects
+			// the trailing `--json`, exiting the pane at launch.
+			"codex exec reachable through a global -c",
+			ProgramCodex, "codex -c model=gpt-5 exec --json",
+			"codex -c model=gpt-5 exec resume " + id + " --json", true,
+		},
+		{
+			// Idempotence / no-double-resume: a leading global -c used to make
+			// the already-has-resume guard read the -c token, miss the existing
+			// resume, and splice a second `resume <id>` in front of it.
+			"codex already resume behind a global -c",
+			ProgramCodex, "codex -c check_for_update_on_startup=false resume --last",
+			"codex -c check_for_update_on_startup=false resume --last", false,
+		},
+		{
+			"codex already resume behind a global -c with model",
+			ProgramCodex, "codex -c model=gpt-5 resume --last",
+			"codex -c model=gpt-5 resume --last", false,
+		},
 		{"amp bare", ProgramAmp, "amp", "amp threads continue " + id, true},
 		{"amp with global flag", ProgramAmp, "amp --no-ide", "amp --no-ide threads continue " + id, true},
 		{"amp quoted path", ProgramAmp, "'/path with spaces/amp' --no-ide", "'/path with spaces/amp' --no-ide threads continue " + id, true},
@@ -631,6 +683,49 @@ func TestResumeProgramWithConversationIDQuotesUnsafeID(t *testing.T) {
 			require.True(t, rewritten)
 			require.Equal(t, tc.want, got)
 		})
+	}
+}
+
+// TestResumeProgramWithConversationID_Idempotent verifies that running the
+// conversation-id rewrite twice produces the same program string as running it
+// once — a second pass must not splice a second `resume <id>`. This is the
+// no-double-resume guarantee the bare-slot reading of the codex branch broke
+// for programs carrying a global -c (#5433 conversation-id variant): a leading
+// -c made the already-has-resume guard read the -c token instead of the resume
+// subcommand, so the second pass inserted another `resume <id>`.
+func TestResumeProgramWithConversationID_Idempotent(t *testing.T) {
+	const id = "019f386f-7206-7fc2-803b-f7045e07a242"
+	for _, tc := range []struct {
+		agent string
+		in    string
+	}{
+		{ProgramCodex, "codex"},
+		{ProgramCodex, "codex exec"},
+		{ProgramCodex, "codex --model gpt-5"},
+		{ProgramCodex, "codex -c check_for_update_on_startup=false"},
+		{ProgramCodex, "codex --config=check_for_update_on_startup=false"},
+		{ProgramCodex, "exec codex -c check_for_update_on_startup=false"},
+		{ProgramCodex, "env codex -c check_for_update_on_startup=false"},
+		{ProgramCodex, "codex -c model=gpt-5 exec --json"},
+		// Inputs that already pin a conversation must be left untouched on the
+		// first pass, so they are trivially stable on the second.
+		{ProgramCodex, "codex resume --last"},
+		{ProgramCodex, "codex -c check_for_update_on_startup=false resume --last"},
+		{ProgramCodex, "codex -c model=gpt-5 resume --last"},
+		// Non-codex agents must remain idempotent too.
+		{ProgramClaude, "claude"},
+		{ProgramClaude, "ionice -c 3 claude"},
+		{ProgramAmp, "amp"},
+		{ProgramAmp, "amp --no-ide"},
+	} {
+		once, ok1 := ResumeProgramWithConversationID(tc.in, tc.agent, id)
+		twice, ok2 := ResumeProgramWithConversationID(once, tc.agent, id)
+		require.Equalf(t, once, twice, "second pass must not splice a second resume for %q (once=%q twice=%q)", tc.in, once, twice)
+		// A rewrite that fires on the first pass must be detected as
+		// already-resuming on the second, never fire again.
+		if ok1 {
+			require.Falsef(t, ok2, "second pass must not re-splice for %q (once=%q)", tc.in, once)
+		}
 	}
 }
 
