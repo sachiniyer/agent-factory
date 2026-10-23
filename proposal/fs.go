@@ -128,6 +128,9 @@ func (s *Store) mkSlugDir(slug string) error {
 
 // createDoc writes a new doc file. It fails when any entry of that name exists.
 func (s *Store) createDoc(slug, file string, data []byte) error {
+	if len(data) > maxDocSize {
+		return fmt.Errorf("doc is larger than %d MiB; af does not write proposal docs that large", maxDocSize>>20)
+	}
 	dir, err := s.openSlugDir(slug)
 	if err != nil {
 		return err

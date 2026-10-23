@@ -72,3 +72,14 @@ func TestOversizedDocIsRefused(t *testing.T) {
 		t.Fatalf("Write failed for another reason: %v", err)
 	}
 }
+
+func TestOversizedNewDocIsNotCreated(t *testing.T) {
+	s, _ := newTestStore(t)
+	startAttached(t, s, "p", sessA)
+	if err := s.createDoc("p", "big.md", make([]byte, maxDocSize+1)); err == nil {
+		t.Fatal("createDoc wrote a doc larger than the limit")
+	}
+	if _, err := os.Lstat(filepath.Join(s.SlugPath("p"), "big.md")); !os.IsNotExist(err) {
+		t.Fatalf("an oversized new doc was left on disk: %v", err)
+	}
+}
