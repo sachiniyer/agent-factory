@@ -334,7 +334,10 @@ callout does not read as the user's.
 
 When the patches are more than 8 KB, the prompt has no patches. The middle
 line tells the agent to read the changed files at the proposal path, because
-`af proposal changes` will not show these edits again.
+`af proposal changes` will not show these edits again. When more than one
+kind of editor made the edits, the prompt then names the files each editor
+changed and tells the agent to ask the user before it does a `[!todo]` it
+cannot attribute.
 
 ### CLI
 

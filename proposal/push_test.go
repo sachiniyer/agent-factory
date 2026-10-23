@@ -93,6 +93,23 @@ func TestPushPromptLargeDiffNamesFilesOnly(t *testing.T) {
 	}
 }
 
+func TestPushPromptLargeMixedDiffKeepsAttribution(t *testing.T) {
+	edits := []Edit{
+		{Author: AuthorHuman, Files: []string{"goals.md"}, Patch: strings.Repeat("+line\n", PushPatchLimit/6+1)},
+		{Author: AuthorAgent, Session: "other", Files: []string{"api.md", "goals.md"}, Patch: "+> [!todo] drop the cache\n"},
+	}
+	got := PushPrompt("auth", "/p/auth", edits)
+	for _, want := range []string{
+		"the user edited goals.md.",
+		"another agent edited api.md, goals.md.",
+		"ask the user",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("large mixed prompt lacks %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestPushPromptAttributesEachEdit(t *testing.T) {
 	edits := []Edit{
 		{Author: AuthorHuman, Files: []string{"goals.md"}, Patch: "+b\n"},

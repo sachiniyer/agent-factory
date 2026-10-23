@@ -182,11 +182,35 @@ func PushPrompt(slug, path string, edits []Edit) string {
 	fmt.Fprintf(&b, "Proposal %s: %s edited %s.\n", slug, joinNames(names), strings.Join(files, ", "))
 	if patches.Len() > PushPatchLimit {
 		fmt.Fprintf(&b, "The diff is too large to send. Read those files in %s; af proposal changes will not show these edits again.\n", path)
+		if len(names) > 1 {
+			for _, n := range names {
+				fmt.Fprintf(&b, "%s edited %s.\n", n, strings.Join(filesBy(edits, n), ", "))
+			}
+			b.WriteString("Where you cannot tell who added a [!todo] callout, ask the user before you do it.\n")
+		}
 	} else {
 		b.WriteString(patches.String())
 	}
 	b.WriteString(pushInstruction)
 	return b.String()
+}
+
+func filesBy(edits []Edit, name string) []string {
+	seen := map[string]bool{}
+	var files []string
+	for _, e := range edits {
+		if editorName(e.Author) != name {
+			continue
+		}
+		for _, f := range e.Files {
+			if !seen[f] {
+				seen[f] = true
+				files = append(files, f)
+			}
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 func joinNames(names []string) string {
