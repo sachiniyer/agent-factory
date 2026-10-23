@@ -223,6 +223,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	preReconcileServingAddr := old.ListenAddr
 	preReconcilePreviewAddr := old.PreviewListenAddr
 	preReconcileRefusal := ""
+	preSwapRevokedSandbox := 0
 	if m.webListeners != nil {
 		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
 		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
@@ -236,7 +237,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		// the full control API unauthenticated even for the span of this
 		// apply, including a retained socket whose earlier failed rebind left
 		// it answering on a network address the file no longer names.
-		m.webListeners.retireWebBeforePostureSwap(newCfg)
+		preSwapRevokedSandbox = m.webListeners.retireWebBeforePostureSwap(newCfg)
 	}
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
@@ -321,7 +322,12 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// false the control plane answers every caller anonymously, so a sandbox does not
 	// need a credential to reach it. Only re-enabling the key restores it.
 	if old.RequireToken && !newCfg.RequireToken {
-		if n := m.sandboxTokens.revokeAll(); n > 0 {
+		// Some or all of the revocations may already have run inside
+		// retireWebBeforePostureSwap's pre-publish fence — the credentials are
+		// gone either way, so the count must cover both sweeps or a hand-edited
+		// refused apply would silently consume the fence's revocations and this
+		// warning would never reach the save surface (#5137 review).
+		if n := preSwapRevokedSandbox + m.sandboxTokens.revokeAll(); n > 0 {
 			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
 			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)

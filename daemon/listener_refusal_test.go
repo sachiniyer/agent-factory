@@ -730,6 +730,107 @@ func TestFrozenPostureStillTightensFromLive(t *testing.T) {
 		"a live relaxation must not lower the gate a generation was pinned with")
 }
 
+// TestFailedRebindUnfreezesRetainedGeneration pins the settle judgement
+// (#5137 review): when the relaxing rebind's bind FAILS, the generation it
+// pinned for the publish→adopt window is RETAINED — and no pin may gate a
+// still-serving socket, or it would require the old posture indefinitely
+// while ApplyConfig reports the relaxation applied. The apply's settle
+// unfroze it, so the live config the operator wrote reaches it.
+func TestFailedRebindUnfreezesRetainedGeneration(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.RequireToken = true
+	cfg.RequireLoopbackToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	// Occupy the rebind's target port so the bind fails and generation 1 is
+	// retained rather than superseded.
+	hold, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer hold.Close()
+
+	next := *cfg
+	next.ListenAddr = hold.Addr().String()
+	next.RequireLoopbackToken = false
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	wl.webFreeze.mu.Lock()
+	pinned := len(wl.webFreeze.pins)
+	wl.webFreeze.mu.Unlock()
+	require.Equal(t, 1, pinned, "the relaxing rebind pinned the bound generation for the bind gap")
+
+	failed, rerr := wl.reconcile(&next)
+	require.Error(t, rerr)
+	require.Contains(t, failed, "network.listen_addr")
+
+	wl.webFreeze.mu.Lock()
+	pins := wl.webFreeze.pins
+	wl.webFreeze.mu.Unlock()
+	require.Empty(t, pins, "a retained generation returns to the live read — the pin outlives nothing it must not gate")
+	retained := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
+	require.False(t, retained.current().RequireLoopbackToken,
+		"the retained socket serves the relaxed posture the apply actually committed")
+}
+
+// TestOptInRevocationRejectsLateDrainHandlers pins the revocation fence
+// (#5137 review): an opted-in tokenless network listener whose opt-in the
+// apply revokes is refused — and its drains must NOT keep the unauthenticated
+// admission they were serving, or a handler that crosses the gate during the
+// drain still enters the control API anonymously after the operator revoked
+// permission for exactly that. The refusal pin is the served posture
+// TIGHTENED to require the token.
+func TestOptInRevocationRejectsLateDrainHandlers(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = false
+	cfg.AllowUnauthenticatedNetwork = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	// Revoke the opt-in without changing require_token: the config is now
+	// refused, and the served tokenless posture must not pin the drain.
+	next := *cfg
+	next.AllowUnauthenticatedNetwork = false
+	require.NotEmpty(t, config.ListenerBindRefusal(&next))
+	wl.retireWebBeforePostureSwap(&next)
+	m.live.Store(&next)
+
+	wl.webFreeze.mu.Lock()
+	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
+	wl.webFreeze.mu.Unlock()
+	require.Len(t, pins, 1)
+	require.True(t, pins[0].cfg.RequireToken,
+		"the refusal pin must be the served posture TIGHTENED — revoking the opt-in cannot leave drains answering unauthenticated")
+	require.True(t, pins[0].cfg.RequireLoopbackToken)
+
+	draining := &livePosture{snapshot: m.Config, freeze: &wl.webFreeze, seq: 1}
+	require.True(t, draining.current().RequireToken,
+		"a late handler on the refused socket now crosses a token-required gate")
+}
+
+// TestRetireWebBeforePostureSwapReportsSandboxRevocations pins the warning
+// plumbing (#5137 review): the pre-swap fence consumes the credential
+// registry before ApplyConfig's require_token transition block can count it —
+// the return carries what the fence took so the save surface still warns.
+func TestRetireWebBeforePostureSwapReportsSandboxRevocations(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = true
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	_, err := m.sandboxTokens.mint("sess-a")
+	require.NoError(t, err)
+	_, err = m.sandboxTokens.mint("sess-b")
+	require.NoError(t, err)
+
+	next := *cfg
+	next.RequireToken = false
+	revoked := wl.retireWebBeforePostureSwap(&next)
+	require.Equal(t, 2, revoked,
+		"the fence consumed the registry — the count must travel back for the save-surface warning")
+	require.Zero(t, m.sandboxTokens.revokeAll(), "the fence already emptied the registry")
+}
+
 // TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side
 // (#2480): a retire that is NOT a refusal — here the listen_addr="" opt-out —
 // leaves the gate on the live read, so an auth tightening keeps applying to the

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,6 +277,34 @@ func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 	f.mu.Unlock()
 }
 
+// unfreezeFrom lifts the freeze for every generation numbered seq or higher —
+// the apply settled with that generation still bound, so it returns to the
+// live read. Coverage is first-win and ranges ascend, so only ranges reaching
+// >= seq need touching: truncate the last range at seq-1, drop it if that
+// empties it under the previous range's coverage, and repeat — earlier ranges
+// always end below the last one's start, so the walk terminates at the first
+// range that stops short of seq.
+func (f *postureFreeze) unfreezeFrom(seq uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for len(f.pins) > 0 {
+		last := &f.pins[len(f.pins)-1]
+		if last.through < seq {
+			return
+		}
+		last.through = seq - 1
+		var prev uint64
+		if len(f.pins) > 1 {
+			prev = f.pins[len(f.pins)-2].through
+		}
+		if last.through <= prev {
+			f.pins = f.pins[:len(f.pins)-1]
+			continue
+		}
+		return
+	}
+}
+
 // current returns the config this listener evaluates requests under — the
 // serving config of the first pin that covered this generation, OVERLAID with
 // the live config's token requirements where those are stricter, or the live
@@ -299,25 +328,51 @@ func (l *livePosture) current() *config.Config {
 }
 
 // tightenFrozenPosture merges a pinned config with the live one field-wise so
-// a later apply that TIGHTENS auth still reaches frozen generations (#5137
-// review — first coverage preserves the pin's posture, but a pin is a floor,
-// not a ceiling). RequireToken and RequireLoopbackToken are the gate's only
-// posture fields and true is the stricter direction for both, so the merge is
-// a plain OR: live can only raise a frozen gate, never lower it. The merge
-// allocation is skipped when nothing tightened — the pinned object itself is
-// returned so the common frozen path allocates nothing per request.
+// a later apply that TIGHTENS the gate still reaches frozen generations
+// (#5137 review — first coverage preserves the pin's posture, but a pin is a
+// floor, not a ceiling). RequireToken and RequireLoopbackToken are the gate's
+// token fields and true is the stricter direction for both, so the merge is a
+// plain OR. CORSAllowedOrigins is an allow-list — stricter means SMALLER — so
+// its merge is the intersection: an origin survives only when the pin AND the
+// live config both allow it, which lets a live removal through without ever
+// widening a frozen gate past its pinned allow-list. The merge allocation is
+// skipped when nothing tightened — the pinned object itself is returned so
+// the common frozen path allocates nothing per request.
 func tightenFrozenPosture(pinned, live *config.Config) *config.Config {
 	if pinned == nil {
 		return live
 	}
 	if live == nil || (pinned.RequireToken == live.RequireToken &&
-		pinned.RequireLoopbackToken == live.RequireLoopbackToken) {
+		pinned.RequireLoopbackToken == live.RequireLoopbackToken &&
+		slices.Equal(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)) {
 		return pinned
 	}
 	merged := *pinned
 	merged.RequireToken = merged.RequireToken || live.RequireToken
 	merged.RequireLoopbackToken = merged.RequireLoopbackToken || live.RequireLoopbackToken
+	merged.CORSAllowedOrigins = intersectCORS(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)
 	return &merged
+}
+
+// intersectCORS keeps an origin only when BOTH allow-lists name it — the
+// pin's list is the floor and live can only shrink it. Live order is
+// preserved so the merged list reads the way the operator last wrote it. An
+// empty list on either side is deny-all, which an intersection inherits.
+func intersectCORS(pinned, live []string) []string {
+	if len(pinned) == 0 || len(live) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(pinned))
+	for _, o := range pinned {
+		allowed[o] = struct{}{}
+	}
+	var out []string
+	for _, o := range live {
+		if _, ok := allowed[o]; ok {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // connTracker tracks the HIJACKED connections — WebSocket upgrades — of one
