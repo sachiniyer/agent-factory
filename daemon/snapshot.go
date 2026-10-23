@@ -99,7 +99,11 @@ type SnapshotResponse struct {
 	// a mid-life-corrupted repo: a repo that becomes corrupted mid-life keeps its
 	// prior in-memory rows via re-hydration, so its sessions remain in the
 	// snapshot and it is correctly NOT reported as skipped until the daemon
-	// restarts and re-runs startup. See daemon.daemon.go::refreshDaemonInstances
+	// restarts and re-runs startup. A fresh startup rows-failure (the file
+	// parsed but a row failed to load) is WITHHELD from this wire field — master
+	// never seeded it, and the refusal names a count with no working remedy —
+	// while the startup orphan sweep still defers from the internal skip set;
+	// see Manager.startupRowsFailedRepos. See daemon.daemon.go::refreshDaemonInstances
 	// and snapshot.go::retainStillSkipped for the skip lifecycle.
 	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
 }
@@ -146,13 +150,16 @@ const SkippedRepoReasonNewerSchemaInstancesJSON = "newer-schema-instances-json"
 // tmux session a Live row points at is gone, not the file (#4876). It is kept
 // apart from the corrupted/unreadable reasons because the file is fine: the
 // remedy is to restore or delete the unloadable sessions, not to repair a JSON
-// error that is not there. Carried on BOTH the startup and the polling refresh:
-// at startup it arms the orphan-sweep deferral (a repo whose rows dropped
-// contributes the same zero rows to the protected-slug set as a corrupted one,
-// so the sweep must spare its live containers, #4998 follow-up) and refuses the
-// partial snapshot on the wire; on poll it rewrites a previously-skipped
-// repo's stale reason to the accurate one. A mid-life row failure stays
-// invisible to the set (the prior in-memory rows are re-hydrated).
+// error that is not there. On the POLLING path it rewrites a previously-skipped
+// repo's stale reason (corrupted/unreadable) to the accurate one and surfaces
+// on the wire. At STARTUP it arms the orphan-sweep deferral (a repo whose rows
+// dropped contributes the same zero rows to the protected-slug set as a
+// corrupted one, so the sweep must spare its live containers, #4998
+// follow-up), but it is WITHHELD from the wire SkippedRepos — master never
+// seeded a fresh startup rows-failure, and the refusal names a count with no
+// working remedy (restore/kill resolve titles against the in-memory set, which
+// excludes the unloadable row); list/get/whoami serve the loadable rows plus a
+// log warning instead. See Manager.startupRowsFailedRepos.
 const SkippedRepoReasonRowsFailedToLoad = "rows-failed-to-load"
 
 // skippedRepoReasonForReadError names the reason for a repo the loader could
@@ -170,7 +177,8 @@ func skippedRepoReasonForReadError(err error) string {
 // failed to load (#603), scoped to repoID (all repos when empty). It is the
 // wire surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or
 // caveat rather than silently serving a partial list as complete (#730's
-// principle extended to the wire surface #1029 PR 2 introduced).
+// principle extended to the wire surface #1029 PR 2 introduced) — except a
+// fresh startup rows-failure, which is withheld (see startupRowsFailedRepos).
 //
 // Seeded from the most recent startup refresh and trimmed by the polling path
 // to drop repaired repos, but never gains a mid-life-corrupted one: a repo
@@ -188,23 +196,43 @@ func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 }
 
 // skippedReposScopedLocked returns a defensive copy of m.skippedRepos scoped to
-// repoID (all repos when empty). The caller MUST hold m.mu: it is the read side
-// shared by SkippedRepos (the public wrapper that locks for the standalone
+// repoID (all repos when empty), with a fresh startup rows-failure withheld from
+// the wire (startupRowsFailedRepos). The caller MUST hold m.mu: it is the read
+// side shared by SkippedRepos (the public wrapper that locks for the standalone
 // read) and SnapshotWithSkipped (which calls it inside its own single lock
 // acquisition so the instance pointers and the skip set are sampled from the
 // same manager generation).
 func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
+	// A repo whose rows failed to load at startup is withheld from the wire:
+	// master never seeded a fresh rows-failure, and the refusal names a count
+	// with no working remedy (the file is fine; restore/kill resolve titles
+	// against the in-memory set, which by definition excludes the unloadable
+	// row). The sweep deferral still arms from skippedRepos, so the live
+	// container is spared; only the wire refusal is decoupled. See
+	// startupRowsFailedRepos.
+	withheld := m.startupRowsFailedRepos
 	if repoID == "" {
 		if len(m.skippedRepos) == 0 {
 			return nil
 		}
-		return append([]SkippedRepo(nil), m.skippedRepos...)
+		out := make([]SkippedRepo, 0, len(m.skippedRepos))
+		for _, s := range m.skippedRepos {
+			if withheld[s.RepoID] {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
 	}
 	var out []SkippedRepo
 	for _, s := range m.skippedRepos {
-		if s.RepoID == repoID {
-			out = append(out, s)
+		if s.RepoID != repoID {
+			continue
 		}
+		if withheld[s.RepoID] {
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
 }
