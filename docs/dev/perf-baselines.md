@@ -227,7 +227,7 @@ terminal actions, tab types, keyboard ownership, split panes, form disclosures,
 confirmations, account registration and controlled recovery fixtures, all in light
 and dark. It omits video, conversion and video pacing. It waits for
 final stand-in output, a stable terminal and all retained seeded rows to report
-`Needs you`, even when the rail is hidden. Chrome and split captures require
+the idle state, even when the rail is hidden. Chrome and split captures require
 exactly four seeded rows; login/unavailable scenes have no application rail.
 Completed terminal output alone precedes the daemon's idle observation on fast
 runners, so #3941 checks these states before each application chrome capture. Goldens are committed under

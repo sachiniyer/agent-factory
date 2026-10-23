@@ -314,7 +314,11 @@ type InstanceData struct {
 	// TaskRunActive rollforward precedent: a record written before this field
 	// decodes to no note.
 	RootRecreateContext RootRecreateContext `json:"root_recreate_context,omitempty"`
-	Worktree            GitWorktreeData     `json:"worktree"`
+	// Attention is the agent's own request for the user (`af sessions
+	// attention`). Persisted: a restart does not answer the question the agent
+	// asked.
+	Attention *Attention      `json:"attention,omitempty"`
+	Worktree  GitWorktreeData `json:"worktree"`
 	// pr_info was removed; encoding/json ignores the extra key in old records.
 	BackendType string `json:"backend_type,omitempty"`
 	// TabKinds is the daemon's own answer, per tab kind, to "may this session gain

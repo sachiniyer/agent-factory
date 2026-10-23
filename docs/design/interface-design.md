@@ -258,8 +258,8 @@ hints before the exit route. Connecting… is static body text, not a spinner.
 
 TUI colours follow tokens within termenv's rounding (at most one step per RGB channel); the web is exact.
 
-There are **12 colour roles per theme**: surface, surface-raised, ink, ink-muted,
-border, accent, running, ready, lost, dead, archived and limit-reached. Accent
+There are **13 colour roles per theme**: surface, surface-raised, ink, ink-muted,
+border, accent, running, ready, lost, dead, archived, limit-reached and attention. Accent
 also provides focus; dead also provides failed-operation/confirmation text.
 These are the only intentional reuse rules. Selection reuses surface-raised;
 primary-button text reuses surface. Do not derive extra shades or allow overrides.
@@ -314,6 +314,7 @@ show plane separation, not text readability claims.
 | dead | `#883b43` | `#e4c8cd` | 7.244:1 | 10.551:1 | 6.617:1 | 9.063:1 |
 | archived | `#4c566a` | `#d8dee9` | 7.008:1 | 12.201:1 | 6.401:1 | 10.481:1 |
 | limit-reached | `#73436b` | `#dbb9d5` | 7.269:1 | 9.350:1 | 6.639:1 | 8.032:1 |
+| attention | `#856200` | `#f5c400` | 5.327:1 | 10.030:1 | 4.866:1 | 8.616:1 |
 
 Surface text on accent: light **6.441:1**, dark **5.278:1**.
 Ink/muted hierarchy: light **1.693:1**, dark **1.689:1**.
@@ -335,10 +336,14 @@ an empty running glyph. Preserve the deleting/lost/limit/remote qualifiers and
 existing liveness/in-flight-op resolution. Shapes and labels carry the meaning
 without colour; reserve blank status cells in the TUI for alignment.
 
+The web rail has no state words, so its glyphs differ: an idle row is blank, a
+working row draws a muted filled circle, and a row whose agent asked for the user
+(`af sessions attention`) draws a blinking circle in the attention colour.
+
 ## Type, spacing and radii
 
 There are **five type steps, four spacing steps and two radii**, shared by every
-component. These eleven metrics plus the twelve colours are the entire **23-token**
+component. These eleven metrics plus the thirteen colours are the entire **24-token**
 contract. Fonts, weights, line height, touch height, focus width and motion are
 fixed implementation rules, not more tokens or user configuration.
 
@@ -370,7 +375,9 @@ TUI focus is an accent frame plus text. Web touch targets are at least 44px high
 
 ## Motion and copy
 
-No animated indicators: no spinner, blink, pulse or cycling glyph. Connecting…,
+No animated indicators: no spinner, pulse or cycling glyph. The one exception is
+the web rail's needs-attention dot, which blinks so a waiting agent is visible
+from across the screen, and is static and ringed under reduced motion. Connecting…,
 Creating… and Running are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.
@@ -417,16 +424,16 @@ P1 and the cold-reader walkthrough must check that disclosure remains discoverab
 ## Generation and ownership
 
 JSON uses Go's standard `encoding/json`, so this repo's existing Go generation
-pipeline needs no parser dependency or Node runtime. The source has twelve
+pipeline needs no parser dependency or Node runtime. The source has thirteen
 light/dark colour pairs, eleven explicitly mapped web/TUI metrics and six fixed
-liveness bindings. Validation enforces the 12/5/4/2 budget and rejects extra
+liveness bindings. Validation enforces the 13/5/4/2 budget and rejects extra
 roles/steps. Treat changing that budget as a design decision, not a customization
 feature. No config, API or end-user editor exposes token values.
 
 `go run ./scripts/gen-design` produces `web/src/tokens.css`, `ui/theme/theme.go`,
 `docs/stylesheets/tokens.css` and `docs/design/style-guide.md`; it also stamps
 this page's contrast report, the HTML shell metas and the manifest colors. CSS has
-exactly 23 custom properties per theme, scoped to `[data-af-theme="light"]` and
+exactly 24 custom properties per theme, scoped to `[data-af-theme="light"]` and
 `[data-af-theme="dark"]`. The docs CSS adds Material's default/slate scheme
 selectors to the same declarations. System selects one of the two palettes. Go
 supplies the same adaptive light/dark roles and prescribed lipgloss component

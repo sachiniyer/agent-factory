@@ -839,10 +839,6 @@ button:disabled,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.af-operator-state {
-  font-weight: 400;
-  font-size: var(--af-type-body);
-}
 .af-row-branch-name {
   display: inline;
   font-family: var(--af-font-mono);
@@ -868,12 +864,48 @@ button:disabled,
   line-height: 1.5;
   font-size: var(--af-type-body);
 }
-.af-dot-ready .af-icon,
+.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
-.af-dot-ready {
-  color: var(--af-ready);
+.af-dot-working {
+  color: var(--af-ink-muted);
+}
+.af-dot-attention .af-icon {
+  fill: currentColor;
+}
+.af-dot-attention {
+  color: var(--af-attention);
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+@keyframes af-attention-blink {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.25;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .af-dot-attention {
+    animation: none;
+  }
+  .af-dot-attention .af-icon {
+    border-radius: 50%;
+    outline: calc(var(--af-space-1) / 2) solid currentColor;
+    outline-offset: calc(var(--af-space-1) / 4);
+  }
+}
+.af-visually-hidden {
+  position: absolute;
+  width: calc(var(--af-space-1) / 4);
+  height: calc(var(--af-space-1) / 4);
+  margin: calc(var(--af-space-1) / -4);
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .af-dot-lost {
   color: var(--af-lost);
@@ -885,24 +917,6 @@ button:disabled,
   color: var(--af-archived);
 }
 .af-dot-limit {
-  color: var(--af-limit-reached);
-}
-.af-row[data-state=ready] .af-operator-state {
-  color: var(--af-ready);
-}
-.af-row[data-state=working] .af-operator-state {
-  color: var(--af-running);
-}
-.af-row[data-state=lost] .af-operator-state {
-  color: var(--af-lost);
-}
-.af-row[data-state=dead] .af-operator-state {
-  color: var(--af-dead);
-}
-.af-row[data-state=archived] .af-operator-state {
-  color: var(--af-archived);
-}
-.af-row[data-state=limit] .af-operator-state {
   color: var(--af-limit-reached);
 }
 .af-row-operator-broken .af-idle-reason {
@@ -3221,6 +3235,7 @@ textarea[class] {
   color-scheme: light;
   --af-accent: #2d6271;
   --af-archived: #4c566a;
+  --af-attention: #856200;
   --af-border: #657084;
   --af-dead: #883b43;
   --af-ink: #2e3440;
@@ -3247,6 +3262,7 @@ textarea[class] {
   color-scheme: dark;
   --af-accent: #2296f3;
   --af-archived: #d8dee9;
+  --af-attention: #f5c400;
   --af-border: #3d3d3d;
   --af-dead: #e4c8cd;
   --af-ink: #cccccc;

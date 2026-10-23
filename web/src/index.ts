@@ -13,6 +13,7 @@
 import "./styles.css";
 import "./tokens.css";
 import "./recovery.css";
+import { agentPaneExposed, AttentionClearer } from "./attention_seen.js";
 import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
 import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
 import { copyText } from "./clipboard.js";
@@ -20,6 +21,7 @@ import {
   addTask,
   ApiError,
   archiveSession,
+  clearAttention,
   clearToken,
   closeTab,
   createSession,
@@ -204,6 +206,15 @@ const pendingRestores = new PendingRestores(
   requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
+const attentionClearer = new AttentionClearer((id, setAt) =>
+  token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, setAt, token),
+);
+
+const narrowViewport = window.matchMedia("(max-width: 768px)");
+
+function noteAttentionSeen(): void {
+  attentionClearer.note(store.get(), agentPaneExposed(document, narrowViewport.matches));
+}
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -299,6 +310,12 @@ function mount(): void {
   restoreLoginRoute();
   window.addEventListener("hashchange", resolveRoute);
   store.subscribe(rerender);
+  store.subscribe(noteAttentionSeen);
+  window.addEventListener("focus", noteAttentionSeen);
+  document.addEventListener("visibilitychange", noteAttentionSeen);
+  // A closed dialog changes no store state; focus returning to the page marks it.
+  document.addEventListener("focusin", noteAttentionSeen);
+  narrowViewport.addEventListener("change", noteAttentionSeen);
   rerender();
 
   // The keyboard/focus state machine (#1693), wired once at the document level in
@@ -2601,7 +2618,10 @@ const actions = {
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
-  layoutChanged: () => splitView.refit(),
+  layoutChanged: () => {
+    splitView.refit();
+    noteAttentionSeen();
+  },
   closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
