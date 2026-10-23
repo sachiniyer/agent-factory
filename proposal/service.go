@@ -337,6 +337,9 @@ func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
 		return nil, err
 	}
 	previous, err := r.store.Attached(r.session.ID)
+	if errors.Is(err, errBadAttachment) {
+		previous, err = "", nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -385,6 +388,12 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 		return nil, err
 	}
 	slug, err := r.store.Attached(r.session.ID)
+	if errors.Is(err, errBadAttachment) {
+		if _, err := r.store.Detach(r.session.ID); err != nil {
+			return nil, err
+		}
+		return &DetachResult{Detached: true}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -558,11 +567,19 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	if n, err := NormalizeDocName(doc); err == nil {
 		file = docFile(n)
 	}
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
 	res, err := r.store.Save(slug, doc, text, base)
 	if err != nil {
 		var conflict *ConflictError
-		if errors.As(err, &conflict) && conflict.snapshotted {
-			s.committed(r, slug, file, conflict.Versions.Head, AuthorExternal)
+		if errors.As(err, &conflict) {
+			if conflict.snapshotted {
+				s.committed(r, slug, file, conflict.Versions.Head, AuthorExternal)
+			}
+		} else {
+			s.publishSnapshot(r, before, "")
 		}
 		return nil, err
 	}

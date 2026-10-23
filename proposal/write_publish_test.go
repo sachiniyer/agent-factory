@@ -28,6 +28,33 @@ func TestRejectedWritePublishesTheSnapshotItTakes(t *testing.T) {
 	t.Fatal("a rejected write that snapshots a disk edit must publish it")
 }
 
+func TestRejectedSavePublishesTheSnapshotItTakes(t *testing.T) {
+	svc, host, store := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	lines := "one\ntwo\nthree\nfour\nfive\nsix\n"
+	w, err := svc.Write(byRepo(), "p", "goals", lines, AuthorExternal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.Scan(WatchInput{RepoIDs: []string{testRepoID}})
+	host.takeEvents()
+
+	editOnDisk(t, store, "p", "goals.md", strings.Replace(lines, "one", "ONE", 1))
+	bumpMtime(t, filepath.Join(store.SlugPath("p"), "goals.md"))
+	big := strings.Replace(lines, "six", strings.Repeat("x", maxDocSize), 1)
+	if _, err := svc.Save(byRepo(), "p", "goals", big, w.Commit); err == nil {
+		t.Fatal("an oversized save succeeded")
+	}
+	for _, e := range host.takeEvents() {
+		if e.Doc == "goals.md" && e.Commit != nil {
+			return
+		}
+	}
+	t.Fatal("a rejected save that snapshots a disk edit must publish it")
+}
+
 func TestNoOpWritePublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
 	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
