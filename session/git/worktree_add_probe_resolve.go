@@ -170,6 +170,19 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		if prefix == "" {
 			prefix = string(filepath.Separator)
 		}
+		// On Windows a drive-absolute path's volume (for example C:) is
+		// relative to the drive's current directory rather than the drive
+		// root, so EvalSymlinks of the bare volume would anchor the
+		// remaining tail under an unrelated directory; if that directory
+		// is within a junction or mounted volume the probes miss ENOSPC on
+		// the filesystem Git actually writes or attach an unrelated
+		// resource error. Preserve the volume root (C:\) as the minimum
+		// prefix for a drive-absolute path the way the bare-root case
+		// above preserves the host root. filepath.VolumeName returns "" on
+		// non-Windows, so this is a no-op there.
+		if volume != "" && prefix == volume && len(volume) == 2 && volume[1] == ':' {
+			prefix = volume + string(filepath.Separator)
+		}
 		// Never search above the volume root: a prefix shorter than the
 		// volume name has left the destination's filesystem and reached the
 		// current drive, whose ENOSPC is unrelated to the structural Git

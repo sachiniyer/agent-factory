@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // archiveReadFile is guarded by boundedReadFileFlights and captured before each
@@ -58,8 +60,8 @@ func boundedReadFile(path string, maxBytes int64) ([]byte, error) {
 		if active.timedOut {
 			boundedReadFileFlights.Unlock()
 			return nil, fmt.Errorf(
-				"file read for %s is still running after an earlier deadline: %w",
-				path, context.DeadlineExceeded,
+				"file read for %s is still running after an earlier deadline: %w: %w",
+				path, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
 		boundedReadFileFlights.Unlock()
@@ -123,8 +125,8 @@ func waitForBoundedReadFile(path string, flight *boundedReadFileFlight) ([]byte,
 			flight.timedOut = true
 			boundedReadFileFlights.Unlock()
 			return nil, fmt.Errorf(
-				"timed out after %s while reading file %s: %w",
-				relocationIdentityTimeout, path, context.DeadlineExceeded,
+				"timed out after %s while reading file %s: %w: %w",
+				relocationIdentityTimeout, path, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
 		boundedReadFileFlights.Unlock()
