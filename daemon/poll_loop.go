@@ -112,6 +112,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// of each watched doc; it commits nothing.
 			manager.ScanProposals()
 
+			// Send proposal edits to idle agents (proposal push). A delivery runs
+			// on its own goroutine, so it never holds this loop.
+			manager.pushProposals()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:

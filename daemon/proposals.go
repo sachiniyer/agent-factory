@@ -165,6 +165,15 @@ func (s *controlServer) GetProposal(req GetProposalRequest, resp *GetProposalRes
 	if err != nil {
 		return err
 	}
+	if req.SessionID != "" {
+		t, err := s.manager.pushTarget(req.SessionID)
+		if err != nil {
+			return err
+		}
+		if out.Push, err = s.manager.proposalService().PushStatusFor(t, req.Slug); err != nil {
+			return err
+		}
+	}
 	*resp = *out
 	return nil
 }

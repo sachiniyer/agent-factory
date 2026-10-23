@@ -130,7 +130,16 @@ Creating or prompting a session: the prompt is the entire contract, because the 
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a
 // skill update. Proposal commands need a session, so plugins do not get it.
-const afUsageProposalsInside = `Proposals: when the user asks you to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work.`
+const afUsageProposalsInside = `Proposals: when the user asks you to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.`
+
+// afSkillDescriptionInside is AfSkillDescription for an agent inside an af
+// session, where proposal commands work.
+const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, and the daemon via the af CLI"
+
+// afProposalTrigger is the activation text for proposal requests. Agents load a
+// skill body only when the request matches its description, and "make a
+// proposal" does not match a description about sessions and tasks.
+const afProposalTrigger = "Use when the user asks to make, write, draft, or start a proposal, plan, spec, or design doc, or to work on, continue, review, or update an existing proposal"
 
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
 // self-archive, and doing so kills it.
