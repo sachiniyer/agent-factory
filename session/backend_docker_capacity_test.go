@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,7 +23,15 @@ import (
 // DOCKER_HOST endpoint form.
 func fakeUnixDockerSocket(t *testing.T) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "docker.sock")
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are unavailable on windows")
+	}
+	// macOS's sun_path tops out near 104 bytes — a t.TempDir() path under
+	// /var/folders/... overflows it (`bind: invalid argument`); /tmp stays short.
+	dir, err := os.MkdirTemp("/tmp", "af-sock-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
 	l, err := net.Listen("unix", sock)
 	require.NoError(t, err)
 	t.Cleanup(func() { l.Close() })

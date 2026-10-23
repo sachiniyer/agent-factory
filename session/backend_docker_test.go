@@ -153,8 +153,9 @@ func TestRunContainer_CapturesCreatedIDOnError(t *testing.T) {
 // provision() boundary since #5382 — the per-step table test pins every
 // other step; this pins the exact-once probe count on the original one.
 func TestProvision_DockerRunJoinsDockerRootFSFullEvidence(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 	host, err := os.Hostname()
 	require.NoError(t, err)
 	statfsCalls := 0
@@ -190,6 +191,8 @@ func TestProvision_DockerRunJoinsDockerRootFSFullEvidence(t *testing.T) {
 func TestProvision_DockerRootFSEvidenceSkipped(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
+	sock := fakeUnixDockerSocket(t)
+	stubMountinfo(t)
 	statfsCalls := 0
 	old := statfsFull
 	statfsFull = func(string) (bool, error) { statfsCalls++; return false, nil }
@@ -222,7 +225,7 @@ func TestProvision_DockerRootFSEvidenceSkipped(t *testing.T) {
 	require.Equal(t, 0, statfsCalls, "remote engine must never reach statfs")
 
 	// Local engine, root has free blocks — the fullness answer is honest.
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", sock)
 	p2 := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "free-root"}}
 	_, err = p2.provision()
 	require.Error(t, err)
