@@ -541,41 +541,6 @@ button:disabled,
   color: var(--af-ink);
 }
 
-/* Appearance mode stays on the existing route until slice C renames Auto. */
-.af-theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--af-space-1);
-  padding: 0;
-  background: var(--af-surface);
-  border: 0;
-  border-radius: 0;
-}
-
-.af-theme-opt {
-  padding: var(--af-space-2);
-  background: var(--af-surface);
-  color: var(--af-ink);
-  border: none;
-  border-radius: var(--af-radius-control);
-  font: inherit;
-  font-size: var(--af-type-body);
-  line-height: 1.5;
-  cursor: pointer;
-}
-
-.af-theme-opt:hover {
-  color: var(--af-ink);
-}
-
-.af-theme-opt-active {
-  background: var(--af-surface-raised);
-  color: var(--af-ink);
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: var(--af-space-1);
-}
-
 /* Body: fixed-width rail + flexible main content. `position: relative` is the
  * positioning context the narrow-viewport rail drawer + its scrim absolutely position
  * against (web mobile pass); it is inert for the desktop flex row. */
@@ -2570,20 +2535,21 @@ button:disabled,
   align-items: center;
   gap: var(--af-space-1);
   margin-left: auto;
-  padding: var(--af-space-1) var(--af-space-2);
-  background: transparent;
-  color: var(--af-accent);
-  border: calc(var(--af-space-1) * 0.25) solid var(--af-accent);
+  padding: var(--af-space-2);
+  background: var(--af-accent);
+  color: var(--af-surface);
+  border: calc(var(--af-space-1) / 4) solid var(--af-accent);
   border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-type-caption);
+  font-size: var(--af-type-body);
   font-weight: 600;
   cursor: pointer;
 }
 
 .af-tasks-add:hover {
-  background: var(--af-surface-raised);
-  color: var(--af-ink);
+  background: var(--af-accent);
+  color: var(--af-surface);
+  text-decoration: underline;
 }
 
 .af-tasks-empty {
@@ -2840,8 +2806,7 @@ button:disabled,
     padding-inline: var(--af-space-2);
   }
 
-  /* Live/install/theme/disconnect are useful but secondary. One 44px trigger keeps
-   * every function reachable without letting four desktop controls squeeze the
+  /* Secondary controls collapse behind one 44px trigger so they never squeeze the
    * project name. The popover is a vertical touch-target stack, not a shrunken bar. */
   .af-appbar-tools-wrap {
     grid-area: tools;
@@ -2887,15 +2852,6 @@ button:disabled,
 
   .af-appbar-tools .af-install__dismiss {
     min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-  }
-
-  .af-appbar-tools .af-theme-toggle {
-    width: 100%;
-  }
-
-  .af-appbar-tools .af-theme-opt {
-    flex: 1 1 0;
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
@@ -2958,8 +2914,7 @@ button:disabled,
   .af-rail-filter,
   .af-rail-action,
   .af-project-switch,
-  .af-viewtab,
-  .af-theme-opt {
+  .af-viewtab {
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
@@ -3590,4 +3545,64 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 :is(.af-app, .af-modal-card, .af-recovery) button:disabled:not(.af-danger) {
   color: var(--af-ink-muted);
   border-style: dashed;
+}
+
+/* Task row controls: icon buttons and an enabled switch; phones swap the icons for a menu. */
+.af-task-enabled { min-width: var(--af-type-body); }
+.af-task-actions { align-items: center; gap: var(--af-space-2); }
+.af-task-icons { display: flex; align-items: center; gap: var(--af-space-1); }
+.af-task-actions > .af-term-more-wrap { display: none; }
+.af-task-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--af-space-2);
+  background: transparent;
+  color: var(--af-ink);
+  border: 0;
+  border-radius: var(--af-radius-control);
+  cursor: pointer;
+}
+.af-task-icon-btn:hover:not(:disabled) { background: var(--af-surface-raised); }
+.af-task-icon-btn:disabled { color: var(--af-ink-muted); cursor: default; }
+.af-task-action { display: inline-flex; align-items: center; gap: var(--af-space-2); }
+.af-task-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0 var(--af-space-1);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.af-task-switch-track {
+  position: relative;
+  display: block;
+  width: calc(var(--af-space-4) + var(--af-space-3));
+  height: calc(var(--af-space-3) + var(--af-space-2));
+  background: var(--af-ink-muted);
+  border: calc(var(--af-space-1) / 4) solid var(--af-ink-muted);
+  border-radius: var(--af-space-3);
+  box-sizing: border-box;
+}
+.af-task-switch-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--af-space-1) / 2);
+  width: calc(var(--af-space-3) + var(--af-space-1) / 2);
+  height: calc(var(--af-space-3) + var(--af-space-1) / 2);
+  transform: translateY(-50%);
+  background: var(--af-surface);
+  border-radius: 50%;
+}
+.af-task-switch-on .af-task-switch-track { background: var(--af-accent); border-color: var(--af-accent); }
+.af-task-switch-on .af-task-switch-thumb { left: auto; right: calc(var(--af-space-1) / 2); background: var(--af-surface); }
+.af-task-switch:focus-visible { outline: none; }
+.af-task-switch:focus-visible .af-task-switch-track { outline: calc(var(--af-space-1) / 2) solid var(--af-accent); outline-offset: calc(var(--af-space-1) / 2); }
+@media (max-width: 768px) {
+  .af-appbar:has(.af-appbar-more[hidden]) .af-project-switch-wrap { grid-column: 1 / -1; }
+  .af-appbar:has(.af-appbar-more[hidden]) .af-project-menu { right: 0; }
+  .af-task-icons { display: none; }
+  .af-task-actions > .af-term-more-wrap { display: block; }
 }
