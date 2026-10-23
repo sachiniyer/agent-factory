@@ -99,6 +99,13 @@ var configAgentLateReceiptRecheckDelay = 5 * time.Minute
 // can run in milliseconds.
 var configAgentLateReceiptRecheckWindow = 5 * time.Second
 
+// configAgentPaneCaptureTimeout bounds the pre-delivery pane capture. The
+// excerpt is a best-effort diagnostic collected synchronously on the spawn
+// path; it must never hold up briefing delivery, so it gets a short budget of
+// its own instead of the full tmuxCommandTimeout a wedged capture-pane would
+// otherwise burn (#5471 review).
+var configAgentPaneCaptureTimeout = 2 * time.Second
+
 // The pane excerpt logged when a briefing receipt stays unconfirmed is bounded
 // twice: in lines and in bytes. The tail is what is kept — a trust, login, or
 // update modal that absorbed Enter (#5471) is the thing rendered at the bottom
@@ -448,7 +455,12 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		var paneCapturedAt time.Time
 		if agent == tmux.ProgramCodex && !isCodexResume {
 			paneCapturedAt = time.Now()
-			paneContent, paneErr = ts.CapturePaneContentContext(ctx)
+			// Best-effort: the excerpt is only diagnostic, so the capture runs
+			// on a short budget and can never stall the send behind a wedged
+			// capture-pane (#5471 review).
+			capCtx, capCancel := context.WithTimeout(ctx, configAgentPaneCaptureTimeout)
+			paneContent, paneErr = ts.CapturePaneContentContext(capCtx)
+			capCancel()
 		}
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
