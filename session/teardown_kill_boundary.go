@@ -60,6 +60,18 @@ func recheckMissingWorktreeAbsent(path string) error {
 	)
 }
 
+// worktreeAbsentAtEntry reports whether a live row's recorded path
+// conclusively answers ENOENT when kill teardown is prepared (#5102), one of
+// the facts that arm recheckMissingWorktreeAbsent. Bounded, since it runs under
+// the session operation lock; a timeout or any other error is not an absence.
+func worktreeAbsentAtEntry(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := git.BoundedLstat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 // ArchivedCleanupSettled decides whether a settled ordinary cleanup may stand
 // for an archived record-free kill (#3278 review). Nil means the pathname
 // conclusively answers ENOENT — the archive is dealt with. Anything else — the

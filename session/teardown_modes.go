@@ -126,19 +126,36 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 				return nil
 			}}, noop, nil
 		}
-		// A live row flagged worktree-missing (#5102) reaches here with no record
-		// at all, or with the identity-unknown stall just discharged on proven
-		// absence — either way nothing fences the path any more, and ordinary
-		// Cleanup ends in an unregistered RemoveAll. A directory that appears
-		// there between that proof and the deletion boundary is unverified by
-		// the flag's own definition, so the absence is re-proven at the boundary
-		// and only git's stale registration is reaped. An occupant refuses; the
-		// tombstone stays the retry handle, and once the user clears the path a
-		// further kill passes admission and settles. Archived missing rows keep
-		// recheckOrigin above: its registered-only cleanup already refuses any
-		// occupant that is not a checkout of this session's branch.
-		if worktreeMissing && !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
-			i.Capabilities().Workspace == WorkspaceLocalWorktree {
+		// A live row whose worktree af has seen gone (#5102) reaches here with
+		// nothing fencing the path any more, and ordinary Cleanup ends in an
+		// unregistered RemoveAll. A directory that appears there after that
+		// proof is unverified, so the absence is re-proven at the deletion
+		// boundary and only git's stale registration is reaped. Three facts
+		// arm it, because each alone misses a row the others catch:
+		//
+		//   - worktreeMissing: the poll recorded the deletion. Durable, so it
+		//     also covers a row reloaded by a restarted daemon.
+		//   - AbsentStallSettled: this process discharged an identity-unknown
+		//     stall on proven absence — at kill admission, or just above. Such
+		//     a stall keeps the presence probe answering unknown, so the flag
+		//     never reached the row, and the discharge leaves no record either.
+		//     Admission shares this GitWorktree, so its discharge is visible
+		//     here though the settle above then has nothing left to clear, and
+		//     an occupant that appeared before teardown entry is refused rather
+		//     than taken for the session's worktree.
+		//   - an ENOENT at entry: the worktree was deleted outside af and the
+		//     poll has not run yet, or a restarted daemon lost the discharge
+		//     proof. Only a conclusive ENOENT arms; an lstat that cannot answer
+		//     leaves the row to ordinary cleanup, as before.
+		//
+		// An occupant refuses; the tombstone stays the retry handle, and once
+		// the user clears the path a further kill passes admission and settles.
+		// Archived rows keep recheckOrigin above: its registered-only cleanup
+		// already refuses any occupant that is not a checkout of this session's
+		// branch.
+		if !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
+			i.Capabilities().Workspace == WorkspaceLocalWorktree &&
+			(worktreeMissing || gw.AbsentStallSettled() || worktreeAbsentAtEntry(gw.GetWorktreePath())) {
 			return teardownKill{trustLiveGeneration: trustLiveGeneration, recheckMissing: func() error {
 				beforeKillTeardownOriginRecheck()
 				return recheckMissingWorktreeAbsent(gw.GetWorktreePath())

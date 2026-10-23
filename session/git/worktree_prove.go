@@ -57,6 +57,7 @@ func (g *GitWorktree) ProveRecordedWorktree() error {
 		return fmt.Errorf("cannot prove %s: %w", path, err)
 	}
 	g.adoptedWorktree = &adoptedWorktreeIdentity{path: path, identity: proved}
+	g.absentStallSettled = false
 	return nil
 }
 

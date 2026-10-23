@@ -223,3 +223,31 @@ func TestReturnClaimUnverifiedKeepsTheFenceSettleable(t *testing.T) {
 		assert.False(t, gw.HasUnresolvedRelocation())
 	})
 }
+
+// A discharge on proven absence is what keeps kill teardown's deletion-boundary
+// recheck armed for a row the missing flag never reached, so the proof must
+// outlive the record it cleared — and must end once af places a worktree at the
+// path itself, or a later kill would refuse af's own checkout (#5102).
+func TestAbsentStallSettledLastsUntilAfPlacesTheWorktree(t *testing.T) {
+	_, wt, gw := renameFixture(t)
+	require.NoError(t, os.RemoveAll(wt))
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{State: RelocationRecoveryStalled}))
+	assert.False(t, gw.AbsentStallSettled(), "premise: nothing discharged yet")
+
+	require.True(t, gw.SettleAbsentIdentityUnknownStall())
+	assert.False(t, gw.HasUnresolvedRelocation())
+	assert.True(t, gw.AbsentStallSettled())
+	assert.False(t, gw.SettleAbsentIdentityUnknownStall(), "a second settle finds no record")
+	assert.True(t, gw.AbsentStallSettled(), "the proof outlives the record it cleared")
+
+	require.NoError(t, gw.RebuildFromExistingBranch())
+	require.DirExists(t, wt)
+	assert.False(t, gw.AbsentStallSettled(), "af placed the worktree; the proof is about its predecessor")
+
+	t.Run("a present path is never recorded as settled", func(t *testing.T) {
+		_, _, gw := renameFixture(t)
+		require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{State: RelocationRecoveryStalled}))
+		assert.False(t, gw.SettleAbsentIdentityUnknownStall())
+		assert.False(t, gw.AbsentStallSettled())
+	})
+}

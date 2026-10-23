@@ -235,5 +235,26 @@ func (g *GitWorktree) settleAbsentIdentityUnknownStallLocked() bool {
 		return false
 	}
 	g.relocationRecovery = nil
+	g.absentStallSettled = true
 	return true
+}
+
+// AbsentStallSettled reports whether this process discharged an
+// identity-unknown stall over the recorded path on proven absence, and af has
+// not placed a worktree there since (#5102). Kill admission and kill teardown
+// share this GitWorktree, so a discharge at admission is visible at teardown
+// even though teardown's own settle then finds no record to clear.
+func (g *GitWorktree) AbsentStallSettled() bool {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.absentStallSettled
+}
+
+// markWorktreePlaced drops the absent-stall proof once af itself has put a
+// worktree at the recorded path (#5102): that directory is af's, and a kill
+// must clean it up normally rather than refuse it as an unverified occupant.
+func (g *GitWorktree) markWorktreePlaced() {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	g.absentStallSettled = false
 }

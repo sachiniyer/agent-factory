@@ -85,6 +85,18 @@ type GitWorktree struct {
 	// a point-in-time proof, not durable state. Cleared whenever the recorded
 	// path changes. Guarded by relocationMu.
 	adoptedWorktree *adoptedWorktreeIdentity
+	// absentStallSettled records that this process discharged an identity-unknown
+	// stall because the recorded path conclusively answered ENOENT (#5102). The
+	// row then carries no record and, unless the worktree-missing poll got there
+	// first, no flag either, yet whatever appears at the path afterwards is as
+	// unverified as an occupant of a flagged row; kill teardown reads it to keep
+	// the deletion-boundary recheck armed. Process-local and never persisted: a
+	// restarted daemon has only the durable record, which the discharge already
+	// removed, and re-derives absence at teardown entry instead. Cleared whenever
+	// af itself places a worktree at the recorded path or moves the record to
+	// another one, because the proof was about the path's previous occupant.
+	// Guarded by relocationMu.
+	absentStallSettled bool
 	// archiveReport is durable metadata for every archive copy that deliberately
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.

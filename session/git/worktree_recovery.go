@@ -984,4 +984,5 @@ func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreeDir = filepath.Dir(dest)
 	// A proof about the previous location says nothing about this one.
 	g.adoptedWorktree = nil
+	g.absentStallSettled = false
 }
