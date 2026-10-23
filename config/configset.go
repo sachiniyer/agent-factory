@@ -111,6 +111,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"debug_pprof":                    {kind: cfgBool},
 	"network.require_token":          {kind: cfgBool, section: "network"},
 	"network.require_loopback_token": {kind: cfgBool, section: "network"},
+	// The #5137 risk-acceptance valve. A plain bool — every guard for it lives
+	// in the resulting-posture check (listenerWriteRefusal), which refuses the
+	// write when the edit would leave a tokenless non-loopback bind without it.
+	"network.allow_unauthenticated_network": {kind: cfgBool, section: "network"},
 	"network.listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
@@ -328,6 +332,49 @@ type SetResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// listenerWriteRefusal names the one `af config` refusal that is not a syntax
+// or drift problem: a write that would LEAVE the control-plane listener in the
+// #5137 refused posture — non-loopback listen_addr, require_token false, and
+// no allow_unauthenticated_network opt-in.
+//
+// cfg is the config the edit RESULTS in — parsed from the bytes about to be
+// written inside the file lock — so the judgment covers the pairing, never one
+// key alone (#2412: two racing writers can each turn on one half of the
+// exposure). A write that lands the refused combination is refused with the
+// SAME message the daemon would emit at bind (ListenerBindRefusal), and the
+// file is left untouched: refusing the write is refusing to create a config
+// the daemon must then refuse to serve.
+//
+// The gate is scoped to the two keys a write can use to CREATE the refused
+// posture — network.listen_addr pointed at the network, and require_token
+// turned off. An unrelated write on an already-refused config (a hand-edit
+// left one) is allowed: it did not create the posture, it leaves it no worse,
+// and refusing it would strand every other config edit behind an unrelated
+// fix — while every remediation write lands a safe resulting config and is
+// therefore allowed.
+//
+// network.allow_unauthenticated_network is deliberately NOT gated. The only
+// write of it that lands on a refused resulting posture is the REVOCATION —
+// setting it false, or unsetting it, under a non-loopback tokenless bind —
+// and refusing that write would keep the very listener it is revoking serving
+// unauthenticated. `af doctor`'s own remediation for an opted-in exposure is
+// `af config set network.allow_unauthenticated_network false`; it must land so
+// the daemon's next apply can retire the listener into the refused state the
+// operator just asked for.
+//
+// network.require_loopback_token is deliberately absent too: it is inert while
+// require_token is false (tokenDisabled short-circuits the gate), so it neither
+// creates nor rescues the exposure. network.preview_listen_addr is a separate
+// listener that never serves the control plane, so it is governed by its own
+// notice (PreviewListenerExposureNotice) and stays warning-only.
+func listenerWriteRefusal(key string, resulting *Config) string {
+	switch canonicalConfigKey(key) {
+	case "network.listen_addr", "network.require_token":
+		return ListenerBindRefusal(resulting)
+	}
+	return ""
+}
+
 // exposureWarning returns a warning when cfg — the config that RESULTS from
 // this set, parsed from the bytes about to be written — serves an
 // unauthenticated control plane to the network, i.e. the combination of a
@@ -339,32 +386,21 @@ type SetResult struct {
 // before the file lock, which two racing writers could each read stale. See
 // scalarWrite.apply.
 //
-// It exists because this is now easy to do by accident. Before `listen_addr`
-// became settable, exposing the listener took a deliberate hand-edit; now it is
-// one command that exits 0 and prints nothing. The daemon already knows this
-// pairing is dangerous and warns about exactly it (daemon/httpserver.go) — but
-// only into the log, at the next daemon start, which is neither where nor when
-// the user is looking. This says it at the moment they type it.
-//
-// It WARNS and nothing more: it does not refuse (that would break scripting) and
-// does not auto-set require_token (silently changing a key the user did not name
-// is worse than the surprise it prevents). The user stays in control; they just
-// stop being surprised.
-//
-// Warning is now the ONLY response anywhere: #2090 briefly made the daemon
-// refuse to start on this pairing, and #2168 Phase 0 reversed that by owner
-// decision ("assume users are safe and will do the right thing"). #2168 Phase 2
-// had proposed escalating THIS warning into a refusal as well; that was dropped
-// with the rest. So this is the notice a user gets when they type the command,
-// and the daemon repeats it once when the listener binds (startHTTPServer) — it
-// no longer forecasts a failure, because there is not going to be one.
+// Since #5137 this warning only ever describes an OPTED-IN exposure: a write
+// whose result would be refused outright never reaches it — listenerWriteRefusal
+// already refused that write with the shared remediation message. What is left
+// for the warning is the combination that IS going to serve unauthenticated —
+// non-loopback listen_addr, token off, and allow_unauthenticated_network = true
+// — so the operator sees the risk they just accepted stated plainly, once.
 //
 // Both directions of the pairing warn, because either key can create the
 // exposure: pointing listen_addr at the network while the token is off, or
 // turning the token off while listen_addr is already on the network. Setting
 // any OTHER key stays silent even on an already-exposed config — this speaks to
 // the change the user just made, and warning on every unrelated `config set`
-// would train them to ignore it.
+// would train them to ignore it. Setting network.allow_unauthenticated_network
+// itself stays silent too: opting in IS the acknowledgement, so warning about
+// it would be noise.
 //
 // network.preview_listen_addr is the parallel surface for the web-tab preview
 // listener (#1856). It has NO "other half" pairing: the preview origin never
@@ -382,9 +418,9 @@ type SetResult struct {
 // before the switch, so both CLI spellings warn.
 //
 // The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
-// the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
-// gate derives from. Two definitions of "is this exposed" drifting apart is
-// precisely how a security check rots, so there is only one.
+// the daemon's refusal builds on, itself built on the IsLoopbackListenAddr the
+// token gate derives from. Two definitions of "is this exposed" drifting apart
+// is precisely how a security check rots, so there is only one.
 func exposureWarning(cfg *Config, key string) string {
 	if cfg == nil {
 		return ""
@@ -392,15 +428,7 @@ func exposureWarning(cfg *Config, key string) string {
 	key = canonicalConfigKey(key)
 	switch key {
 	case "network.listen_addr", "network.require_token":
-		addr := cfg.ListenAddr
-		if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
-			return ""
-		}
-		return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
-			"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
-			"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
-			"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
-			"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
+		return ListenerExposureNotice(cfg)
 	case "network.preview_listen_addr":
 		// PreviewListenerExposureNotice is itself non-transition-gated: it returns
 		// a notice whenever cfg.PreviewListenAddr is non-empty and non-loopback,
@@ -832,6 +860,16 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 		if drift := configRewriteDrift(before, resulting, w.key, SchemaVersionField); drift != "" {
 			return nil, ConfigDigest{}, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
+	}
+	// #5137: refuse to leave the file in a posture the daemon will refuse to
+	// bind — a non-loopback listen_addr with the token off and no explicit
+	// opt-in. Judged on `resulting` (the locked bytes' meaning), so two racing
+	// writers each touching one half of the pairing still converge on the
+	// refusal rather than each seeing a stale safe half (#2412). The message is
+	// ListenerBindRefusal's own, so the write refusal and the daemon's bind
+	// refusal read identically. Nothing is written.
+	if refusal := listenerWriteRefusal(w.key, resulting); refusal != "" {
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: %s", refusal)
 	}
 	if err := locked.write([]byte(updated), 0644); err != nil {
 		return nil, ConfigDigest{}, err

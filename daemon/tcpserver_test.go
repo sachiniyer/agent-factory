@@ -370,20 +370,73 @@ func freeNetworkPort(t *testing.T) string {
 	return addr
 }
 
-// TestStartHTTPServer_BindsUnauthenticatedNetworkListener is the #2168 Phase 0
-// lock, and it REVERSES the #2090 assertion that stood here before: the port must
-// be OPEN and serving.
+// TestStartHTTPServer_RefusesUnauthenticatedNetworkListener is the #5137 half of
+// the #2168 Phase 0 lock's successor: a tokenless non-loopback control listener
+// is REFUSED — the port never opens — unless the operator opted in. The daemon
+// itself still starts (startHTTPServer returns no error): what is refused is
+// the socket, never the process, because a process-level refusal is what
+// crash-looped the autostart unit under #2090.
 //
-// The owner's decision, verbatim: "just allow binding to 0.0.0.0 without a token.
-// Assume users are safe and will do the right thing; if it becomes a problem I
-// will check up on them." So this is not a regression to be re-fixed — it is the
-// deliberate posture, and a future change that stops binding here breaks a
-// documented configuration.
+// The refusal is also SAID, exactly once, at ERROR — a configured-but-dead
+// listener is an operational fact the operator must be told, and reconcile's
+// webRefusal gate is what keeps "once" honest across applies.
+func TestStartHTTPServer_RefusesUnauthenticatedNetworkListener(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	errors := captureErrors(t)
+
+	addr := freeNetworkPort(t)
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = addr // network-bound…
+	cfg.RequireToken = false
+	// …and require_loopback_token cannot stand in for the real token: it is inert
+	// while require_token is false, so it cannot rescue this bind either.
+	cfg.RequireLoopbackToken = true
+
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+	require.NoError(t, err, "a refused LISTENER must never take the daemon down — the unix socket still serves")
+	defer func() { require.NoError(t, closeHTTP()) }()
+
+	// The property: it does NOT BIND. Under #2168 this dial succeeded — that was
+	// the exposure #5137 removes.
+	conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	require.Error(t, dialErr, "a tokenless network bind must be refused, not served (#5137)")
+
+	// And the refusal is RECORDED, with the three fixes, for af daemon status
+	// and af doctor.
+	snap := m.lifecycle.snapshot().listeners
+	require.True(t, snap.TCPConfigured, "the posture is configured — refused is configured-but-declined, not disabled")
+	require.False(t, snap.TCPBound)
+	require.Empty(t, snap.TCPBoundAddr)
+	require.Contains(t, snap.TCPRefusalReason, addr)
+	for _, fix := range []string{"network.require_token true", "af token show",
+		"network.listen_addr 127.0.0.1:8443", "network.allow_unauthenticated_network true"} {
+		require.Contains(t, snap.TCPRefusalReason, fix)
+	}
+
+	// Said once, at ERROR, and worth reading: the address, DeliverPrompt, the
+	// refusal, and the remediation.
+	got := errors.String()
+	require.Equal(t, 1, strings.Count(got, "reachable from the network"),
+		"the refusal must be logged exactly once, not per apply:\n%s", got)
+	require.Contains(t, got, "DeliverPrompt")
+	require.Contains(t, got, "listener is refused")
+}
+
+// TestStartHTTPServer_BindsOptedInUnauthenticatedNetworkListener is the opt-in
+// half: the same posture with network.allow_unauthenticated_network = true
+// BINDS and serves — the deliberate, documented configuration the opt-in
+// exists for.
 //
 // The exposure is still SAID, exactly once. Log spam is the failure mode of a
 // warning that replaces a refusal, so "once" is asserted, not assumed: a per-
 // request or per-connection warning would fire again on the requests below.
-func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
+func TestStartHTTPServer_BindsOptedInUnauthenticatedNetworkListener(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	warnings := captureWarnings(t)
 
@@ -394,6 +447,8 @@ func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
 	// …and require_loopback_token cannot stand in for the real token: it is inert
 	// while require_token is false, so this peer is genuinely unauthenticated.
 	cfg.RequireLoopbackToken = true
+	// The explicit #5137 opt-in — without it this exact posture is refused.
+	cfg.AllowUnauthenticatedNetwork = true
 
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
@@ -402,10 +457,9 @@ func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
 	require.NoError(t, err, "an exposed posture must never take the daemon down")
 	defer func() { require.NoError(t, closeHTTP()) }()
 
-	// The property: it BINDS. Pre-#2168 this dial failed (connection refused)
-	// because startHTTPServer skipped the listener entirely.
+	// The property: it BINDS, because the operator opted in.
 	conn, dialErr := net.DialTimeout("tcp", addr, 5*time.Second)
-	require.NoError(t, dialErr, "a tokenless network bind must be served, not skipped")
+	require.NoError(t, dialErr, "an opted-in tokenless network bind must be served")
 	require.NoError(t, conn.Close())
 
 	// And it SERVES: a caller with no credentials is answered, not 401'd. That is
@@ -427,7 +481,7 @@ func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
 		"the exposure warning must be emitted exactly once per daemon start, not per request:\n%s", got)
 	require.Contains(t, got, addr)
 	require.Contains(t, got, "DeliverPrompt")
-	require.Contains(t, got, "require_token = true")
+	require.Contains(t, got, "require_token")
 }
 
 // TestStartHTTPServer_NetworkListenerServesWithToken pins that #2168 Phase 0

@@ -237,6 +237,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "network.allow_unauthenticated_network",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Explicitly permit a non-loopback network.listen_addr to serve the full control API with no token · off by default, so that combination is refused rather than bound.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "daemon_poll_interval",
 		Type:       "duration",
 		Default:    "1000",
