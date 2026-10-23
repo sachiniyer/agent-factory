@@ -146,6 +146,16 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		}
 		parts = flat
 	}
+	// On Windows a UNC destination (\\server\share\dir\..\wt) or a drive-rooted
+	// path (C:\dir\..\wt) has a volume prefix the prefix walk must not shorten
+	// past: the loop would otherwise reach the bare root (\ or C:) and resolve
+	// it against the daemon's current drive, so a tail component above the
+	// volume (server, share) would be treated as a creatable directory on the
+	// wrong drive and a coincidental ENOSPC there would convert a structural Git
+	// failure (Git cannot create a UNC server/share) into an indefinite
+	// environmental retry. filepath.VolumeName returns "" on non-Windows, so this
+	// bound is a no-op there.
+	volume := filepath.VolumeName(path)
 	for i := len(parts); i > 0; i-- {
 		select {
 		case <-ctx.Done():
@@ -159,6 +169,13 @@ func resolveSymlinkPrefixWalk(ctx context.Context, path string) (resolved string
 		prefix := strings.Join(parts[:i], string(filepath.Separator))
 		if prefix == "" {
 			prefix = string(filepath.Separator)
+		}
+		// Never search above the volume root: a prefix shorter than the
+		// volume name has left the destination's filesystem and reached the
+		// current drive, whose ENOSPC is unrelated to the structural Git
+		// failure the caller is classifying.
+		if volume != "" && len(prefix) < len(volume) {
+			break
 		}
 		r, e := evalSymlinksSpaceProbe(prefix)
 		if e == nil {

@@ -791,15 +791,15 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		}
 	}
 	// A missing repository is a structural failure (git cannot enter its
-	// cmd.Dir), so the worktree add never writes anything. For an absolute
-	// worktreePath the destination is unrelated to the missing repo, and a
-	// coincidental ENOSPC on its filesystem would convert the structural
-	// failure into an indefinite environmental retry. The ancestor walk and
-	// creatable-parent loop below already skip a missing repo, but the immediate
-	// parent queue and the destination probes did not, so skip them for an
-	// absolute worktreePath when the repo is missing; a relative path's
-	// destination lives under the missing repo, so its probes still run.
-	if repoMissing && filepath.IsAbs(g.worktreePath) {
+	// cmd.Dir), so the worktree add never writes anything. The ancestor walk
+	// and creatable-parent loop below already skip a missing repo, but the
+	// immediate parent queue and destination probes did not. A relative
+	// worktreePath that traverses above the repo (for example ../dest) resolves
+	// outside the missing repo, and Git exits before creating the destination;
+	// an ENOSPC from any resolved destination is unrelated and would convert the
+	// structural missing-repository failure into an indefinite environmental
+	// retry. Skip all probes once the repository boundary is missing.
+	if repoMissing {
 		return g.annotateGitWriteError(err)
 	}
 	dirs := []string{filepath.Dir(worktreePath)}

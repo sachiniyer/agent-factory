@@ -21,10 +21,13 @@ import (
 // repo's parent and probe it, and a coincidental ENOSPC on that parent would turn
 // the structural missing-repository failure into an indefinite environmental retry.
 // The existence check uses the bounded EvalSymlinks flight the walk already uses,
-// so a missing repo (EvalSymlinks returns ENOENT) skips the creatable-parent and
-// ancestor probes; the existing-destination probe and the worktree parent are
-// unaffected (the worktree parent is under the missing repo, so the git failure
-// reaches it as a structural ENOENT rather than a write probe the classifier reads).
+// so a missing repo (EvalSymlinks returns ENOENT) skips all worktree-location
+// probes (the creatable-parent, ancestor, destination, and parent probes): the
+// git child cannot enter its cmd.Dir, so it exits before creating the destination,
+// and a relative path that traverses above the missing repo (for example ../dest)
+// resolves outside it, so any ENOSPC on the resolved destination's filesystem is
+// unrelated and would convert the structural missing-repository failure into an
+// indefinite environmental retry.
 //
 // Deterministic in both directions: against the form that probed the missing repo's
 // parent a write probe mocked to fail only there surfaces ENOSPC and the test fails;

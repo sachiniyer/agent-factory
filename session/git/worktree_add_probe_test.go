@@ -321,7 +321,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathResolvedAgainstLaunchCwd(t
 	afHome := t.TempDir()
 	require.NotEqual(t, launchCwd, afHome)
 	t.Chdir(afHome)
-
+	require.NoError(t, os.Mkdir(filepath.Join(launchCwd, "repo"), 0o755))
 	var statTarget string
 	statSpaceProbe = func(p string) (os.FileInfo, error) {
 		statTarget = p
@@ -381,6 +381,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathEnvironmentalClassificatio
 	afHome := t.TempDir()
 	require.NotEqual(t, launchCwd, afHome)
 	t.Chdir(afHome)
+	require.NoError(t, os.Mkdir(filepath.Join(launchCwd, "repo"), 0o755))
 
 	// t.TempDir() lives under a symlinked prefix on macOS (/var/folders ->
 	// /private/var/folders), and the probe resolves the longest existing
@@ -427,6 +428,7 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathStatErrorNamesResolvedPath
 	afHome := t.TempDir()
 	require.NotEqual(t, launchCwd, afHome)
 	t.Chdir(afHome)
+	require.NoError(t, os.Mkdir(filepath.Join(launchCwd, "repo"), 0o755))
 
 	resolved := filepath.Join(launchCwd, "repo", "wt", "dest")
 	statSpaceProbe = func(p string) (os.FileInfo, error) {
