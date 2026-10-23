@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -848,5 +849,156 @@ func TestDeferredSweep_StaysDeferredAcrossPollsWhileRowsStillUnloadable_EndToEnd
 	require.Equal(t, 1, rec.count(), "repair -> deferred sweep runs")
 	m.mu.Lock()
 	require.False(t, m.deferredOrphanSweepArmed, "flag cleared after the sweep")
+	m.mu.Unlock()
+}
+
+// TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd is the
+// regression test for the partial-loss shape the bug report's self-healing half
+// must cover: a repo whose instances.json parses with N=2 rows where one row
+// loads at startup and the other fails. The loadable row is re-hydrated from
+// the prior in-memory map on every later poll without incrementing
+// `materialized`, so a repair that re-materializes only the previously-failed
+// row must STILL reach `materialized == len(data)` for the skip set to drain —
+// otherwise the skip entry seeded at startup is retained forever and the
+// deferred orphan sweep never runs again for the daemon's lifetime. Pre-fix,
+// the re-hydrated row was not counted, so `materialized` stayed below
+// `len(data)` even after repair and the repo was stuck skipped forever.
+func TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	// A two-row repo: "loads" materializes at startup, "stuck" fails. Both
+	// carry stable IDs so they reach fromInstanceDataForRefresh directly.
+	partialJSON, err := json.Marshal([]session.InstanceData{
+		{Title: "loads", ID: "id-loads"},
+		{Title: "stuck", ID: "id-stuck"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("partial-r", partialJSON))
+	failingFromInstanceForRefreshFor(t, "stuck")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// Startup: one row loads, one fails -> partial loss seeds the skip set.
+	m.mu.Lock()
+	require.Equal(t, []SkippedRepo{{RepoID: "partial-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		m.skippedRepos, "a 1-of-2 partial loss seeds the startup skip set")
+	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "loads")],
+		"the loadable row materializes at startup")
+	require.Nil(t, m.instances[daemonInstanceKey("partial-r", "stuck")],
+		"the unloadable row does not")
+	m.mu.Unlock()
+
+	// The startup sweep defers: the failing row's container's slug is absent
+	// from the protected set.
+	sweepStartupOrphanContainers(m)
+	require.Equal(t, 0, rec.count(), "the sweep must defer for a partial loss")
+	m.mu.Lock()
+	require.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed")
+	m.mu.Unlock()
+
+	// A first poll where the row is still unloadable: the loadable row is
+	// re-hydrated from the prior in-memory map (without incrementing
+	// materialized) and the failing row still fails, so the skip set stays.
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked())
+	require.Equal(t, []string{"partial-r"}, skippedRepoIDs(m.skippedRepos),
+		"a still-unloadable partial repo stays skipped")
+	m.mu.Unlock()
+	runDeferredOrphanSweepIfReady(m)
+	require.Equal(t, 0, rec.count(), "still-unloadable -> sweep stays deferred")
+	m.mu.Lock()
+	require.True(t, m.deferredOrphanSweepArmed, "flag stays armed")
+	m.mu.Unlock()
+
+	// Repair: restore the materializer so "stuck" loads again. The loadable
+	// row "loads" is re-hydrated from the prior in-memory map and the
+	// previously-failing "stuck" re-materializes fresh. With the fix, BOTH
+	// count toward `materialized`, so the repo reaches `materialized ==
+	// len(data)`, stays in reread, and the skip set drains. Pre-fix, only the
+	// freshly re-materialized "stuck" was counted, leaving `materialized` at
+	// 1 < 2, so the repo was stuck skipped forever.
+	stubFromInstanceForRefresh(t)
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked(), "a polling refresh that re-materializes both rows must not error")
+	require.Empty(t, m.skippedRepos, "a fully-repaired partial repo drains the skip set")
+	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "loads")],
+		"the loadable row is still present")
+	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "stuck")],
+		"the previously-unloadable row re-materializes")
+	m.mu.Unlock()
+
+	// The deferred sweep now runs with both rows' slugs in the protected set.
+	runDeferredOrphanSweepIfReady(m)
+	require.Equal(t, 1, rec.count(), "the deferred sweep runs once the partial repo's skip set drains")
+
+	call, ok := rec.lastCall()
+	require.True(t, ok)
+	assert.True(t, call.slugs[session.Slugify("loads")], "the loadable row's slug is protected")
+	assert.True(t, call.slugs[session.Slugify("stuck")], "the repaired row's slug is protected")
+
+	m.mu.Lock()
+	require.False(t, m.deferredOrphanSweepArmed, "the deferral flag is cleared after the sweep runs")
+	m.mu.Unlock()
+
+	// The wire surface stops refusing now that the skip set has drained: the
+	// Snapshot RPC returns the full row set with no SkippedRepos, so list/get/
+	// whoami no longer reject the partial list (they would have while the
+	// rows-failed skip entry persisted).
+	cs := &controlServer{manager: m}
+	var resp SnapshotResponse
+	require.NoError(t, cs.Snapshot(SnapshotRequest{RepoID: "partial-r"}, &resp))
+	require.ElementsMatch(t, []string{"loads", "stuck"}, snapshotFilterTitles(resp.Instances),
+		"after repair both rows are served and nothing is skipped")
+	require.Empty(t, resp.SkippedRepos, "the wire refusal clears once the partial repo's skip set drains")
+}
+
+// TestSweepStartup_LegacyIDPersistenceFailureSeedsSkipSetAndDefers exercises
+// the earlier drop path the rows-failed gate must also cover: a legacy row
+// (empty ID) whose persistLegacyInstanceID cannot write — a read-only state file
+// or a full disk at startup — is omitted from next without going through
+// fromInstanceDataForRefresh, so the failedRows counter the deferral gate reads
+// was never incremented. Pre-fix, the row contributed zero to materialized AND
+// zero to failedRows, so the skip set was empty and the destructive sweep ran
+// with the row's slug absent from the protected set. Post-fix, the dropped row
+// counts as a failed row, so the skip set is seeded and the sweep defers.
+func TestSweepStartup_LegacyIDPersistenceFailureSeedsSkipSetAndDefers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	// A legacy row (empty ID, non-transient) whose stable ID cannot be persisted.
+	legacyJSON, err := json.Marshal([]session.InstanceData{{
+		Title: "legacy-editor", Status: session.Archived, Liveness: session.LiveArchived,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("legacy-r", legacyJSON))
+
+	prevPersist := persistLegacyInstanceID
+	persistLegacyInstanceID = func(string, session.InstanceData) error {
+		return fmt.Errorf("forced stable ID persistence failure")
+	}
+	t.Cleanup(func() { persistLegacyInstanceID = prevPersist })
+	stubFromInstanceForRefresh(t)
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// The skip set is seeded with the rows-failed reason: the row's slug is
+	// absent from the protected set, so the sweep must defer.
+	require.Equal(t, []SkippedRepo{{RepoID: "legacy-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		m.skippedRepos, "a legacy row whose ID could not be persisted seeds the skip set")
+	require.Nil(t, m.instances[daemonInstanceKey("legacy-r", "legacy-editor")],
+		"the legacy row is not materialized")
+
+	sweepStartupOrphanContainers(m)
+	assert.Equal(t, 0, rec.count(),
+		"the sweep must defer: the legacy row's container cannot be distinguished from a genuine orphan")
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed")
 	m.mu.Unlock()
 }

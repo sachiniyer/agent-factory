@@ -756,9 +756,19 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					if existing != nil {
 						if prior := existing[key]; prior != nil {
 							next[key] = prior
+							materialized++
 							continue
 						}
 					}
+					// A legacy row whose stable ID could not be durably persisted
+					// and has no prior to re-hydrate is dropped — count it as a
+					// failed row so the startup skip set is seeded and the
+					// destructive orphan sweep defers, exactly like a row that
+					// fails fromInstanceDataForRefresh (#4998). Without this, a
+					// read-only state file or a full disk at startup leaves the
+					// row's slug absent from the protected set and the sweep can
+					// reap its still-running container.
+					failedRows++
 					if rawTaskRunHoldsSlot(item) {
 						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					}
@@ -768,6 +778,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if existing != nil {
 				if instance := existing[key]; instance != nil {
 					next[key] = instance
+					materialized++
 					continue
 				}
 			}
