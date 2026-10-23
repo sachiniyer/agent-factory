@@ -544,28 +544,48 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 // verdicts must stay indeterminate rather than claiming never-arrived (#5471
 // review).
 func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string, resume bool) {
-	selector := tmux.ConversationSelectorArgs(program)
-	if len(selector) == 0 || selector[0] != "resume" {
+	selector, resume := tmux.CodexResumeSelection(program)
+	if !resume {
 		return "", false
 	}
-	if len(selector) == 1 {
+	// The resume target is the first positional after the subcommand; flags
+	// may come in any order, so --last and --all are recognized wherever they
+	// sit. A selector with no target opens Codex's own picker — resumable but
+	// unidentifiable.
+	var id string
+	var last, all bool
+	for _, tok := range selector[1:] {
+		switch {
+		case tok == "--last":
+			last = true
+		case tok == "--all":
+			all = true
+		case !strings.HasPrefix(tok, "-") && id == "":
+			id = tok
+		}
+	}
+	if !last && id == "" {
 		return "", true
 	}
 	files, err := codexRolloutFiles(codexHome)
 	if err != nil {
 		return "", true
 	}
-	if selector[1] == "--last" {
-		if workingDir == "" {
-			return "", true
+	if last {
+		var pool []string
+		if all {
+			// --all disables --last's working-directory scope: the resumed
+			// file is the globally newest rollout, so filtering by cwd would
+			// track a different conversation's transcript (#5471 review).
+			pool = mapKeys(files)
+		} else {
+			if workingDir == "" {
+				return "", true
+			}
+			pool, _ = codexRolloutFilesForWorkingDir(mapKeys(files), pathutil.ResolveForCompare(workingDir))
 		}
-		var all []string
-		for file := range files {
-			all = append(all, file)
-		}
-		candidates, _ := codexRolloutFilesForWorkingDir(all, pathutil.ResolveForCompare(workingDir))
 		var newestMod time.Time
-		for _, file := range candidates {
+		for _, file := range pool {
 			if info, err := os.Stat(file); err == nil && (path == "" || info.ModTime().After(newestMod)) {
 				path, newestMod = file, info.ModTime()
 			}
@@ -573,7 +593,7 @@ func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string
 		return path, true
 	}
 	for file := range files {
-		if strings.EqualFold(codexConversationIDFromPath(file), selector[1]) {
+		if strings.EqualFold(codexConversationIDFromPath(file), id) {
 			if path != "" {
 				return "", true
 			}
@@ -581,6 +601,14 @@ func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string
 		}
 	}
 	return path, true
+}
+
+func mapKeys(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) {

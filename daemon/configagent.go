@@ -363,6 +363,12 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// the new-rollout set proves nothing and "never arrived" would be a false
 	// verdict (#5471 review).
 	var resumedUntracked bool
+	// isCodexResume additionally suppresses the pane excerpt: a resumed pane
+	// can still show the previous conversation — arbitrary private text a
+	// credential scrubber cannot recognize — and pre-attach only proves the
+	// USER did not type it, not that the content is safe to persist (#5471
+	// review).
+	var isCodexResume bool
 	if agent == tmux.ProgramCodex && req.Prompt != "" {
 		codexHome, rerr := configAgentCodexReceiptHome(req.Program, home)
 		if rerr != nil {
@@ -380,6 +386,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		}
 		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launchDir)
 		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program, launchDir); resume {
+			isCodexResume = true
 			if path != "" {
 				promptReceipt.TrackCodexReceiptRollout(path)
 			} else {
@@ -461,7 +468,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		var paneContent string
 		var paneErr error
 		var paneCapturedAt time.Time
-		if agent == tmux.ProgramCodex {
+		if agent == tmux.ProgramCodex && !isCodexResume {
 			paneCapturedAt = time.Now()
 			paneContent, paneErr = ts.CapturePaneContentContext(ctx)
 		}
@@ -548,7 +555,14 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
 							lateErr,
 						)
-						m.logConfigAgentPaneExcerpt(sessionName, paneContent, paneErr, briefingDeliveredAt.Sub(paneCapturedAt))
+						if isCodexResume {
+							m.info().Printf(
+								"config agent: %s pane excerpt suppressed after unconfirmed briefing receipt: the resumed pane may hold the previous conversation",
+								sessionName,
+							)
+						} else {
+							m.logConfigAgentPaneExcerpt(sessionName, paneContent, paneErr, briefingDeliveredAt.Sub(paneCapturedAt))
+						}
 						// One late re-check (#5471): the 5s/35s windows cannot tell
 						// a slow rollout from a briefing that never became a turn,
 						// so at a horizon where the record is durable-or-absent the

@@ -586,8 +586,13 @@ func TestCodexResumedRolloutPath(t *testing.T) {
 		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", otherDir)
+	// Distinct mtimes pin --last's newest selection: older is oldest, newer
+	// trails foreign — so a cwd-scoped --last picks newer while --all picks
+	// the globally newest foreign rollout.
 	stale := time.Now().Add(-time.Hour)
+	mid := time.Now().Add(-30 * time.Minute)
 	require.NoError(t, os.Chtimes(older, stale, stale))
+	require.NoError(t, os.Chtimes(newer, mid, mid))
 
 	for _, tc := range []struct {
 		name       string
@@ -602,6 +607,8 @@ func TestCodexResumedRolloutPath(t *testing.T) {
 		{"id ignores the cwd filter", "codex resume 039f386f-7206-7fc2-803b-f7045e07a244", workDir, foreign, true},
 		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
 		{"latest picks newest in cwd", "codex resume --last", workDir, newer, true},
+		{"latest --all picks globally newest", "codex resume --last --all", workDir, foreign, true},
+		{"all before last still unscoped", "codex resume --all --last", workDir, foreign, true},
 		{"latest through an env wrapper", "env FOO=1 codex resume --last", workDir, newer, true},
 		{"latest without a cwd is unresolvable", "codex resume --last", "", "", true},
 		{"bare resume opens the picker", "codex resume", workDir, "", true},
