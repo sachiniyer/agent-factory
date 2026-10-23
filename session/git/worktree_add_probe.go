@@ -790,6 +790,18 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 			return errors.Join(out, fmt.Errorf("symlink resolution of %s: %w", lexical, resolveErr))
 		}
 	}
+	// A missing repository is a structural failure (git cannot enter its
+	// cmd.Dir), so the worktree add never writes anything. For an absolute
+	// worktreePath the destination is unrelated to the missing repo, and a
+	// coincidental ENOSPC on its filesystem would convert the structural
+	// failure into an indefinite environmental retry. The ancestor walk and
+	// creatable-parent loop below already skip a missing repo, but the immediate
+	// parent queue and the destination probes did not, so skip them for an
+	// absolute worktreePath when the repo is missing; a relative path's
+	// destination lives under the missing repo, so its probes still run.
+	if repoMissing && filepath.IsAbs(g.worktreePath) {
+		return g.annotateGitWriteError(err)
+	}
 	dirs := []string{filepath.Dir(worktreePath)}
 	// When the destination's parent does not exist yet (a nested relative
 	// worktreePath such as wt/dest, where git creates the missing leading
@@ -832,10 +844,8 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	for {
 		if repoMissing {
 			// A missing repo is a structural failure (git cannot enter its
-			// cmd.Dir), so the worktree add never writes anything. The
-			// ancestor walk would otherwise walk up to the repo's parent
-			// and probe it, turning a coincidental ENOSPC there into an
-			// environmental retry of a structural missing-repo failure.
+			// cmd.Dir), so the ancestor walk must not probe the repo's parent
+			// and turn a coincidental ENOSPC there into an environmental retry.
 			break
 		}
 		if time.Now().After(ancestorDeadline) {
@@ -893,14 +903,11 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	// covers the filesystem git wrote the missing directory into, not just the
 	// final parent and the common dir. annotateGitWriteError dedups via its
 	// probed map, so a creatable parent that coincides with an already-probed
-	// dir is probed once.
+	// dir is probed once. A missing repo is a structural failure (git cannot
+	// enter its cmd.Dir), so the worktree-prefix walker's creatable parents are
+	// not creatable worktree prefixes — skip them the way the ancestor walk is
+	// skipped.
 	if !repoMissing {
-		// A missing repo is a structural failure (git cannot enter its
-		// cmd.Dir), so the worktree-prefix walker's creatable parents are
-		// not creatable worktree prefixes — git never creates the missing
-		// repository, so a full filesystem on its parent is not the resource
-		// errno the classifier must read. Skip the creatable-parent probe
-		// the way the ancestor walk above is skipped.
 		for _, cp := range creatableParents {
 			dirs = append(dirs, cp)
 		}
@@ -943,33 +950,26 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				// destination the way a regular directory is probed. A nonempty
 				// target is skipped: git rejects the add without writing, so a
 				// coincidental ENOSPC on the target's filesystem would stall the
-				// lost-restore loop on a filesystem freeing it cannot fix — UNLESS
-				// the nonempty content is partial-attempt debris from a failed `git
-				// worktree add` rather than a pre-existing destination. `git
-				// worktree add` creates a `.git` file (a gitfile) before it checks
-				// out, so a nonempty target that contains a `.git` *file* is one
-				// git already started writing into and then failed (for example with
-				// ENOSPC mid-checkout), not a destination git rejects without
-				// writing. A pre-existing repository has a `.git` *directory* (its
-				// object store); an already-registered linked worktree also has a
-				// `.git` *file* (its gitdir registration). A non-directory `.git`
-				// alone is not proof of partial-attempt debris: validate the
-				// gitfile's gitdir — a live gitdir means git rejected the add
-				// without writing (a registered worktree), so a coincidental ENOSPC
-				// is not the real errno; an orphaned gitfile (gitdir gone) is debris
-				// from a failed add the probe should cover. A non-ENOENT lstat error
-				// is environmental evidence, not a missing `.git` file.
+				// lost-restore loop on a filesystem freeing it cannot fix. A
+				// nonempty target with a regular `.git` *file* is still not probed:
+				// `git worktree add` creates the gitdir before the gitfile, so an
+				// absent gitdir is a pruned linked worktree (not a gitfile this add
+				// created) and a present gitdir is a live registered worktree git
+				// rejected the add over — git did not write to the destination in
+				// either case, so a coincidental ENOSPC must not stall the loop. A
+				// non-ENOENT stat error on the gitdir (a live but inaccessible
+				// registered worktree) is environmental evidence, preserved below; a
+				// non-ENOENT lstat error on the `.git` entry itself is environmental
+				// evidence too, not a missing `.git` file.
 				if empty {
 					dirs = append(dirs, worktreePath)
 				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && gitInfo.Mode().IsRegular() {
-					// orphanedGitfileDebris restricts to ENOENT (a live but
-					// inaccessible gitdir is preserved, not probed).
 					gitFile := filepath.Join(worktreePath, ".git")
-					if debris, dErr := orphanedGitfileDebris(gitFile); debris {
-						dirs = append(dirs, worktreePath)
-					} else if dErr != nil {
+					if _, dErr := orphanedGitfileDebris(gitFile); dErr != nil {
 						gitDirStatErr = dErr
 					}
+				} else if gitErr != nil && !os.IsNotExist(gitErr) {
+					gitDirStatErr = gitErr
 				}
 			} else if !os.IsNotExist(dErr) {
 				readDirErr = dErr

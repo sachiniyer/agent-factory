@@ -518,16 +518,28 @@ func hasFinalSymlinkComponent(path string) bool {
 // worktree add` (whose gitdir may no longer exist) from one a pre-existing
 // registered worktree left behind — the latter is not partial-attempt debris.
 //
-// The read runs through BoundedReadFile so a `.git` entry on a stalled
+// maxGitfileBytes caps how much of a `.git` gitfile BoundedReadFileLimit reads.
+// A gitdir path is a single short line, so only the small prefix needed for
+// parsing is read; a restored symlink destination containing a very large
+// regular `.git` file (not a gitfile) cannot make the diagnostic consume
+// gigabytes or OOM the daemon, since the deadline only limits how long the
+// caller waits and does not cap the worker's allocation. 4 KiB comfortably
+// holds a gitdir path on every platform Git supports (PATH_MAX is 4096 on
+// Linux, the Windows MAX_PATH is 260, and macOS is 1024) while bounding the read.
+const maxGitfileBytes = 4096
+
+// The read runs through BoundedReadFileLimit so a `.git` entry on a stalled
 // filesystem returns the bounded deadline's non-answer instead of blocking the
-// synchronous lost-restore poll forever; a non-regular entry (FIFO, device,
-// socket, or a `.git` symlink to a directory) is rejected by the caller before
-// this runs, since the unbounded os.ReadFile it replaced would otherwise wedge
-// on such an entry that a bounded Lstat accepts merely for being "not a
-// directory". An unreadable or non-gitfile entry is not partial-attempt debris
-// and returns ok = false so the caller treats it as pre-existing content.
+// synchronous lost-restore poll forever, and so a huge regular `.git` file is
+// not read in full — only the bounded prefix a gitfile needs is read, with an
+// explicit maximum size. A non-regular entry (FIFO, device, socket, or a `.git`
+// symlink to a directory) is rejected by the caller before this runs, since the
+// unbounded os.ReadFile it replaced would otherwise wedge on such an entry that
+// a bounded Lstat accepts merely for being "not a directory". An unreadable or
+// non-gitfile entry is not partial-attempt debris and returns ok = false so the
+// caller treats it as pre-existing content.
 func gitdirFromGitfile(gitfile string) (string, bool) {
-	b, err := BoundedReadFile(gitfile)
+	b, err := BoundedReadFileLimit(gitfile, maxGitfileBytes)
 	if err != nil {
 		return "", false
 	}
@@ -555,25 +567,36 @@ func gitdirFromGitfile(gitfile string) (string, bool) {
 	return dir, true
 }
 
-// orphanedGitfileDebris reports whether a regular `.git` file at gitFile is
-// partial-attempt debris from a failed `git worktree add` (a gitfile whose
-// referenced gitdir no longer exists) rather than a pre-existing destination
-// git rejected the add without writing. A live gitdir means the worktree is
-// already registered, so a coincidental ENOSPC on its filesystem is not the
-// real resource errno and the probe must not target it; only an ENOENT gitdir
-// (the add created the gitfile and then failed, leaving it orphaned) is debris
-// the probe covers. A non-ENOENT stat error (EACCES, EIO, ErrProbeTimedOut)
-// is environmental evidence about a live but temporarily inaccessible gitdir,
-// not proof of an orphaned gitfile; the error is returned so the caller
-// preserves it the way it preserves the destination and ancestor stat errors,
-// rather than probing a registered worktree git rejected the add over.
+// orphanedGitfileDebris stat's a regular `.git` file's referenced gitdir and
+// returns a non-ENOENT stat error to the caller as environmental evidence. A
+// regular `.git` file at a nonempty destination is not, on its own, partial-
+// attempt debris from this add: `git worktree add` creates the gitdir before the
+// gitfile, so an absent gitdir is a pruned linked worktree (its registration was
+// deleted, not a gitfile this add created and then failed), and a present
+// gitdir is a live registered worktree git rejected the add over. Either way
+// the destination already existed and git did not write to it, so a
+// coincidental ENOSPC on its filesystem cannot fix the structural failure and
+// the probe must not write-probe the destination — absence of the referenced
+// gitdir alone cannot establish that this invocation created the gitfile. A
+// non-ENOENT stat error (EACCES, EIO, ErrProbeTimedOut) is environmental
+// evidence about a live but temporarily inaccessible gitdir, not proof of an
+// orphaned gitfile; the error is returned so the caller preserves it the way it
+// preserves the destination and ancestor stat errors, rather than probing a
+// registered worktree git rejected the add over.
 func orphanedGitfileDebris(gitFile string) (bool, error) {
 	gitDir, ok := gitdirFromGitfile(gitFile)
 	if !ok {
 		return false, nil
 	}
 	if _, dErr := statSpaceProbe(gitDir); os.IsNotExist(dErr) {
-		return true, nil
+		// An absent gitdir is a pruned linked worktree (its registration was
+		// deleted), not a gitfile this add created: `git worktree add` creates
+		// the gitdir before the gitfile, so a present gitfile with an absent
+		// gitdir predates this add. The destination already existed and git
+		// rejected the add without writing, so it is not debris the probe
+		// covers (a coincidental ENOSPC on its filesystem cannot fix the
+		// structural failure).
+		return false, nil
 	} else if dErr != nil {
 		return false, dErr
 	}

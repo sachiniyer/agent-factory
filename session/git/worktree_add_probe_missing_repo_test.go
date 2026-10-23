@@ -88,22 +88,22 @@ func TestAnnotateWorktreeAddError_MissingRepoPathSkipsCreatableParentProbe(t *te
 			"missing-repository failure and must not reach the chain")
 }
 
-// TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed pins the
-// contract the #5421 review added: when the destination is a symlink to a directory a
-// failed `git worktree add` started populating, the nonempty target is partial-attempt
-// debris (a `.git` entry git created before the add failed) rather than a pre-existing
-// destination git rejects without writing. The empty-dir gate would otherwise skip the
-// probe on the nonempty target, and a coincidental ENOSPC on the target's filesystem
-// (the real resource errno the failed add hit) would be lost — the lost-restore loop
-// would retry a structural "already exists" rejection that freeing the target cannot
-// fix. Retain coverage when the contents show the failed worktree add started
-// populating the target (a `.git` entry), the way an empty target is probed.
+// TestAnnotateWorktreeAddError_SymlinkedDestinationOrphanedGitfileSkipsProbe pins the
+// contract the #5421 review added: a nonempty target whose `.git` *file* (a gitfile) points
+// at an absent gitdir is NOT partial-attempt debris from a failed `git worktree add`. `git
+// worktree add` creates the gitdir before the gitfile, so a present gitfile with an absent
+// gitdir is a stale linked worktree whose registration was pruned or deleted — a
+// pre-existing destination git rejects the add over without writing, not one the failed
+// add started populating. The empty-dir gate skips the nonempty target, and the `.git`
+// file must not re-enable the probe: a coincidental ENOSPC on the target's filesystem is
+// not the real resource errno of a failed add, so it must not turn the structural
+// "already exists" rejection into an indefinite environmental retry.
 //
-// Deterministic in both directions: against the form that skipped every nonempty
-// target the write probe never targets the symlinked destination and the test fails;
-// with the `.git`-debris check the probe targets the symlinked destination and the
-// ENOSPC reaches the chain.
-func TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed(t *testing.T) {
+// Deterministic in both directions: against the form that treated every orphaned gitfile
+// as debris the write probe targeted the symlinked destination and the ENOSPC reached the
+// chain, so the test failed; with the gitdir-absence-is-not-debris fix the write probe
+// never targets the destination and the ENOSPC never reaches the chain.
+func TestAnnotateWorktreeAddError_SymlinkedDestinationOrphanedGitfileSkipsProbe(t *testing.T) {
 	oldWrite := writeSpaceProbe
 	defer func() { writeSpaceProbe = oldWrite }()
 	oldStat := statSpaceProbe
@@ -121,22 +121,24 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed
 	defer func() { daemonLaunchCwd = oldLaunch }()
 
 	// The relative worktree path's final component is a symlink to a nonempty
-	// directory whose contents are partial-attempt debris from a failed
-	// `git worktree add`: a `.git` entry the add created before it failed with
-	// ENOSPC mid-checkout. `git worktree add` rejects a pre-existing nonempty
-	// destination without writing, but a target the failed add started populating
-	// is one git already wrote into, so a full filesystem there is the real
-	// resource errno the lost-restore classifier must read.
+	// directory whose `.git` *file* points at a gitdir that no longer exists:
+	// `git worktree add` creates the gitdir before the gitfile, so a present
+	// gitfile with an absent gitdir is a stale linked worktree whose
+	// registration was pruned (git rejected the add over a pre-existing
+	// destination without writing there), not a failed add's partial-attempt
+	// debris. A coincidental ENOSPC on the target's filesystem cannot fix the
+	// structural "already exists" rejection and must not stall the lost-restore
+	// loop.
 	repo := filepath.Join(launchCwd, "repo")
 	require.NoError(t, os.Mkdir(repo, 0o755))
 	realTarget := t.TempDir()
 	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
 	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
-	// The partial-attempt debris: a `.git` *file* (a gitfile pointing at the
-	// worktree's gitdir) the failed add created before it failed with ENOSPC
-	// mid-checkout, plus a partial checkout file. `git worktree add` creates a
-	// `.git` file, not a `.git` directory; a `.git` directory is a pre-existing
-	// repository that git rejects without writing.
+	// A `.git` *file* (a gitfile) pointing at a gitdir that does not exist —
+	// the registration of a stale linked worktree, not a failed add's gitfile.
+	// `git worktree add` creates a `.git` file, not a `.git` directory; a
+	// `.git` directory is a pre-existing repository that git rejects without
+	// writing.
 	require.NoError(t, os.WriteFile(filepath.Join(realTarget, ".git"), []byte("gitdir: /repo/.git/worktrees/wt\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "partial"), []byte("x"), 0o644))
 
@@ -150,10 +152,9 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed
 
 	// Stat follows the symlink and reports a directory (the nonempty target);
 	// Lstat reports the symlink itself so the gate reads the target's entries
-	// rather than blindly probing every symlinked directory. The empty-dir
-	// read reports a nonempty target (the debris), so the `.git`-debris check
-	// is the only thing that retains coverage for a target the failed add
-	// started populating.
+	// rather than blindly probing every symlinked directory. The empty-dir read
+	// reports a nonempty target, so the `.git`-file check is the only thing that
+	// could re-enable the probe — an orphaned gitfile must not.
 	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
 	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
 	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
@@ -170,15 +171,16 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed
 
 	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
 	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
-	require.True(t, errors.Is(out, syscall.ENOSPC),
-		"a nonempty target the failed `git worktree add` started populating (a `.git` entry) "+
-			"must be probed through to its target — a full filesystem there is the real ENOSPC the "+
-			"failed add hit, not a coincidental ENOSPC on a pre-existing destination git rejects "+
-			"without writing: %v", out)
-	require.Contains(t, probedDirs, destPath,
-		"the write probe must target the symlinked destination (%s) — its target's filesystem is "+
-			"one the failed add already wrote into, so a full filesystem there is the real resource "+
-			"errno the lost-restore classifier must read", destPath)
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a nonempty target whose `.git` file points at an absent gitdir is a stale linked "+
+			"worktree git rejected the add over (git creates the gitdir before the gitfile, so an "+
+			"absent gitdir is not a failed add's debris), not a target the failed add started "+
+			"populating — a coincidental ENOSPC on its filesystem must not turn the structural "+
+			"'already exists' rejection into an environmental retry: %v", out)
+	require.NotContains(t, probedDirs, destPath,
+		"the write probe must not target the symlinked destination (%s) — its `.git` file points "+
+			"at an absent gitdir, so the destination already existed and git rejected the add "+
+			"without writing there", destPath)
 }
 
 // TestAnnotateWorktreeAddError_SymlinkedDestinationPreExistingRepoSkipsProbe pins the
@@ -188,10 +190,10 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationDirtiedByFailedAddIsProbed
 // `git worktree add` rejects it as already existing without writing there, so the
 // empty-dir gate must not probe the target: if that filesystem is coincidentally full,
 // the resulting ENOSPC is a structural "already exists" rejection freeing the target
-// cannot fix, not the real resource errno of a failed add. The earlier `.git`-existence
-// check probed every nonempty target with a `.git` entry and turned that coincidental
-// ENOSPC into an unbounded environmental wait; this test pins that only a `.git` *file*
-// (partial-attempt debris from a failed add) retains coverage.
+// cannot fix, not the real resource errno of a failed add. A `.git` *file* (a gitfile)
+// with an absent gitdir is also not partial-attempt debris: `git worktree add` creates the
+// gitdir before the gitfile, so an absent gitdir is a stale linked worktree git rejected
+// the add over, not a failed add's debris — see the orphaned-gitfile test for that case.
 func TestAnnotateWorktreeAddError_SymlinkedDestinationPreExistingRepoSkipsProbe(t *testing.T) {
 	oldWrite := writeSpaceProbe
 	defer func() { writeSpaceProbe = oldWrite }()
