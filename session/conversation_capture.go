@@ -150,6 +150,12 @@ func CaptureAgentConversation(agent string, snap ConversationCaptureSnapshot, ti
 // a just-spawned process. Callers must take snap before spawning the pane. Other
 // providers return ErrPromptReceiptUnavailable rather than manufacturing an
 // acknowledgement from pane pixels.
+//
+// A snapshot taken with a launch working directory correlates the receipt to
+// that directory's rollouts, so another Codex's concurrently created rollout
+// cannot force ErrPromptReceiptAmbiguous — the same rule capture applies
+// (#5471: a receipt wait outliving its spawn window otherwise turns unanswerable
+// on any box where Codex sessions come and go).
 func WaitForPromptReceipt(
 	ctx context.Context,
 	agent string,
@@ -165,7 +171,7 @@ func WaitForPromptReceipt(
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		received, err := codexPromptReceiptOnce(snap, prompt)
+		received, undecided, err := codexPromptReceiptOnce(snap, prompt)
 		if err != nil {
 			return err
 		}
@@ -173,6 +179,9 @@ func WaitForPromptReceipt(
 			return nil
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
+			if undecided {
+				return fmt.Errorf("prompt receipt undecidable within %s: a new Codex rollout's session metadata never became classifiable", timeout)
+			}
 			return fmt.Errorf("%w in Codex rollout within %s", ErrPromptReceiptNotObserved, timeout)
 		}
 
@@ -352,19 +361,26 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) []string {
 	return candidates
 }
 
-func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (bool, error) {
-	candidates := newCodexRolloutFiles(snap)
-	if len(candidates) == 0 {
-		return false, nil
-	}
+// codexPromptReceiptOnce reports one observation of the receipt store:
+// whether a NEW rollout correlated to the snapshot's launch working directory
+// recorded prompt as a user turn. The working-directory correlation is the same
+// fail-closed rule capture uses — without it, any Codex process on the box
+// creating a rollout during a long wait (the config agent's 5-minute late
+// re-check, #5471) would force the >1-candidate refusal and make the check
+// permanently unanswerable on a busy host. undecided reports a new rollout
+// whose session_meta is not yet classifiable: it could be the awaited one
+// mid-write, so neither absence nor ambiguity may be concluded yet.
+func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, err error) {
+	observed := newCodexRolloutFiles(snap)
+	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	if len(candidates) > 1 {
-		return false, fmt.Errorf("%w: %d new Codex rollout files appeared", ErrPromptReceiptAmbiguous, len(candidates))
+		return false, false, fmt.Errorf("%w: %d new Codex rollout files appeared", ErrPromptReceiptAmbiguous, len(candidates))
 	}
 	matches := 0
 	for _, path := range candidates {
 		received, err := codexRolloutHasPrompt(path, prompt)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		if received {
 			matches++
@@ -374,14 +390,15 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (bo
 	case 0:
 		// Another Codex process can create a rollout during this spawn. Do not
 		// fail merely because it exists: the exact briefing may appear in this
-		// config agent's rollout on the next poll.
-		return false, nil
+		// config agent's rollout on the next poll — and a still-unclassifiable
+		// rollout cannot be ruled out as that rollout either.
+		return false, uncorrelated > 0, nil
 	case 1:
-		return true, nil
+		return true, false, nil
 	default:
 		// One candidate can contribute at most one match. Keep this defensive arm
 		// so future receipt formats cannot silently weaken that invariant.
-		return false, fmt.Errorf("%w: one rollout produced %d matches", ErrPromptReceiptAmbiguous, matches)
+		return false, false, fmt.Errorf("%w: one rollout produced %d matches", ErrPromptReceiptAmbiguous, matches)
 	}
 }
 

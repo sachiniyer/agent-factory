@@ -351,7 +351,11 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	}
 	// Detect and snapshot before launch so Codex cannot create its rollout between
 	// the before-image and tmux start. The receipt path is resolved from the exact
-	// command environment, not the daemon's CODEX_HOME (#2228 review).
+	// command environment, not the daemon's CODEX_HOME (#2228 review), and the
+	// snapshot is bound to the launch working directory: the late re-check waits
+	// five minutes, and a receipt scan that counted EVERY new rollout under
+	// CODEX_HOME would go ambiguous the moment an unrelated Codex session creates
+	// one on a busy box (#5471).
 	agent := tmux.DetectAgentFromCommand(req.Program)
 	var promptReceipt session.ConversationCaptureSnapshot
 	if agent == tmux.ProgramCodex && req.Prompt != "" {
@@ -359,7 +363,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		if rerr != nil {
 			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
 		}
-		promptReceipt = session.BeginConversationCaptureAtCodexHome(codexHome)
+		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, home)
 	}
 
 	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession

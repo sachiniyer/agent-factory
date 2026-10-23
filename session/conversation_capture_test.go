@@ -356,6 +356,97 @@ func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 		"prompt coincidence cannot prove which new rollout belongs to the launched pane")
 }
 
+// A bound snapshot correlates the receipt to the launch working directory —
+// the rule capture already applies (#2228 review) and the one that keeps the
+// config agent's 5-minute late re-check answerable on a box where other Codex
+// sessions create rollouts in the same CODEX_HOME (#5471 review).
+func TestWaitForPromptReceipt_WorkingDirCorrelationIgnoresOtherCwds(t *testing.T) {
+	codexHome := t.TempDir()
+	workDirA := filepath.Join(t.TempDir(), "session-a")
+	workDirB := filepath.Join(t.TempDir(), "session-b")
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirA)
+
+	other := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDirB)
+	mine := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDirA)
+	appendCodexRolloutEvent(t, other, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "unrelated session"},
+	})
+	appendCodexRolloutEvent(t, mine, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"a sibling Codex's rollout in another working directory must not force ambiguity")
+}
+
+func TestWaitForPromptReceipt_WorkingDirSameCwdStaysAmbiguous(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
+		"two rollouts in the launch directory genuinely cannot be told apart")
+}
+
+// A new rollout whose session_meta is still mid-write cannot be ruled OUT as
+// the awaited one, so expiry under it is "undecidable", never "not observed" —
+// the late re-check's never-arrived verdict must not claim a file it could not
+// classify (#5471).
+func TestWaitForPromptReceipt_UncorrelatableRolloutStaysUndecided(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"an unclassifiable rollout is not absence")
+	require.ErrorContains(t, err, "undecidable")
+}
+
+// And while the window is still open the undecided rollout gets the same grace
+// the receipt wait gives a slow one: it can settle into a real receipt.
+func TestWaitForPromptReceipt_UncorrelatedSettlesIntoReceipt(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	const name = "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl"
+	writeEmptyCodexRolloutFile(t, codexHome, name)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 2*time.Second)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	path := writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a receipt whose rollout settled mid-wait was never observed")
+	}
+}
+
 func TestWaitForPromptReceipt_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	codexHome := t.TempDir()
 	snap := BeginConversationCaptureAtCodexHome(codexHome)

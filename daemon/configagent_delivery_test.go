@@ -310,7 +310,21 @@ func runConfigAgentCodexFixture(mode string) error {
 	if err := os.MkdirAll(filepath.Dir(rollout), 0755); err != nil {
 		return fmt.Errorf("create fake Codex sessions dir: %w", err)
 	}
-	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta"}`+"\n"), 0600); err != nil {
+	// session_meta carries the pane's real working directory, the same field a
+	// bound receipt snapshot correlates on (#5471): without it this rollout is
+	// uncorrelatable and no briefing it records can ever be observed.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve fake Codex working dir: %w", err)
+	}
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": cwd},
+	})
+	if err != nil {
+		return fmt.Errorf("encode fake Codex session_meta: %w", err)
+	}
+	if err := os.WriteFile(rollout, append(meta, '\n'), 0600); err != nil {
 		return fmt.Errorf("create fake Codex rollout: %w", err)
 	}
 
