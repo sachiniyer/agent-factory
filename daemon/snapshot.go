@@ -195,6 +195,26 @@ func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	return m.skippedReposScopedLocked(repoID)
 }
 
+// seedStartupRowsFailedRepos records the repos whose instances.json PARSED at
+// daemon startup but whose rows failed to load (rows-failed-to-load). The
+// startup orphan sweep still arms from skippedRepos, but the Snapshot RPC
+// withholds these repos from the wire SkippedRepos so list/get/whoami serve
+// the loadable rows plus a log warning instead of refusing the whole repo —
+// matching master, which never seeded a fresh startup rows-failure (the
+// refusal names a count, not a session, and restore/kill resolve titles
+// against the in-memory set, which by definition excludes the unloadable row).
+// A polling-path previously-skipped repo (corrupted at startup, then
+// parses-but-rows-fail on poll) is NOT seeded here, so its rows-failed rewrite
+// still surfaces on the wire. The caller MUST hold m.mu.
+func (m *Manager) seedStartupRowsFailedRepos(skipped []SkippedRepo) {
+	m.startupRowsFailedRepos = make(map[string]bool, len(skipped))
+	for _, s := range skipped {
+		if s.Reason == SkippedRepoReasonRowsFailedToLoad {
+			m.startupRowsFailedRepos[s.RepoID] = true
+		}
+	}
+}
+
 // skippedReposScopedLocked returns a defensive copy of m.skippedRepos scoped to
 // repoID (all repos when empty), with a fresh startup rows-failure withheld from
 // the wire (startupRowsFailedRepos). The caller MUST hold m.mu: it is the read
