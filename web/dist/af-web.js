@@ -18586,6 +18586,7 @@ function mount() {
   window.addEventListener("focus", noteAttentionSeen);
   document.addEventListener("visibilitychange", noteAttentionSeen);
   document.addEventListener("focusin", noteAttentionSeen);
+  narrowViewport.addEventListener("change", noteAttentionSeen);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
   watchSystemTheme();
@@ -20019,7 +20020,10 @@ var actions = {
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
-  layoutChanged: () => splitView.refit(),
+  layoutChanged: () => {
+    splitView.refit();
+    noteAttentionSeen();
+  },
   closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,

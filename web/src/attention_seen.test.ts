@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { agentPaneExposed, AttentionClearer, attentionSeen, type AttentionView } from "./attention_seen.js";
@@ -89,4 +90,12 @@ test("attention_seen: the open drawer hides the pane only on a narrow viewport",
   assert.equal(agentPaneExposed(page(true), true), false);
   assert.equal(agentPaneExposed(page(false), true), true);
   assert.equal(agentPaneExposed(page(true), false), true, "a wide rail sits beside the pane");
+});
+
+// Closing the drawer or widening the window changes no store state, so the wiring
+// must recheck on those exposure changes itself.
+test("attention_seen: closing the drawer or widening the window rechecks", () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.match(source, /layoutChanged: \(\) => \{[^}]*noteAttentionSeen\(\);/);
+  assert.match(source, /narrowViewport\.addEventListener\("change", noteAttentionSeen\)/);
 });

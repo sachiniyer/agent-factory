@@ -315,6 +315,7 @@ function mount(): void {
   document.addEventListener("visibilitychange", noteAttentionSeen);
   // A closed dialog changes no store state; focus returning to the page marks it.
   document.addEventListener("focusin", noteAttentionSeen);
+  narrowViewport.addEventListener("change", noteAttentionSeen);
   rerender();
 
   // The keyboard/focus state machine (#1693), wired once at the document level in
@@ -2617,7 +2618,10 @@ const actions = {
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
-  layoutChanged: () => splitView.refit(),
+  layoutChanged: () => {
+    splitView.refit();
+    noteAttentionSeen();
+  },
   closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
