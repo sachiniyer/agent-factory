@@ -434,8 +434,22 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
 // unavailable.
+//
+// It replays FromInstanceData's full fence-restoration order — archive, then
+// relocation recovery, then handoff and account-swap — so the rollback-safe
+// ownership projection ForStorage writes for any row carrying an unresolved
+// worktree relocation recovery cannot survive into the disk-fallback client
+// view. A recovery row whose safety metadata is missing or undecodable is
+// corrupt; ForClientRead cannot drop the row, so it leaves the ForStorage
+// projection in place and the row reads as the conservative unknown-ownership
+// verdict rather than fabricating confidence — the same fail-closed direction
+// every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	restored, err := d.RestoreRelocationRecoveryOriginals()
+	if err == nil {
+		d = restored
+	}
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
