@@ -602,7 +602,8 @@ func TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout(t *testing.T) {
 	})
 
 	// A second config agent's rollout appears in the same AF home after this
-	// spawn's receipt wait already identified its own file.
+	// spawn's receipt wait already identified its own file during the initial
+	// window.
 	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
 		"sessions", "2026", "07", "21",
 		"rollout-2026-07-21T09-00-00-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
@@ -615,6 +616,12 @@ func TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout(t *testing.T) {
 	require.NoError(t, os.WriteFile(sibling, append(meta, '\n'), 0600))
 	require.NoError(t, appendConfigAgentCodexUserTurn(sibling, "a different config agent's briefing"))
 
+	// Our turn must land AFTER the escalation window expires unconfirmed — a
+	// receipt visible to the escalation poll resolves as "confirmed late" and
+	// never reaches the re-check — but before the re-check fires.
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt was still not observed")
+	}, 3*time.Second, 25*time.Millisecond)
 	require.NoError(t, appendConfigAgentCodexUserTurn(rollout, prompt))
 	require.Eventually(t, func() bool {
 		return strings.Contains(info.String(), "briefing receipt observed at the late re-check")
