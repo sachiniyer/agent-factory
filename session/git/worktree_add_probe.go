@@ -960,18 +960,18 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				// is environmental evidence, not a missing `.git` file.
 				if empty {
 					dirs = append(dirs, worktreePath)
-				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && !gitInfo.IsDir() {
-					// A non-directory `.git` is a gitfile, but an already-registered
-					// linked worktree also has one: validate the gitfile's gitdir
-					// exists — a live gitdir means git rejected the add (registered
-					// worktree), so skip; an orphaned gitfile is debris — probe.
+				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && gitInfo.Mode().IsRegular() {
+					// A regular `.git` file is a gitfile; validate its gitdir — a
+					// live gitdir means a registered worktree (skip), an orphaned
+					// gitfile is debris (probe). Restricting to a regular file
+					// excludes a FIFO/device/`.git` symlink the unbounded read in
+					// gitdirFromGitfile would wedge; a non-regular or unrecognized
+					// `.git` is pre-existing content, not debris (see gitdirFromGitfile).
 					gitFile := filepath.Join(worktreePath, ".git")
 					if gitDir, ok := gitdirFromGitfile(gitFile); ok {
 						if _, dErr := statSpaceProbe(gitDir); dErr != nil {
 							dirs = append(dirs, worktreePath)
 						}
-					} else {
-						dirs = append(dirs, worktreePath)
 					}
 				}
 			} else if !os.IsNotExist(dErr) {

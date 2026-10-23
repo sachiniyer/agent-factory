@@ -492,8 +492,17 @@ func hasPathTraversal(path string) bool {
 // = false. The caller uses this to distinguish a gitfile from a failed `git
 // worktree add` (whose gitdir may no longer exist) from one a pre-existing
 // registered worktree left behind — the latter is not partial-attempt debris.
+//
+// The read runs through BoundedReadFile so a `.git` entry on a stalled
+// filesystem returns the bounded deadline's non-answer instead of blocking the
+// synchronous lost-restore poll forever; a non-regular entry (FIFO, device,
+// socket, or a `.git` symlink to a directory) is rejected by the caller before
+// this runs, since the unbounded os.ReadFile it replaced would otherwise wedge
+// on such an entry that a bounded Lstat accepts merely for being "not a
+// directory". An unreadable or non-gitfile entry is not partial-attempt debris
+// and returns ok = false so the caller treats it as pre-existing content.
 func gitdirFromGitfile(gitfile string) (string, bool) {
-	b, err := os.ReadFile(gitfile)
+	b, err := BoundedReadFile(gitfile)
 	if err != nil {
 		return "", false
 	}
