@@ -3,7 +3,7 @@ import { register } from "node:module";
 import test from "node:test";
 
 register("./browser_stub_loader.mjs", import.meta.url);
-const { AttachTerminal } = await import("./terminal.js");
+const { AttachTerminal, terminalFontSize } = await import("./terminal.js");
 const { decode, Op } = await import("./frame.js");
 
 // Exercise the real initial-fit/connection boundary without constructing xterm.
@@ -81,4 +81,28 @@ test("binary output reaches the socket byte-for-byte, never UTF-8 split", () => 
   const frame = decode(sent[0]);
   assert.equal(frame.op, Op.Input);
   assert.deepEqual(Array.from(frame.data), [0x1b, 0x5b, 0x4d, 0x60, 0x85, 0x93]);
+});
+
+// #5492: phones open at half the desktop pitch so a ~390px viewport fits a
+// usable grid. The two ends pin both acceptance halves — desktop stays 13,
+// phone is exactly 50% of it.
+test("the phone breakpoint halves the terminal's default font size", () => {
+  assert.equal(terminalFontSize(false), 13);
+  assert.equal(terminalFontSize(true), terminalFontSize(false) / 2);
+});
+
+test("a phone-boundary crossing re-picks the pitch and refits once", () => {
+  const term = { options: { fontSize: 13 } };
+  const calls: string[] = [];
+  const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
+    term,
+    phone: { matches: true },
+    scheduleVisibleFit: () => calls.push("refit"),
+  }) as { applyDeviceFontSize(): void };
+  terminal.applyDeviceFontSize();
+  assert.equal(term.options.fontSize, 6.5);
+  assert.deepEqual(calls, ["refit"]);
+  // A repeat that changes nothing must not schedule a no-op fit.
+  terminal.applyDeviceFontSize();
+  assert.deepEqual(calls, ["refit"]);
 });
