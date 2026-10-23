@@ -328,3 +328,63 @@ func TestStartup_ParsesButUnloadableRepoWithheldFromSnapshotWire_MatchesMaster(t
 	require.Equal(t, []string{"ok"}, snapshotFilterTitles(resp.Instances))
 	require.Empty(t, resp.SkippedRepos, "a scoped read to a healthy repo reports no skip")
 }
+
+// TestStartup_RowsFailedThenCorrupt_SurfacesOnWire pins the fix for a startup
+// rows-failure whose instances.json later becomes corrupted or unreadable on the
+// polling path. The skip entry's reason is rewritten to corrupted/unreadable by
+// retainStillSkipped, which is an actionable state with a real remedy (repair
+// the file), so it must surface on the wire even though the repo ID is still in
+// startupRowsFailedRepos. Pre-fix, skippedReposScopedLocked checked the repo ID
+// alone, so the now-corrupted entry stayed suppressed and list/get/whoami
+// silently served an incomplete snapshot for the daemon's lifetime.
+func TestStartup_RowsFailedThenCorrupt_SurfacesOnWire(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	failingFromInstanceForRefreshFor(t, "stuck")
+	_ = captureWarnings(t)
+
+	unloadableJSON, err := json.Marshal([]session.InstanceData{{Title: "stuck", ID: "id-stuck"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("stuck-r", unloadableJSON))
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: m}
+
+	// Startup: the repo's file parses but its row fails to materialize, so it
+	// is a fresh rows-failure seeded into startupRowsFailedRepos and withheld
+	// from the wire (master behavior).
+	m.mu.Lock()
+	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		m.skippedRepos, "startup seeds the rows-failed skip entry")
+	require.True(t, m.startupRowsFailedRepos["stuck-r"],
+		"the fresh startup rows-failure is tracked so the wire withholds it")
+	m.mu.Unlock()
+
+	var resp SnapshotResponse
+	require.NoError(t, cs.Snapshot(SnapshotRequest{}, &resp))
+	require.Empty(t, resp.SkippedRepos, "fresh startup rows-failure is withheld from the wire")
+
+	// Poll: the file becomes corrupted (unparseable JSON). retainStillSkipped
+	// rewrites the skip entry's reason to corrupted-instances-json, which is
+	// actionable, so the wire must surface it even though the repo ID is still
+	// in startupRowsFailedRepos.
+	seedCorruptedRepo(t, "stuck-r")
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked())
+	require.Equal(t, SkippedRepoReasonCorruptedInstancesJSON, m.skippedRepos[0].Reason,
+		"the polling path rewrites the skip entry's reason to the file's current state")
+	m.mu.Unlock()
+
+	resp = SnapshotResponse{}
+	require.NoError(t, cs.Snapshot(SnapshotRequest{}, &resp))
+	require.Equal(t, []string{"stuck-r"}, skippedRepoIDs(resp.SkippedRepos),
+		"a repo whose reason changed from rows-failed-to-load to corrupted surfaces on the wire (it has a real remedy)")
+	require.Equal(t, SkippedRepoReasonCorruptedInstancesJSON, resp.SkippedRepos[0].Reason,
+		"the surfaced entry carries the actionable corrupted reason, not the withheld rows-failed one")
+
+	// A scoped read to the now-corrupted repo also surfaces the actionable skip.
+	resp = SnapshotResponse{}
+	require.NoError(t, cs.Snapshot(SnapshotRequest{RepoID: "stuck-r"}, &resp))
+	require.Equal(t, []string{"stuck-r"}, skippedRepoIDs(resp.SkippedRepos),
+		"a scoped read to the now-corrupted repo surfaces the actionable skip")
+}

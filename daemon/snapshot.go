@@ -230,6 +230,13 @@ func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
 	// row). The sweep deferral still arms from skippedRepos, so the live
 	// container is spared; only the wire refusal is decoupled. See
 	// startupRowsFailedRepos.
+	//
+	// The withholding is gated on the entry's CURRENT reason, not the repo ID
+	// alone: a polling refresh can rewrite a startup rows-failure's reason to
+	// corrupted/unreadable when the file later fails to read or parse
+	// (retainStillSkipped carries the fresh entry's reason), and that is an
+	// actionable state with a real remedy the wire must surface — so only a
+	// reason still equal to rows-failed-to-load stays suppressed.
 	withheld := m.startupRowsFailedRepos
 	if repoID == "" {
 		if len(m.skippedRepos) == 0 {
@@ -237,7 +244,7 @@ func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
 		}
 		out := make([]SkippedRepo, 0, len(m.skippedRepos))
 		for _, s := range m.skippedRepos {
-			if withheld[s.RepoID] {
+			if withheld[s.RepoID] && s.Reason == SkippedRepoReasonRowsFailedToLoad {
 				continue
 			}
 			out = append(out, s)
@@ -249,7 +256,7 @@ func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
 		if s.RepoID != repoID {
 			continue
 		}
-		if withheld[s.RepoID] {
+		if withheld[s.RepoID] && s.Reason == SkippedRepoReasonRowsFailedToLoad {
 			continue
 		}
 		out = append(out, s)
