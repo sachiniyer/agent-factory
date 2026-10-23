@@ -111,7 +111,9 @@ func (s *Store) stage(pathspecs []string) error {
 	return err
 }
 
-// trackedDocs maps each doc path in the index to its blob id.
+// trackedDocs maps each doc path in the index to its blob id. An entry of any
+// other mode than 100644 (one a legacy store imported) maps to "", so stage
+// rewrites it as a regular doc or deletes it.
 func (s *Store) trackedDocs() (map[string]string, error) {
 	out, err := s.git(nil, "ls-files", "-s", "-z")
 	if err != nil {
@@ -121,11 +123,16 @@ func (s *Store) trackedDocs() (map[string]string, error) {
 	for _, rec := range strings.Split(out, "\x00") {
 		meta, path, ok := strings.Cut(rec, "\t")
 		fields := strings.Fields(meta)
-		if !ok || len(fields) != 3 || fields[0] != "100644" {
+		if !ok || len(fields) != 3 {
 			continue
 		}
-		if _, _, ok := isDocPath(path); ok {
+		if _, _, ok := isDocPath(path); !ok {
+			continue
+		}
+		if fields[0] == "100644" {
 			docs[path] = fields[1]
+		} else {
+			docs[path] = ""
 		}
 	}
 	return docs, nil

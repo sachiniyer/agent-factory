@@ -139,11 +139,14 @@ func (s *Store) createDoc(slug, file string, data []byte) error {
 		return &fs.PathError{Op: "create", Path: display, Err: err}
 	}
 	f := os.NewFile(uintptr(fd), display)
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	return f.Close()
+	if err != nil {
+		_ = unix.Unlinkat(int(dir.Fd()), file, 0)
+	}
+	return err
 }
 
 func (s *Store) removeDoc(slug, file string) error {

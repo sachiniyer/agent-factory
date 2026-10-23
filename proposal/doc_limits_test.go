@@ -33,6 +33,26 @@ func TestUnreadableSlugFolderIsNotStagedAsDeleted(t *testing.T) {
 	}
 }
 
+func TestImportedExecutableDocIsTracked(t *testing.T) {
+	s, _ := newTestStore(t)
+	oldLayoutStore(t, s)
+	notes := filepath.Join(s.SlugPath("p"), "notes.md")
+	if err := os.WriteFile(notes, []byte("notes\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, s.Dir(), "add", "-A")
+	testGit(t, s.Dir(), "commit", "-q", "-m", "notes")
+	if err := os.Remove(notes); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotAll(s); err != nil {
+		t.Fatal(err)
+	}
+	if out := testGit(t, s.Dir(), "--git-dir="+s.gitDir(), "ls-tree", "HEAD", "p/notes.md"); out != "" {
+		t.Fatalf("a removed doc that was imported as executable stays in HEAD: %q", out)
+	}
+}
+
 func TestOversizedDocIsRefused(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA)
