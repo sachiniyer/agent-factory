@@ -538,6 +538,7 @@ func (s *Service) Write(t Target, slug, doc, text string, author Author) (*DocRe
 	}
 	file, commit, err := r.store.Write(slug, doc, text, by)
 	if err != nil {
+		s.publishSnapshot(r, before, "")
 		return nil, err
 	}
 	s.publishSnapshot(r, before, commit)

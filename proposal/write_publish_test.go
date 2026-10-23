@@ -2,8 +2,31 @@ package proposal
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestRejectedWritePublishesTheSnapshotItTakes(t *testing.T) {
+	svc, host, store := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals", "technical"}); err != nil {
+		t.Fatal(err)
+	}
+	svc.Scan(WatchInput{RepoIDs: []string{testRepoID}})
+	host.takeEvents()
+
+	editOnDisk(t, store, "p", "goals.md", "edited on disk\n")
+	bumpMtime(t, filepath.Join(store.SlugPath("p"), "goals.md"))
+	big := strings.Repeat("x", maxDocSize+1)
+	if _, err := svc.Write(byRepo(), "p", "technical", big, AuthorExternal); err == nil {
+		t.Fatal("an oversized write succeeded")
+	}
+	for _, e := range host.takeEvents() {
+		if e.Doc == "goals.md" && e.Commit != nil {
+			return
+		}
+	}
+	t.Fatal("a rejected write that snapshots a disk edit must publish it")
+}
 
 func TestNoOpWritePublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
