@@ -576,6 +576,54 @@ func TestConfigAgentLateReceiptRecheckNeverArrived(t *testing.T) {
 		"a receipt still absent at the late re-check must be reported as never arrived")
 }
 
+// TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout is the #5471 review's
+// shared-home case: two config agents launch into the same AF home, so a
+// sibling rollout appearing mid-wait lands inside the same working-directory
+// correlation. The receipt check pins this agent's own rollout the moment it is
+// the sole classifiable candidate, so the late re-check still resolves
+// observed/never-arrived instead of reporting ambiguity it cannot classify.
+func TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		2*time.Second, 250*time.Millisecond)
+
+	const prompt = "briefing recorded minutes after every window closed"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// A second config agent's rollout appears in the same AF home after this
+	// spawn's receipt wait already identified its own file.
+	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
+		"sessions", "2026", "07", "21",
+		"rollout-2026-07-21T09-00-00-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0755))
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": os.Getenv("AGENT_FACTORY_HOME")},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sibling, append(meta, '\n'), 0600))
+	require.NoError(t, appendConfigAgentCodexUserTurn(sibling, "a different config agent's briefing"))
+
+	require.NoError(t, appendConfigAgentCodexUserTurn(rollout, prompt))
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "briefing receipt observed at the late re-check")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a same-cwd sibling rollout must not make the late re-check ambiguous")
+	require.NotContains(t, warnings.String(), "late receipt re-check could not determine")
+	require.NotContains(t, warnings.String(), "briefing receipt never arrived")
+}
+
 // TestConfigAgentLateReceiptRecheckSkipsGoneSession is the #5471 review's
 // gone-session case: if the config agent left tracking — or its pane exited on
 // its own without a reap — the late re-check must skip quietly rather than log

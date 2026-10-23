@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,6 +35,13 @@ var (
 	// appeared after the snapshot. Prompt text cannot identify which process owns
 	// which rollout, even when only one has recorded it so far (#2228 review).
 	ErrPromptReceiptAmbiguous = errors.New("prompt receipt ambiguous")
+	// ErrPromptReceiptUndecidable means the wait expired while a NEW rollout
+	// existed whose session_meta never became classifiable. It is neither
+	// absence nor receipt: the file could still be the launched process's own
+	// rollout mid-write, so a never-arrived verdict must not claim it. It is a
+	// recognized unconfirmed outcome — callers that keep observing on
+	// ErrPromptReceiptNotObserved keep observing on this too (#5471 review).
+	ErrPromptReceiptUndecidable = errors.New("prompt receipt undecidable")
 )
 
 // errCodexCaptureUndecided marks a retryable observation in which at least one
@@ -65,11 +73,79 @@ type ConversationCaptureSnapshot struct {
 	codexHome   string
 	workingDir  string
 	codexBefore map[string]struct{}
+	// codexBeforeErr is set when the before-image scan itself failed: the map
+	// can no longer distinguish "new" from "pre-existing", and every check
+	// against this snapshot must surface that failure instead of guessing.
+	codexBeforeErr error
+	// receiptState preserves rollout identity across the separate
+	// WaitForPromptReceipt calls that share one snapshot — the config agent's
+	// initial, escalation, and five-minute windows are three different calls.
+	// Once exactly one classifiable new rollout is bound to the launch
+	// directory it is provably the spawned process's own file, and a same-cwd
+	// sibling landing later (a second config agent sharing AF home, #5471
+	// review) cannot re-widen a question earlier polling already answered.
+	receiptState *codexReceiptState
 	// carried is the conversation a same-agent account swap copied into this
 	// store and resumes (#4367). Its rollout is recorded in codexBefore even
 	// though the copy lands after the snapshot, so capture only ever reports a
 	// thread Codex itself minted.
 	carried AgentConversationData
+}
+
+// codexReceiptState is the receipt-check memory carried inside a snapshot.
+// path is the rollout proven to be the launched process's own ("" until one
+// classifiable candidate exists); scans memoizes prompt scans by (size,
+// mtime), because a rollout that has not grown cannot have recorded a new
+// turn and need not be re-read on every poll (#5471 review).
+type codexReceiptState struct {
+	mu    sync.Mutex
+	path  string
+	scans map[string]codexReceiptScan
+}
+
+type codexReceiptScan struct {
+	size    int64
+	modTime time.Time
+	matched bool
+}
+
+func newCodexReceiptState() *codexReceiptState {
+	return &codexReceiptState{scans: make(map[string]codexReceiptScan)}
+}
+
+func (s *codexReceiptState) lockedPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.path
+}
+
+func (s *codexReceiptState) setPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.path = path
+}
+
+// scanPrompt returns whether path records prompt, reusing the previous result
+// whenever the file has not changed since the last scan.
+func (s *codexReceiptState) scanPrompt(path, prompt string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, fmt.Errorf("inspect Codex rollout %s: %w", path, err)
+	}
+	s.mu.Lock()
+	if scan, ok := s.scans[path]; ok && scan.size == info.Size() && scan.modTime.Equal(info.ModTime()) {
+		s.mu.Unlock()
+		return scan.matched, nil
+	}
+	s.mu.Unlock()
+	matched, err := codexRolloutHasPrompt(path, prompt)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	s.scans[path] = codexReceiptScan{size: info.Size(), modTime: info.ModTime(), matched: matched}
+	s.mu.Unlock()
+	return matched, nil
 }
 
 // expectCarriedCodexRollout tells capture that path holds conv's rollout,
@@ -90,6 +166,9 @@ func cloneConversationCaptureSnapshot(snap ConversationCaptureSnapshot) Conversa
 			copy.codexBefore[path] = struct{}{}
 		}
 	}
+	// A clone is a new observation: it must identify its own rollout rather
+	// than inherit an identity the source's polling established.
+	copy.receiptState = newCodexReceiptState()
 	return copy
 }
 
@@ -121,11 +200,14 @@ func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 	if workingDir != "" {
 		workingDir = pathutil.ResolveForCompare(workingDir)
 	}
+	before, beforeErr := codexRolloutFiles(home)
 	return ConversationCaptureSnapshot{
-		startedAt:   time.Now(),
-		codexHome:   home,
-		workingDir:  workingDir,
-		codexBefore: codexRolloutFiles(home),
+		startedAt:      time.Now(),
+		codexHome:      home,
+		workingDir:     workingDir,
+		codexBefore:    before,
+		codexBeforeErr: beforeErr,
+		receiptState:   newCodexReceiptState(),
 	}
 }
 
@@ -180,7 +262,7 @@ func WaitForPromptReceipt(
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			if undecided {
-				return fmt.Errorf("prompt receipt undecidable within %s: a new Codex rollout's session metadata never became classifiable", timeout)
+				return fmt.Errorf("%w within %s: a new Codex rollout's session metadata never became classifiable", ErrPromptReceiptUndecidable, timeout)
 			}
 			return fmt.Errorf("%w in Codex rollout within %s", ErrPromptReceiptNotObserved, timeout)
 		}
@@ -276,7 +358,13 @@ func captureCarriedCodexConversation(snap ConversationCaptureSnapshot) (AgentCon
 }
 
 func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConversationData, bool, error) {
-	observed := newCodexRolloutFiles(snap)
+	observed, err := newCodexRolloutFiles(snap)
+	if err != nil {
+		// A store that cannot be enumerated is retried inside the caller's
+		// bound — the same grace mid-write headers get — then surfaces as the
+		// error it is rather than as absence.
+		return AgentConversationData{}, true, err
+	}
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	if uncorrelated > 0 {
 		// Codex can create each file before its first JSONL record is visible.
@@ -327,11 +415,10 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {
-	data, err := readCodexRollout(path)
+	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
 		return "", false
 	}
-	line, _, _ := bytes.Cut(data, []byte{'\n'})
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
@@ -345,8 +432,14 @@ func codexRolloutWorkingDir(path string) (string, bool) {
 	return metadata.Payload.Cwd, true
 }
 
-func newCodexRolloutFiles(snap ConversationCaptureSnapshot) []string {
-	after := codexRolloutFiles(snap.codexHome)
+func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
+	if snap.codexBeforeErr != nil {
+		return nil, fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr)
+	}
+	after, err := codexRolloutFiles(snap.codexHome)
+	if err != nil {
+		return nil, fmt.Errorf("scan of the Codex rollout store failed: %w", err)
+	}
 	var candidates []string
 	for path := range after {
 		if _, existed := snap.codexBefore[path]; existed {
@@ -358,7 +451,7 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) []string {
 		}
 		candidates = append(candidates, path)
 	}
-	return candidates
+	return candidates, nil
 }
 
 // codexPromptReceiptOnce reports one observation of the receipt store:
@@ -367,39 +460,49 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) []string {
 // fail-closed rule capture uses — without it, any Codex process on the box
 // creating a rollout during a long wait (the config agent's 5-minute late
 // re-check, #5471) would force the >1-candidate refusal and make the check
-// permanently unanswerable on a busy host. undecided reports a new rollout
-// whose session_meta is not yet classifiable: it could be the awaited one
-// mid-write, so neither absence nor ambiguity may be concluded yet.
+// permanently unanswerable on a busy host. Once a poll sees exactly one
+// classifiable candidate, that file is provably the launched process's — the
+// spawned rollout is in this set the moment it exists, so a lone candidate can
+// only be it — and the snapshot pins it: a same-cwd sibling created later (two
+// config agents share AF home) cannot take the answer away with it. undecided
+// reports a new rollout whose session_meta is not yet classifiable: it could
+// be the awaited one mid-write, so neither absence nor ambiguity may be
+// concluded yet.
 func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, err error) {
-	observed := newCodexRolloutFiles(snap)
+	state := snap.receiptState
+	if state == nil {
+		state = newCodexReceiptState()
+	}
+	if locked := state.lockedPath(); locked != "" {
+		matched, err := state.scanPrompt(locked, prompt)
+		return matched, false, err
+	}
+	observed, err := newCodexRolloutFiles(snap)
+	if err != nil {
+		return false, false, err
+	}
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	if len(candidates) > 1 {
-		return false, false, fmt.Errorf("%w: %d new Codex rollout files appeared", ErrPromptReceiptAmbiguous, len(candidates))
+		return false, false, fmt.Errorf("%w: %d new Codex rollout files matched the launch directory", ErrPromptReceiptAmbiguous, len(candidates))
 	}
-	matches := 0
-	for _, path := range candidates {
-		received, err := codexRolloutHasPrompt(path, prompt)
-		if err != nil {
-			return false, false, err
-		}
-		if received {
-			matches++
-		}
-	}
-	switch matches {
-	case 0:
-		// Another Codex process can create a rollout during this spawn. Do not
-		// fail merely because it exists: the exact briefing may appear in this
-		// config agent's rollout on the next poll — and a still-unclassifiable
-		// rollout cannot be ruled out as that rollout either.
+	if len(candidates) == 0 {
 		return false, uncorrelated > 0, nil
-	case 1:
-		return true, false, nil
-	default:
-		// One candidate can contribute at most one match. Keep this defensive arm
-		// so future receipt formats cannot silently weaken that invariant.
-		return false, false, fmt.Errorf("%w: one rollout produced %d matches", ErrPromptReceiptAmbiguous, matches)
 	}
+	if uncorrelated == 0 {
+		// One classified candidate and nothing unclassifiable that could still
+		// turn out to be the launched rollout: every new file is accounted for,
+		// so this file IS the spawned process's. Pin it for the rest of this
+		// snapshot's checks before a same-cwd sibling can appear.
+		state.setPath(candidates[0])
+	}
+	matched, err := state.scanPrompt(candidates[0], prompt)
+	if err != nil {
+		return false, false, err
+	}
+	if matched {
+		return true, false, nil
+	}
+	return false, uncorrelated > 0, nil
 }
 
 func codexRolloutHasPrompt(path, prompt string) (bool, error) {
@@ -445,7 +548,7 @@ func codexRolloutHasPrompt(path, prompt string) (bool, error) {
 	return false, nil
 }
 
-func readCodexRollout(path string) ([]byte, error) {
+func openCodexRollout(path string) (*os.File, error) {
 	file, err := os.OpenFile(
 		path,
 		os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
@@ -454,21 +557,52 @@ func readCodexRollout(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open Codex rollout %s: %w", path, err)
 	}
-	defer file.Close()
-
 	info, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return nil, fmt.Errorf("inspect opened Codex rollout %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
+		file.Close()
 		return nil, fmt.Errorf("read Codex rollout %s: not a regular file (%s)", path, info.Mode().Type())
 	}
+	return file, nil
+}
+
+func readCodexRollout(path string) ([]byte, error) {
+	file, err := openCodexRollout(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
 	}
 	return data, nil
+}
+
+// codexSessionMetaReadCap bounds the bytes working-directory classification
+// reads for a rollout's session_meta — always the first JSONL record.
+// Correlation inspects that header on every poll, so reading whole transcripts
+// just to reach the newline was the bulk of a long receipt wait's I/O (#5471
+// review); the cap keeps even a pathological first record inside the bound.
+const codexSessionMetaReadCap = 1 << 20
+
+func readCodexRolloutFirstLine(path string) ([]byte, error) {
+	file, err := openCodexRollout(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, codexSessionMetaReadCap))
+	if err != nil {
+		return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
+	}
+	line, _, _ := bytes.Cut(data, []byte{'\n'})
+	return line, nil
 }
 
 func jsonValueContainsPrompt(value any, prompt string) bool {
@@ -496,18 +630,22 @@ func normalizePromptReceiptText(text string) string {
 	return strings.ReplaceAll(text, "\r", "\n")
 }
 
-func codexRolloutFiles(codexHome string) map[string]struct{} {
+func codexRolloutFiles(codexHome string) (map[string]struct{}, error) {
 	out := make(map[string]struct{})
 	if codexHome == "" {
-		return out
+		return out, nil
 	}
 	root := filepath.Join(codexHome, "sessions")
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			if path == root {
-				return filepath.SkipDir
+			// An entry vanishing mid-walk is normal; a store that cannot be
+			// traversed is NOT an empty store. Swallowing the failure would let
+			// a receipt check report never-arrived for a directory it never
+			// inspected (#5471 review).
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
 			}
-			return nil
+			return err
 		}
 		if d == nil || d.IsDir() {
 			return nil
@@ -518,7 +656,7 @@ func codexRolloutFiles(codexHome string) map[string]struct{} {
 		out[path] = struct{}{}
 		return nil
 	})
-	return out
+	return out, err
 }
 
 func codexConversationIDFromPath(path string) string {

@@ -401,7 +401,8 @@ func TestWaitForPromptReceipt_WorkingDirSameCwdStaysAmbiguous(t *testing.T) {
 // A new rollout whose session_meta is still mid-write cannot be ruled OUT as
 // the awaited one, so expiry under it is "undecidable", never "not observed" —
 // the late re-check's never-arrived verdict must not claim a file it could not
-// classify (#5471).
+// classify (#5471), and the error is typed so unconfirmed-outcome callers keep
+// observing rather than dropping the diagnostic watcher.
 func TestWaitForPromptReceipt_UncorrelatableRolloutStaysUndecided(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
@@ -411,10 +412,80 @@ func TestWaitForPromptReceipt_UncorrelatableRolloutStaysUndecided(t *testing.T) 
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPromptReceiptUndecidable)
 	require.NotErrorIs(t, err, ErrPromptReceiptNotObserved,
 		"an unclassifiable rollout is not absence")
-	require.ErrorContains(t, err, "undecidable")
+}
+
+// Two config agents launch into the same AF home, so a sibling rollout CAN
+// appear mid-wait inside the working-directory correlation (#5471 review). The
+// first poll that sees exactly one classifiable candidate has already proven
+// the launched rollout — the spawned process's own file is in the new-set the
+// moment it exists, so that lone file can only be it — and the snapshot pins
+// it: the late-arriving sibling cannot force ambiguity over a question the
+// earlier polling already answered.
+func TestWaitForPromptReceipt_PreservedRolloutIgnoresSameCwdSibling(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	mine := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 2*time.Second)
+	}()
+
+	// A couple of polls establish the single-candidate identity, then a second
+	// config agent's rollout lands in the same directory — the state that made
+	// every remaining check ambiguous before identity was preserved.
+	time.Sleep(200 * time.Millisecond)
+	sibling := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	appendCodexRolloutEvent(t, sibling, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "a sibling config agent's briefing"},
+	})
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("a same-cwd sibling aborted the receipt wait: %v", err)
+	default:
+	}
+
+	appendCodexRolloutEvent(t, mine, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pinned rollout's receipt was not observed")
+	}
+}
+
+// A store that cannot be enumerated is not an empty store: the late re-check's
+// "never arrived" must only fire when the scan really looked. Traversal
+// failures surface as their own indeterminate error, never as absence (#5471
+// review).
+func TestWaitForPromptReceipt_UninspectedStoreIsIndeterminate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not constrain root")
+	}
+	codexHome := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHome(codexHome)
+	sessionsDir := filepath.Join(codexHome, "sessions")
+	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+	require.NoError(t, os.Chmod(sessionsDir, 0))
+	t.Cleanup(func() { _ = os.Chmod(sessionsDir, 0755) })
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"a store the scan could not enter is not an observed absence")
+	require.ErrorContains(t, err, "scan of the Codex rollout store failed")
 }
 
 // And while the window is still open the undecided rollout gets the same grace
