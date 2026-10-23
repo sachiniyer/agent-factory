@@ -131,6 +131,40 @@ test("projectAccent keeps 4.5:1 contrast against each theme surface", () => {
   assert.equal(markInk("#bd93f9"), "#1f1f1f");
 });
 
+function contrastRatio(a: string, b: string): number {
+  const lum = (c: string): number => {
+    const [r, g, bl] = [1, 3, 5].map((i) => {
+      const x = parseInt(c.slice(i, i + 2), 16) / 255;
+      return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test("markInk reaches 4.5:1 on every color, including the mid-luminance band", () => {
+  for (const color of ["#6c8818", "#777777", "#808080", "#2f5fd8", "#f1fa8c", "#000000", "#ffffff"]) {
+    assert.ok(contrastRatio(markInk(color), color) >= 4.5, `${color} → ${markInk(color)}`);
+  }
+});
+
+test("projectAccent reaches 4.5:1 against every surface it is given, after rounding", () => {
+  const accent = projectAccent("#2a695e", "#1f1f1f", "#2b2b2b");
+  assert.ok(contrastRatio(accent, "#1f1f1f") >= 4.5, accent);
+  assert.ok(contrastRatio(accent, "#2b2b2b") >= 4.5, accent);
+  const light = projectAccent("#f1fa8c", "#f8f9fc", "#eceff4");
+  assert.ok(contrastRatio(light, "#f8f9fc") >= 4.5, light);
+  assert.ok(contrastRatio(light, "#eceff4") >= 4.5, light);
+});
+
+test("app bar focus rings and the phone keyboard label take the project ink", () => {
+  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+  assert.match(css, /\.af-app\[data-project-color\] \.af-appbar :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-project-ink\);/);
+  assert.match(css, /\.af-app\[data-project-color\] \.af-appbar \.af-term-keyboard \{\s*color: inherit;/);
+  assert.match(css, /\.af-app\[data-project-color\] \.af-appbar-tools :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-accent\);/);
+});
+
 test("the phone tools popover restores theme ink over the colored app bar's ink", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
   assert.match(

@@ -1010,6 +1010,12 @@ button:disabled,
   background: var(--af-project-color);
   color: var(--af-project-ink);
 }
+.af-app[data-project-color] .af-appbar :is(button, summary, a):focus-visible {
+  outline-color: var(--af-project-ink);
+}
+.af-app[data-project-color] .af-appbar .af-term-keyboard {
+  color: inherit;
+}
 .af-app[data-project-color] .af-viewnav,
 .af-app[data-project-color] .af-viewtab,
 .af-app[data-project-color] .af-viewtab:hover,
@@ -1035,6 +1041,9 @@ button:disabled,
 @media (max-width: 768px) {
   .af-app[data-project-color] .af-appbar-tools {
     color: var(--af-ink);
+  }
+  .af-app[data-project-color] .af-appbar-tools :is(button, summary, a):focus-visible {
+    outline-color: var(--af-accent);
   }
 }
 .af-term-head {

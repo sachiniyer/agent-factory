@@ -6206,14 +6206,18 @@ function currentMode() {
     return "dark";
   }
 }
-function surface(mode) {
+function surface(mode, token2 = "--af-surface") {
   const probe = document.createElement("span");
   probe.dataset.afTheme = mode;
   probe.hidden = true;
   document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
   probe.remove();
   return color;
+}
+function themeSurfaces() {
+  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
 }
 function themeColorMetaContents(choice) {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
@@ -15931,16 +15935,19 @@ var INK_DARK = "#1f1f1f";
 var INK_LIGHT = "#ffffff";
 function markInk(color) {
   const c = rgb(color);
-  return contrast(c, rgb(INK_DARK)) >= contrast(c, rgb(INK_LIGHT)) ? INK_DARK : INK_LIGHT;
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
 }
-function projectAccent(color, surface2) {
+function projectAccent(color, ...surfaces) {
   const c = rgb(color);
-  const s = rgb(surface2);
-  const target = luminance(s) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  const s = surfaces.map(rgb);
+  const target = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
   for (let step = 0; step <= 20; step++) {
     const t = step / 20;
-    const mixed = c.map((v, i) => v + (target[i] - v) * t);
-    if (contrast(mixed, s) >= 4.5) return hex(mixed);
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t));
+    if (s.every((surface2) => contrast(rgb(candidate), surface2) >= 4.5)) return candidate;
   }
   return hex(target);
 }
@@ -15994,8 +16001,12 @@ function applyProjectColor(root2, color, surfaces) {
   root2.dataset.projectColor = color;
   root2.style.setProperty("--af-project-color", color);
   root2.style.setProperty("--af-project-ink", markInk(color));
-  root2.style.setProperty("--af-project-accent-light", HEX.test(light) ? projectAccent(color, light) : color);
-  root2.style.setProperty("--af-project-accent-dark", HEX.test(dark) ? projectAccent(color, dark) : color);
+  root2.style.setProperty("--af-project-accent-light", accentOn(color, light));
+  root2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+}
+function accentOn(color, surfaces) {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === void 0 ? color : projectAccent(color, first, ...rest);
 }
 var PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];
 function projectColorRow(current, label, onPick) {
@@ -16832,7 +16843,7 @@ var AppShell = class {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
-    applyProjectColor(this.el, color, () => themeColorMetaContents("system"));
+    applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;

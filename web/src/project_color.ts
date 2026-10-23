@@ -56,22 +56,27 @@ function contrast(a: Rgb, b: Rgb): number {
 const INK_DARK = "#1f1f1f";
 const INK_LIGHT = "#ffffff";
 
-/** Whichever of near-black or white has more contrast on color. */
+/** Whichever of near-black or white has more contrast on color. In the
+ *  mid-luminance band where neither reaches 4.5:1, true black or white does. */
 export function markInk(color: string): string {
   const c = rgb(color);
-  return contrast(c, rgb(INK_DARK)) >= contrast(c, rgb(INK_LIGHT)) ? INK_DARK : INK_LIGHT;
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
 }
 
-/** color, moved toward black or white until it reaches 4.5:1 against surface, so it
- *  stays legible as accent text on that surface and as a fill behind surface text. */
-export function projectAccent(color: string, surface: string): string {
+/** color, moved toward black or white until it reaches 4.5:1 against every surface
+ *  it can sit on, so it stays legible as accent text there and as a fill behind
+ *  surface text. The surfaces share one theme, so the first sets the direction. */
+export function projectAccent(color: string, ...surfaces: [string, ...string[]]): string {
   const c = rgb(color);
-  const s = rgb(surface);
-  const target: Rgb = luminance(s) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  const s = surfaces.map(rgb);
+  const target: Rgb = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
   for (let step = 0; step <= 20; step++) {
     const t = step / 20;
-    const mixed = c.map((v, i) => v + (target[i] - v) * t) as unknown as Rgb;
-    if (contrast(mixed, s) >= 4.5) return hex(mixed);
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t) as unknown as Rgb);
+    if (s.every((surface) => contrast(rgb(candidate), surface) >= 4.5)) return candidate;
   }
   return hex(target);
 }
@@ -142,7 +147,7 @@ export function applyProjectFavicon(color: string | null): void {
 export function applyProjectColor(
   root: HTMLElement,
   color: string | null,
-  surfaces: () => { light: string; dark: string },
+  surfaces: () => { light: readonly string[]; dark: readonly string[] },
 ): void {
   if (color === null) {
     if (root.dataset.projectColor === undefined) return;
@@ -155,8 +160,13 @@ export function applyProjectColor(
   root.dataset.projectColor = color;
   root.style.setProperty("--af-project-color", color);
   root.style.setProperty("--af-project-ink", markInk(color));
-  root.style.setProperty("--af-project-accent-light", HEX.test(light) ? projectAccent(color, light) : color);
-  root.style.setProperty("--af-project-accent-dark", HEX.test(dark) ? projectAccent(color, dark) : color);
+  root.style.setProperty("--af-project-accent-light", accentOn(color, light));
+  root.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+}
+
+function accentOn(color: string, surfaces: readonly string[]): string {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === undefined ? color : projectAccent(color, first, ...rest);
 }
 
 const PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];

@@ -65,7 +65,7 @@ import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
-import { type ThemeChoice, THEME_CHOICES, currentMode, themeColorMetaContents } from "./theme.js";
+import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -1400,7 +1400,7 @@ export class AppShell {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
-    applyProjectColor(this.el, color, () => themeColorMetaContents("system"));
+    applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
