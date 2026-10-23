@@ -35,6 +35,9 @@ func (s *Store) attachedLocked(sessionID string) (string, error) {
 		if _, verr := s.git(nil, "rev-parse", "--verify", "--quiet", attachRefPrefix+sessionID); verr != nil {
 			return "", nil
 		}
+		if kind, terr := s.git(nil, "cat-file", "-t", attachRefPrefix+sessionID); terr != nil || strings.TrimSpace(kind) != "blob" {
+			return "", fmt.Errorf("%w: session %s: the ref names no readable blob", errBadAttachment, sessionID)
+		}
 		return "", err
 	}
 	slug := strings.TrimSpace(out)

@@ -16,6 +16,29 @@ func plantAttachment(t *testing.T, s *Store, sessionID, slug string) {
 	}
 }
 
+func TestNonBlobAttachmentCanBeRepaired(t *testing.T) {
+	for _, target := range []string{"HEAD", "HEAD^{tree}"} {
+		s, _ := newTestStore(t)
+		startAttached(t, s, "p", sessA)
+		id, err := s.git(nil, "rev-parse", target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.git(nil, "update-ref", attachRefPrefix+sessA, strings.TrimSpace(id)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Attach("p", sessA); err != nil {
+			t.Fatalf("attach over a %s attachment: %v", target, err)
+		}
+		if _, err := s.git(nil, "update-ref", attachRefPrefix+sessA, strings.TrimSpace(id)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Detach(sessA); err != nil {
+			t.Fatalf("detach of a %s attachment: %v", target, err)
+		}
+	}
+}
+
 func TestInvalidAttachmentSlugIsRefused(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA)
