@@ -433,7 +433,7 @@ feature. No config, API or end-user editor exposes token values.
 `go run ./scripts/gen-design` produces `web/src/tokens.css`, `ui/theme/theme.go`,
 `docs/stylesheets/tokens.css` and `docs/design/style-guide.md`; it also stamps
 this page's contrast report, the HTML shell metas and the manifest colors. CSS has
-exactly 23 custom properties per theme, scoped to `[data-af-theme="light"]` and
+exactly 24 custom properties per theme, scoped to `[data-af-theme="light"]` and
 `[data-af-theme="dark"]`. The docs CSS adds Material's default/slate scheme
 selectors to the same declarations. System selects one of the two palettes. Go
 supplies the same adaptive light/dark roles and prescribed lipgloss component

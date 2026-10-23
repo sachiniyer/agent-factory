@@ -81,7 +81,7 @@ The examples above are the specification; this compact reference is for implemen
 not a palette picker. Every value below comes from `design/tokens.json`. Adding a role
 or step fails validation: revise a component rule before enlarging this contract.
 
-<details><summary>Exact internal values · 23 tokens</summary>
+<details><summary>Exact internal values · 24 tokens</summary>
 <table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
 {{range colorKeys}}{{$c := index $.Tokens.Colors .}}<tr><td>{{.}}</td><td>{{$c.Light}}</td><td>{{$c.Dark}}</td><td>{{$c.Role}}</td></tr>
 {{end}}</tbody></table>

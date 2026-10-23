@@ -376,7 +376,7 @@ The examples above are the specification; this compact reference is for implemen
 not a palette picker. Every value below comes from `design/tokens.json`. Adding a role
 or step fails validation: revise a component rule before enlarging this contract.
 
-<details><summary>Exact internal values · 23 tokens</summary>
+<details><summary>Exact internal values · 24 tokens</summary>
 <table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
 <tr><td>accent</td><td>#2d6271</td><td>#2296f3</td><td>Primary button fill, selected marker, active-tab underline and keyboard-focus outline; never liveness</td></tr>
 <tr><td>archived</td><td>#4c566a</td><td>#d8dee9</td><td>Archived glyph and label only; retained history</td></tr>
