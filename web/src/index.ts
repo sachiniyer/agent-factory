@@ -29,6 +29,7 @@ import {
   deleteProject,
   registerProject,
   rebindProject,
+  setProjectColor,
   type RegisteredProject,
   errorText,
   fetchSessionSnapshot,
@@ -131,6 +132,7 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
+import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
 
@@ -1152,19 +1154,23 @@ function openDeleteProject(root: string, label: string): void {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root, tok)
-          .then(() => { if (modal === m) closeModal(); })
-          .catch((e) => {
-            if (isMutationCommittedError(e)) {
-              if (modal === m) closeModal();
-              requestResync();
-              refreshRegisteredProjects();
-              surfaceTabError(e);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
-          });
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root).then(() => {
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root, tok)
+            .then(() => { if (modal === m) closeModal(); })
+            .catch((e) => {
+              if (isMutationCommittedError(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(errorText(e));
+            });
+        });
       },
       onCancel: closeModal,
     }),
@@ -2192,6 +2198,36 @@ function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
 }
 
+/** Sets a project's color. A project known only from its sessions has no registry
+ *  record to hold a color, so it is registered first (idempotent on the daemon).
+ *  Each choice is fenced to the connection and credential it was made under, and
+ *  keeps the project id it was made for, so a rebind cannot turn it into a new
+ *  registration of the old root. Deleting the project cancels it (openDeleteProject). */
+const projectColorWriter = createLatestWriter<{ color: string; tok: string; connection: number; projectId: string | null }>(
+  async (root, { color, tok, connection, projectId: known }) => {
+    const current = (): boolean => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const projectId = known ?? (await registerProject(root, tok)).id;
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e: unknown, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  },
+);
+
+function isCurrentConnection(connection: number, tok: string): boolean {
+  return connection === connectionGeneration && token === tok;
+}
+
+function doSetProjectColor(root: string, color: string): void {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root)?.id ?? null;
+  void projectColorWriter.set(root, { color, tok, connection: connectionGeneration, projectId });
+}
+
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
  *  requestTaskResync. */
 function requestProjectsResync(): void {
@@ -2598,6 +2634,7 @@ const actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme,
 };
 

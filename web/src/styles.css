@@ -421,6 +421,75 @@ button:disabled,
   white-space: nowrap;
 }
 
+/* The current project's color row: preset swatches, a custom picker, and clear. */
+.af-project-color {
+  position: relative;
+  margin-top: var(--af-space-2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--af-space-1);
+}
+
+.af-project-color-label {
+  flex-basis: 100%;
+  color: var(--af-ink-muted);
+  font-size: var(--af-type-caption);
+}
+
+/* Each swatch keeps the shared touch-target size; the visible dot is its content box. */
+.af-project-swatch,
+.af-project-swatch-custom {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  min-width: 0;
+  min-height: 0;
+  padding: var(--af-space-2);
+  border: 0;
+  border-radius: 50%;
+  background: var(--af-swatch);
+  background-clip: content-box;
+  cursor: pointer;
+  appearance: none;
+}
+
+.af-project-swatch-custom {
+  background: transparent;
+  color: var(--af-ink);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 calc(var(--af-space-1) / 4) var(--af-border);
+}
+
+/* Opened by the "+" swatch; kept rendered (not display:none) so showPicker works. */
+.af-project-color-input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.af-project-swatch[aria-pressed="true"] {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-ink);
+  outline-offset: calc(var(--af-space-1) / -1);
+}
+
+.af-project-color-clear {
+  margin-left: auto;
+}
+
+.af-project-dot {
+  display: inline-block;
+  width: var(--af-space-2);
+  height: var(--af-space-2);
+  border-radius: 50%;
+  background: var(--af-swatch);
+}
+
 /* The menu footer holds the always-present add-project action (#2456) and, for the
  * current project, the reversible delete-project action (#1735, moved here from the
  * removed Projects view). Space separates it from the switch list. */
@@ -1179,6 +1248,18 @@ button:disabled,
 .af-kb-terminal .af-main-term::after {
   border-width: calc(var(--af-space-1) / 2);
   border-color: var(--af-accent);
+}
+
+/* A project color replaces the frame's border and the keyboard-focus outline, so
+ * the pane always reads as that project. The rail keeps its own focus outline. */
+.af-main-term[data-project-color],
+.af-kb-terminal .af-main-term[data-project-color] {
+  outline-color: var(--af-project-color);
+}
+.af-main-term[data-project-color]::after,
+.af-kb-terminal .af-main-term[data-project-color]::after {
+  border-width: calc(var(--af-space-1) / 2);
+  border-color: var(--af-project-color);
 }
 
 .af-term-head {

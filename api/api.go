@@ -756,6 +756,7 @@ func init() {
 	ProjectsCmd.AddCommand(projectsListCmd)
 	ProjectsCmd.AddCommand(newProjectsAddCmd())
 	ProjectsCmd.AddCommand(projectsRebindCmd)
+	ProjectsCmd.AddCommand(projectsColorCmd)
 	ProjectsCmd.AddCommand(projectsDeleteCmd)
 
 	// Tasks

@@ -79,6 +79,8 @@ type Project struct {
 	// does not infer that a new checkout appearing at the same path is the old
 	// one; only the checkout marker provides that evidence.
 	PathExists bool `json:"path_exists"`
+	// Color is the user-chosen display color (#rrggbb), or empty for none.
+	Color string `json:"color,omitempty"`
 }
 
 type projectRecord struct {
@@ -744,6 +746,7 @@ func projectFromRecord(record projectRecord) Project {
 		RelativeRoot: record.RelativeRoot,
 		RepoID:       record.RepoID,
 		PathExists:   projectPathExists(record.Root),
+		Color:        loadProjectColor(record.ID),
 	}
 }
 
