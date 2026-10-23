@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,5 +202,76 @@ func TestKillTeardown_UnflaggedLiveRowProvenAbsentRechecksItsPath(t *testing.T) 
 		require.NoError(t, err)
 		assert.Equal(t, stateKnown, state)
 		assert.NoDirExists(t, wtPath)
+	})
+}
+
+// A missing-row kill that refuses an unverified occupant must read as a
+// refusal — the path af will not delete and the remedy — not as the deadline
+// cut ErrWorkspaceStateUnknown's own text describes: no deadline fired and af
+// removed nothing (#5102). Classification is unchanged: the error still is
+// ErrWorkspaceStateUnknown, so the record is kept and the kill retried.
+func TestKillTeardown_MissingRowRefusalReadsAsARefusal(t *testing.T) {
+	setup := func(t *testing.T) (*Instance, string, string) {
+		t.Helper()
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repoRoot := initTempGitRepo(t)
+		runRenameGit(t, repoRoot, "commit", "--allow-empty", "-m", "init")
+		parent := filepath.Join(t.TempDir(), "parent")
+		require.NoError(t, os.Mkdir(parent, 0o755))
+		wtPath := filepath.Join(parent, "refusal-live")
+		runRenameGit(t, repoRoot, "worktree", "add", "-b", "af/refusal-live", wtPath)
+		require.NoError(t, os.RemoveAll(wtPath), "deleted outside af")
+		inst, err := NewInstance(InstanceOptions{Title: "refusal-live", Path: repoRoot, Program: "claude"})
+		require.NoError(t, err)
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "refusal-live", "af/refusal-live", "", false, true)
+		require.NoError(t, err)
+		inst.gitWorktree = gw
+		inst.SetWorktreeMissing(WorktreeMissingDeletedReason(wtPath))
+		return inst, parent, wtPath
+	}
+	kill := func(t *testing.T, inst *Instance) error {
+		t.Helper()
+		mode, _, err := inst.prepareKillTeardown(false)
+		require.NoError(t, err)
+		require.NotNil(t, mode.recheckMissing, "premise: the missing row is armed")
+		err = inst.teardownTabs(mode)
+		require.Error(t, err)
+		t.Logf("kill teardown error: %q", err.Error())
+		assert.True(t, TeardownStateUnknown(err), "the record must still be kept and the kill retried")
+		assert.ErrorIs(t, err, ErrWorkspaceStateUnknown)
+		assert.NotContains(t, err.Error(), "deadline", "no deadline fired")
+		assert.NotContains(t, err.Error(), "partially removed", "af removed nothing")
+		assert.Contains(t, err.Error(), `leaving "refusal-live"'s session state intact so the cleanup can be retried`)
+		return err
+	}
+
+	t.Run("an occupant", func(t *testing.T) {
+		inst, _, wtPath := setup(t)
+		require.NoError(t, os.Mkdir(wtPath, 0o755))
+		err := kill(t, inst)
+		assert.Contains(t, err.Error(), "a directory has since appeared at "+wtPath)
+		assert.Contains(t, err.Error(), "af has not verified it and will not delete it")
+		assert.Contains(t, err.Error(), "inspect it, remove it or move it aside, then kill the session again")
+		assert.DirExists(t, wtPath)
+	})
+
+	t.Run("a path that cannot be checked", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the permission denial this case needs")
+		}
+		inst, parent, wtPath := setup(t)
+		require.NoError(t, os.Chmod(parent, 0))
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		err := kill(t, inst)
+		assert.Contains(t, err.Error(), "the state of its path "+wtPath+" could not be established")
+		assert.Contains(t, err.Error(), "kill the session again once the path answers")
+	})
+
+	t.Run("control: a genuine deadline cut keeps the sentinel's text", func(t *testing.T) {
+		cut := fmt.Errorf("%w: git worktree remove timed out", ErrWorkspaceStateUnknown)
+		retained := worktreeRetentionError(cut, "refusal-live")
+		assert.ErrorIs(t, retained, ErrWorkspaceStateUnknown)
+		assert.Contains(t, retained.Error(), "cut off by its deadline")
+		assert.False(t, workspaceStateRefusal(cut))
 	})
 }
