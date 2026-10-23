@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -222,71 +223,55 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// path-only `worktree remove` cannot make atomic by itself.
 
 	// Resolve relocation ownership before reading repo-derived restore context.
+	// A conclusive ENOENT with no relocation record behind it (a recovery-path
+	// claim error joins ErrRelocateStateUnknown and never wraps a bare ENOENT)
+	// is a worktree deleted outside af — the archived-missing row the no-move
+	// archive commits (#5102). There are no bytes to move back; the kept branch
+	// is rebuilt into the restore destination instead.
+	placement := "worktree moved back to"
+	// placedByProof is true when the worktree was rebuilt or adopted rather than
+	// moved back under a claim: its directory was proven and its identity pinned
+	// (rebuildAbsentArchivedWorktree), and that pin is re-checked below at each
+	// boundary that would make the directory authoritative.
+	placedByProof := false
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
-	if err != nil {
+	switch {
+	case err == nil:
+		if err := m.moveArchivedWorktreeBack(repoID, req.Title, instance, relocationClaim); err != nil {
+			return "", err
+		}
+	case errors.Is(err, os.ErrNotExist) && !errors.Is(err, sessiongit.ErrRelocateStateUnknown):
+		if err := m.rebuildAbsentArchivedWorktree(repoID, req.Title, instance); err != nil {
+			return "", err
+		}
+		placement = "worktree rebuilt from its kept branch at"
+		placedByProof = true
+	default:
 		return "", err
 	}
-	claimTransferred := false
-	defer func() {
-		if !claimTransferred {
-			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+	// The directory af just placed is the only thing a missing row's restore may
+	// record and start the agent in. Rebuild and adoption both proved it and
+	// pinned its device/inode, but the hooks a rebuild starts, and anything else
+	// running as this user, can swap the name between that proof and the commit
+	// below — so the pin is reconfirmed before the commit (which clears the flag
+	// and persists the path as authoritative) and again before the respawn
+	// (#5102). A failure leaves the row archived, still flagged, and fenced by the
+	// git layer, and that state is persisted before the refusal is reported.
+	if placedByProof {
+		if err := m.reconfirmPlacedRestoreWorktree(repoID, req.Title, instance, "before recording it"); err != nil {
+			return "", err
 		}
-	}()
-
-	repoPath := instance.GetRepoPath()
-	if repoPath == "" {
-		return "", fmt.Errorf("cannot restore session %q: no repo path on record", req.Title)
 	}
-	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
-	// need the origin repo, so surface the actionable message (archive left
-	// intact) before either fails with a generic error.
-	if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
-		claimTransferred = repoGone
-		return "", err
-	}
-	// Honor the configured worktree_root placement, exactly as session creation
-	// does (#1540): a subdirectory user's worktree is restored under
-	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
-	// needed only for subdirectory placement.
-	beforeRestoreWorktreePath()
-	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
-	if err != nil {
-		claimTransferred = true
-		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
-	}
-	beforeRestoreWorktreeUse()
-
-	// Move the worktree back next to the repo. A repo-gone failure leaves the
-	// archive intact (the git layer guarantees this) and surfaces an actionable
-	// message; the instance stays Archived.
-	claimTransferred = true
-	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
-	if err := restoreWorktreeErr; err != nil {
-		if errors.Is(err, sessiongit.ErrRepoGone) {
-			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
-		}
-		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
-			// The bounded move may have reached either pathname before it was
-			// killed. The git layer retains destination + source with the captured
-			// directory identity; neither is destructive authority until a retry
-			// resolves it. Persist both handles before returning.
-			//
-			// Persist first, then report — and take the error-returning persist,
-			// not the log-and-continue one. The whole point of this branch is that
-			// the location must survive a restart, so a write that did NOT happen
-			// (full or read-only disk) reproduces the exact stranding it exists to
-			// prevent. Reporting the relocate error alone would tell the operator
-			// their worktree is safely recorded when nothing recorded it.
-			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its recovery candidates could not be written to disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w", req.Title, perr, worktreeRecoveryLocation(instance), err)
-			}
-			return "", fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", req.Title, worktreeRecoveryLocation(instance), err)
-		}
-		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, relocationClaim, err)
-	}
+	// The worktree is back where af put it — moved back, or rebuilt from the
+	// branch — so a worktree-missing flag on this row is stale and the commit
+	// below must not carry it (#5102). The flag is sticky by design: only af
+	// re-placing the worktree clears it, and both routes above are such a
+	// placement.
+	instance.ClearWorktreeMissing()
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
-	// it exists only in memory, exactly as on the cut-off branch above.
+	// it exists only in memory, exactly as on moveArchivedWorktreeBack's cut-off
+	// branch.
 	// setWorktreeLocation updated g.worktreePath; this write is the only thing that
 	// carries it across a restart, so it takes the error-returning persist for the
 	// reason that branch already spells out (#2880). A restore nothing recorded is
@@ -333,6 +318,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
+	if placedByProof {
+		if err := m.reconfirmPlacedRestoreWorktree(repoID, req.Title, instance, "before starting the agent in it"); err != nil {
+			return failedRestoredArchiveResult(instance, restoredPath, err)
+		}
+	}
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,
@@ -357,6 +347,99 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
-	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
+	m.info().Printf("restored session %q (repo %s): %s %s, agent re-spawned", req.Title, repoID, placement, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)
+}
+
+// moveArchivedWorktreeBack is the restore route for an archived worktree whose
+// relocation claim resolved a directory: it moves that directory back next to
+// the repo and re-registers it, reporting every failure already persisted and
+// worded for the caller to return.
+func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *session.Instance, relocationClaim sessiongit.RelocationClaim) error {
+	claimTransferred := false
+	defer func() {
+		if !claimTransferred {
+			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+		}
+	}()
+
+	// A persisted worktree-missing flag means the directory af tracked was
+	// deleted (#5102). A claim that now succeeds found SOMETHING at that path,
+	// and by default nothing proves it is the session's worktree — a mkdir, an
+	// unrelated checkout, a restore from backup all look the same from here.
+	// Moving it back and starting the agent in it would hand its files to the
+	// agent, so it may continue only on git's own proof that the claimed
+	// directory is this session's checkout (VerifyClaimedWorktree) — the user
+	// putting the archive back, which the rebuild route's refusal asks for.
+	// Anything else refuses closed: once the path is cleared, the retry takes the
+	// rebuild route. The flag is sticky exactly so a reappearing path cannot
+	// quietly re-qualify the row; the caller clears it once the restore commits.
+	if missing, _ := instance.WorktreeMissing(); missing {
+		verifyErr := instance.VerifyClaimedWorktree(relocationClaim)
+		if verifyErr != nil {
+			claimTransferred = true
+			instance.ReturnWorktreeClaimUnverified(relocationClaim)
+			refusal := fmt.Errorf(
+				"cannot restore session %q: its archived worktree %s was recorded as deleted outside af, and the directory now at that path is not one git proves is the session's checkout (%v) — af will not move it back or start the agent in it; inspect %s, remove it or move it aside if it is not the session's work, then retry (restore then rebuilds the worktree from its kept branch)",
+				title, relocationClaim.Path, verifyErr, relocationClaim.Path)
+			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+				return errors.Join(refusal, fmt.Errorf("could not persist its unverified-worktree fence: %w", perr))
+			}
+			return refusal
+		}
+		m.info().Printf("restore of session %q: git proves the directory at %s is the session's own checkout (put back after it was recorded as deleted); moving it back", title, relocationClaim.Path)
+	}
+
+	repoPath := instance.GetRepoPath()
+	if repoPath == "" {
+		return fmt.Errorf("cannot restore session %q: no repo path on record", title)
+	}
+	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
+	// need the origin repo, so surface the actionable message (archive left
+	// intact) before either fails with a generic error.
+	if repoGone, err := m.guardRepoGoneRestore(repoID, title, repoPath, instance, relocationClaim); err != nil {
+		claimTransferred = repoGone
+		return err
+	}
+	// Honor the configured worktree_root placement, exactly as session creation
+	// does (#1540): a subdirectory user's worktree is restored under
+	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
+	// needed only for subdirectory placement.
+	beforeRestoreWorktreePath()
+	dest, err := sessiongit.RestoreWorktreePath(repoPath, title, instance.GetBranch())
+	if err != nil {
+		claimTransferred = true
+		return m.persistRestorePathFailure(repoID, title, instance, relocationClaim, err)
+	}
+	beforeRestoreWorktreeUse()
+
+	// Move the worktree back next to the repo. A repo-gone failure leaves the
+	// archive intact (the git layer guarantees this) and surfaces an actionable
+	// message; the instance stays Archived.
+	claimTransferred = true
+	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
+	if err := restoreWorktreeErr; err != nil {
+		if errors.Is(err, sessiongit.ErrRepoGone) {
+			return m.persistRepoGoneAtRestoreUse(repoID, title, repoPath, instance, err)
+		}
+		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// The bounded move may have reached either pathname before it was
+			// killed. The git layer retains destination + source with the captured
+			// directory identity; neither is destructive authority until a retry
+			// resolves it. Persist both handles before returning.
+			//
+			// Persist first, then report — and take the error-returning persist,
+			// not the log-and-continue one. The whole point of this branch is that
+			// the location must survive a restart, so a write that did NOT happen
+			// (full or read-only disk) reproduces the exact stranding it exists to
+			// prevent. Reporting the relocate error alone would tell the operator
+			// their worktree is safely recorded when nothing recorded it.
+			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+				return fmt.Errorf("restore of %q was cut off mid-relocate AND its recovery candidates could not be written to disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w", title, perr, worktreeRecoveryLocation(instance), err)
+			}
+			return fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", title, worktreeRecoveryLocation(instance), err)
+		}
+		return m.persistUnresolvedRestoreFailure(repoID, title, instance, relocationClaim, err)
+	}
+	return nil
 }
