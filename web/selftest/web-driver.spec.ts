@@ -12142,7 +12142,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
         playState: animation.playState,
       };
     };
-    const animations = rail.getAnimations({ subtree: true });
+    // The attention blink repeats forever and never finishes.
+    const animations = rail
+      .getAnimations({ subtree: true })
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity);
     const waitedAnimations = animations.map(describeAnimation);
     await Promise.allSettled(animations.map((animation) => animation.finished));
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -12171,7 +12174,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
       appOpen: app?.classList.contains("af-nav-open") ?? false,
       toggleExpanded: toggle?.getAttribute("aria-expanded") ?? null,
       waitedAnimations,
-      remainingAnimations: rail.getAnimations({ subtree: true }).map(describeAnimation),
+      remainingAnimations: rail
+        .getAnimations({ subtree: true })
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map(describeAnimation),
       rail: {
         connected: rail.isConnected,
         rect: rect(rail),

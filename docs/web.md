@@ -72,9 +72,11 @@ such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 Agents learn `af sessions attention --self` from the af skill, and run it only when
 they are blocked on a decision or question that only you can answer. The yellow
 circle clears when you type into the agent pane, view the agent tab, or when the
-agent starts work again after it went idle. When your system asks for reduced
-motion, it does not blink and has a ring around it. The TUI rail does not show the
-request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
+agent starts work again after it went idle. While any session in the selected
+project needs attention, the browser tab's favicon also swaps its tile and mark
+colors every second, so you can see it from another tab. When your system asks for
+reduced motion, neither blinks and the circle has a ring around it. The TUI rail does
+not show the request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the

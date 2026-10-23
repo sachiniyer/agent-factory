@@ -81,29 +81,37 @@ export function projectAccent(color: string, ...surfaces: [string, ...string[]])
   return hex(target);
 }
 
-/** The favicon SVG with its tile painted in color. */
-export function projectFaviconSvg(color: string): string {
+/** The favicon SVG with its tile painted in color. inverted swaps the tile and
+ *  mark colors, the second frame of the attention blink. */
+export function projectFaviconSvg(color: string, inverted = false): string {
+  const [tile, mark] = faviconColors(color, inverted);
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` +
-    `<rect width="512" height="512" rx="112" fill="${color}"/>` +
-    `<path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`
+    `<rect width="512" height="512" rx="112" fill="${tile}"/>` +
+    `<path d="${FAVICON_MARK_PATH}" fill="${mark}"/></svg>`
   );
 }
 
-export function projectFaviconDataUrl(color: string): string {
-  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+export function projectFaviconDataUrl(color: string, inverted = false): string {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color, inverted))}`;
+}
+
+function faviconColors(color: string, inverted: boolean): [string, string] {
+  const ink = markInk(color);
+  return inverted ? [ink, color] : [color, ink];
 }
 
 /** Renders the same tile to a PNG for browsers (Safari) that read only the PNG
  *  favicons. Null where no canvas is available. */
-function projectFaviconPng(color: string, size: number): string | null {
+function projectFaviconPng(color: string, inverted: boolean, size: number): string | null {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (!ctx || typeof Path2D === "undefined") return null;
+  const [tile, mark] = faviconColors(color, inverted);
   ctx.scale(size / 512, size / 512);
-  ctx.fillStyle = color;
+  ctx.fillStyle = tile;
   // arcTo, not roundRect, which older Safari lacks.
   ctx.beginPath();
   ctx.moveTo(112, 0);
@@ -113,7 +121,7 @@ function projectFaviconPng(color: string, size: number): string | null {
   ctx.arcTo(0, 0, 512, 0, 112);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = markInk(color);
+  ctx.fillStyle = mark;
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
@@ -121,22 +129,80 @@ function projectFaviconPng(color: string, size: number): string | null {
 /** The tile color of icons/icon.svg (project_color.test.ts pins it). */
 export const DEFAULT_FAVICON_COLOR = "#2f5fd8";
 
-let appliedFavicon: string | null = null;
+/** How long each frame of the attention blink shows. Background tabs clamp
+ *  timers to about one second, so a shorter period would not show. */
+export const FAVICON_BLINK_MS = 1000;
+
+let appliedColor: string | null = null;
+let appliedAttention = false;
+let blinkTimer: ReturnType<typeof setInterval> | null = null;
+let blinkInverted = false;
+let lastBlinkAt = 0;
+let motionQuery: MediaQueryList | null = null;
+const faviconHrefs = new Map<string, string | null>();
 
 /** Points every favicon link at the project-colored mark, or back at the default
- *  mark when color is null. Writes only on a change. */
-export function applyProjectFavicon(color: string | null): void {
-  if (appliedFavicon === color) return;
-  appliedFavicon = color;
+ *  mark when color is null. While attention is true the tile and mark colors swap
+ *  every FAVICON_BLINK_MS; under reduced motion the swapped frame stays still. */
+export function applyProjectFavicon(color: string | null, attention = false): void {
+  if (appliedColor === color && appliedAttention === attention) return;
+  if (appliedColor !== color) faviconHrefs.clear();
+  appliedColor = color;
+  appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+
+function restartBlink(): void {
+  if (blinkTimer !== null) {
+    clearInterval(blinkTimer);
+    blinkTimer = null;
+  }
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
+  }
+}
+
+// Chrome runs timers in a long-hidden tab about once a minute. A late tick shows
+// the attention frame instead of toggling, so a throttled tab holds that frame
+// rather than showing the plain mark for a minute at a time.
+function blinkTick(): void {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
+  paintFavicon();
+}
+
+function prefersReducedMotion(): boolean {
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
+}
+
+function paintFavicon(): void {
   // Chrome keeps showing the last data: favicon when a link's href returns to a
   // URL it already loaded, so the default is redrawn as a data: URL too.
-  const tile = color ?? DEFAULT_FAVICON_COLOR;
+  const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === undefined) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    const href =
-      link.type === "image/svg+xml"
-        ? projectFaviconDataUrl(tile)
-        : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
+    const size = Number.parseInt(link.sizes.value, 10) || 32;
+    const key = `${link.type}|${size}|${blinkInverted}`;
+    let href = faviconHrefs.get(key);
+    if (href === undefined) {
+      href =
+        link.type === "image/svg+xml"
+          ? projectFaviconDataUrl(tile, blinkInverted)
+          : projectFaviconPng(tile, blinkInverted, size);
+      faviconHrefs.set(key, href);
+    }
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }

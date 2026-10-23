@@ -376,8 +376,9 @@ TUI focus is an accent frame plus text. Web touch targets are at least 44px high
 ## Motion and copy
 
 No animated indicators: no spinner, pulse or cycling glyph. The one exception is
-the web rail's needs-attention dot, which blinks so a waiting agent is visible
-from across the screen, and is static and ringed under reduced motion. Connecting…,
+the needs-attention blink, on the web rail's dot and on the favicon, so an agent
+blocked on the user is visible from across the screen or from another tab. Both
+are static under reduced motion, where the dot gets a ring. Connecting…,
 Creating… and Running are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.
