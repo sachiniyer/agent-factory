@@ -21,8 +21,21 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if shouldClose {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
-			picked := tmux.SupportedPrograms[idx]
+			// The rows are what the open picker actually showed — for a remote
+			// target that is the daemon's catalog, not the local enum (#4889
+			// review).
+			picks := m.programPickerChoices
+			if len(picks) == 0 {
+				picks = tmux.SupportedPrograms
+			}
+			picked := picks[idx]
+			m.programPickerChoices = nil
 			changed := picked != m.pendingProgram
+			// A picker submit is an explicit choice even when it re-picks the
+			// value already shown: it submits the concrete program on the wire
+			// rather than "" (#4889 review). String equality cannot tell this
+			// pick apart from an untouched field — this flag is what can.
+			m.pendingProgramChosen = true
 			if changed {
 				// An account belongs to ONE agent — claude's "work" and codex's "work"
 				// are different identities in different registries — so a program change

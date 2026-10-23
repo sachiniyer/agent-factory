@@ -906,7 +906,6 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
-	globalDefault := h.appConfig.DefaultProgram
 	h.program = "codex"
 
 	projectBRoot := initTestGitRepo(t)
@@ -939,8 +938,12 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	saved, err := task.LoadTasks()
 	require.NoError(t, err)
 	require.Len(t, saved, 1, "the create must have reached disk")
-	assert.Equal(t, globalDefault, saved[0].Program,
-		"a task created after a failed resolve must carry the global default program, not the previous project's (#2138)")
+	// The form's "Use config default" option stores Program="" — the implicit
+	// value the task runner resolves to the repo's live default_program at run
+	// time. After the failed project resolve that is the global default, which
+	// satisfies #2138 without baking a copy of it into the task.
+	assert.Empty(t, saved[0].Program,
+		"a task created after a failed resolve must store the implicit program, not a stale copy of the previous project's (#2138)")
 }
 
 // TestBuildProjectListUnionsSourcesWithCounts: the picker list unions the
