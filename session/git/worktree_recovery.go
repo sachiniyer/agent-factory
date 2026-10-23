@@ -502,12 +502,12 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		}
 		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 			return RelocationClaim{}, errors.Join(fmt.Errorf(
-				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %v)",
+				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 				primary, primaryErr, recovery.AlternatePath, alternateFailure,
 			), ErrRelocateStateUnknown)
 		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
-			"cannot resolve interrupted relocation: neither candidate was established (%s: %v; %s: %v)",
+			"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 			primary, primaryFailure, recovery.AlternatePath, alternateFailure,
 		), ErrRelocateStateUnknown)
 	}
@@ -896,7 +896,7 @@ func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, set
 			g.recordStaleClaimLocked(claim)
 		}
 		return errors.Join(fmt.Errorf(
-			"worktree path %s changed after identity resolution: %v", claim.Path, err,
+			"worktree path %s changed after identity resolution: %w", claim.Path, err,
 		), ErrRelocateStateUnknown)
 	}
 	if !claim.identity.same(identity) {

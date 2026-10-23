@@ -128,7 +128,8 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err))
 	}
 
 	g.baseCommitSHA = baseCommit
@@ -364,7 +365,8 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
-		return fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err))
 	}
 
 	// Resolve the base commit SHA so diffs and other operations have a reference point.
@@ -450,7 +452,8 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// Create a new worktree from the base commit.
 	// This starts the worktree with a clean slate without inheriting uncommitted changes.
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err))
 	}
 
 	return nil

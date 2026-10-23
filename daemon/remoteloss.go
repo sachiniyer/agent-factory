@@ -331,6 +331,7 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	instance.ClearAgentModelChange()
 	instance.ClearIdleEvidence()
 	instance.ClearLostRestoreFailure()
+	instance.ClearLostRestoreWait()
 	key := stableSessionKey(repoID, instance)
 	m.clearRemoteLoss(key)
 	// A replaced runtime is a fresh pane: the task-run turn watcher's prev

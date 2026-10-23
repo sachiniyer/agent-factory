@@ -533,6 +533,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 			d.Worktree.MissingReason = redactedMarker
 		}
 	}
+	// LostRestoreWait.Error is the same class of af-authored string quoting an
+	// environmental failure (daemon/lostrestore.go stores the error that armed
+	// the wait), so it gets the identical diagnostic scrub (#5295).
+	if d.LostRestoreWait != nil {
+		d.LostRestoreWait.Error = r.scrubDiagnostic(d.LostRestoreWait.Error)
+	}
 	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
 	// renderer prints the user-chosen names of the files af could not read.
 	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths

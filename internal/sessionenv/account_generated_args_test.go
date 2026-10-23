@@ -386,3 +386,142 @@ func TestGenerateAccountLaunchProof_ExecPrefixDoesNotTrustRelativeExecutable(t *
 	})
 	require.Error(t, err, "the relative executable must still fail closed")
 }
+
+// The codex resume splice lands `resume --last` after any global -c options
+// (an extension the positional diff describes), but rewrites that DO insert
+// mid-command — this shape, or anything a future splice produces ahead of a
+// declared word — must still merge the declaration rather than clearing it and
+// refusing every account-scoped codex restore at the launch boundary (#5238
+// review; same pane-exits-127 defect #3083 closed for claude's append). The
+// merge must keep the proof.
+func TestGeneratedArgsByInsertion_ResumeSpliceKeepsTheProof(t *testing.T) {
+	base := "codex -c check_for_update_on_startup=false"
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	final := "codex resume --last -c check_for_update_on_startup=false"
+
+	merged, ok := GeneratedArgsByInsertion(base, final, declared)
+	require.True(t, ok)
+	require.Equal(t, []string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, merged,
+		"the splice lands where the words landed: resume --last before the injected flag")
+
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
+	})
+	require.NoError(t, err, "the launcher's own description of the splice must satisfy the guard")
+}
+
+// The account boundary proves `exec codex` and `env codex` wrappers — so a
+// launch through one must keep its declaration across the resume splice too,
+// or every account-scoped restore through an accepted wrapper is refused
+// (#5238 review). The executable is the codex operand, not the command's
+// first word: the wrapper prefix is the operator's and only has to be
+// identical between base and final.
+func TestGeneratedArgsByInsertion_WrapperSpliceKeepsTheProof(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		// scopeable reports whether the account boundary itself accepts the
+		// shape — an env MUTATION is refused there regardless of how well the
+		// diff describes it, so the merge alone is asserted for that row.
+		scopeable bool
+	}{
+		{"exec wrapper",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{"env wrapper",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{
+			// env's own operand sits between `env` and codex — the executable
+			// is still the codex word, located through the same envcommand
+			// model the boundary uses. FOO=1 is a mutation the boundary
+			// refuses on its own rule; the merge is what this fixes.
+			"env assignment wrapper",
+			"env FOO=1 codex -c check_for_update_on_startup=false",
+			"env FOO=1 codex resume --last -c check_for_update_on_startup=false",
+			false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declared := []string{"-c", "check_for_update_on_startup=false"}
+			merged, ok := GeneratedArgsByInsertion(test.base, test.final, declared)
+			require.True(t, ok)
+			require.Equal(t,
+				[]string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, merged)
+
+			if !test.scopeable {
+				return
+			}
+			_, err := ApplyAccount([]string{"PATH=/usr/bin"}, test.final, Account{
+				Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
+			})
+			require.NoError(t, err, "the wrapper's proof must satisfy the same boundary")
+		})
+	}
+}
+
+// Wrapper refusals stay refusals: `exec --` (dash cannot run it) and an env
+// with no command to execute have no executable to anchor the splice on.
+func TestGeneratedArgsByInsertion_RefusesUnplaceableWrappers(t *testing.T) {
+	for _, test := range []struct{ name, base, final string }{
+		{"exec separator", "exec -- codex -c k=v", "exec -- codex resume --last -c k=v"},
+		{"env with no command", "env FOO=1 -c k=v", "env FOO=1 resume --last -c k=v"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, ok := GeneratedArgsByInsertion(test.base, test.final, []string{"-c", "k=v"})
+			require.False(t, ok)
+		})
+	}
+}
+
+// Insertion lands wherever the words landed — not only at index 1.
+func TestGeneratedArgsByInsertion_SplicesAtTheDivergence(t *testing.T) {
+	base := "codex -c a=1 -c b=2"
+	declared := []string{"-c", "a=1", "-c", "b=2"}
+	final := "codex -c a=1 --middle -c b=2"
+
+	merged, ok := GeneratedArgsByInsertion(base, final, declared)
+	require.True(t, ok)
+	require.Equal(t, []string{"-c", "a=1", "--middle", "-c", "b=2"}, merged)
+}
+
+func TestGeneratedArgsByInsertion_FailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		declared          []string
+		why               string
+	}{
+		{"an undeclared base word", "codex --full-auto -c k=v", "codex resume --last --full-auto -c k=v",
+			[]string{"-c", "k=v"},
+			"the operator's --full-auto is not af-authored; a command with undeclared words was never provable"},
+		{"no declared words at all", "codex exec --json", "codex exec resume --last --json",
+			nil, "exec is the operator's word, not af's"},
+		{"a dropped base word", "codex -c k=v", "codex resume --last",
+			[]string{"-c", "k=v"}, "insertion keeps every base word"},
+		{"a replaced base word", "codex -c k=v", "codex resume --last -c k=w",
+			[]string{"-c", "k=v"}, "the tail no longer spells base's tail"},
+		{"a changed executable", "codex -c k=v", "codex-next resume --last -c k=v",
+			[]string{"-c", "k=v"}, "the first word moved"},
+		{"an assignment prefix", "codex -c k=v", "FOO=1 codex resume --last -c k=v",
+			[]string{"-c", "k=v"}, "an assignment is not an argument word"},
+		{"same-length commands", "codex -c k=v", "codex -c k=w",
+			[]string{"-c", "k=v"}, "nothing was inserted"},
+		{"a shorter final", "codex -c k=v", "codex",
+			[]string{"-c", "k=v"}, "words were removed, not inserted"},
+		{"two commands", "codex", "codex resume --last; rm -rf /",
+			nil, "not a single simple command"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, ok := GeneratedArgsByInsertion(test.base, test.final, test.declared)
+			require.False(t, ok, test.why)
+		})
+	}
+}
+
+// A bare `codex` needs no extension check to be described: its entire tail is
+// the insertion point.
+func TestGeneratedArgsByInsertion_BareCommand(t *testing.T) {
+	merged, ok := GeneratedArgsByInsertion("codex", "codex resume --last", nil)
+	require.True(t, ok)
+	require.Equal(t, []string{"resume", "--last"}, merged)
+}

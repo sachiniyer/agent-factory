@@ -120,6 +120,25 @@ func (i *Instance) RestoreStalledWorktreeFenceAfterFailedSettle() error {
 	return gw.RestoreStalledFenceAfterFailedSettle()
 }
 
+// SetRelocationSettleNotify installs the callback invoked (outside i.mu) when
+// the respawn path settles a recovery record — the same daemon-installed
+// persist shape as SetOwedOnCompleteNotify, consumed at exactly one edge:
+// after SettleWorktreeRelocationClaim clears the in-memory record and before
+// the spawn proceeds (#5295 review).
+func (i *Instance) SetRelocationSettleNotify(notify func(*Instance) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.relocationSettleNotify = notify
+}
+
+// relocationSettleNotifyFn reads the installed callback under the lock for
+// the respawn edge; a nil return means fire nothing.
+func (i *Instance) relocationSettleNotifyFn() func(*Instance) error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.relocationSettleNotify
+}
+
 // SettleWorktreeRelocationClaim revalidates a consumed recovery claim and
 // releases its ownership without relocating anything. The kill admission
 // producer uses it when a reclaimed stalled record turns out to need no

@@ -934,6 +934,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			instance.ClearLostRestoreFailureAtObservation(observationGeneration) {
 			settlementCheckpoint = true
 		}
+		if accepted && instance.GetLiveness() != session.LiveLost &&
+			instance.ClearLostRestoreWaitAtObservation(observationGeneration) {
+			settlementCheckpoint = true
+		}
 	}
 
 	// The run-marker flip is durable on its own: a held gate releasing on a

@@ -136,10 +136,10 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
 		// best-effort list. See sshNoConfigFile.
 		"-F", sshNoConfigFile,
-		"-o", "User=" + shellQuoteSandbox(sshLoginUser(cfg)),
+		"-o", "User=" + shellQuote(sshLoginUser(cfg)),
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
-		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHosts),
+		"-o", "UserKnownHostsFile=" + shellQuote(knownHosts),
 		// The x/crypto client consulted ONE file, so this preserves today's
 		// semantics rather than tightening them.
 		//
@@ -235,9 +235,9 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
 		// Composition stays FILESYSTEM-PURE — the readability check lives in
 		// verifySSHIdentityFile, called from the provision path. See there.
-		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
+		parts = append(parts, "-i", shellQuote(expandUserPath(identity)))
 	}
-	parts = append(parts, shellQuoteSandbox(host))
+	parts = append(parts, shellQuote(host))
 	return strings.Join(parts, " "), nil
 }
 
@@ -292,6 +292,34 @@ func verifySSHIdentityFile(cfg config.SSHConfig) error {
 		return fmt.Errorf("backend=ssh: ssh.identity_file %q cannot be used as an ssh key: %w "+
 			"(af refuses rather than silently falling back to your agent or default keys, "+
 			"which would authenticate as a different identity than the one configured)", path, why)
+	}
+	// REFUSE A LITERAL '%' BEFORE TOUCHING THE FILESYSTEM. ssh percent-token-expands
+	// -i/IdentityFile values (per ssh_config(5): %%, %C, %d, %h, %i, %j, %k, %L, %l,
+	// %n, %p, %r, %u), so a path containing '%' makes ssh load a DIFFERENT file than
+	// the one the checks below prove readable — and the one below can exist and be a
+	// perfectly good key while the expanded one does not. That divergence is the one
+	// input class the stat/open guard below CANNOT see: ssh pre-stats the LITERAL -i
+	// value at startup (it exists, so no "Warning: Identity file … not accessible")
+	// and the mismatch surfaces only at key-load time, where a usable agent key makes
+	// the connection succeed SILENTLY as the wrong identity — the exact failure this
+	// function was built to prevent. Refusal is the decision and not just the default:
+	//
+	//   - Escaping (% → %%), the way escapeSSHPercent does for ProxyCommand, does NOT
+	//     work for -i. Measured: ssh's startup pre-stat then sees the literal %%d path
+	//     (nonexistent), prints the warning and drops the identity entirely, falling
+	//     back to default keys — the silent fallback again. %% is correct only for a
+	//     value ssh expands once at run time; -i is statted literally first.
+	//   - Normalization is impossible because the token set includes values ssh
+	//     derives at run time (%h, %p, %C), so af cannot predict the expanded path.
+	//
+	// This also covers a '%' that crept in via expandUserPath — e.g. an AF home whose
+	// own path contains '%' — because the check runs on the EXPANDED value, which is
+	// exactly the string af hands to ssh and ssh then re-expands.
+	if strings.ContainsRune(path, '%') {
+		return refuse(fmt.Errorf("it contains a '%%' character, which ssh expands as a token in identity " +
+			"paths (ssh_config(5) accepts %%, %%C, %%d, %%h, %%i, %%j, %%k, %%L, %%l, %%n, %%p, %%r and %%u in " +
+			"IdentityFile/-i), so ssh would load a different file than af verified — the silent " +
+			"wrong-identity fallback this guard exists to prevent; use a path with no '%%'"))
 	}
 	// KIND FIRST, THEN READABILITY — this order is load-bearing, not tidiness.
 	// Opening a FIFO for reading BLOCKS until another process opens the write end,
@@ -366,11 +394,11 @@ func sshPinnedProxyCommand(dialAddr string, port int) (string, error) {
 			"connection to %s (af runs itself as ssh's ProxyCommand so every step dials the one address "+
 			"the session was provisioned on): %w", dialAddr, err)
 	}
-	inner := shellQuoteSandbox(relay) +
+	inner := shellQuote(relay) +
 		" " + sshrelay.Subcommand +
-		" " + shellQuoteSandbox(dialAddr) +
+		" " + shellQuote(dialAddr) +
 		" " + strconv.Itoa(port)
-	return "ProxyCommand=" + shellQuoteSandbox(escapeSSHPercent(inner)), nil
+	return "ProxyCommand=" + shellQuote(escapeSSHPercent(inner)), nil
 }
 
 // escapeSSHPercent doubles every `%` so ssh's percent expansion yields the literal

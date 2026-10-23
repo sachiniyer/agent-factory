@@ -72,8 +72,44 @@ func TestResumeProgram(t *testing.T) {
 		// Codex headless: "exec" is a subcommand; resume comes after it.
 		{"codex exec", "codex exec", "codex exec resume --last"},
 		{"codex exec with flag", "codex exec --foo bar", "codex exec resume --last --foo bar"},
+		// Codex global -c/--config options — the position af's
+		// check_for_update_on_startup suppression lands in (#5238) — sit
+		// before the subcommand, so the splice goes BEHIND them and the flag
+		// stays global. That is also what keeps `exec` reachable through an
+		// injected -c: the exec/resume check must not read the -c operand as
+		// the subcommand slot.
+		{
+			"codex injected -c keeps the flag global",
+			"codex -c check_for_update_on_startup=false",
+			"codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"codex --config= keeps the flag global",
+			"codex --config=check_for_update_on_startup=false",
+			"codex --config=check_for_update_on_startup=false resume --last",
+		},
+		{
+			"exec codex wrapper keeps the flag global",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"env codex wrapper keeps the flag global",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"codex exec reachable through a global -c",
+			"codex -c check_for_update_on_startup=false exec --json",
+			"codex -c check_for_update_on_startup=false exec resume --last --json",
+		},
 		// Codex: already-has-resume cases — no-op.
 		{"codex already resume", "codex resume --last", "codex resume --last"},
+		{
+			"codex already resume behind a global -c",
+			"codex -c check_for_update_on_startup=false resume --last",
+			"codex -c check_for_update_on_startup=false resume --last",
+		},
 		{"codex exec already resume", "codex exec resume --last", "codex exec resume --last"},
 		// Codex: "resume" appearing in flag-value position must NOT trip
 		// the already-has-resume check (#632). The subcommand can only

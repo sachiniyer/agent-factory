@@ -673,7 +673,7 @@ func proxyCommandValue(t *testing.T, cmd string) string {
 	i := strings.Index(cmd, marker)
 	require.GreaterOrEqual(t, i, 0, "no ProxyCommand in %q", cmd)
 	rest := cmd[i+len(marker):]
-	// shellQuoteSandbox spells an embedded quote '\'' — undo that, then stop at the
+	// shellQuote spells an embedded quote '\'' — undo that, then stop at the
 	// closing quote.
 	rest = strings.ReplaceAll(rest, `'\''`, "\x00")
 	end := strings.Index(rest, "'")

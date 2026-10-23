@@ -232,7 +232,13 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		if _, err := ensureCodexSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up codex af skill, af guidance unavailable to codex: %v", err)
 		}
-		return resolved
+		// Keep codex's startup update picker from ever rendering for a launch
+		// af owns: af answering it is exactly the interaction that let a
+		// respawn die seconds after restore (#5238). Shared with the
+		// config-agent spawn through tmux.EnsureCodexUpdateCheckDisabled, one
+		// place so the two launch paths cannot drift — the same contract
+		// devin's trust flag holds on the line below.
+		return tmux.EnsureCodexUpdateCheckDisabled(resolved)
 	case tmux.ProgramGemini:
 		if _, err := ensureGeminiSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up gemini af skill, af guidance unavailable to gemini: %v", err)

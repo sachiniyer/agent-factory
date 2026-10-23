@@ -109,6 +109,14 @@ type InstanceData struct {
 	// LostRestoreFailure persists why automatic recovery stopped across daemon
 	// restarts until an explicit runtime replacement succeeds.
 	LostRestoreFailure *LostRestoreFailure `json:"lost_restore_failure,omitempty"`
+	// LostRestoreWait persists that automatic recovery is waiting on the
+	// environment — the last failure was a resource limit external to the
+	// session — across daemon restarts until a restore attempt succeeds, a
+	// structural failure retires the wait, or a replacement lands (#5295). A
+	// row that reloads INERT drops it on load instead: no automatic retry can
+	// reach that row, so the record would report an armed retry forever.
+	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
 	// still known to be later. Persisted across daemon restarts.
@@ -189,10 +197,14 @@ type InstanceData struct {
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
-	// survive a restart, and so PR3's auto-resume scheduler can read it. omitempty
-	// drops it for every normal session; additive + rollforward, mirroring the
-	// Liveness precedent.
-	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// survive a restart, and so PR3's auto-resume scheduler can read it. omitzero
+	// drops it for every normal session (and for a limit row whose banner carried
+	// no parseable reset time): omitempty never omits a struct, and a zero
+	// time.Time would otherwise serialize as "0001-01-01T00:00:00Z" on every row,
+	// inventing a reset date the web would render (#4506 review, mirroring the
+	// TabExitData.At precedent); additive + rollforward, mirroring the Liveness
+	// precedent.
+	LimitResetAt time.Time `json:"limit_reset_at,omitzero"`
 	// LimitAgent is the provider namespace for LimitAccount. It is always a
 	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
 	// pending cross-agent replacement must retain both values.
@@ -422,8 +434,22 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
 // unavailable.
+//
+// It replays FromInstanceData's full fence-restoration order — archive, then
+// relocation recovery, then handoff and account-swap — so the rollback-safe
+// ownership projection ForStorage writes for any row carrying an unresolved
+// worktree relocation recovery cannot survive into the disk-fallback client
+// view. A recovery row whose safety metadata is missing or undecodable is
+// corrupt; ForClientRead cannot drop the row, so it leaves the ForStorage
+// projection in place and the row reads as the conservative unknown-ownership
+// verdict rather than fabricating confidence — the same fail-closed direction
+// every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	restored, err := d.RestoreRelocationRecoveryOriginals()
+	if err == nil {
+		d = restored
+	}
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
