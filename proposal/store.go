@@ -71,6 +71,11 @@ func (s *Store) withLock(fn func() error) error {
 	if err := s.ensureRepo(); err != nil {
 		return fmt.Errorf("initialize proposal store: %w", err)
 	}
+	// A process that died mid-commit can leave entries staged; every commit
+	// must start from HEAD so they are not swept into the wrong author's.
+	if _, err := s.git(nil, "read-tree", "HEAD"); err != nil {
+		return fmt.Errorf("reset proposal index: %w", err)
+	}
 	return fn()
 }
 
