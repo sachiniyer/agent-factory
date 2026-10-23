@@ -127,6 +127,8 @@ test("nav mode: t creates a tab; w closes the active non-agent tab", () => {
   // Ctrl/Cmd+Shift+T stays the browser's reopen-closed-tab.
   assert.deepEqual(decideKey("T", ctx(), { shift: true, ctrl: true }), { kind: "none" });
   assert.deepEqual(decideKey("T", ctx(), { shift: true, meta: true }), { kind: "none" });
+  // Shift+Alt+T focuses Chrome's toolbar on Windows and Linux.
+  assert.deepEqual(decideKey("T", ctx(), { shift: true, alt: true }), { kind: "none" });
   // w on the agent tab (index 0) is refused — kill the session instead.
   assert.deepEqual(decideKey("w", ctx({ activeTab: 0 })), { kind: "none" }, "agent tab is unclosable");
   // w on a non-agent tab closes it.

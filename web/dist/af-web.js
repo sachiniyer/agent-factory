@@ -6953,7 +6953,7 @@ function decideKey(key, ctx, mods = {}) {
       return { kind: "none" };
     }
     if (key === "t" || key === "T") {
-      if (mods.ctrl || mods.meta) return { kind: "none" };
+      if (mods.ctrl || mods.meta || mods.alt) return { kind: "none" };
       const tabKind = mods.shift ?? key === "T" ? "vscode" : "shell";
       return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
