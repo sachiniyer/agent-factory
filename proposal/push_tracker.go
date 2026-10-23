@@ -1,6 +1,7 @@
 package proposal
 
 import (
+	"errors"
 	"time"
 )
 
@@ -139,8 +140,14 @@ func (s *Service) refreshUnsentLocked(store *Store, sessionID string, e *pushEnt
 		return
 	}
 	slug, n, err := store.Unseen(sessionID)
+	if err != nil && !errors.Is(err, ErrNotAttached) {
+		return
+	}
 	if err != nil || slug != e.slug {
 		n = 0
+	}
+	if n == 0 {
+		e.sendNow, e.lastSave = false, time.Time{}
 	}
 	e.unsent, e.unsentAt = n, now
 }
