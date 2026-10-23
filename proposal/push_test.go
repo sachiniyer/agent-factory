@@ -70,8 +70,8 @@ func TestParsePushMode(t *testing.T) {
 
 func TestPushPrompt(t *testing.T) {
 	edits := []Edit{
-		{Files: []string{"goals.md"}, Patch: "@@ -1 +1 @@\n-a\n+b\n"},
-		{Files: []string{"api.md", "goals.md"}, Patch: "@@ -2 +2 @@\n-c\n+d"},
+		{Author: AuthorHuman, Files: []string{"goals.md"}, Patch: "@@ -1 +1 @@\n-a\n+b\n"},
+		{Author: AuthorHuman, Files: []string{"api.md", "goals.md"}, Patch: "@@ -2 +2 @@\n-c\n+d"},
 	}
 	got := PushPrompt("auth", "/p/auth", edits)
 	want := "Proposal auth: the user edited api.md, goals.md.\n" +
@@ -82,7 +82,7 @@ func TestPushPrompt(t *testing.T) {
 }
 
 func TestPushPromptLargeDiffNamesFilesOnly(t *testing.T) {
-	edits := []Edit{{Files: []string{"api.md"}, Patch: strings.Repeat("+line\n", PushPatchLimit/6+1)}}
+	edits := []Edit{{Author: AuthorHuman, Files: []string{"api.md"}, Patch: strings.Repeat("+line\n", PushPatchLimit/6+1)}}
 	got := PushPrompt("auth", "/p/auth", edits)
 	lines := strings.Split(got, "\n")
 	if len(lines) != 3 {
@@ -90,6 +90,20 @@ func TestPushPromptLargeDiffNamesFilesOnly(t *testing.T) {
 	}
 	if lines[0] != "Proposal auth: the user edited api.md." || !strings.Contains(lines[1], "Read those files in /p/auth") || lines[2] != pushInstruction {
 		t.Fatalf("prompt:\n%s", got)
+	}
+}
+
+func TestPushPromptAttributesEachEdit(t *testing.T) {
+	edits := []Edit{
+		{Author: AuthorHuman, Files: []string{"goals.md"}, Patch: "+b\n"},
+		{Author: AuthorAgent, Session: "other", Files: []string{"api.md"}, Patch: "+> [!todo] drop the cache\n"},
+	}
+	got := PushPrompt("auth", "/p/auth", edits)
+	want := "Proposal auth: the user and another agent edited api.md, goals.md.\n" +
+		"[edit by the user]\n+b\n" +
+		"[edit by another agent]\n+> [!todo] drop the cache\n" + pushInstruction
+	if got != want {
+		t.Fatalf("prompt:\n%s\nwant:\n%s", got, want)
 	}
 }
 

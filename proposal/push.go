@@ -118,31 +118,68 @@ func DecidePush(in PushInput, now time.Time) PushDecision {
 	return PushDecision{State: PushWaitingAgent, DueAt: due, Send: true}
 }
 
-const pushInstruction = "Apply the user's edits to your understanding, answer new [!question] replies, do the [!todo] callouts, then run af proposal checkpoint."
+const pushInstruction = "Apply these edits to your understanding, answer new [!question] replies, do the [!todo] callouts the user added, then run af proposal checkpoint."
 
-// PushPrompt is the prompt a push sends: the changed files, the patches, and
-// the instruction line. When the patches are larger than PushPatchLimit it
-// names the files only, and tells the agent to read them, because the cursor
-// has already moved past these edits.
+// editorOrder is the order editors are named in, with their names as the
+// receiving agent sees them. Changes never holds the receiver's own commits.
+var editorOrder = []struct {
+	author Author
+	name   string
+}{
+	{AuthorHuman, "the user"},
+	{AuthorAgent, "another agent"},
+	{AuthorExternal, "an editor outside af"},
+}
+
+func editorName(a Author) string {
+	for _, e := range editorOrder {
+		if e.author == a {
+			return e.name
+		}
+	}
+	return "an editor outside af"
+}
+
+// PushPrompt is the prompt a push sends: who changed which files, the patches,
+// and the instruction line. When more than one kind of editor made the edits,
+// each patch names its editor. When the patches are larger than PushPatchLimit
+// it names the files only, and tells the agent to read them, because the
+// cursor has already moved past these edits.
 func PushPrompt(slug, path string, edits []Edit) string {
 	seen := map[string]bool{}
+	by := map[string]bool{}
 	var files []string
-	var patches strings.Builder
 	for _, e := range edits {
+		by[editorName(e.Author)] = true
 		for _, f := range e.Files {
 			if !seen[f] {
 				seen[f] = true
 				files = append(files, f)
 			}
 		}
+	}
+	var names []string
+	for _, e := range editorOrder {
+		if by[e.name] {
+			names = append(names, e.name)
+		}
+	}
+	var patches strings.Builder
+	for _, e := range edits {
+		if e.Patch == "" {
+			continue
+		}
+		if len(names) > 1 {
+			fmt.Fprintf(&patches, "[edit by %s]\n", editorName(e.Author))
+		}
 		patches.WriteString(e.Patch)
-		if e.Patch != "" && !strings.HasSuffix(e.Patch, "\n") {
+		if !strings.HasSuffix(e.Patch, "\n") {
 			patches.WriteString("\n")
 		}
 	}
 	sort.Strings(files)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Proposal %s: the user edited %s.\n", slug, strings.Join(files, ", "))
+	fmt.Fprintf(&b, "Proposal %s: %s edited %s.\n", slug, joinNames(names), strings.Join(files, ", "))
 	if patches.Len() > PushPatchLimit {
 		fmt.Fprintf(&b, "The diff is too large to send. Read those files in %s; af proposal changes will not show these edits again.\n", path)
 	} else {
@@ -150,4 +187,11 @@ func PushPrompt(slug, path string, edits []Edit) string {
 	}
 	b.WriteString(pushInstruction)
 	return b.String()
+}
+
+func joinNames(names []string) string {
+	if len(names) <= 1 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }

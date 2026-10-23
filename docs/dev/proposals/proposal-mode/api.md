@@ -324,8 +324,13 @@ daemon puts the cursor back, and the push tries again after 10 s.
 ```
 Proposal auth-rework: the user edited api.md, goals.md.
 <the patches of each edit, oldest first>
-Apply the user's edits to your understanding, answer new [!question] replies, do the [!todo] callouts, then run af proposal checkpoint.
+Apply these edits to your understanding, answer new [!question] replies, do the [!todo] callouts the user added, then run af proposal checkpoint.
 ```
+
+The first line names who made the edits: the user, another agent, or an
+editor outside af. When the edits come from more than one of them, each patch
+starts with a line such as `[edit by another agent]`, so a peer agent's
+callout does not read as the user's.
 
 When the patches are more than 8 KB, the prompt has no patches. The middle
 line tells the agent to read the changed files at the proposal path, because
