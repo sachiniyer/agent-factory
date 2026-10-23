@@ -704,10 +704,39 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 					// detached child may still write this worktree, so preserve the
 					// pending mission but suppress automatic retries until inspection.
 					instance.MarkStartupStateUnknown()
-					if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-						rerr = errors.Join(rerr, perr)
-					}
 				}
+			}
+			// Persist the instance even on failure, matching the sibling recovery
+			// paths (lostrestore.go, restore.go): Respawn shares LocalBackend.respawn,
+			// so reaching this line can mean it rebuilt a vanished worktree —
+			// recreating the branch, flipping branchCreatedByUs and rewriting
+			// baseCommitSHA — before a later step (tmux spawn, setupTabs) failed.
+			// Without this write the in-memory flag is lost, so after a daemon
+			// restart the instance reloads a stale branchCreatedByUs=false; the
+			// next recovery skips the rebuild (the worktree now exists) and the
+			// flag stays wrong, so kill never deletes the branch and it is
+			// orphaned (#1532/#1841/#2883). The poll does not cover it —
+			// persistPollChange writes only on a liveness/reset-time change, and
+			// the re-parked row matches the one the poll already knows. A
+			// SETTLEMENT, not best-effort: the auto-resume scheduler has no
+			// caller to report a failed write to and the retry set is what makes
+			// the state durable (#2883). persistSettlement also captures
+			// MarkStartupStateUnknown applied above for the blind-teardown case.
+			if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+				rerr = errors.Join(rerr, perr)
+			}
+			// A rebuild that already mutated durable workspace state before the
+			// later failure committed that mutation — report it as committed,
+			// not as an untouched, freely retryable failure, the way restore.go
+			// does for the manual restore path (#3236). The git side lives on
+			// disk regardless of the record write; a raw error reading as
+			// failed-nothing-committed about a mutation that landed would
+			// mislead a retry.
+			var rebuilt *session.RecoverRebuiltWorkspaceError
+			if errors.As(rerr, &rebuilt) {
+				return resumeNotPerformed, &mutationCommittedError{err: fmt.Errorf(
+					"re-spawn for %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the resume: %w",
+					requestedTitle, instance.GetWorktreePath(), rerr)}
 			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
