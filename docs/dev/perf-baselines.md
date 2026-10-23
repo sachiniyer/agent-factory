@@ -223,7 +223,7 @@ and do not replace the three existing budgeted latency metrics.
 
 `playwright.visual.config.ts` drives the **same demo stills** as the
 recorder: the ten workflow scenes plus rail disclosures, phone layouts,
-terminal actions, tab types, keyboard ownership, split panes, form disclosures,
+terminal actions, keyboard ownership, split panes, form disclosures,
 confirmations, account registration and controlled recovery fixtures, all in light
 and dark. It omits video, conversion and video pacing. It waits for
 final stand-in output, a stable terminal and all retained seeded rows to report
