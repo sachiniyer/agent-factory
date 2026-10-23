@@ -359,15 +359,16 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationRegisteredWorktreeSkipsPro
 			"so a full filesystem on that target cannot fix the structural failure")
 }
 
-// TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileReadErrorPreserved pins the
-// contract the #5421 review added: when a failed add has left a nonempty symlink target whose
-// regular `.git` file stalls or returns an I/O error, the bounded read error must be
-// preserved as environmental evidence — the same way a non-ENOENT lstat or stat error on the
-// gitdir is preserved — so the lost-restore classifier reads the error alongside the git
-// failure rather than charging the structural budget for a filesystem that did not answer.
-// Discarding the read error (converting it to ok == false) would leave no evidence from the
-// affected target when the parent and common directory remain writable.
-func TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileReadErrorPreserved(t *testing.T) {
+// TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileNotInspectedForNonemptyTarget pins the
+// contract the #5421 review added: a nonempty symlinked destination is a pre-existing target git
+// rejects the add over without writing there, so the `.git` gitfile is a path the failed add did
+// not access. Once the target is known to be nonempty the gitfile/gitdir inspection stops, so a
+// regular `.git` file that would stall or return an I/O error is never lstat'd or read — the
+// bounded read error cannot join the chain, which lostRestoreEnvironmentalClass would otherwise
+// treat as an unbounded environmental wait even though git rejected the nonempty destination
+// without writing there. The probe must not target the destination, and the `.git` entry must
+// not be inspected.
+func TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileNotInspectedForNonemptyTarget(t *testing.T) {
 	oldWrite := writeSpaceProbe
 	defer func() { writeSpaceProbe = oldWrite }()
 	oldStat := statSpaceProbe
@@ -389,14 +390,13 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileReadErrorPreserved(
 	realTarget := t.TempDir()
 	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
 	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
-	// A nonempty target whose `.git` entry is a regular file the bounded
-	// read cannot answer. The target is nonempty so the empty-dir gate
-	// falls through to the `.git`-file branch, the lstat reports a regular
-	// file, but the read returns an error the caller must preserve.
+	// A nonempty target whose `.git` entry is a regular file a bounded read
+	// could not answer. The target is nonempty, so the empty-dir gate must
+	// short-circuit before the `.git`-file branch ever lstat's or reads the
+	// entry — the failed add did not access it.
 	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "file"), []byte("x"), 0o644))
-	// A regular file whose Stat is used as the fake lstat result for the
-	// non-existent `.git` entry — the code sees a regular file and calls
-	// BoundedReadFileLimit, which fails because the file does not exist.
+	// A regular file whose Stat is used as the fake lstat result should the
+	// `.git` entry ever be inspected — the test fails if that branch runs.
 	fakeInfo, err := os.Stat(filepath.Join(realTarget, "file"))
 	require.NoError(t, err)
 
@@ -408,9 +408,11 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileReadErrorPreserved(
 	require.NoError(t, err)
 	destPath := filepath.Join(resolvedRepo, "dest")
 
+	var gitInspected bool
 	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
 	lstatSpaceProbe = func(p string) (os.FileInfo, error) {
 		if p == filepath.Join(destPath, ".git") {
+			gitInspected = true
 			return fakeInfo, nil
 		}
 		return os.Lstat(p)
@@ -431,14 +433,14 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationGitfileReadErrorPreserved(
 	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
 	require.False(t, errors.Is(out, syscall.ENOSPC),
 		"a nonempty target whose `.git` file could not be read must not be probed as "+
-			"partial-attempt debris — the read failure is environmental evidence, not proof of a "+
-			"gitfile this add created: %v", out)
+			"partial-attempt debris — the failed add did not access the gitfile, so a read failure "+
+			"cannot turn the structural 'already exists' rejection into an environmental retry: %v", out)
 	require.NotContains(t, probedDirs, destPath,
 		"the write probe must not target a symlinked destination whose `.git` file could not be "+
-			"read — the read error is evidence, not debris, so the destination must not be probed")
-	require.Error(t, out,
-		"a bounded read error on the `.git` file must be preserved as environmental evidence so "+
-			"the lost-restore classifier reads it alongside the git failure: %v", out)
+			"read — the failed add did not access it, so the destination must not be probed")
+	require.False(t, gitInspected,
+		"a nonempty target must short-circuit before the `.git` entry is lstat'd or read, so a "+
+			"bounded read error on a gitfile the failed add did not access cannot join the chain")
 }
 
 // TestAnnotateWorktreeAddError_AbsoluteWorktreePathTraversalResolvesSymlink pins the contract
@@ -583,12 +585,16 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationNonGitfileSkipsProbe(t *te
 }
 
 // TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsProbe pins the
-// contract the #5421 review added: a `.git` file pointing at a live gitdir whose stat returns a
-// non-ENOENT error (EACCES, EIO, ErrProbeTimedOut) must not be treated as orphaned debris. Only
-// ENOENT establishes an orphaned gitfile; a live but temporarily inaccessible gitdir means the
-// worktree is registered and git rejected the add without writing, so the probe must not target
-// the destination and the stat error must be preserved so the classifier reads it as
-// environmental evidence rather than bare structural silence.
+// contract the #5421 review added: a nonempty symlinked destination is a pre-existing
+// target git rejects the add over without writing there, so the `.git` gitfile and its
+// referenced gitdir are paths the failed add did not access. The gitfile/gitdir
+// inspection therefore stops once the target is known to be nonempty: a `.git` file
+// pointing at a live gitdir whose stat returns a non-ENOENT error (EACCES, EIO,
+// ErrProbeTimedOut) must not be stat'd at all, so the unrelated gitdir's error cannot
+// join the chain — lostRestoreEnvironmentalClass would otherwise treat an unavailable
+// network gitdir's ETIMEDOUT as an unbounded environmental wait even though git
+// rejected the nonempty destination without writing there. The probe must not target
+// the destination, and the gitdir stat error must not reach the chain.
 func TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsProbe(t *testing.T) {
 	oldWrite := writeSpaceProbe
 	defer func() { writeSpaceProbe = oldWrite }()
@@ -611,10 +617,11 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsPr
 	realTarget := t.TempDir()
 	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
 	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
-	// A `.git` file pointing at a live gitdir whose stat returns a non-ENOENT
-	// error (EACCES) — the worktree is registered, so git rejects the add
-	// without writing; the inaccessible gitdir is environmental evidence, not
-	// an orphaned gitfile.
+	// A `.git` file pointing at a live gitdir whose stat would return a
+	// non-ENOENT error (EACCES) — the worktree is registered, so git rejects
+	// the add without writing. The nonempty target must short-circuit the
+	// inspection before this gitdir is ever stat'd, so the inaccessible gitdir's
+	// error cannot become an unbounded environmental wait.
 	gitDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(realTarget, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "README"), []byte("x"), 0o644))
@@ -628,8 +635,10 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsPr
 	destPath := filepath.Join(resolvedRepo, "dest")
 
 	statErr := errors.New("gitdir stat: permission denied")
+	var gitDirStatted bool
 	statSpaceProbe = func(p string) (os.FileInfo, error) {
 		if p == gitDir {
+			gitDirStatted = true
 			return nil, statErr
 		}
 		return os.Stat(p)
@@ -658,9 +667,14 @@ func TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsPr
 		"the write probe must not target a symlinked destination whose `.git` file points at a "+
 			"live gitdir whose stat returned a non-ENOENT error — the gitdir is inaccessible, not "+
 			"orphaned, so the destination is not failed-add debris")
-	require.True(t, errors.Is(out, statErr),
-		"a non-ENOENT stat error on a live gitdir must be preserved as environmental evidence so "+
-			"the lost-restore classifier reads it alongside the git failure: %v", out)
+	require.False(t, gitDirStatted,
+		"a nonempty target must short-circuit the gitfile/gitdir inspection before the referenced "+
+			"gitdir is stat'd, so an unrelated gitdir's non-ENOENT error cannot join the chain and "+
+			"stall the lost-restore loop on a filesystem git never wrote to")
+	require.False(t, errors.Is(out, statErr),
+		"a non-ENOENT stat error on a live but unrelated gitdir must not be preserved as "+
+			"environmental evidence — the failed add did not access that gitdir, so its error must "+
+			"not reach the chain: %v", out)
 }
 
 // TestAnnotateWorktreeAddError_AbsoluteWorktreePathTrailingSepPreservesFinalSymlink pins the

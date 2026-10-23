@@ -913,7 +913,6 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	var statErr error
 	var lstatErr error
 	var readDirErr error
-	var gitDirStatErr error
 	if st, sErr := statSpaceProbe(worktreePath); sErr == nil && st != nil && st.IsDir() {
 		// Stat follows a final symlink, so a destination whose final name is a
 		// symlink to an existing directory looks like a directory here. `git
@@ -948,24 +947,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				// destination the way a regular directory is probed. A nonempty
 				// target is skipped: git rejects the add without writing, so a
 				// coincidental ENOSPC on the target's filesystem would stall the
-				// lost-restore loop on a filesystem freeing it cannot fix. A
-				// nonempty target with a regular `.git` *file* is still not probed:
-				// `git worktree add` creates the gitdir before the gitfile, so an
-				// absent gitdir is a pruned linked worktree (not a gitfile this add
-				// created) and a present gitdir is a live registered worktree git
-				// rejected the add over — a reachable gitdir does not prove this
-				// failed invocation created the gitfile. A non-ENOENT stat/lstat
-				// error on the `.git` entry or its gitdir, and a bounded read error
-				// on the gitfile, are environmental evidence, preserved below.
+				// lost-restore loop on a filesystem freeing it cannot fix. The
+				// target is not inspected for a `.git` gitfile once it is known to
+				// be nonempty: `git worktree add` creates the gitdir before the
+				// gitfile, so an absent gitdir is a pruned linked worktree (not a
+				// gitfile this add created) and a present gitdir is a live
+				// registered worktree git rejected the add over — a reachable
+				// gitdir does not prove this failed invocation created the
+				// gitfile, so the gitfile/gitdir inspection can no longer
+				// identify any probeable debris. Statting or reading those
+				// entries would only introduce errors from paths the failed add
+				// did not access (for example an unavailable network gitdir's
+				// ETIMEDOUT), which lostRestoreEnvironmentalClass would treat as
+				// an unbounded environmental wait even though git rejected the
+				// nonempty destination without writing there.
 				if empty {
 					dirs = append(dirs, worktreePath)
-				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && gitInfo.Mode().IsRegular() {
-					gitFile := filepath.Join(worktreePath, ".git")
-					if _, dErr := orphanedGitfileDebris(gitFile); dErr != nil {
-						gitDirStatErr = dErr
-					}
-				} else if gitErr != nil && !os.IsNotExist(gitErr) {
-					gitDirStatErr = gitErr
 				}
 			} else if !os.IsNotExist(dErr) {
 				readDirErr = dErr
@@ -988,9 +985,6 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	}
 	if ancestorStatErr != nil {
 		out = errors.Join(out, fmt.Errorf("stat probe ancestor %s: %w", ancestorStatPath, ancestorStatErr))
-	}
-	if gitDirStatErr != nil {
-		out = errors.Join(out, gitDirStatErr)
 	}
 	return out
 }
