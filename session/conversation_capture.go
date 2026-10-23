@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -272,6 +273,13 @@ func WaitForPromptReceipt(
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if normalizedReceiptPrompt(prompt) == "" {
+		// A prompt with no attributable text can never prove its own receipt —
+		// and must not degrade to an empty needle that matches every recorded
+		// turn. Refuse as undecidable instead of waiting out the timeout
+		// (#5488).
+		return fmt.Errorf("%w: the prompt has no attributable text", ErrPromptReceiptUndecidable)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
@@ -619,7 +627,7 @@ func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) 
 		return false, nil
 	}
 	data = data[fromOffset:]
-	normalizedPrompt := normalizePromptReceiptText(prompt)
+	normalizedPrompt := normalizedReceiptPrompt(prompt)
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -737,6 +745,17 @@ func jsonValueContainsPrompt(value any, prompt string) bool {
 func normalizePromptReceiptText(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	return strings.ReplaceAll(text, "\r", "\n")
+}
+
+// normalizedReceiptPrompt is the prompt side of a receipt match: normalized
+// line endings plus trailing whitespace removed. Codex strips the trailing
+// newline when recording a submitted turn, so a prompt that ends in one — the
+// config-agent briefing always does — could never be contained in its own
+// receipt (#5488). Leading and interior whitespace stay meaningful: the
+// prompt is evidence, and relaxing them would let a different recorded turn
+// pass for it.
+func normalizedReceiptPrompt(prompt string) string {
+	return strings.TrimRightFunc(normalizePromptReceiptText(prompt), unicode.IsSpace)
 }
 
 func codexRolloutFiles(codexHome string) (map[string]struct{}, error) {

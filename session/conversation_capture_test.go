@@ -336,6 +336,61 @@ func TestWaitForPromptReceipt_DifferentUserTurnDoesNotConfirmBriefing(t *testing
 		"a concurrent/unrelated user turn must not acknowledge the config briefing")
 }
 
+// TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn is the
+// #5488 production failure: the config-agent briefing ends in a newline and
+// Codex strips it when recording the submitted turn, so the verbatim prompt
+// was never contained in its own receipt. The fixture below is a real
+// response_item turn as Codex 0.164 records it — identical to the prompt
+// except rstripped.
+func TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	const prompt = "the config-agent briefing\nwith several lines\n\n"
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type": "response_item",
+		"payload": map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				// Codex strips trailing whitespace when recording the turn.
+				"text": "the config-agent briefing\nwith several lines",
+			}},
+		},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, 0),
+		"a turn recorded as prompt.rstrip() is still the prompt's receipt")
+}
+
+// A prompt with no attributable text can never be proven in the rollout —
+// refusing it as undecidable keeps an empty needle from matching every
+// recorded turn (#5488).
+func TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type": "response_item",
+		"payload": map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "a recorded turn that must not satisfy a whitespace prompt",
+			}},
+		},
+	})
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, " \n\t", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptUndecidable,
+		"a whitespace-only prompt must not become a match-everything empty needle")
+}
+
 func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
