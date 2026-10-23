@@ -152,6 +152,40 @@ func (s *Store) createDoc(slug, file string, data []byte) error {
 	return err
 }
 
+// removeSlugDir removes the folder of proposal slug and the files in it,
+// through no-follow folder fds. It fails, removing nothing outside the store,
+// when the store root or the folder has become a link.
+func (s *Store) removeSlugDir(slug string) error {
+	if err := ValidateSlug(slug); err != nil {
+		return err
+	}
+	store, err := s.openStoreDir()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	dir, err := openDirAt(int(store.Fd()), slug, s.SlugPath(slug))
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	if err == nil {
+		for _, e := range entries {
+			if uerr := unix.Unlinkat(int(dir.Fd()), e.Name(), 0); uerr != nil && err == nil {
+				err = &fs.PathError{Op: "remove", Path: filepath.Join(s.SlugPath(slug), e.Name()), Err: uerr}
+			}
+		}
+	}
+	dir.Close()
+	if err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(int(store.Fd()), slug, unix.AT_REMOVEDIR); err != nil {
+		return &fs.PathError{Op: "remove", Path: s.SlugPath(slug), Err: err}
+	}
+	return nil
+}
+
 func (s *Store) removeDoc(slug, file string) error {
 	dir, err := s.openSlugDir(slug)
 	if err != nil {

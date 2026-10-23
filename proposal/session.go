@@ -37,8 +37,16 @@ func (s *Store) attachedLocked(sessionID string) (string, error) {
 		}
 		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	slug := strings.TrimSpace(out)
+	if err := ValidateSlug(slug); err != nil {
+		return "", fmt.Errorf("%w: session %s: %v", errBadAttachment, sessionID, err)
+	}
+	return slug, nil
 }
+
+// errBadAttachment marks an attachment ref whose blob names no valid slug.
+// Attach and Detach replace or drop such a ref; everything else refuses it.
+var errBadAttachment = errors.New("corrupt proposal attachment; run af proposal attach or detach to repair it")
 
 // Attachments maps each attached session ID to its slug.
 func (s *Store) Attachments() (map[string]string, error) {
@@ -53,6 +61,9 @@ func (s *Store) Attachments() (map[string]string, error) {
 	for _, ref := range strings.Fields(out) {
 		id := strings.TrimPrefix(ref, attachRefPrefix)
 		slug, err := s.attachedLocked(id)
+		if errors.Is(err, errBadAttachment) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -73,6 +84,9 @@ func (s *Store) Attach(slug, sessionID string) error {
 			return err
 		}
 		current, err := s.attachedLocked(sessionID)
+		if errors.Is(err, errBadAttachment) {
+			current, err = "", nil
+		}
 		if err != nil {
 			return err
 		}
@@ -125,7 +139,10 @@ func (s *Store) Detach(sessionID string) (string, error) {
 	var slug string
 	err := s.withLock(func() error {
 		var err error
-		if slug, err = s.attachedLocked(sessionID); err != nil {
+		if slug, err = s.attachedLocked(sessionID); errors.Is(err, errBadAttachment) {
+			slug, err = "", nil
+		}
+		if err != nil {
 			return err
 		}
 		for _, ref := range []string{attachRefPrefix + sessionID, cursorRefPrefix + sessionID} {

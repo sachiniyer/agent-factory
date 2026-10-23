@@ -216,7 +216,7 @@ func (s *Store) Create(slug string, docs []string, by Committer) error {
 		}
 		if err := s.populate(slug, names, by); err != nil {
 			_, _ = s.git(nil, "reset", "-q", "--", slug)
-			if rmErr := os.RemoveAll(dir); rmErr != nil {
+			if rmErr := s.removeSlugDir(slug); rmErr != nil {
 				return fmt.Errorf("%w (and failed to remove %s: %v)", err, dir, rmErr)
 			}
 			return err
