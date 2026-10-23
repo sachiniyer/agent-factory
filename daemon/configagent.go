@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -80,6 +84,29 @@ var configAgentPromptReceiptEscalationTimeout = 30 * time.Second
 // Healthy watchers return the moment they are cancelled, so this only ever trips
 // on the stall it exists for. A var so the regression can run in milliseconds.
 var configAgentReceiptJoinTimeout = 5 * time.Second
+
+// configAgentLateReceiptRecheckDelay anchors the single late receipt re-check
+// (#5471): it fires once, this long AFTER the briefing was delivered — not after
+// the escalation window expired. The rollout record is durable-or-absent by
+// then, so its result finally separates "the receipt was just slow" from "the
+// briefing never became a turn" without extending the attach-path windows. A var
+// keeps the receipt regressions fast.
+var configAgentLateReceiptRecheckDelay = 5 * time.Minute
+
+// configAgentLateReceiptRecheckWindow bounds the late re-check's own poll. At
+// that horizon the receipt is durable-or-absent; the window only absorbs a
+// record Codex is still appending when the scan lands. A var so the regression
+// can run in milliseconds.
+var configAgentLateReceiptRecheckWindow = 5 * time.Second
+
+// The pane excerpt logged when a briefing receipt stays unconfirmed is bounded
+// twice: in lines and in bytes. The tail is what is kept — a trust, login, or
+// update modal that absorbed Enter (#5471) is the thing rendered at the bottom
+// of the pane when the window expires.
+const (
+	configAgentPaneExcerptMaxLines = 30
+	configAgentPaneExcerptMaxBytes = 4096
+)
 
 type configAgentReceiptWatcher struct {
 	cancel context.CancelFunc
@@ -400,6 +427,9 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
 		}
+		// Anchors both the reported receipt latency and the late re-check: both
+		// are measured from DELIVERY, not from when a poll happened to observe.
+		briefingDeliveredAt := time.Now()
 		// A successful tmux send is not a delivery receipt, so we try to CONFIRM
 		// one. In the #2220 reproduction every load/paste/Enter command succeeded
 		// against Codex's directory-trust modal; Enter merely selected "Yes", Codex
@@ -446,24 +476,81 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 						}
 						if lateErr == nil {
 							m.info().Printf(
-								"config agent: %s briefing receipt confirmed after the initial %s window",
+								"config agent: %s briefing receipt confirmed after the initial %s window (%s after delivery)",
 								sessionName, configAgentPromptReceiptTimeout,
+								time.Since(briefingDeliveredAt).Round(100*time.Millisecond),
 							)
 							return
 						}
-						if errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+						if !errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
 							m.warn().Printf(
-								"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
-								sessionName,
-								configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
-								lateErr,
+								"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
+								sessionName, configAgentPromptReceiptTimeout, lateErr,
 							)
 							return
 						}
 						m.warn().Printf(
-							"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
-							sessionName, configAgentPromptReceiptTimeout, lateErr,
+							"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
+							sessionName,
+							configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
+							lateErr,
 						)
+						m.logConfigAgentPaneExcerpt(receiptCtx, sessionName, ts)
+						// One late re-check (#5471): the 5s/35s windows cannot tell
+						// a slow rollout from a briefing that never became a turn,
+						// so at a horizon where the record is durable-or-absent the
+						// rollout is consulted one last time. The wait parks on the
+						// watcher context, so reap and daemon shutdown still unwind
+						// this goroutine instantly.
+						if wait := configAgentLateReceiptRecheckDelay - time.Since(briefingDeliveredAt); wait > 0 {
+							timer := time.NewTimer(wait)
+							select {
+							case <-receiptCtx.Done():
+								timer.Stop()
+								return
+							case <-timer.C:
+							}
+						}
+						if receiptCtx.Err() != nil {
+							return
+						}
+						// Nothing remains to diagnose once the session is gone —
+						// reaped out from under the watcher, or the pane exited on
+						// its own without one. Skip quietly either way.
+						if m.configAgents.session(sessionName) == nil {
+							return
+						}
+						if exists, known := ts.ProbeSession(); known && !exists {
+							return
+						}
+						finalErr := session.WaitForPromptReceipt(
+							receiptCtx,
+							agent,
+							promptReceipt,
+							req.Prompt,
+							configAgentLateReceiptRecheckWindow,
+						)
+						if receiptCtx.Err() != nil {
+							return
+						}
+						elapsed := time.Since(briefingDeliveredAt).Round(100 * time.Millisecond)
+						switch {
+						case finalErr == nil:
+							m.info().Printf(
+								"config agent: %s briefing receipt observed at the late re-check, %s after delivery",
+								sessionName, elapsed,
+							)
+						case errors.Is(finalErr, session.ErrPromptReceiptNotObserved):
+							m.warn().Printf(
+								"config agent: %s briefing receipt never arrived; still unobserved %s after delivery",
+								sessionName, elapsed,
+							)
+						default:
+							m.warn().Printf(
+								"config agent: %s late receipt re-check could not determine the outcome: %v",
+								sessionName, finalErr,
+							)
+						}
 					})
 				} else {
 					m.warn().Printf(
@@ -513,4 +600,80 @@ func (m *Manager) ReapConfigAgent(req ReapConfigAgentRequest) error {
 		return fmt.Errorf("config agent: no session name to reap")
 	}
 	return m.configAgents.reap(req.SessionName)
+}
+
+// logConfigAgentPaneExcerpt captures the config agent's pane once and logs a
+// bounded, sanitized excerpt (#5471). It exists to answer the one question the
+// unconfirmed-receipt windows cannot: whether a modal — trust, login, update —
+// absorbed the Enter meant to submit the briefing, because that modal is what
+// would be VISIBLE on the pane when the windows expire. A cancelled capture
+// (reap, shutdown) stays silent like every other arm of its watcher; a real
+// capture failure still logs, because a pane that cannot be read at that point
+// is itself the diagnostic.
+func (m *Manager) logConfigAgentPaneExcerpt(ctx context.Context, sessionName string, ts *tmux.TmuxSession) {
+	content, err := ts.CapturePaneContentContext(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		m.warn().Printf(
+			"config agent: %s briefing receipt is unconfirmed and the pane could not be captured for diagnostics: %v",
+			sessionName, err,
+		)
+		return
+	}
+	m.info().Printf(
+		"config agent: %s pane excerpt after unconfirmed briefing receipt:\n%s",
+		sessionName, configAgentPaneExcerpt(content),
+	)
+}
+
+// configAgentPaneExcerpt renders captured pane content safe to write to the
+// daemon log: ANSI sequences stripped (xansi.Strip — the same stripper
+// ui/err.go's sanitizeError and the delivery-witness matching in
+// session/tmux/submit.go use, so no bespoke regex misses an OSC variant),
+// residual C0/C1/DEL controls dropped except the newlines and tabs that ARE the
+// picture, credential shapes removed by the same RedactCredentials policy the
+// log sink itself applies, and the whole thing tail-bounded so a modal drawn at
+// the bottom of the pane is what survives the cut.
+func configAgentPaneExcerpt(content string) string {
+	clean := xansi.Strip(content)
+	clean = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, clean)
+	clean = log.RedactCredentials(clean)
+	if strings.TrimSpace(clean) == "" {
+		return "(empty pane)"
+	}
+	lines := strings.Split(strings.TrimRight(clean, "\n"), "\n")
+	truncated := len(lines) > configAgentPaneExcerptMaxLines
+	if truncated {
+		lines = lines[len(lines)-configAgentPaneExcerptMaxLines:]
+	}
+	tail := strings.Join(lines, "\n")
+	for len(tail) > configAgentPaneExcerptMaxBytes {
+		truncated = true
+		if idx := strings.IndexByte(tail, '\n'); idx >= 0 {
+			// Cut whole lines from the top so the excerpt can never begin
+			// mid-token.
+			tail = tail[idx+1:]
+			continue
+		}
+		// A single line longer than the cap gets a byte cut; land it on a rune
+		// boundary so the log never sees half a UTF-8 sequence.
+		tail = tail[len(tail)-configAgentPaneExcerptMaxBytes:]
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+	}
+	if truncated {
+		return "… (truncated)\n" + tail
+	}
+	return tail
 }

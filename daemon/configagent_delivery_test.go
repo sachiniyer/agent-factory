@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
@@ -441,4 +442,255 @@ func appendConfigAgentCodexUserTurn(rollout, prompt string) error {
 		return err
 	}
 	return f.Sync()
+}
+
+// shortenConfigAgentReceiptWindows shrinks all three receipt budgets at once so
+// the #5471 watcher phases — escalation window, pane excerpt, late re-check —
+// run in milliseconds. It restores them all on cleanup, the same pattern the
+// tests above apply per-var.
+func shortenConfigAgentReceiptWindows(t *testing.T, receipt, escalation, recheckDelay, recheckWindow time.Duration) {
+	t.Helper()
+	oldReceipt := configAgentPromptReceiptTimeout
+	oldEscalation := configAgentPromptReceiptEscalationTimeout
+	oldDelay := configAgentLateReceiptRecheckDelay
+	oldWindow := configAgentLateReceiptRecheckWindow
+	configAgentPromptReceiptTimeout = receipt
+	configAgentPromptReceiptEscalationTimeout = escalation
+	configAgentLateReceiptRecheckDelay = recheckDelay
+	configAgentLateReceiptRecheckWindow = recheckWindow
+	t.Cleanup(func() {
+		configAgentPromptReceiptTimeout = oldReceipt
+		configAgentPromptReceiptEscalationTimeout = oldEscalation
+		configAgentLateReceiptRecheckDelay = oldDelay
+		configAgentLateReceiptRecheckWindow = oldWindow
+	})
+}
+
+// TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt covers the first half of
+// #5471: when the receipt is still unconfirmed after the escalation window, the
+// watcher captures the agent pane once and logs a sanitized excerpt — the only
+// place a trust/login/update modal that absorbed Enter would still be visible.
+func TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	info, _ := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		10*time.Minute, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+	}, 3*time.Second, 25*time.Millisecond,
+		"an unconfirmed receipt must leave the pane's visible state in the log")
+	// The drop fixture leaves the composer drawn; its banner text is what the
+	// excerpt must carry once the ANSI is stripped.
+	require.Contains(t, info.String(), "OpenAI Codex",
+		"the excerpt should contain the pane's visible text")
+}
+
+// TestConfigAgentLateReceiptRecheckObserved is the "slow rollout" arm of #5471:
+// the receipt lands after the 35s-equivalent windows but before the late
+// re-check, which must then log the observed latency since delivery.
+func TestConfigAgentLateReceiptRecheckObserved(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		4*time.Second, 250*time.Millisecond)
+
+	const prompt = "briefing recorded minutes after every window closed"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// The turn must arrive AFTER the escalation window closes unconfirmed — a
+	// receipt the escalation poll can still see resolves as "confirmed late"
+	// and never reaches the re-check — but BEFORE the re-check fires.
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt was still not observed")
+	}, 3*time.Second, 25*time.Millisecond)
+	require.NoError(t, appendConfigAgentCodexUserTurn(rollout, prompt))
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "briefing receipt observed at the late re-check") &&
+			strings.Contains(info.String(), "after delivery")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a receipt that lands past the windows must surface its observed latency at the late re-check")
+	require.NotContains(t, warnings.String(), "briefing receipt never arrived")
+}
+
+// TestConfigAgentLateReceiptRecheckNeverArrived is the "lost briefing" arm of
+// #5471: no turn is ever recorded, so the late re-check must say so plainly.
+func TestConfigAgentLateReceiptRecheckNeverArrived(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	_, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		1500*time.Millisecond, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt never arrived; still unobserved")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a receipt still absent at the late re-check must be reported as never arrived")
+}
+
+// TestConfigAgentLateReceiptRecheckSkipsGoneSession is the #5471 review's
+// gone-session case: if the config agent left tracking — or its pane exited on
+// its own without a reap — the late re-check must skip quietly rather than log
+// a rollout verdict for a session that is gone.
+func TestConfigAgentLateReceiptRecheckSkipsGoneSession(t *testing.T) {
+	for _, gone := range []string{"untracked", "pane exited"} {
+		t.Run(gone, func(t *testing.T) {
+			testguard.IsolateTmux(t)
+			manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+			info, warnings := captureConfigAgentReceiptLogs(t)
+			// The re-check horizon (3s) must sit comfortably past the excerpt
+			// observation bound (2s) so the session is gone BEFORE the watcher
+			// reaches its late-check guards; otherwise the test races the timer.
+			shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+				3*time.Second, 250*time.Millisecond)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+				Program: program,
+				Prompt:  "briefing the receiver never records as a turn",
+			})
+			require.NoError(t, err)
+
+			ts := manager.configAgents.session(sessionName)
+			require.NotNil(t, ts)
+			t.Cleanup(func() { _, _ = ts.Close() })
+
+			// The excerpt line is the last thing logged before the watcher parks
+			// on the re-check timer, so observing it means the wait has begun.
+			require.Eventually(t, func() bool {
+				return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+			}, 2*time.Second, 25*time.Millisecond)
+
+			switch gone {
+			case "untracked":
+				manager.configAgents.mu.Lock()
+				delete(manager.configAgents.sessions, sessionName)
+				manager.configAgents.mu.Unlock()
+			case "pane exited":
+				_, err := ts.Close()
+				require.NoError(t, err)
+			}
+
+			// The re-check horizon passes with no verdict logged either way.
+			require.Never(t, func() bool {
+				return strings.Contains(info.String(), "observed at the late re-check") ||
+					strings.Contains(warnings.String(), "briefing receipt never arrived") ||
+					strings.Contains(warnings.String(), "late receipt re-check could not determine")
+			}, 4*time.Second, 50*time.Millisecond,
+				"a gone session must not get a late re-check verdict")
+		})
+	}
+}
+
+// TestConfigAgentReapDuringLateRecheckWaitUnwindsWatcher is the #5471 review's
+// join-budget case: a watcher parked on the 5m re-check timer must still unwind
+// instantly when reap cancels it — joinReceiptWatchers must never have to wait
+// out its timeout, which is the only way teardown could tell the difference.
+func TestConfigAgentReapDuringLateRecheckWaitUnwindsWatcher(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		10*time.Minute, 250*time.Millisecond)
+	shortenReceiptJoinTimeout(t, 3*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+
+	// Once the excerpt line lands the watcher is parked on the re-check timer;
+	// reaping now cancels that wait, and the join can only return quickly if the
+	// goroutine actually observed receiptCtx.Done() — an abandoned watcher would
+	// hold the join for the whole configAgentReceiptJoinTimeout and log it.
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+	}, 3*time.Second, 25*time.Millisecond)
+
+	start := time.Now()
+	require.NoError(t, manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName}))
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, configAgentReceiptJoinTimeout,
+		"reap returned only because the watcher unwound on receiptCtx.Done(), "+
+			"not because the join abandoned it after %s", configAgentReceiptJoinTimeout)
+	require.NotContains(t, warnings.String(), "did not unwind",
+		"the watcher parked on the re-check timer must unwind on cancellation, not be abandoned")
+}
+
+func TestConfigAgentPaneExcerpt(t *testing.T) {
+	t.Run("strips ansi and residual controls", func(t *testing.T) {
+		got := configAgentPaneExcerpt("\x1b[31mDo you trust\x1b[0m this dir?\x07\n\x9b2Ky/n\r")
+		require.NotContains(t, got, "\x1b")
+		require.NotContains(t, got, "\x07")
+		require.NotContains(t, got, "\x9b")
+		require.NotContains(t, got, "\r")
+		require.Contains(t, got, "Do you trust this dir?")
+	})
+
+	t.Run("redacts credential shapes", func(t *testing.T) {
+		got := configAgentPaneExcerpt(
+			"pat: ghp_0123456789abcdefghij\nkeyed: api_key=hunter2secret\n")
+		require.NotContains(t, got, "ghp_0123456789abcdefghij")
+		require.NotContains(t, got, "hunter2secret")
+	})
+
+	t.Run("keeps the tail within the line cap", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < configAgentPaneExcerptMaxLines+10; i++ {
+			fmt.Fprintf(&b, "line-%02d\n", i)
+		}
+		got := configAgentPaneExcerpt(b.String())
+		require.True(t, strings.HasPrefix(got, "… (truncated)"))
+		require.NotContains(t, got, "line-00")
+		require.Contains(t, got, fmt.Sprintf("line-%02d", configAgentPaneExcerptMaxLines+9))
+	})
+
+	t.Run("keeps the tail within the byte cap", func(t *testing.T) {
+		got := configAgentPaneExcerpt(strings.Repeat("x", configAgentPaneExcerptMaxBytes+100))
+		require.True(t, strings.HasPrefix(got, "… (truncated)"))
+		require.LessOrEqual(t, len(got), len("… (truncated)\n")+configAgentPaneExcerptMaxBytes)
+		require.True(t, utf8.ValidString(got))
+	})
+
+	t.Run("marks an empty pane", func(t *testing.T) {
+		require.Equal(t, "(empty pane)", configAgentPaneExcerpt("\x1b[2J  \n\t\n"))
+	})
 }
