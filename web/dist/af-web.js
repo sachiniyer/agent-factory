@@ -6206,14 +6206,18 @@ function currentMode() {
     return "dark";
   }
 }
-function surface(mode) {
+function surface(mode, token2 = "--af-surface") {
   const probe = document.createElement("span");
   probe.dataset.afTheme = mode;
   probe.hidden = true;
   document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
   probe.remove();
   return color;
+}
+function themeSurfaces() {
+  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
 }
 function themeColorMetaContents(choice) {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
@@ -15895,14 +15899,13 @@ function replaceProjectMenuChildren(menu, children, fallback) {
 
 // src/project_color.ts
 var PROJECT_COLOR_PALETTE = [
-  "#e11d48",
-  "#ea580c",
-  "#ca8a04",
-  "#16a34a",
-  "#0d9488",
-  "#2563eb",
-  "#7c3aed",
-  "#db2777"
+  "#ff5555",
+  "#ffb86c",
+  "#f1fa8c",
+  "#50fa7b",
+  "#8be9fd",
+  "#bd93f9",
+  "#ff79c6"
 ];
 var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
 var HEX = /^#[0-9a-f]{6}$/;
@@ -15911,13 +15914,42 @@ function projectColor(projects, root2) {
   const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
   return HEX.test(color) ? color : null;
 }
+function rgb(color) {
+  return [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+}
+function hex(c) {
+  return `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+function luminance(c) {
+  const [r, g, b] = c.map((v) => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+var INK_DARK = "#1f1f1f";
+var INK_LIGHT = "#ffffff";
 function markInk(color) {
-  const channel = (i) => {
-    const v = parseInt(color.slice(i, i + 2), 16) / 255;
-    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-  };
-  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  return luminance > 0.45 ? "#1f1f1f" : "#ffffff";
+  const c = rgb(color);
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
+}
+function projectAccent(color, ...surfaces) {
+  const c = rgb(color);
+  const s = surfaces.map(rgb);
+  const target = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  for (let step = 0; step <= 20; step++) {
+    const t = step / 20;
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t));
+    if (s.every((surface2) => contrast(rgb(candidate), surface2) >= 4.5)) return candidate;
+  }
+  return hex(target);
 }
 function projectFaviconSvg(color) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
@@ -15945,34 +15977,38 @@ function projectFaviconPng(color, size) {
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
+var DEFAULT_FAVICON_COLOR = "#2f5fd8";
 var appliedFavicon = null;
 function applyProjectFavicon(color) {
   if (appliedFavicon === color) return;
   appliedFavicon = color;
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    let href = null;
-    if (color !== null) {
-      if (link.type === "image/svg+xml") {
-        href = projectFaviconDataUrl(color);
-      } else {
-        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
-      }
-    }
+    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
-function applyProjectFrame(main, color) {
+function applyProjectColor(root2, color, surfaces) {
   if (color === null) {
-    if (main.dataset.projectColor === void 0) return;
-    delete main.dataset.projectColor;
-    main.style.removeProperty("--af-project-color");
+    if (root2.dataset.projectColor === void 0) return;
+    delete root2.dataset.projectColor;
+    for (const name of PROJECT_VARS) root2.style.removeProperty(name);
     return;
   }
-  if (main.dataset.projectColor === color) return;
-  main.dataset.projectColor = color;
-  main.style.setProperty("--af-project-color", color);
+  if (root2.dataset.projectColor === color) return;
+  const { light, dark } = surfaces();
+  root2.dataset.projectColor = color;
+  root2.style.setProperty("--af-project-color", color);
+  root2.style.setProperty("--af-project-ink", markInk(color));
+  root2.style.setProperty("--af-project-accent-light", accentOn(color, light));
+  root2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
 }
+function accentOn(color, surfaces) {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === void 0 ? color : projectAccent(color, first, ...rest);
+}
+var PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];
 function projectColorRow(current, label, onPick) {
   const pick = (color) => (e) => {
     e.stopPropagation();
@@ -16005,7 +16041,8 @@ function projectColorRow(current, label, onPick) {
       input.click();
     }
   });
-  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
   clear.disabled = current === null;
   clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));
@@ -16806,7 +16843,7 @@ var AppShell = class {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
-    applyProjectFrame(this.main, color);
+    applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
