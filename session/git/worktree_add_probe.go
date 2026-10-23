@@ -939,19 +939,27 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				// cannot fix — UNLESS the nonempty content is partial-attempt
 				// debris from a failed `git worktree add` rather than a
 				// pre-existing destination. `git worktree add` creates a `.git`
-				// entry before it checks out, so a nonempty target that contains
-				// a `.git` entry is one git already started writing into and then
-				// failed (for example with ENOSPC mid-checkout), not a destination
-				// git rejects without writing. Retain coverage when the contents
-				// show the failed add started populating the target, so a
-				// coincidental ENOSPC on the target's filesystem is the real
-				// resource errno the way an empty target's is. A non-ENOENT lstat
-				// error (EIO, ETIMEDOUT, ErrProbeTimedOut) is environmental
-				// evidence, not a missing `.git` entry, so it stays silent the way
-				// a missing-destination lstat does.
+				// file (a gitfile pointing at the worktree's gitdir) before it
+				// checks out, so a nonempty target that contains a `.git` *file*
+				// is one git already started writing into and then failed (for
+				// example with ENOSPC mid-checkout), not a destination git
+				// rejects without writing. A pre-existing repository, by
+				// contrast, has a `.git` *directory* (its object store); git
+				// rejects the add without writing there, so a coincidental ENOSPC
+				// on that filesystem would stall the loop on a structural
+				// "already exists" rejection freeing the target cannot fix.
+				// Correlate the entry with this worktree add's registration (a
+				// `.git` file) rather than using mere `.git` existence as proof of
+				// partial-attempt debris. Retain coverage when the contents show
+				// the failed add started populating the target, so a coincidental
+				// ENOSPC on the target's filesystem is the real resource errno the
+				// way an empty target's is. A non-ENOENT lstat error (EIO,
+				// ETIMEDOUT, ErrProbeTimedOut) is environmental evidence, not a
+				// missing `.git` file, so it stays silent the way a
+				// missing-destination lstat does.
 				if empty {
 					dirs = append(dirs, worktreePath)
-				} else if _, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil {
+				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && !gitInfo.IsDir() {
 					dirs = append(dirs, worktreePath)
 				}
 			} else if !os.IsNotExist(dErr) {
