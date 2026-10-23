@@ -16,10 +16,15 @@
 //     remote endpoint is refused before provisioning anyway.
 //   - The daemon's own hostname must match af's os.Hostname() — a Unix socket
 //     proves the daemon answers on this machine, not that it shares this
-//     mount namespace: Docker Desktop's VM and an af container bind-mounted
-//     the host socket both answer locally while their DockerRootDir lives in
-//     a filesystem af cannot see. Same hostname is the observable seam of a
-//     shared namespace.
+//     kernel: a forwarded or proxied socket (ssh -U, Docker Desktop's host
+//     socket artifact) answers with the REMOTE daemon's info, whose
+//     DockerRootDir is a path in another filesystem entirely.
+//   - The socket af dials must live in af's OWN mount namespace — hostname
+//     equality alone cannot prove it (an af container on --uts=host sees the
+//     host's name but keeps its own mounts). The mount-identity evidence is
+//     /proc/self/mountinfo: a socket reached through a file- or dir-level
+//     bind mount is the daemon's inode borrowed, not shared; anything the
+//     mount table cannot rule out fails closed (#5382 review).
 //   - The privilege mode decides WHICH block count answers the fullness
 //     question, and the class of the failed step decides whose privilege
 //     matters (dockerOpClass): a rootful dockerd allocates reserved blocks
@@ -28,7 +33,11 @@
 //     `docker exec` running as a non-root container user is Bavail-bounded
 //     on a rootful engine too whenever its write lands outside the overlay
 //     layer's mounter credentials (a bind mount, or any write at all under
-//     `name=userns` uid remapping).
+//     `name=userns` uid remapping). Both the exec user and the userns
+//     opt-out are read off the RUNNING CONTAINER — `docker run --user`
+//     overrides the image's USER and `--userns=host` overrides the
+//     daemon-wide remap, so neither is answered from image config alone
+//     (#5382 review).
 //   - The statfs must succeed and actually report exhaustion — blocks or
 //     inodes. Every unresolved or unproven step returns nil instead: unknown
 //     is not-proven, never a "full" verdict.
@@ -191,6 +200,18 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 	if !ok || info.root == "" || info.name == "" || info.name != host {
 		return nil
 	}
+	// Mount-identity evidence, not hostname equality: the socket af dials
+	// must exist in af's own mount namespace as an UNMOUNTED file — a unix
+	// socket with no mount entry can only be the daemon's inode if the
+	// daemon created it in this namespace. A file- or dir-level bind
+	// (`-v /var/run/docker.sock:…`, Docker Desktop's shared socket, an af
+	// container on --uts=host) shows a mountinfo entry whose root is not
+	// "/", meaning the path reaches through a foreign filesystem view —
+	// and /var/lib/docker on af's side is a different object than the
+	// daemon's (#5382 review).
+	if mnt, err := os.ReadFile(procMountinfoFile); err != nil || !socketSharesMountNamespace(endpoint, mnt) {
+		return nil
+	}
 	// The failed step's writer picks the block counter: a rootless engine's
 	// every write is Bavail-bounded, and so is any container-side writer that
 	// cannot reach the reserved blocks on a rootful engine. Evaluated once —
@@ -228,6 +249,45 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 		info.root, who, &os.PathError{Op: "statfs", Path: info.root, Err: syscall.ENOSPC})
 }
 
+// procMountinfoFile is the test seam over the mount table the namespace
+// proof reads. The production path is /proc/self/mountinfo.
+var procMountinfoFile = "/proc/self/mountinfo"
+
+// socketSharesMountNamespace is the mount-identity proof the hostname check
+// cannot give (#5382 review): for the endpoint's unix socket to be the
+// daemon's inode while sitting in af's namespace, either the daemon shares
+// the namespace outright — the socket is a plain file — or the socket file
+// (or a directory containing it) was bind-mounted in, which always shows a
+// mountinfo entry whose ROOT is a proper subtree ("root" field != "/"). A
+// whole-filesystem bind carries root="/" and does NOT split the namespace
+// view the way a subtree bind does, so it passes — rightly: the bound
+// object is still the same filesystem object the daemon sees. Anything
+// unreadable or non-socket is unproven.
+func socketSharesMountNamespace(endpoint string, mountinfo []byte) bool {
+	sockPath := strings.TrimPrefix(endpoint, "unix://")
+	if !strings.HasPrefix(sockPath, "/") {
+		return false
+	}
+	st, err := os.Stat(sockPath)
+	if err != nil || st.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		root, mnt := fields[3], fields[4]
+		if root == "/" {
+			continue
+		}
+		if mnt == sockPath || strings.HasPrefix(sockPath, mnt+"/") {
+			return false
+		}
+	}
+	return true
+}
+
 // dockerStepWriterUnprivileged answers whether the FAILED operation's writer
 // cannot reach the filesystem's root-reserved blocks — the question Bavail
 // answers (#5382 review). Only the process that failed matters: a rootful
@@ -235,36 +295,43 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 // are privileged, while a `docker exec` process writing outside the overlay
 // layer's mounter credentials — a bind mount, or anything at all under
 // userns remapping — is bounded by its own fsuid: the account owner's
-// uid:gid when one is mounted, else the image's USER.
+// uid:gid when one is mounted, else the CONTAINER's resolved user (a
+// `--user` in docker.run_args overrides the image's USER — read the running
+// container, not the image). `name=userns` is the daemon's default; a
+// container's own HostConfig.UsernsMode can refuse it with `--userns=host`,
+// so remap is only counted when the container did not opt out.
 func (p *dockerProvisioner) dockerStepWriterUnprivileged(info dockerEngineInfo, op dockerOpClass) bool {
 	switch op {
 	case dockerOpSessionExec:
-		if info.userns {
-			return true
+		if info.userns || p.containerUser == "" {
+			user, usernsHost := p.containerExecIdentity()
+			if info.userns && !usernsHost {
+				return true
+			}
+			if p.containerUser == "" {
+				return dockerUserUnprivileged(user)
+			}
 		}
-		if p.containerUser != "" {
-			uid, _, _ := strings.Cut(p.containerUser, ":")
-			return uid != "0"
-		}
-		return p.imageUserUnprivileged()
+		uid, _, _ := strings.Cut(p.containerUser, ":")
+		return uid != "0"
 	case dockerOpRootExec:
-		return info.userns
+		if !info.userns {
+			return false
+		}
+		_, usernsHost := p.containerExecIdentity()
+		return !usernsHost
 	default:
 		return false
 	}
 }
 
-// imageUserUnprivileged resolves the USER the image runs under — the uid a
-// plain `docker exec` inherits when af did not pin one. Empty, "0" and
-// "root" are privileged; anything else — a nonzero uid or a non-root name —
-// is bounded by Bavail. An unreadable answer is unproven, which fails closed
-// to the privileged metric rather than inventing a reserved-block verdict.
-func (p *dockerProvisioner) imageUserUnprivileged() bool {
-	out, err := p.docker(dockerShortStepTimeout, "image", "inspect", "--format", "{{.Config.User}}", p.image)
-	if err != nil {
-		return false
-	}
-	user := strings.TrimSpace(string(out))
+// dockerUserUnprivileged classifies a docker user string — "1000",
+// "1000:1000", "root", a bare name — by whether it can allocate
+// root-reserved blocks. Empty and root are privileged; a nonzero uid is
+// not; a name that is not "root" is treated as unprivileged (a named user
+// is an ordinary account by definition).
+func dockerUserUnprivileged(user string) bool {
+	user = strings.TrimSpace(user)
 	if user == "" || user == "root" {
 		return false
 	}
@@ -273,4 +340,38 @@ func (p *dockerProvisioner) imageUserUnprivileged() bool {
 		return n != 0
 	}
 	return true
+}
+
+// containerExecIdentity reads the container's RESOLVED exec user and its
+// per-container userns mode — what `docker run` actually merged, not what
+// the image declared: a `--user` in docker.run_args replaces the image's
+// USER for every unpinned exec, and `--userns=host` opts this container out
+// of the daemon-wide remap (#5382 review). An unreadable answer fails
+// closed both ways: the empty user is unproven (privileged — no invented
+// Bavail verdict), and an unknown UsernsMode falls back to the engine's
+// proven default rather than inventing an opt-out.
+func (p *dockerProvisioner) containerExecIdentity() (user string, usernsHost bool) {
+	if p.containerID == "" {
+		return "", false
+	}
+	out, err := p.docker(dockerShortStepTimeout, "inspect", "--format", "{{json .}}", p.containerID)
+	if err != nil {
+		return "", false
+	}
+	start := strings.IndexByte(string(out), '{')
+	if start < 0 {
+		return "", false
+	}
+	var c struct {
+		Config struct {
+			User string `json:"User"`
+		} `json:"Config"`
+		HostConfig struct {
+			UsernsMode string `json:"UsernsMode"`
+		} `json:"HostConfig"`
+	}
+	if err := json.NewDecoder(strings.NewReader(string(out)[start:])).Decode(&c); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(c.Config.User), c.HostConfig.UsernsMode == "host"
 }

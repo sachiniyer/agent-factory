@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -14,6 +16,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeUnixDockerSocket stands up a real unix socket in a temp dir so the
+// mount-namespace gate's os.Stat sees a genuine socket file; it returns the
+// DOCKER_HOST endpoint form.
+func fakeUnixDockerSocket(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	l, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { l.Close() })
+	return "unix://" + sock
+}
+
+// stubMountinfo points the namespace gate at a mount table with one benign
+// root mount (root "/" = a whole filesystem, never a foreign subtree).
+// extra entries simulate bind mounts — root != "/" is what flags them.
+func stubMountinfo(t *testing.T, extra ...string) {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "mountinfo")
+	content := "24 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n" + strings.Join(extra, "\n")
+	require.NoError(t, os.WriteFile(f, []byte(content), 0o644))
+	old := procMountinfoFile
+	procMountinfoFile = f
+	t.Cleanup(func() { procMountinfoFile = old })
+}
 
 // dockerInfoAnswer is the fake `docker info` payload for capacity-evidence
 // tests. The production evidence path issues one `docker info --format
@@ -81,8 +108,9 @@ func fakeDockerCapacityProbe(t *testing.T, infoPayload []byte,
 func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 
 	// Each failingStep names a docker argv shape emitted by one provision
 	// step; matching it makes the fake fail that call. The matchers read argv
@@ -201,8 +229,9 @@ func TestParseDockerEngineInfo_CombinedOutput(t *testing.T) {
 func TestProvisionFailure_RootlessEngineReadsBavail(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 
 	failRun := func(args []string) ([]byte, error) {
 		if args[0] == "run" {
@@ -291,12 +320,12 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 
 	t.Run("daemon hostname mismatch is not namespace proof", func(t *testing.T) {
 		// A Unix socket only proves the daemon answers on this machine —
-		// Docker Desktop's VM and an af container bind-mounted the host
-		// socket both answer locally while their DockerRootDir lives in the
-		// VM's/container's OTHER mount namespace. The daemon's own hostname
-		// disagreeing with af's is the observable seam of that split.
-		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+		// a proxied or forwarded socket (Docker Desktop's host artifact,
+		// ssh -U) answers with the REMOTE daemon's info, whose reported
+		// DockerRootDir lives on another filesystem entirely.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
+		stubMountinfo(t)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", "af-test-foreign-daemon", false), failRun)
 
 		statfsCalls := 0
@@ -308,13 +337,66 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a daemon in another mount namespace must not get a full verdict from af's filesystem: %v", err)
+			"a daemon answering under another kernel's hostname must not get a full verdict from af's filesystem: %v", err)
 		assert.Equal(t, 0, statfsCalls, "a mismatched daemon hostname must not reach statfs")
 	})
 
-	t.Run("local endpoint plus matching hostname probes", func(t *testing.T) {
-		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Run("bind-mounted socket is not mount-identity proof", func(t *testing.T) {
+		// The #5382-review gap: `--uts=host` gives an af container the
+		// host's hostname, and `-v /var/run/docker.sock:/…` hands it the
+		// daemon's socket inode — but af's /var/lib/docker is still its own
+		// container rootfs. The mount entry's root != "/" is what proves
+		// the socket reaches af through a foreign filesystem view.
+		sock := fakeUnixDockerSocket(t)
+		sockPath := strings.TrimPrefix(sock, "unix://")
+		t.Setenv("DOCKER_HOST", sock)
 		t.Setenv("DOCKER_CONTEXT", "")
+		stubMountinfo(t,
+			// `-v /var/run/docker.sock:<sockPath>` — a file-level bind.
+			fmt.Sprintf("99 24 8:1 /var/run/docker.sock %s rw - ext4 /dev/sda1 rw", sockPath))
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+
+		statfsCalls := 0
+		old := statfsFull
+		statfsFull = func(string) (bool, error) { statfsCalls++; return true, nil }
+		defer func() { statfsFull = old }()
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "borrowed-socket"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a bind-mounted socket proves the daemon answers, not that af's /var/lib/docker is the daemon's: %v", err)
+		assert.Equal(t, 0, statfsCalls, "a borrowed socket must not reach statfs")
+	})
+
+	t.Run("a socket dir bind-mounted is not mount-identity proof", func(t *testing.T) {
+		// `-v /run:/run` — the socket arrives through a directory-level
+		// foreign subtree, the other shape the same gap takes.
+		sock := fakeUnixDockerSocket(t)
+		sockDir := filepath.Dir(strings.TrimPrefix(sock, "unix://"))
+		t.Setenv("DOCKER_HOST", sock)
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubMountinfo(t,
+			fmt.Sprintf("99 24 8:1 %s %s rw - ext4 /dev/sda1 rw", sockDir, sockDir))
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+
+		statfsCalls := 0
+		old := statfsFull
+		statfsFull = func(string) (bool, error) { statfsCalls++; return true, nil }
+		defer func() { statfsFull = old }()
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "borrowed-dir"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a dir-bound socket is the same borrowed inode as a file bind: %v", err)
+		assert.Equal(t, 0, statfsCalls, "a dir-bound socket must not reach statfs")
+	})
+
+	t.Run("local endpoint plus matching hostname probes", func(t *testing.T) {
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubMountinfo(t)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -329,8 +411,9 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	})
 
 	t.Run("a root af cannot stat is not full", func(t *testing.T) {
-		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
+		stubMountinfo(t)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -355,8 +438,9 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
@@ -410,8 +494,9 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 
 	// failExec kills the configureGit exec; failRun kills `docker run`.
 	failExec := func(args []string) ([]byte, error) {
@@ -479,14 +564,21 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 			"a uid-0 exec reaches the reserved blocks — Bavail=0 is not full for it: %v", err)
 	})
 
-	t.Run("image USER non-root joins the Bavail verdict", func(t *testing.T) {
+	// containerIdentity answers the `docker inspect` the writer-privilege
+	// check performs — the container's RESOLVED user and userns mode, which
+	// is where `docker run --user` and `--userns=host` land.
+	containerIdentity := func(user, usernsMode string) func(args []string) ([]byte, error) {
+		return func(args []string) ([]byte, error) {
+			if args[0] == "inspect" {
+				return []byte(fmt.Sprintf(`{"Config":{"User":%q},"HostConfig":{"UsernsMode":%q}}`, user, usernsMode)), nil
+			}
+			return failExec(args)
+		}
+	}
+
+	t.Run("container-resolved non-root user joins the Bavail verdict", func(t *testing.T) {
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
-			func(args []string) ([]byte, error) {
-				if args[0] == "image" {
-					return []byte("1000\n"), nil // the image declares USER 1000
-				}
-				return failExec(args)
-			})
+			containerIdentity("1000", ""))
 		reservedWindow(t)
 		p := &dockerProvisioner{
 			image: "img:latest",
@@ -495,14 +587,31 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, syscall.ENOSPC),
-			"an exec under a non-root image USER is Bavail-bounded: %v", err)
+			"an exec under a non-root container user is Bavail-bounded: %v", err)
 	})
 
-	t.Run("unreadable image USER fails closed to Bfree", func(t *testing.T) {
+	t.Run("`docker run --user 0` override is privileged", func(t *testing.T) {
+		// Codex's example: a non-root image overridden by `--user 0` in
+		// docker.run_args — the container's Config.User is "0", and the
+		// image's own USER must not mislabel the exec.
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+			containerIdentity("0", ""))
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "user-override", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a uid-0 exec via run_args --user reaches reserved blocks — Bavail=0 is not full for it: %v", err)
+	})
+
+	t.Run("unreadable container user fails closed to Bfree", func(t *testing.T) {
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
 			func(args []string) ([]byte, error) {
-				if args[0] == "image" {
-					return nil, fmt.Errorf("Error: No such image")
+				if args[0] == "inspect" {
+					return nil, fmt.Errorf("Error: No such container")
 				}
 				return failExec(args)
 			})
@@ -514,20 +623,24 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"an unproven image USER is not evidence of unprivileged writes: %v", err)
+			"an unproven container user is not evidence of unprivileged writes: %v", err)
 	})
+
+	usernsInfo := func(t *testing.T) []byte {
+		info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(info, &raw))
+		raw["SecurityOptions"] = []string{"name=seccomp,profile=builtin", "name=userns"}
+		info, err := json.Marshal(raw)
+		require.NoError(t, err)
+		return info
+	}
 
 	t.Run("userns remap makes even a uid-0 exec Bavail-bounded", func(t *testing.T) {
 		// `docker info` reports name=userns when the engine remaps container
 		// uids into a subordinate range — every in-container writer, uid 0
 		// included, is an ordinary user on the data-root filesystem.
-		info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
-		var raw map[string]any
-		require.NoError(t, json.Unmarshal(info, &raw))
-		raw["SecurityOptions"] = []string{"name=seccomp,profile=builtin", "name=userns"}
-		info, err = json.Marshal(raw)
-		require.NoError(t, err)
-		fakeDockerCapacityProbe(t, info, failExec)
+		fakeDockerCapacityProbe(t, usernsInfo(t), containerIdentity("0", ""))
 		reservedWindow(t)
 		p := &dockerProvisioner{
 			image:         "img:latest",
@@ -538,6 +651,23 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, syscall.ENOSPC),
 			"under userns remap a uid-0 exec is an unprivileged writer: %v", err)
+	})
+
+	t.Run("`--userns=host` opts the container out of remap", func(t *testing.T) {
+		// The daemon-wide remap is a DEFAULT — HostConfig.UsernsMode=host on
+		// this container cancels it, so a uid-0 exec is genuinely privileged
+		// and the reserved window is not its ENOSPC.
+		fakeDockerCapacityProbe(t, usernsInfo(t), containerIdentity("0", "host"))
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image:         "img:latest",
+			containerUser: "0:0",
+			spec:          ProvisionSpec{Title: "userns-host", CloneURL: "file:///repo"},
+		}
+		_, err = p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a container that opted out of remap writes as real uid 0: %v", err)
 	})
 }
 
@@ -550,8 +680,9 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubMountinfo(t)
 
 	cases := map[string]func(args []string) ([]byte, error){
 		"port output unparsable": func(args []string) ([]byte, error) {
@@ -595,8 +726,8 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 }
 
 // TestDockerStepWriterUnprivileged pins the per-class privilege matrix the
-// evidence path consults, including the classes no provision-level test can
-// reach cheaply (a uid-0 exec under an account session).
+// evidence path consults, for the cases that do not need a docker
+// round-trip (container-inspect cases are covered at provision level).
 func TestDockerStepWriterUnprivileged(t *testing.T) {
 	p := &dockerProvisioner{}
 	info := dockerEngineInfo{}
@@ -608,13 +739,9 @@ func TestDockerStepWriterUnprivileged(t *testing.T) {
 		"uid 0 reaches reserved blocks on a rootful engine")
 	assert.False(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpDaemonWrite),
 		"userns remaps CONTAINER uids — the rootful daemon's own writes stay privileged")
-	assert.True(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpRootExec),
-		"under userns, in-container uid 0 maps to a subordinate uid")
 
 	p.containerUser = "1000:1000"
 	assert.True(t, p.dockerStepWriterUnprivileged(info, dockerOpSessionExec))
 	p.containerUser = "0:0"
 	assert.False(t, p.dockerStepWriterUnprivileged(info, dockerOpSessionExec))
-	assert.True(t, p.dockerStepWriterUnprivileged(dockerEngineInfo{userns: true}, dockerOpSessionExec),
-		"userns remap subordinates every container uid, including the account owner's")
 }
