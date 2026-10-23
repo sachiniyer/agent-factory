@@ -17,7 +17,7 @@ test("handoff marks unauthenticated accounts and never preselects their default"
  ] }, error: null } }));
  await page.goto(`/#/session/${encodeURIComponent(instance.id)}`);
  await page.locator("#app[data-af-resync-settled]").waitFor();
- await page.getByRole("button", { name: "Session actions", exact: true }).click();
+ await page.getByRole("button", { name: "More session actions", exact: true }).click();
  await page.getByRole("button", { name: "Handoff", exact: true }).click();
  const dialog = page.getByRole("dialog");
  const account = dialog.getByRole("combobox", { name: "New account", exact: true });
@@ -49,7 +49,7 @@ for (const hasTarget of [true, false]) {
   ] }, error: null } }));
   await page.goto(`/#/session/${encodeURIComponent(instance.id)}`);
   await page.locator("#app[data-af-resync-settled]").waitFor();
-  await page.getByRole("button", { name: "Session actions", exact: true }).click();
+  await page.getByRole("button", { name: "More session actions", exact: true }).click();
   await page.getByRole("button", { name: "Handoff", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const agent = dialog.getByRole("combobox", { name: "New agent", exact: true });

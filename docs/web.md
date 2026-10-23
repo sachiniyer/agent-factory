@@ -75,9 +75,9 @@ selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, selecting a terminal gives it the screen: one compact row holds
-**Toggle sessions**, the truncating session title, static Keyboard state and **…**.
-The menu contains project choices, Sessions · Tasks · Config, session actions
-and tabs. Escape closes it and returns focus.
+**Toggle sessions**, the truncating session title, the
+**Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
+choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -93,8 +93,8 @@ terminal occupies at least 85% of the visual viewport at the verified phone widt
 
 ![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
-**Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
-header title to copy its link, or copy the address bar: it follows your selection.
+**Share a link to a session.** Open **…** in the pane header and choose **Copy link**,
+or copy the address bar: it follows your selection.
 Links use the stable session ID (`/#/session/<id>`) and open on this daemon,
 switching projects and revealing Archived when needed. Login preserves the target;
 a missing session shows a notice and returns to the dashboard.
@@ -160,8 +160,7 @@ as the explicit override while automatic redelivery stays suppressed, and
 **Mark delivered** to retire it without resending when the pane shows the mission
 already landed. If that retry delivers the mission while its final disk
 settlement remains pending, the web keeps a confirmed-mutation warning on screen
-because the mission has already landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
-on a phone) for **Handoff**, which appears when the session supports swapping
+because the mission has already landed and must not be retried. Open **…** in the pane header for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
@@ -198,11 +197,11 @@ whose button you clicked, even when a different session is selected.
 </figure>
 
 Click an existing process tab, such as **diff** in the still, to attach it. To
-inspect changes yourself, choose **Actions → + New tab → Terminal** and run `git diff` in
+inspect changes yourself, click **Terminal** in the pane header and run `git diff` in
 the shell. The still's diff is terminal output, not a separate diff-view control.
 Tabs run in the session's worktree. Click **Agent** to return to the agent.
 
-**Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
+**VS Code**, beside it, opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
 deletable tab opens a confirmation naming the tab and session; the Agent tab
 cannot be deleted independently. Confirm with **Delete tab** or choose Cancel.
@@ -211,14 +210,15 @@ a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` opens the **New tab** picker, where **Terminal** and **VS Code** appear when
-supported. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
+`t` opens a terminal tab and `T` (shift) a VS Code tab, when the session supports
+that kind. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
 without attaching. Clicking a tab selects and attaches it.
 
-When a backend cannot create local tabs, the bar explains the restriction.
+When a backend cannot create local tabs, the **Terminal** and **VS Code** buttons
+are hidden and **…** explains the restriction.
 Archived sessions must be restored before creating tabs. Agents can also create
 [web tabs](#web-tabs) for dev-server previews through the CLI or API; these do not
-appear as a creation option in the menu.
+appear as a creation button in the pane header.
 
 ### Tasks view
 
@@ -366,7 +366,7 @@ through to the agent unless a modal or menu handles them.
 | `ctrl+]` | Detach the terminal and return to navigation |
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
-| `t` | Open the New tab picker for the supported tab types |
+| `t` · `T` | Open a terminal tab · a VS Code tab, when the session supports that kind |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
@@ -417,10 +417,10 @@ dev-server preview**: an agent runs a dev server in its worktree and injects a t
 pointing at it, so you watch the app render in the browser as the agent builds it.
 
 Web tabs are created from inside a session (by an agent or by you) with the
-CLI/API — they are not in the tab bar's **New tab** menu, because their target
+CLI/API — the pane header has no button for them, because their target
 comes from whatever the agent is running rather than from anything the UI could
 ask you for (a [VS Code tab](#vs-code-tabs), which always targets the worktree,
-*is* in that menu):
+*does* have one):
 
 ```bash
 # a local dev server on port 5173 (Vite/Next/CRA/…)
@@ -621,8 +621,8 @@ without leaving the web UI. It renders as a pane like any other tab, and works i
 splits and drag/drop.
 
 Unlike a web tab it takes **no target**: the session's worktree is always what it
-opens. That is what makes it offerable from the tab bar's labelled **New tab**
-menu, which lists **Terminal** and **VS Code**. From the CLI:
+opens. That is what makes it offerable from the pane header's **VS Code** button,
+next to **Terminal**. From the CLI:
 
 ```bash
 af sessions tab-create my-session --kind vscode --name editor

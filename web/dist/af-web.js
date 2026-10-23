@@ -6952,8 +6952,10 @@ function decideKey(key, ctx, mods = {}) {
       }
       return { kind: "none" };
     }
-    if (key === "t") {
-      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+    if (key === "t" || key === "T") {
+      if (mods.ctrl || mods.meta || mods.alt) return { kind: "none" };
+      const tabKind = mods.shift ?? key === "T" ? "vscode" : "shell";
+      return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
@@ -7353,7 +7355,9 @@ function sessionFirstComposition(moves) {
   } };
 }
 function terminalChrome(opts) {
-  const menu = actionsDisclosure();
+  const menu = actionsDisclosure("More session actions");
+  menu.trigger.replaceChildren(icon("ellipsis"));
+  menu.trigger.title = "More session actions";
   const action = (label, className, run) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
     button.addEventListener("click", () => {
@@ -7362,13 +7366,34 @@ function terminalChrome(opts) {
     });
     return button;
   };
+  const newTabButton = (kind, label, glyph, name) => {
+    const button = h(
+      "button",
+      { type: "button", class: `af-ghost af-term-action af-term-new af-term-new-${kind}`, title: name },
+      icon(glyph),
+      h("span", { class: "af-term-new-label" }, label)
+    );
+    button.setAttribute("aria-label", name);
+    button.hidden = true;
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail > 1) event.preventDefault();
+    });
+    button.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
+      menu.close();
+      button.blur();
+      opts.newTab(kind);
+    });
+    return button;
+  };
+  const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
+  const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
+  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
@@ -7378,31 +7403,26 @@ function terminalChrome(opts) {
   deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
-  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
-  copy.title = "Copy link";
-  copy.setAttribute("aria-label", "Copy link");
-  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
-  desktopCopy.append(icon("link"));
-  desktopCopy.title = "Copy link";
-  desktopCopy.setAttribute("aria-label", "Copy link");
-  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  const copy = action("Copy link", "af-copy-link", opts.copyLink);
+  copy.title = "Copy link to this session";
+  const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
+  tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  menu.panel.append(tabUnavailable, copy, handoff, deliver, actions2, closePane);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, retry, menu.el);
+  return { head, title, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
   const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
   close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => {
     event.stopPropagation();
     onClose();
   });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, close), glyph, label };
 }
 function terminalSurface(container, palette) {
   const style = getComputedStyle(container);
@@ -12343,22 +12363,26 @@ var InstallAffordance = class {
   }
 };
 
-// src/shortcut-focus.ts
-function restoreShortcutFocus(navigationTarget, rail) {
-  if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-    navigationTarget.focus({ preventScroll: true });
-  }
-  if (document.activeElement === navigationTarget && navigationTarget !== document.body) {
-    return;
-  }
-  if (rail) {
-    rail.tabIndex = -1;
-    rail.focus({ preventScroll: true });
-    if (document.activeElement === rail) {
-      return;
+// src/tab_create.ts
+function tabCreateKey(generation, sessionId, kind) {
+  return `${generation}\0${sessionId}\0${kind}`;
+}
+function shortcutRepeatGuard() {
+  let held = null;
+  return {
+    arm(code) {
+      held = code;
+    },
+    release(code) {
+      if (held === code) held = null;
+    },
+    swallow(e) {
+      if (held !== e.code) return false;
+      if (e.repeat) return true;
+      held = null;
+      return false;
     }
-  }
-  document.activeElement?.blur();
+  };
 }
 
 // src/time.ts
@@ -16178,6 +16202,10 @@ function canMutateTabRoster(s) {
 function canCloseTabs(s) {
   return canMutateTabRoster(s);
 }
+function offeredNewTabKinds(s) {
+  if (tabCreationUnavailableReason(s) !== null) return [];
+  return NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(s, kind));
+}
 function tabCreationUnavailableReason(s) {
   const projected = s.tab_kinds;
   if (projected && projected.length > 0 && !isArchived(s)) {
@@ -16426,9 +16454,10 @@ var AppShell = class {
     this.navToggle.addEventListener("click", () => this.toggleNav());
     this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : []
-    ], this.phone, this.captureNewTabCancelReturn, () => {
-      const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    ], this.phone, () => {
+    }, () => {
+      const panel = this.terminalChrome?.menu.panel;
+      if (panel && this.appControls.panel.contains(panel)) this.terminalChrome?.menu.dismiss();
     }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     const header = h(
@@ -16540,7 +16569,6 @@ var AppShell = class {
   // and focused kind are both too coarse: switching between same-kind panes must
   // still invalidate carried actions, while viewport-only recomposition must not.
   sessionComposition = null;
-  newTabPickerPosition = null;
   phoneSyncQueued = false;
   schedulePhoneSync = () => {
     if (this.phoneSyncQueued) return;
@@ -16552,22 +16580,7 @@ var AppShell = class {
   };
   syncPhone() {
     const active = this.phone.matches && this.terminalSelected === true;
-    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
-    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    const responsiveState = this.responsiveNewTabState;
-    this.responsiveNewTabState = null;
-    const pickerOpen = responsiveState?.trigger === pickerTrigger ? responsiveState.open : pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : void 0) : void 0;
-    const reopenPicker = () => {
-      this.openNewTabPicker();
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
-    };
-    if (!compositionChanged) {
-      if (responsiveState?.trigger === pickerTrigger && responsiveState.open && pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
-      return;
-    }
+    if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement;
     const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
@@ -16576,10 +16589,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
     if (sessionActionsOpen) this.terminalChrome?.menu.open();
-    if (pickerOpen) {
-      reopenPicker();
-    }
-    if (!pickerOpen && focus && focus !== document.activeElement) {
+    if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
@@ -16663,19 +16673,6 @@ var AppShell = class {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
-  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  // Escape restores every enclosing disclosure a keyboard open changed before
-  // returning to navigation. Pointer opens have no entry and return to the button.
-  newTabCancelReturn = /* @__PURE__ */ new WeakMap();
-  responsiveNewTabState = null;
-  captureNewTabCancelReturn = () => {
-    const trigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    this.responsiveNewTabState = trigger ? {
-      trigger,
-      cancel: this.newTabCancelReturn.get(trigger),
-      open: trigger.getAttribute("aria-expanded") === "true"
-    } : null;
-  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -17316,168 +17313,6 @@ var AppShell = class {
     }
     return drop.landed;
   }
-  /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker(shortcutReturn) {
-    const slot = this.terminalChrome?.newTabSlot;
-    const trigger = slot?.querySelector(".af-tab-new");
-    if (!trigger || !slot) return;
-    if (shortcutReturn) {
-      const preserveAppControls = this.appControls.panel.contains(slot) && this.appControls.trigger.getAttribute("aria-expanded") === "true";
-      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
-      this.newTabCancelReturn.set(trigger, () => {
-        if (!preserveSessionActions) this.terminalChrome?.menu.close();
-        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
-        shortcutReturn();
-      });
-    }
-    if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabCancelReturn.has(trigger)) {
-        const wasHidden = this.appControls.panel.hidden;
-        this.newTabCancelReturn.set(trigger, () => {
-          if (!this.appControls.panel.contains(slot)) {
-            this.terminalChrome?.menu.open();
-            trigger.focus();
-            return;
-          }
-          if (wasHidden) this.appControls.close(true);
-          else this.appControls.trigger.focus();
-        });
-      }
-      this.appControls.open();
-    }
-    this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
-    else trigger.click();
-    slot?.querySelector('[role="menuitem"]')?.focus();
-  }
-  /** The visible New tab button and its kind menu.
-   *
-   *  The old split control created a terminal from a plus and hid VS Code behind a
-   *  separate, unlabeled caret. Even the project's maintainer could not find that
-   *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut opens this same picker.
-   *
-   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
-   *  are bound to THIS instance and torn down with it — see the isConnected check
-   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  newTabControl(selected) {
-    const wrap = h("div", { class: "af-tab-new-wrap" });
-    const trigger = h(
-      "button",
-      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
-      icon("plus", "af-tab-new-plus"),
-      h("span", {}, "New tab"),
-      icon("chevron-down", "af-tab-new-caret")
-    );
-    trigger.setAttribute("aria-haspopup", "menu");
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", "New tab \xB7 Terminal or VS Code");
-    const menu = h("div", { class: "af-tab-menu" });
-    menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Tab type");
-    menu.hidden = true;
-    let scrollParent = null;
-    const positionMenu = () => {
-      const anchor = trigger.getBoundingClientRect();
-      const menuBox = menu.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
-      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
-      const below = anchor.bottom + gap;
-      const above = anchor.top - menuBox.height - gap;
-      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
-    };
-    const close = () => {
-      menu.hidden = true;
-      this.newTabCancelReturn.delete(trigger);
-      trigger.setAttribute("aria-expanded", "false");
-      document.removeEventListener("mousedown", onDocMouseDown);
-      window.removeEventListener("keydown", onKeyDown, true);
-      scrollParent?.removeEventListener("scroll", positionMenu);
-      scrollParent = null;
-      window.removeEventListener("resize", positionMenu);
-      wrap.removeEventListener("focusout", onFocusOut);
-      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
-    };
-    const onFocusOut = (e) => {
-      const next = e.relatedTarget;
-      if (!next || !wrap.contains(next)) close();
-    };
-    const onDocMouseDown = (e) => {
-      if (!wrap.isConnected || !wrap.contains(e.target)) {
-        close();
-      }
-    };
-    const onKeyDown = (e) => {
-      if (!wrap.isConnected) {
-        close();
-        return;
-      }
-      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
-      const items = Array.from(menu.querySelectorAll('[role="menuitem"]:not(:disabled)'));
-      const current = items.indexOf(document.activeElement);
-      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
-        close();
-        if (returnAfterCancel) returnAfterCancel();
-        else trigger.focus();
-        return;
-      }
-      if (!items.length) return;
-      if (e.key === "Enter" || e.key === " ") {
-        items[current]?.click();
-        return;
-      }
-      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : e.key === "ArrowDown" ? (current + 1) % items.length : current <= 0 ? items.length - 1 : current - 1;
-      items[next].focus();
-    };
-    const open = () => {
-      this.newTabPickerPosition = positionMenu;
-      menu.hidden = false;
-      positionMenu();
-      trigger.setAttribute("aria-expanded", "true");
-      scrollParent = wrap.closest(".af-tabbar");
-      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
-      window.addEventListener("resize", positionMenu);
-      document.addEventListener("mousedown", onDocMouseDown);
-      wrap.addEventListener("focusout", onFocusOut);
-      window.addEventListener("keydown", onKeyDown, true);
-    };
-    const item = (label, kind) => {
-      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
-      b.setAttribute("role", "menuitem");
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        this.terminalChrome?.menu.close();
-        this.appControls.close();
-        this.actions.newTab(kind);
-      });
-      return b;
-    };
-    const offered = [];
-    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
-      if (!selected || canCreateTabKind(selected, kind)) {
-        offered.push(item(label, kind));
-      }
-    }
-    menu.append(...offered);
-    trigger.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (menu.hidden) {
-        open();
-      } else {
-        close();
-      }
-    });
-    wrap.append(trigger, menu);
-    return wrap;
-  }
   toggleFilterMenu() {
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
@@ -17561,6 +17396,10 @@ var AppShell = class {
       title: selected.title,
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      newTab: (kind) => {
+        if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
+        this.actions.newTab(kind);
+      },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.()
@@ -17601,12 +17440,14 @@ var AppShell = class {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
+      // Restore runs in reverse and inserts each node before its old next sibling,
+      // so a node must be listed before the sibling that follows it.
       [chrome.title, this.header],
-      [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel],
       [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
+      [chrome.newTabs, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -17662,13 +17503,16 @@ var AppShell = class {
         selected.id ?? ""
       )
     );
-    const unavailable = tabCreationUnavailableReason(selected);
-    if (unavailable === null) {
-      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
-    } else {
-      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
-      reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
-      this.terminalChrome?.newTabSlot.replaceChildren(reason);
+    const chrome = this.terminalChrome;
+    if (chrome) {
+      const unavailable = tabCreationUnavailableReason(selected);
+      const offered = offeredNewTabKinds(selected);
+      chrome.newTerminal.hidden = !offered.includes("shell");
+      chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.tabUnavailable.hidden = unavailable === null;
+      chrome.tabUnavailable.textContent = unavailable ?? "";
+      chrome.tabUnavailable.title = unavailable ?? "";
+      if (unavailable !== null) chrome.tabUnavailable.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
     }
     const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
@@ -18000,7 +17844,6 @@ var AppShell = class {
     this.headTitle.title = selected.title;
     this.headTitle.setAttribute("aria-label", selected.title);
     if (this.terminalChrome) {
-      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
     const warningText = archiveWarningText(selected);
@@ -18381,6 +18224,7 @@ function mount() {
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
   watchSystemTheme();
   void bootstrap();
 }
@@ -19200,22 +19044,31 @@ function guardedTabRebind(selId, run, resolve, verb) {
     surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
   }).catch((e) => surfaceTabError(e));
 }
+var pendingTabCreates = /* @__PURE__ */ new Set();
+var tabShortcutRepeat = shortcutRepeatGuard();
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
+    return;
+  }
+  const selId = sel.id ?? "";
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
+  if (pendingTabCreates.has(pendingKey)) {
     return;
   }
   clearTabError();
-  const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   let createdName = "";
   guardedTabRebind(
     selId,
-    () => create(selId, sel.title, tok).then((name) => {
-      createdName = name;
-      return fetchProjectedSnapshot(tok);
-    }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok).then((name) => {
+        createdName = name;
+        return fetchProjectedSnapshot(tok);
+      }).finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -20042,6 +19895,11 @@ function isNativeControl(el2) {
   return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -20073,13 +19931,13 @@ function onKeydown(e) {
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected ? offeredNewTabKinds(actionableSelected) : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") }
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey }
   );
   if (action.kind === "none") {
     return;
@@ -20103,14 +19961,12 @@ function onKeydown(e) {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        restoreShortcutFocus(navigationTarget, root?.querySelector(".af-rail") ?? null);
-      });
+    case "newTab":
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

@@ -935,12 +935,25 @@ button:disabled,
   align-items: center;
   gap: var(--af-space-1);
 }
-.af-copy-link-desktop {
-  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-  justify-content: center;
+.af-term-head {
+  container-type: inline-size;
 }
-.af-term-menu .af-copy-link-phone {
-  display: none;
+.af-term-new-group {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+}
+.af-term-new {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  white-space: nowrap;
+}
+@container (max-width: 640px) {
+  .af-term-new-label {
+    display: none;
+  }
 }
 .af-term-action {
   flex: 0 0 auto;
@@ -1005,28 +1018,14 @@ button:disabled,
   background: var(--af-surface-raised);
   color: var(--af-ink);
 }
-.af-term-menu[hidden],
-.af-term-keyboard[hidden] {
+.af-term-menu[hidden] {
   display: none;
 }
-.af-term-new-slot,
-.af-term-new-slot .af-tab-new-wrap,
 .af-term-menu button {
   width: 100%;
 }
 .af-term-menu button {
   text-align: left;
-}
-.af-term-keyboard,
-.af-pane-keyboard {
-  color: var(--af-ink);
-  font-size: var(--af-type-body);
-}
-.af-pane-keyboard {
-  display: none;
-}
-.af-kb-terminal .af-pane-focused .af-pane-keyboard {
-  display: inline;
 }
 .af-term-title-separator {
   color: var(--af-ink);
@@ -1154,69 +1153,6 @@ button:disabled,
   width: var(--af-space-2);
   height: var(--af-space-2);
 }
-.af-tab-new-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.af-tab-menu {
-  position: fixed;
-  top: 0;
-  left: 0;
-  min-width: calc(var(--af-space-3) * 9);
-  background: var(--af-surface-raised);
-  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
-  border-radius: var(--af-radius-dialog);
-  box-shadow: none;
-  padding: var(--af-space-2);
-  z-index: 30;
-}
-.af-tab-menu-item {
-  display: block;
-  width: 100%;
-  padding: var(--af-space-2);
-  background: var(--af-surface-raised);
-  color: var(--af-ink);
-  border: none;
-  border-radius: var(--af-radius-control);
-  font: inherit;
-  font-size: var(--af-type-body);
-  text-align: left;
-  cursor: pointer;
-}
-.af-tab-menu-item:hover {
-  background: var(--af-surface-raised);
-}
-.af-tab-menu-item:focus-visible {
-  outline: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) * -0.5);
-}
-.af-tab-new {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--af-space-1);
-  padding: var(--af-space-2);
-  background: transparent;
-  color: var(--af-ink);
-  border: none;
-  border-radius: 0;
-  font: inherit;
-  font-size: var(--af-type-body);
-  font-weight: 400;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.af-tab-new:hover {
-  color: var(--af-ink);
-}
-.af-tab-new-plus {
-  font-size: var(--af-type-body);
-}
-.af-tab-new-caret {
-  color: var(--af-ink);
-  font-size: var(--af-type-caption);
-}
 .af-tab-new-unavailable {
   display: inline-flex;
   align-items: center;
@@ -1224,6 +1160,9 @@ button:disabled,
   color: var(--af-ink);
   font-size: var(--af-type-body);
   white-space: normal;
+}
+.af-tab-new-unavailable[hidden] {
+  display: none;
 }
 .af-toast {
   position: fixed;
@@ -2058,12 +1997,6 @@ button:disabled,
   font-size: var(--af-type-caption);
 }
 @media (max-width: 768px) {
-  .af-copy-link-desktop {
-    display: none;
-  }
-  .af-term-menu .af-copy-link-phone {
-    display: inline-flex;
-  }
   .af-appbar {
     position: relative;
     z-index: var(--af-z-appbar);
@@ -2199,8 +2132,15 @@ button:disabled,
   }
   .af-term-head {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     gap: var(--af-space-2);
+  }
+  .af-term-new-group {
+    grid-row: 1;
+    grid-column: 3;
+  }
+  .af-term-new-label {
+    display: none;
   }
   .af-term-head-main {
     grid-row: 1;
@@ -2211,14 +2151,9 @@ button:disabled,
   .af-term-title-separator {
     display: none;
   }
-  .af-term-keyboard {
-    grid-row: 1;
-    grid-column: 2;
-    white-space: nowrap;
-  }
   .af-term-head > .af-term-more-wrap {
     grid-row: 1;
-    grid-column: 3;
+    grid-column: 4;
   }
   .af-term-head > .af-term-more-wrap .af-term-more-label {
     display: inline;
@@ -2236,7 +2171,7 @@ button:disabled,
     min-width: 0;
     flex-wrap: nowrap;
   }
-  .af-term-head > .af-term-action:not(.af-copy-link-desktop) {
+  .af-term-head > .af-term-action {
     grid-column: 1 / -1;
   }
   .af-tab {
@@ -2247,7 +2182,7 @@ button:disabled,
     padding: var(--af-space-2) var(--af-space-2);
   }
   .af-tab-close,
-  .af-tab-new {
+  .af-term-new {
     min-width: calc(var(--af-space-3) * 2);
     min-height: calc(var(--af-space-3) * 2);
   }
@@ -2913,7 +2848,7 @@ textarea[class] {
   }
   .af-term-head .af-tab,
   .af-term-head .af-term-action,
-  .af-term-head .af-tab-new {
+  .af-session-first .af-term-new {
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 }
@@ -2989,13 +2924,12 @@ textarea[class] {
     order: 1;
     flex: 1;
   }
-  .af-session-first .af-term-keyboard {
-    order: 2;
+  .af-session-first .af-term-new-group {
+    order: 3;
     flex-shrink: 0;
-    font-size: var(--af-type-caption);
   }
   .af-session-first .af-appbar-tools-wrap {
-    order: 3;
+    order: 4;
     flex-shrink: 0;
   }
   .af-session-first .af-term-head {
@@ -3004,12 +2938,10 @@ textarea[class] {
   .af-session-first .af-appbar-tools {
     width: calc(100vw - var(--af-space-3));
   }
-  .af-session-first .af-project-switch,
-  .af-session-first .af-tab-new {
+  .af-session-first .af-project-switch {
     display: none;
   }
   .af-session-first .af-project-menu,
-  .af-session-first .af-tab-menu,
   .af-session-first .af-appbar-tools > .af-term-menu {
     display: flex !important;
     position: static;
@@ -3031,9 +2963,6 @@ textarea[class] {
   }
   .af-session-first .af-appbar-tools a {
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-  }
-  .af-session-first .af-appbar-tools .af-copy-link-phone {
-    display: inline-flex;
   }
 }
 .af-phone-pane-close {

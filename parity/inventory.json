@@ -1130,7 +1130,7 @@
         "pointer": "api/sessions_tabs.go:27 --kind vscode"
       },
       "verdict": "parity",
-      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes the choice from a labelled New tab menu."
+      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes it as a VS Code button in the session header and the Shift+T shortcut."
     },
     {
       "id": "session.tab.create.web",
