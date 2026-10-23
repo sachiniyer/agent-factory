@@ -86,7 +86,10 @@ func (s *Service) scanLocked(repos map[string]bool, tabs map[string]map[string][
 	}
 	for repoID := range repos {
 		store, err := Open(repoID)
-		if err != nil || !store.initialized() {
+		if err != nil {
+			continue
+		}
+		if ok, err := store.present(); err != nil || !ok {
 			continue
 		}
 		watched := s.watchedSlugsLocked(store, repoID, tabs[repoID])

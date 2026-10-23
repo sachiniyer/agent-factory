@@ -95,7 +95,7 @@ name the project:
 |---|---|
 | `session_id` | The session's stable ID. The daemon uses the session's project. The Docs tab sends this. |
 | `repo_id` | The project ID (12 hex characters). |
-| `repo_path` | A path inside the project on the daemon host. The CLI sends this with `--daemon-url --repo`. |
+| `repo_path` | An absolute path (or `~/…`) inside the project on the daemon host. The CLI sends this with `--daemon-url --repo`. |
 
 A request with none of them, or more than one, fails.
 

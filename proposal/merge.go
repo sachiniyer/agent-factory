@@ -97,11 +97,11 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 		if err != nil {
 			return err
 		}
-		data, err := s.readDoc(slug, file)
+		theirs, err := s.fileAt(head, rel)
 		if err != nil {
 			return err
 		}
-		theirs := string(data)
+		data := []byte(theirs)
 		next, merged := text, false
 		if theirs != baseText && theirs != text {
 			out, clean, err := s.mergeFile(text, baseText, theirs)

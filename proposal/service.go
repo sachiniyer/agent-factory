@@ -143,7 +143,7 @@ func (s *Service) resolve(t Target) (*resolved, error) {
 	case t.RepoID != "":
 		r.repoID = t.RepoID
 	default:
-		path, err := config.ResolveUserPath(t.RepoPath)
+		path, err := config.ResolveDaemonHostPath(t.RepoPath)
 		if err != nil {
 			return nil, err
 		}
