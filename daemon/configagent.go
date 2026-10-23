@@ -358,12 +358,24 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// one on a busy box (#5471).
 	agent := tmux.DetectAgentFromCommand(req.Program)
 	var promptReceipt session.ConversationCaptureSnapshot
+	// resumedUntracked marks a `codex resume` launch whose target rollout could
+	// not be identified: the resumed file predates the snapshot, so absence from
+	// the new-rollout set proves nothing and "never arrived" would be a false
+	// verdict (#5471 review).
+	var resumedUntracked bool
 	if agent == tmux.ProgramCodex && req.Prompt != "" {
 		codexHome, rerr := configAgentCodexReceiptHome(req.Program, home)
 		if rerr != nil {
 			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
 		}
 		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, home)
+		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program); resume {
+			if path != "" {
+				promptReceipt.TrackCodexReceiptRollout(path)
+			} else {
+				resumedUntracked = true
+			}
+		}
 	}
 
 	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession
@@ -572,10 +584,20 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 								sessionName, elapsed,
 							)
 						case errors.Is(finalErr, session.ErrPromptReceiptNotObserved):
-							m.warn().Printf(
-								"config agent: %s briefing receipt never arrived; still unobserved %s after delivery",
-								sessionName, elapsed,
-							)
+							if resumedUntracked {
+								// The resumed rollout could not be identified,
+								// so absence from the new-file set cannot disprove
+								// delivery — an indeterminate result, not never.
+								m.warn().Printf(
+									"config agent: %s briefing receipt could not be verified; the resumed rollout was not identifiable %s after delivery",
+									sessionName, elapsed,
+								)
+							} else {
+								m.warn().Printf(
+									"config agent: %s briefing receipt never arrived; still unobserved %s after delivery",
+									sessionName, elapsed,
+								)
+							}
 						default:
 							m.warn().Printf(
 								"config agent: %s late receipt re-check could not determine the outcome: %v",

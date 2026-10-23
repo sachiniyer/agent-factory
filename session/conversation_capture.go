@@ -77,14 +77,17 @@ type ConversationCaptureSnapshot struct {
 	// can no longer distinguish "new" from "pre-existing", and every check
 	// against this snapshot must surface that failure instead of guessing.
 	codexBeforeErr error
-	// receiptState preserves rollout identity across the separate
+	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
-	// initial, escalation, and five-minute windows are three different calls.
-	// Once exactly one classifiable new rollout is bound to the launch
-	// directory it is provably the spawned process's own file, and a same-cwd
-	// sibling landing later (a second config agent sharing AF home, #5471
-	// review) cannot re-widen a question earlier polling already answered.
+	// initial, escalation, and five-minute windows are three different calls
+	// re-reading the same rollout files every poll.
 	receiptState *codexReceiptState
+	// receiptPaths are rollout files outside the new-file set that receipt
+	// checks must still scan — a `codex resume` target, whose file predates
+	// the snapshot and so can never appear among observed new rollouts even
+	// though it is exactly where the resumed session records its turns (#5471
+	// review).
+	receiptPaths []string
 	// carried is the conversation a same-agent account swap copied into this
 	// store and resumes (#4367). Its rollout is recorded in codexBefore even
 	// though the copy lands after the snapshot, so capture only ever reports a
@@ -93,13 +96,11 @@ type ConversationCaptureSnapshot struct {
 }
 
 // codexReceiptState is the receipt-check memory carried inside a snapshot.
-// path is the rollout proven to be the launched process's own ("" until one
-// classifiable candidate exists); scans memoizes prompt scans by (size,
-// mtime), because a rollout that has not grown cannot have recorded a new
-// turn and need not be re-read on every poll (#5471 review).
+// scans memoizes prompt scans by (size, mtime), because a rollout that has
+// not grown cannot have recorded a new turn and need not be re-read on every
+// poll (#5471 review).
 type codexReceiptState struct {
 	mu    sync.Mutex
-	path  string
 	scans map[string]codexReceiptScan
 }
 
@@ -111,18 +112,6 @@ type codexReceiptScan struct {
 
 func newCodexReceiptState() *codexReceiptState {
 	return &codexReceiptState{scans: make(map[string]codexReceiptScan)}
-}
-
-func (s *codexReceiptState) lockedPath() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.path
-}
-
-func (s *codexReceiptState) setPath(path string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.path = path
 }
 
 // scanPrompt returns whether path records prompt, reusing the previous result
@@ -148,6 +137,14 @@ func (s *codexReceiptState) scanPrompt(path, prompt string) (bool, error) {
 	return matched, nil
 }
 
+// TrackCodexReceiptRollout adds path to the set of rollouts every receipt
+// check scans. The new-rollout set cannot contain a `codex resume` target —
+// it exists before the snapshot by definition — so a resumed config agent's
+// receipt would read as never observed without it (#5471 review).
+func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) {
+	s.receiptPaths = append(s.receiptPaths, path)
+}
+
 // expectCarriedCodexRollout tells capture that path holds conv's rollout,
 // placed there by af rather than minted by the replacement.
 func (s *ConversationCaptureSnapshot) expectCarriedCodexRollout(conv AgentConversationData, path string) {
@@ -167,8 +164,10 @@ func cloneConversationCaptureSnapshot(snap ConversationCaptureSnapshot) Conversa
 		}
 	}
 	// A clone is a new observation: it must identify its own rollout rather
-	// than inherit an identity the source's polling established.
+	// than inherit the source's scan memoization. Tracked receipt paths are
+	// launch knowledge, not observation state, so they carry over.
 	copy.receiptState = newCodexReceiptState()
+	copy.receiptPaths = append([]string(nil), snap.receiptPaths...)
 	return copy
 }
 
@@ -455,54 +454,92 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 }
 
 // codexPromptReceiptOnce reports one observation of the receipt store:
-// whether a NEW rollout correlated to the snapshot's launch working directory
-// recorded prompt as a user turn. The working-directory correlation is the same
-// fail-closed rule capture uses — without it, any Codex process on the box
-// creating a rollout during a long wait (the config agent's 5-minute late
-// re-check, #5471) would force the >1-candidate refusal and make the check
-// permanently unanswerable on a busy host. Once a poll sees exactly one
-// classifiable candidate, that file is provably the launched process's — the
-// spawned rollout is in this set the moment it exists, so a lone candidate can
-// only be it — and the snapshot pins it: a same-cwd sibling created later (two
-// config agents share AF home) cannot take the answer away with it. undecided
-// reports a new rollout whose session_meta is not yet classifiable: it could
-// be the awaited one mid-write, so neither absence nor ambiguity may be
-// concluded yet.
+// whether exactly one candidate rollout recorded prompt as a user turn.
+// Candidates are the NEW rollout files correlated to the snapshot's launch
+// working directory — the same fail-closed rule capture uses — plus any
+// explicitly tracked paths (a `codex resume` target, which predates the
+// snapshot and so can never appear among new files, #5471 review). Attribution
+// is the prompt match itself, not a previously pinned path: a candidate can
+// only be proven by recording the briefing, so a same-cwd sibling appearing
+// first cannot steal the identity (two config agents share AF home), and a
+// sibling appearing later cannot re-widen a settled answer. Zero matches means
+// the briefing exists in no candidate — absence, not ambiguity. More than one
+// match means two rollouts both recorded the prompt and cannot be told apart,
+// which stays fail-closed ambiguous. undecided reports a new rollout whose
+// session_meta is not yet classifiable: it could be the awaited one mid-write,
+// so neither absence nor ambiguity may be concluded yet.
 func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, err error) {
 	state := snap.receiptState
 	if state == nil {
 		state = newCodexReceiptState()
-	}
-	if locked := state.lockedPath(); locked != "" {
-		matched, err := state.scanPrompt(locked, prompt)
-		return matched, false, err
 	}
 	observed, err := newCodexRolloutFiles(snap)
 	if err != nil {
 		return false, false, err
 	}
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
-	if len(candidates) > 1 {
-		return false, false, fmt.Errorf("%w: %d new Codex rollout files matched the launch directory", ErrPromptReceiptAmbiguous, len(candidates))
+	seen := make(map[string]struct{}, len(candidates)+len(snap.receiptPaths))
+	matched := 0
+	for _, path := range append(candidates, snap.receiptPaths...) {
+		if _, dup := seen[path]; dup {
+			continue
+		}
+		seen[path] = struct{}{}
+		has, err := state.scanPrompt(path, prompt)
+		if err != nil {
+			return false, false, err
+		}
+		if has {
+			matched++
+		}
 	}
-	if len(candidates) == 0 {
+	switch {
+	case matched > 1:
+		return false, false, fmt.Errorf("%w: %d Codex rollout files recorded the briefing", ErrPromptReceiptAmbiguous, matched)
+	case matched == 1:
+		return true, false, nil
+	default:
 		return false, uncorrelated > 0, nil
 	}
-	if uncorrelated == 0 {
-		// One classified candidate and nothing unclassifiable that could still
-		// turn out to be the launched rollout: every new file is accounted for,
-		// so this file IS the spawned process's. Pin it for the rest of this
-		// snapshot's checks before a same-cwd sibling can appear.
-		state.setPath(candidates[0])
+}
+
+// CodexResumedRolloutPath resolves the rollout file a `codex resume` command
+// will append to — the explicit conversation id, or the newest rollout for
+// --last. resume reports whether program is a resume at all: a true resume
+// with an empty path means the target could not be identified (a bare `codex
+// resume` opens Codex's own picker; an id may match no rollout or several),
+// in which case a missing receipt can never be disproven and verdicts must
+// stay indeterminate rather than claiming never-arrived (#5471 review).
+func CodexResumedRolloutPath(codexHome, program string) (path string, resume bool) {
+	selector := tmux.ConversationSelectorArgs(program)
+	if len(selector) == 0 || selector[0] != "resume" {
+		return "", false
 	}
-	matched, err := state.scanPrompt(candidates[0], prompt)
+	if len(selector) == 1 {
+		return "", true
+	}
+	files, err := codexRolloutFiles(codexHome)
 	if err != nil {
-		return false, false, err
+		return "", true
 	}
-	if matched {
-		return true, false, nil
+	if selector[1] == "--last" {
+		var newestMod time.Time
+		for file := range files {
+			if info, err := os.Stat(file); err == nil && (path == "" || info.ModTime().After(newestMod)) {
+				path, newestMod = file, info.ModTime()
+			}
+		}
+		return path, true
 	}
-	return false, uncorrelated > 0, nil
+	for file := range files {
+		if strings.EqualFold(codexConversationIDFromPath(file), selector[1]) {
+			if path != "" {
+				return "", true
+			}
+			path = file
+		}
+	}
+	return path, true
 }
 
 func codexRolloutHasPrompt(path, prompt string) (bool, error) {

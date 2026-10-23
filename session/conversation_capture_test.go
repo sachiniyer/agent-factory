@@ -342,18 +342,38 @@ func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 	snap := BeginConversationCapture()
 	other := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 	want := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	for _, path := range []string{other, want} {
+		appendCodexRolloutEvent(t, path, map[string]any{
+			"type":    "event_msg",
+			"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+		})
+	}
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
+		"two rollouts recording the same briefing cannot prove which belongs to the launched pane")
+}
+
+// The receipt question is "was the briefing observed", not "which file is the
+// session's": among several new rollouts, the one that recorded the prompt is
+// the receipt, and the rest are ignored (#5471 review).
+func TestWaitForPromptReceipt_OneMatchAmongCandidatesIsTheReceipt(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	other := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	mine := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
 	appendCodexRolloutEvent(t, other, map[string]any{
 		"type":    "event_msg",
 		"payload": map[string]any{"type": "user_message", "message": "unrelated session"},
 	})
-	appendCodexRolloutEvent(t, want, map[string]any{
+	appendCodexRolloutEvent(t, mine, map[string]any{
 		"type":    "event_msg",
 		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
 	})
 
-	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
-	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
-		"prompt coincidence cannot prove which new rollout belongs to the launched pane")
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"exactly one matching rollout is the receipt, regardless of how many candidates exist")
 }
 
 // A bound snapshot correlates the receipt to the launch working directory —
@@ -388,14 +408,20 @@ func TestWaitForPromptReceipt_WorkingDirSameCwdStaysAmbiguous(t *testing.T) {
 	workDir := t.TempDir()
 	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
-	writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	for _, name := range []string{
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl",
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl",
+	} {
+		path := writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+		appendCodexRolloutEvent(t, path, map[string]any{
+			"type":    "event_msg",
+			"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+		})
+	}
 
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
 	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
-		"two rollouts in the launch directory genuinely cannot be told apart")
+		"two same-directory rollouts both recording the briefing cannot be told apart")
 }
 
 // A new rollout whose session_meta is still mid-write cannot be ruled OUT as
@@ -418,12 +444,10 @@ func TestWaitForPromptReceipt_UncorrelatableRolloutStaysUndecided(t *testing.T) 
 }
 
 // Two config agents launch into the same AF home, so a sibling rollout CAN
-// appear mid-wait inside the working-directory correlation (#5471 review). The
-// first poll that sees exactly one classifiable candidate has already proven
-// the launched rollout — the spawned process's own file is in the new-set the
-// moment it exists, so that lone file can only be it — and the snapshot pins
-// it: the late-arriving sibling cannot force ambiguity over a question the
-// earlier polling already answered.
+// appear mid-wait inside the working-directory correlation (#5471 review).
+// Attribution is the recorded turn itself: the sibling's own unrelated turns
+// are not the awaited prompt, so its presence changes nothing about the scan
+// and the receipt still resolves on the rollout that did record it.
 func TestWaitForPromptReceipt_PreservedRolloutIgnoresSameCwdSibling(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
@@ -463,6 +487,107 @@ func TestWaitForPromptReceipt_PreservedRolloutIgnoresSameCwdSibling(t *testing.T
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pinned rollout's receipt was not observed")
+	}
+}
+
+// A sibling can BEAT the launched rollout to the store: two config agents
+// share AF home, so a poll can see the sibling as the lone same-directory
+// candidate before the launched process's own file exists. Attribution must
+// wait for the prompt match, never for first-seen — pinning that lone sibling
+// would scan the wrong transcript forever and report never-arrived while the
+// real receipt sits in the file that arrived second (#5471 review).
+func TestWaitForPromptReceipt_SiblingRolloutFirstDoesNotStealReceipt(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	sibling := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	appendCodexRolloutEvent(t, sibling, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "a sibling config agent's briefing"},
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 2*time.Second)
+	}()
+
+	// Polls observe the sibling alone first; the launched rollout lands after.
+	time.Sleep(200 * time.Millisecond)
+	mine := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	appendCodexRolloutEvent(t, mine, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a first-seen sibling stole the receipt identity from the later real rollout")
+	}
+}
+
+// A `codex resume` launch appends to a rollout that predates the snapshot —
+// the before-set already holds it, so the new-file scan can never see it. The
+// tracked path is the only thing pointing the receipt check at the file the
+// resumed session will actually write (#5471 review).
+func TestWaitForPromptReceipt_TrackedResumedRollout(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	resumed := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	appendCodexRolloutEvent(t, resumed, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	require.ErrorIs(t,
+		WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		ErrPromptReceiptNotObserved,
+		"without tracking, a resumed rollout is invisible to the receipt check")
+
+	snap.TrackCodexReceiptRollout(resumed)
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"the tracked resumed rollout is where the briefing lands")
+}
+
+// CodexResumedRolloutPath maps a `codex resume` launch onto the rollout it
+// will append to — the named conversation id, or the newest file for --last —
+// and reports "resume, but target unknown" rather than guessing when the
+// target cannot be identified (#5471 review).
+func TestCodexResumedRolloutPath(t *testing.T) {
+	codexHome := t.TempDir()
+	older := writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	newer := writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	stale := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(older, stale, stale))
+
+	for _, tc := range []struct {
+		name       string
+		program    string
+		wantPath   string
+		wantResume bool
+	}{
+		{"not a codex command", "claude --resume 019f386f-7206-7fc2-803b-f7045e07a242", "", false},
+		{"plain codex", "codex", "", false},
+		{"explicit id", "codex resume 019f386f-7206-7fc2-803b-f7045e07a242", older, true},
+		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", older, true},
+		{"latest", "codex resume --last", newer, true},
+		{"latest through an env wrapper", "env FOO=1 codex resume --last", newer, true},
+		{"bare resume opens the picker", "codex resume", "", true},
+		{"unknown id", "codex resume 00000000-0000-0000-0000-000000000000", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, resume := CodexResumedRolloutPath(codexHome, tc.program)
+			require.Equal(t, tc.wantResume, resume)
+			require.Equal(t, tc.wantPath, path)
+		})
 	}
 }
 
