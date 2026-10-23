@@ -142,6 +142,10 @@ func (i *Instance) MarkUserKilled() {
 		// would report "waiting on the environment" while only the tombstone's
 		// cleanup loop runs. It commits clear with the tombstone (#5295 review).
 		i.lostRestoreWait = LostRestoreWait{}
+		// Same for the flap bound's durable history: no automatic restore can
+		// ever reach this row again, so the confirmations are dead evidence
+		// (#5436).
+		i.lostRestoreConfirmations = nil
 		i.touchLocked()
 	}
 	i.inFlightOp = OpNone
@@ -168,6 +172,7 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 		// never be auto-restored, so a mirrored armed-wait is a lie here too
 		// (#5295 review).
 		i.lostRestoreWait = LostRestoreWait{}
+		i.lostRestoreConfirmations = nil
 		i.touchLocked()
 		if i.inFlightOp != OpKilling {
 			i.inFlightOp = OpNone

@@ -75,6 +75,11 @@ type Instance struct {
 	// failure was environmental, so an automatic retry is still armed behind a
 	// capped backoff instead of the terminal budget being spent (#5295).
 	lostRestoreWait LostRestoreWait
+	// lostRestoreConfirmations is the durable copy of the daemon's rolling
+	// confirmed-restore history — the flap bound's evidence (#5238). A restart
+	// reseeds the in-memory map from it so the window-bound count cannot be
+	// reset by bouncing the daemon (#5436).
+	lostRestoreConfirmations []time.Time
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT

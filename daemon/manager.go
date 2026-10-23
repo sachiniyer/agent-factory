@@ -884,6 +884,10 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	// Reseed the confirmed-flap bound's history from the durable copies: the
+	// in-memory map was dropped with the previous generation, and a restart
+	// mid-window must not let a flapping session buy extra cycles (#5436).
+	m.reseedLostRestoreConfirmationsLocked(nowFunc(), instances, nil)
 	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
 	// instances.json was corrupted and dropped at startup. A full restart always
 	// re-runs this path with existing==nil, so a repaired-and-restarted daemon

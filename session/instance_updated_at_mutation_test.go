@@ -58,6 +58,8 @@ func TestUpdatedAtMutations(t *testing.T) {
 		}},
 		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, errors.New("enospc")) }},
 		{"clear restore wait", func(t *testing.T, i *Instance) { i.lostRestoreWait = LostRestoreWait{Attempts: 2, Error: "enospc"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreWait() }},
+		{"restore confirmations", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreConfirmations([]time.Time{clock}) }},
+		{"clear restore confirmations", func(t *testing.T, i *Instance) { i.lostRestoreConfirmations = []time.Time{clock} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreConfirmations() }},
 		{"restore wait snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "enospc"})
 		}},
