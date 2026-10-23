@@ -7375,6 +7375,9 @@ function terminalChrome(opts) {
     );
     button.setAttribute("aria-label", name);
     button.hidden = true;
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail > 1) event.preventDefault();
+    });
     button.addEventListener("click", (event) => {
       if (event.detail > 1) return;
       menu.close();
@@ -12359,6 +12362,28 @@ var InstallAffordance = class {
     });
   }
 };
+
+// src/tab_create.ts
+function tabCreateKey(generation, sessionId, kind) {
+  return `${generation}\0${sessionId}\0${kind}`;
+}
+function shortcutRepeatGuard() {
+  let held = null;
+  return {
+    arm(code) {
+      held = code;
+    },
+    release(code) {
+      if (held === code) held = null;
+    },
+    swallow(e) {
+      if (held !== e.code) return false;
+      if (e.repeat) return true;
+      held = null;
+      return false;
+    }
+  };
+}
 
 // src/time.ts
 function formatDuration(ms) {
@@ -18199,6 +18224,7 @@ function mount() {
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
   watchSystemTheme();
   void bootstrap();
 }
@@ -19019,6 +19045,7 @@ function guardedTabRebind(selId, run, resolve, verb) {
   }).catch((e) => surfaceTabError(e));
 }
 var pendingTabCreates = /* @__PURE__ */ new Set();
+var tabShortcutRepeat = shortcutRepeatGuard();
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
@@ -19026,7 +19053,7 @@ function createSessionTab(kind = "shell") {
     return;
   }
   const selId = sel.id ?? "";
-  const pendingKey = `${selId}\0${kind}`;
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
   if (pendingTabCreates.has(pendingKey)) {
     return;
   }
@@ -19868,6 +19895,11 @@ function isNativeControl(el2) {
   return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -19930,7 +19962,10 @@ function onKeydown(e) {
       else switchTab(action.index);
       break;
     case "newTab":
-      if (!e.repeat) createSessionTab(action.tabKind);
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);

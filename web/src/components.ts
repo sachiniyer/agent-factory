@@ -136,6 +136,11 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
     // The new tab owns input next; a focused button would swallow the rail keys.
     // detail counts clicks in one gesture; a fast local create can settle before the
     // second click of a double-click lands, so the in-flight guard alone misses it.
+    // The first create may already have focused its terminal; a focusing mousedown
+    // here would blur it back to rail mode.
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail > 1) event.preventDefault();
+    });
     button.addEventListener("click", (event) => {
       if (event.detail > 1) return;
       menu.close(); button.blur(); opts.newTab(kind);

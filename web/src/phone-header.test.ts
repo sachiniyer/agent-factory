@@ -202,3 +202,15 @@ test("the second click of a double-click does not create a second tab", () => {
   assert.deepEqual(kinds, ["shell", "vscode"], "keyboard activation reports detail 0 and must still create");
   chrome.dispose();
 });
+
+test("the second press of a double-click does not take focus from the new terminal", () => {
+  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, newTab() {} });
+  const press = (detail: number) => Object.assign(new Event("mousedown", { cancelable: true }), { detail });
+  const first = press(1);
+  chrome.newTerminal.dispatchEvent(first);
+  assert.equal(first.defaultPrevented, false);
+  const second = press(2);
+  chrome.newTerminal.dispatchEvent(second);
+  assert.equal(second.defaultPrevented, true, "a prevented mousedown leaves focus where the first create put it");
+  chrome.dispose();
+});
