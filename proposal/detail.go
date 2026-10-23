@@ -126,12 +126,8 @@ func (s *Store) ReadAt(slug, doc string) (text, file, commit string, snapshotted
 		if commit, err = s.head(); err != nil {
 			return err
 		}
-		data, err := s.readDoc(slug, f)
-		if err != nil {
-			return err
-		}
-		text = string(data)
-		return nil
+		text, err = s.fileAt(commit, slug+"/"+f)
+		return err
 	})
 	return text, file, commit, snapshotted, err
 }

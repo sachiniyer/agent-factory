@@ -292,8 +292,15 @@ func (s *Service) Start(sessionID, slug string, docs []string) (*Summary, error)
 	if len(docs) == 0 {
 		docs = BuiltinTemplates
 	}
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
 	if err := r.store.Create(slug, docs, agentCommitter(r)); err != nil {
 		return nil, err
+	}
+	if own, err := r.store.Head(); err == nil {
+		s.publishSnapshot(r, before, own)
 	}
 	return s.attach(r, slug)
 }
@@ -341,9 +348,14 @@ func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
 			return nil, fmt.Errorf("still attached to %s: closing its Docs tab failed: %w", previous, err)
 		}
 	}
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
 	if err := r.store.Attach(slug, r.session.ID); err != nil {
 		return nil, err
 	}
+	s.publishSnapshot(r, before, "")
 	info, err := s.summary(r, slug)
 	if err != nil {
 		return nil, err
@@ -433,9 +445,17 @@ func (s *Service) Checkpoint(sessionID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
+	before, err := r.store.Head()
+	if err != nil {
+		return nil, err
+	}
 	cp, err := r.store.Checkpoint(r.session.ID)
-	if err != nil || cp.Commit == "" {
+	if err != nil {
 		return cp, err
+	}
+	s.publishSnapshot(r, before, cp.Commit)
+	if cp.Commit == "" {
+		return cp, nil
 	}
 	files, _, err := r.store.commitDiff(cp.Commit, cp.Slug)
 	if err != nil {
