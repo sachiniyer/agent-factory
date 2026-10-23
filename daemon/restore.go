@@ -520,13 +520,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// The live-boundary retirement above made the fence drop crash safe. This reset is
 	// still required for transport observations accumulated while Recover ran.
 	m.noteRuntimeReplaced(repoID, instance)
-	// The durable flap history clears HERE, before the settlement: the manual
-	// restore is the operator's off-ramp and armRestoreConfirmation's
-	// in-memory delete below runs after this write, so nothing else would
-	// carry the field's removal to disk — a restart inside the window would
-	// reseed the retired episode's timestamps and the next losses could trip
-	// the bound on stale credit (#5436 review).
+	// The manual restore is the operator's off-ramp, so its flap episode ends
+	// here — the map entry and the durable copy in ONE critical section,
+	// before the settlement write. Splitting them lets a concurrent
+	// persistLostRestoreConfirmations mirror the retired timestamps back
+	// onto the instance between the two clears; a restart inside the window
+	// would then reseed history the operator already retired and the next
+	// losses could trip the bound on stale credit (#5436 review). The retry
+	// state is deliberately untouched: consecutiveFailures carries into the
+	// armed confirmation below (#1976).
+	stateKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	delete(m.lostRestoreConfirmations, stateKey)
 	instance.ClearLostRestoreConfirmations()
+	m.mu.Unlock()
 	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag
 	// that authorizes deleting it later. No poll rewrites it (the row is already
