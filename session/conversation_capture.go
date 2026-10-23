@@ -538,9 +538,13 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	switch {
 	case matched > 1:
 		return false, false, fmt.Errorf("%w: %d Codex rollout files recorded the briefing", ErrPromptReceiptAmbiguous, matched)
-	case matched == 1:
+	case matched == 1 && uncorrelated == 0:
 		return true, false, nil
 	default:
+		// Zero matches is absence; a lone match while an unclassifiable
+		// rollout could still settle into a second match is not yet a
+		// unique attribution — keep waiting rather than confirm early
+		// (#5471 review).
 		return false, uncorrelated > 0, nil
 	}
 }
@@ -597,10 +601,16 @@ func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string
 		}
 		pool, _ = codexRolloutFilesForWorkingDir(mapKeys(files), pathutil.ResolveForCompare(workingDir))
 	}
-	var newestMod time.Time
+	// --last continues the most recently started session: order by the
+	// session-start timestamp embedded in the rollout filename, not file
+	// mtime — a touched, restored, or copied rollout would otherwise
+	// diverge from Codex's own selection (#5471 review). Filenames are
+	// rollout-<YYYY-MM-DD>T<HH-MM-SS>-<uuid>.jsonl, so the fixed-width
+	// timestamp prefix sorts lexicographically in session order.
+	var newestName string
 	for _, file := range pool {
-		if info, err := os.Stat(file); err == nil && (path == "" || info.ModTime().After(newestMod)) {
-			path, newestMod = file, info.ModTime()
+		if base := filepath.Base(file); path == "" || base > newestName {
+			path, newestName = file, base
 		}
 	}
 	return path, true

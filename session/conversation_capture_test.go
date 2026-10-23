@@ -391,6 +391,39 @@ func TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable(t *testing.T) {
 		"a whitespace-only prompt must not become a match-everything empty needle")
 }
 
+// A lone prompt match is not yet unique attribution while another new
+// rollout's header is still unclassifiable: that file could settle into a
+// second match, so the poll must wait rather than confirm early (#5471
+// review).
+func TestCodexPromptReceiptOnce_LoneMatchWaitsForUnsettledRollout(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	const prompt = "the exact config-agent briefing"
+	matched := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl", workDir)
+	appendCodexRolloutEvent(t, matched, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": prompt},
+	})
+	const settling = "rollout-2026-08-13T01-56-30-019ffa5a-ddb3-7941-8cad-7c688ceb97d4.jsonl"
+	writeEmptyCodexRolloutFile(t, codexHome, settling)
+
+	received, undecided, err := codexPromptReceiptOnce(snap, prompt)
+	require.NoError(t, err)
+	require.False(t, received, "a still-unclassifiable rollout could settle into a second match")
+	require.True(t, undecided)
+
+	// Once it settles into another working directory the match is unique
+	// and the receipt confirms.
+	writeCodexRolloutFileWithCwd(t, codexHome, settling, t.TempDir())
+	received, undecided, err = codexPromptReceiptOnce(snap, prompt)
+	require.NoError(t, err)
+	require.True(t, received)
+	require.False(t, undecided)
+}
+
 func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -650,12 +683,13 @@ func TestCodexResumedRolloutPath(t *testing.T) {
 		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", otherDir)
-	// Distinct mtimes pin --last's newest selection: older is oldest, newer
-	// trails foreign — so a cwd-scoped --last picks newer while --all picks
-	// the globally newest foreign rollout.
-	stale := time.Now().Add(-time.Hour)
-	mid := time.Now().Add(-30 * time.Minute)
-	require.NoError(t, os.Chtimes(older, stale, stale))
+	// mtime ordering deliberately contradicts session ordering: older is
+	// mtime-freshest, newer mtime-oldest. --last must still follow the
+	// recorded session order in the rollout filenames — copied or touched
+	// rollouts must not redirect tracking (#5471 review).
+	now := time.Now()
+	mid := now.Add(-30 * time.Minute)
+	require.NoError(t, os.Chtimes(older, now, now))
 	require.NoError(t, os.Chtimes(newer, mid, mid))
 
 	for _, tc := range []struct {
