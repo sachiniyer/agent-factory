@@ -382,6 +382,9 @@ func sandboxTransportConfigKey(label string) string {
 	if label == string(BackendSSH) {
 		return "ssh.host"
 	}
+	if label == string(BackendHook) {
+		return "remote_hooks.provision_cmd"
+	}
 	return "sandbox.ssh"
 }
 
