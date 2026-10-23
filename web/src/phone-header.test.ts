@@ -30,6 +30,7 @@ class Element extends EventTarget {
   getAttribute(key: string) { return this.attrs.get(key) ?? null; }
   contains(node: Element): boolean { return node === this || this.children.some(child => child.contains(node)); }
   focus() { doc.activeElement = this; }
+  blur() { if (doc.activeElement === this) doc.activeElement = null; }
   click() { this.dispatchEvent(new Event("click")); }
 }
 const doc = Object.assign(new EventTarget(), {
@@ -189,4 +190,15 @@ test("hiding the last phone control moves focus out before the menu hides", () =
   } finally {
     Object.assign(globalThis, { MutationObserver: saved });
   }
+});
+
+test("the second click of a double-click does not create a second tab", () => {
+  const kinds: string[] = [];
+  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, newTab(kind) { kinds.push(kind); } });
+  const click = (detail: number) => Object.assign(new Event("click"), { detail });
+  chrome.newTerminal.dispatchEvent(click(1));
+  chrome.newTerminal.dispatchEvent(click(2));
+  chrome.newVSCode.dispatchEvent(click(0));
+  assert.deepEqual(kinds, ["shell", "vscode"], "keyboard activation reports detail 0 and must still create");
+  chrome.dispose();
 });

@@ -134,7 +134,12 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
     button.setAttribute("aria-label", name);
     button.hidden = true;
     // The new tab owns input next; a focused button would swallow the rail keys.
-    button.addEventListener("click", () => { menu.close(); button.blur(); opts.newTab(kind); });
+    // detail counts clicks in one gesture; a fast local create can settle before the
+    // second click of a double-click lands, so the in-flight guard alone misses it.
+    button.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
+      menu.close(); button.blur(); opts.newTab(kind);
+    });
     return button;
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");

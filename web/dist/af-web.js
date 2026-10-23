@@ -7375,7 +7375,8 @@ function terminalChrome(opts) {
     );
     button.setAttribute("aria-label", name);
     button.hidden = true;
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
       menu.close();
       button.blur();
       opts.newTab(kind);
