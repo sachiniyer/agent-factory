@@ -86,6 +86,9 @@ func (e *pushEntry) apply(t PushTarget) {
 		mode = PushAuto
 	}
 	e.mode, e.hasTab = mode, ok
+	if !ok {
+		e.lastSave = time.Time{}
+	}
 	e.ready, e.attached = t.Ready, t.Attached
 	if !t.Ready && !e.sending {
 		e.unconfirmedAt = time.Time{}
@@ -208,9 +211,9 @@ func (s *Service) PushTick(targets []PushTarget) {
 func (s *Service) runPush(sessionID string) error {
 	s.mu.Lock()
 	var savedAt time.Time
-	var sendNow bool
+	var sendNow, heldBefore bool
 	if e := s.push[sessionID]; e != nil {
-		savedAt, sendNow = e.lastSave, e.sendNow
+		savedAt, sendNow, heldBefore = e.lastSave, e.sendNow, e.held
 		e.lastSave, e.sendNow = time.Time{}, false
 	}
 	s.mu.Unlock()
@@ -248,9 +251,9 @@ func (s *Service) runPush(sessionID string) error {
 		switch {
 		case empty:
 		case err == nil && delivery == DeliveryConfirmed:
-			e.sent, e.held, e.unconfirmedAt = true, false, time.Time{}
+			e.sent, e.held, e.unconfirmedAt = true, e.held && !heldBefore, time.Time{}
 		case err == nil && delivery == DeliveryUnconfirmed:
-			e.sent, e.held, e.unconfirmedAt = true, false, now
+			e.sent, e.held, e.unconfirmedAt = true, e.held && !heldBefore, now
 		default:
 			if e.lastSave.IsZero() {
 				e.lastSave = savedAt

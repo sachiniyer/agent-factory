@@ -23,9 +23,14 @@ type fakeHost struct {
 	delivery Delivery
 	sendErr  error
 	pushes   []PushStatus
+	onSend   func()
 }
 
 func (h *fakeHost) SendPrompt(sessionID, prompt string) (Delivery, error) {
+	if f := h.onSend; f != nil {
+		h.onSend = nil
+		f()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.prompts = append(h.prompts, prompt)

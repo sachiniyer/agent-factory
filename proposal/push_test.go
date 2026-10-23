@@ -115,6 +115,7 @@ type pushRig struct {
 	base  string
 	ready bool
 	mode  PushMode
+	noTab bool
 }
 
 func newPushRig(t *testing.T) *pushRig {
@@ -132,7 +133,11 @@ func newPushRig(t *testing.T) *pushRig {
 }
 
 func (r *pushRig) target() PushTarget {
-	return PushTarget{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"p": r.mode}, Ready: r.ready}
+	modes := map[string]PushMode{"p": r.mode}
+	if r.noTab {
+		modes = map[string]PushMode{}
+	}
+	return PushTarget{RepoID: testRepoID, SessionID: sessA, Modes: modes, Ready: r.ready}
 }
 
 func (r *pushRig) save(text string) {
