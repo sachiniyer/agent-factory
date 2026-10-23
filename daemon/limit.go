@@ -722,8 +722,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// caller to report a failed write to and the retry set is what makes
 			// the state durable (#2883). persistSettlement also captures
 			// MarkStartupStateUnknown applied above for the blind-teardown case.
-			if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-				rerr = errors.Join(rerr, perr)
+			// Error-returning, not the logging wrapper: the committed arm below must
+			// not claim "recorded" for a write that failed (#3353 review), so the
+			// outcome of this persist is part of the message — mirroring restore.go's
+			// manual-restore path.
+			persistErr := m.persistSettlement(repoID, key, instance)
+			if persistErr != nil {
+				rerr = errors.Join(rerr, persistErr)
 			}
 			// A rebuild that already mutated durable workspace state before the
 			// later failure committed that mutation — report it as committed,
@@ -731,12 +736,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// does for the manual restore path (#3236). The git side lives on
 			// disk regardless of the record write; a raw error reading as
 			// failed-nothing-committed about a mutation that landed would
-			// mislead a retry.
+			// mislead a retry. Use failure-specific wording: when the persist
+			// itself failed the on-disk row is still stale until a retry, so the
+			// message must not claim the rebuilt state is recorded.
 			var rebuilt *session.RecoverRebuiltWorkspaceError
 			if errors.As(rerr, &rebuilt) {
-				return resumeNotPerformed, &mutationCommittedError{err: fmt.Errorf(
+				failure := fmt.Errorf(
 					"re-spawn for %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the resume: %w",
-					requestedTitle, instance.GetWorktreePath(), rerr)}
+					requestedTitle, instance.GetWorktreePath(), rerr)
+				if persistErr != nil {
+					failure = fmt.Errorf(
+						"re-spawn for %q failed after recovery rebuilt its worktree at %s, and the rebuilt state could not be written to disk (%v) — retry the resume once the cause clears: %w",
+						requestedTitle, instance.GetWorktreePath(), persistErr, rerr)
+				}
+				return resumeNotPerformed, &mutationCommittedError{err: failure}
 			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
