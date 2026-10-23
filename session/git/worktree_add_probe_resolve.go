@@ -585,21 +585,23 @@ func gitdirFromGitfile(gitfile string) (string, bool) {
 }
 
 // orphanedGitfileDebris stat's a regular `.git` file's referenced gitdir and
-// returns a non-ENOENT stat error to the caller as environmental evidence. A
-// regular `.git` file at a nonempty destination is not, on its own, partial-
-// attempt debris from this add: `git worktree add` creates the gitdir before the
-// gitfile, so an absent gitdir is a pruned linked worktree (its registration was
-// deleted, not a gitfile this add created and then failed), and a present
-// gitdir is a live registered worktree git rejected the add over. Either way
-// the destination already existed and git did not write to it, so a
-// coincidental ENOSPC on its filesystem cannot fix the structural failure and
-// the probe must not write-probe the destination — absence of the referenced
-// gitdir alone cannot establish that this invocation created the gitfile. A
-// non-ENOENT stat error (EACCES, EIO, ErrProbeTimedOut) is environmental
-// evidence about a live but temporarily inaccessible gitdir, not proof of an
-// orphaned gitfile; the error is returned so the caller preserves it the way it
-// preserves the destination and ancestor stat errors, rather than probing a
-// registered worktree git rejected the add over.
+// reports whether the gitfile is partial-attempt debris from a failed `git
+// worktree add`, returning a non-ENOENT stat error to the caller as
+// environmental evidence. `git worktree add` creates the gitdir before the
+// gitfile, so a present gitdir means the add created the worktree registration
+// and started checkout before it failed (for example with ENOSPC
+// mid-checkout): the destination was written to, so a full filesystem there is
+// the real resource errno the lost-restore classifier must read and the probe
+// covers it. An absent gitdir is a pruned linked worktree (its registration was
+// deleted, not a gitfile this add created and then failed): the destination
+// already existed and git rejected the add without writing, so a coincidental
+// ENOSPC on its filesystem cannot fix the structural failure and the probe
+// must not write-probe the destination. A non-ENOENT stat error (EACCES, EIO,
+// ErrProbeTimedOut) is environmental evidence about a live but temporarily
+// inaccessible gitdir, not proof of partial-attempt debris; the error is
+// returned so the caller preserves it the way it preserves the destination and
+// ancestor stat errors, rather than probing a registered worktree git rejected
+// the add over.
 func orphanedGitfileDebris(gitFile string) (bool, error) {
 	gitDir, ok := gitdirFromGitfile(gitFile)
 	if !ok {
@@ -617,5 +619,9 @@ func orphanedGitfileDebris(gitFile string) (bool, error) {
 	} else if dErr != nil {
 		return false, dErr
 	}
-	return false, nil
+	// A present gitdir means the add created the worktree registration and
+	// the gitfile before the checkout failed (for example with ENOSPC
+	// mid-checkout): the destination was written to, so the probe covers it
+	// the way an empty target is probed.
+	return true, nil
 }

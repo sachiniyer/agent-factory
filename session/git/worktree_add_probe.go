@@ -950,22 +950,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				// destination the way a regular directory is probed. A nonempty
 				// target is skipped: git rejects the add without writing, so a
 				// coincidental ENOSPC on the target's filesystem would stall the
-				// lost-restore loop on a filesystem freeing it cannot fix. A
-				// nonempty target with a regular `.git` *file* is still not probed:
-				// `git worktree add` creates the gitdir before the gitfile, so an
-				// absent gitdir is a pruned linked worktree (not a gitfile this add
-				// created) and a present gitdir is a live registered worktree git
-				// rejected the add over — git did not write to the destination in
-				// either case, so a coincidental ENOSPC must not stall the loop. A
-				// non-ENOENT stat error on the gitdir (a live but inaccessible
-				// registered worktree) is environmental evidence, preserved below; a
-				// non-ENOENT lstat error on the `.git` entry itself is environmental
-				// evidence too, not a missing `.git` file.
+				// lost-restore loop on a filesystem freeing it cannot fix — UNLESS
+				// the nonempty content is partial-attempt debris from a failed
+				// `git worktree add`. `git worktree add` creates the gitdir before
+				// the gitfile, so a present gitdir means the add created the
+				// registration and started checkout before it failed (for example
+				// with ENOSPC mid-checkout); the destination was written to, so
+				// a full filesystem there is the real errno the classifier must
+				// read. An absent gitdir is a pruned linked worktree, not a
+				// gitfile this add created. A non-ENOENT stat/lstat error on the `.git` entry or its gitdir is environmental evidence.
 				if empty {
 					dirs = append(dirs, worktreePath)
 				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && gitInfo.Mode().IsRegular() {
 					gitFile := filepath.Join(worktreePath, ".git")
-					if _, dErr := orphanedGitfileDebris(gitFile); dErr != nil {
+					if debris, dErr := orphanedGitfileDebris(gitFile); debris {
+						dirs = append(dirs, worktreePath)
+					} else if dErr != nil {
 						gitDirStatErr = dErr
 					}
 				} else if gitErr != nil && !os.IsNotExist(gitErr) {
