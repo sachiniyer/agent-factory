@@ -47,6 +47,16 @@ func IsAccountCommandValidationError(err error) bool {
 // workdir, so their arguments can be declared but their identity cannot. Any
 // other base arguments stay undeclared.
 //
+// When the positional extension (GeneratedArgsBetween) cannot describe the
+// rewrite — an insertion that lands words mid-command, the shape a codex resume
+// splice produces when the base already carries af's own flag (#5433) — and
+// trustedBaseArgs records the base's af-authored declaration, the proof merges
+// that recorded declaration through GeneratedArgsByInsertion the same way the
+// tmux-level rewrite path (rewriteProgramCmdByAf) keeps its pane declaration
+// across the same splice. Without it the swap would treat af's own words
+// (af's resume splice operands and the injected flag) as undeclared user
+// arguments and the account boundary would refuse the swap.
+//
 // A base whose exec builtin carries the `--` separator declares nothing, for the
 // same reason ValidateAccountCommand refuses it: dash runs no such command, so a
 // proof about it would describe a pane that exits 127 (#3557). Producer and
@@ -54,23 +64,38 @@ func IsAccountCommandValidationError(err error) bool {
 func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (AccountLaunchProof, bool) {
 	added, ok := GeneratedArgsBetween(base, final)
 	if !ok {
-		return AccountLaunchProof{}, false
+		// GeneratedArgsBetween fails when the rewrite is an insertion rather
+		// than a positional extension: a contiguous block of new words landed
+		// amid the base's words instead of after them (a codex resume splice
+		// ahead of af's own startup flag, #5433). With a recorded base
+		// declaration in trustedBaseArgs, re-derive the declaration as a
+		// splice the way rewriteProgramCmdByAf does at the tmux layer:
+		// GeneratedArgsByInsertion verifies the base's post-executable words
+		// are exactly the declared ones and splices the inserted block into
+		// the declaration at the point it landed. Without trusted base args
+		// (no built-in override and no pane recording) nothing is provable,
+		// so the refusal stays — this never vouches for user-authored words.
+		if trustedBaseArgs == nil {
+			return AccountLaunchProof{}, false
+		}
+		merged, mergeOK := GeneratedArgsByInsertion(base, final, trustedBaseArgs)
+		if !mergeOK {
+			return AccountLaunchProof{}, false
+		}
+		proof := AccountLaunchProof{GeneratedArgs: merged}
+		words, ok := accountBaseWords(base)
+		if ok && filepath.IsAbs(words[0]) {
+			proof.TrustedExecutable = words[0]
+		}
+		return proof, true
 	}
 	proof := AccountLaunchProof{GeneratedArgs: added}
 	if trustedBaseArgs == nil {
 		return proof, true
 	}
 
-	call, ok := singleSimpleCall(base)
-	if !ok || !callIsLiteral(call) || len(call.Assigns) > 0 {
-		return AccountLaunchProof{}, false
-	}
-	stripped, execSeparator := stripExecPrefix(call.Args)
-	if execSeparator {
-		return AccountLaunchProof{}, false
-	}
-	words, ok := literalCommandArgs(stripped)
-	if !ok || len(words) == 0 {
+	words, ok := accountBaseWords(base)
+	if !ok {
 		return AccountLaunchProof{}, false
 	}
 	if len(words) < len(trustedBaseArgs)+1 {
@@ -87,6 +112,29 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 		proof.TrustedExecutable = words[0]
 	}
 	return proof, true
+}
+
+// accountBaseWords parses base the way the account boundary proves a launch: a
+// single literal simple call whose `exec` builtin prefix (and its never-portable
+// `--` separator) is stripped, returning the resulting flat word list. Shared
+// by the positional-extension and insertion branches of GenerateAccountLaunchProof
+// so the executable-trust and trailing-arg decisions cannot drift apart. An
+// empty result or ok=false means the base is not a provable simple call and
+// nothing can be declared from it.
+func accountBaseWords(base string) ([]string, bool) {
+	call, ok := singleSimpleCall(base)
+	if !ok || !callIsLiteral(call) || len(call.Assigns) > 0 {
+		return nil, false
+	}
+	stripped, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
+		return nil, false
+	}
+	words, ok := literalCommandArgs(stripped)
+	if !ok || len(words) == 0 {
+		return nil, false
+	}
+	return words, true
 }
 
 // ValidateAccountCommand applies the command-shape half of the account

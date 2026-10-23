@@ -18,7 +18,7 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	resolved := resolution.command
 	program, conversation := planCreateConversation(i, resolved)
 	program = injectSystemPrompt(program, resolveSkillTarget(i, program))
-	proof := accountLaunchProof(resolved, program, resolution.trustBase)
+	proof := accountLaunchProof(resolved, program, resolution.trustBase, nil)
 	if account := strings.TrimSpace(i.Account); account != "" {
 		accountAgent := sessionenv.AgentForCommand(i.AgentProgram())
 		if err := refuseAccountAgentDrift(account, accountAgent, program); err != nil {

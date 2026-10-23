@@ -400,6 +400,25 @@ func (i *Instance) ResolvedPaneProgram() string {
 	return ts.Program()
 }
 
+// ResolvedPaneGeneratedArgs returns the af-authored argument words recorded for
+// the local agent pane's frozen program, or nil when the instance has no local
+// tmux binding. It surfaces TmuxSession.GeneratedArgs through the instance so
+// validateAccountSwapPlan can seed a launch proof whose base came from
+// ResolvedPaneProgram instead of RuntimeProgram: that pane command already
+// carries af's own injected flags, so re-deriving the declaration from that base
+// treats af's words as undeclared user arguments and the swap is refused
+// (#5433). The recorded declaration is the provenance the pane carries beside
+// the command string, and is exactly what the proof needs to trust them.
+func (i *Instance) ResolvedPaneGeneratedArgs() []string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil
+	}
+	return ts.GeneratedArgs()
+}
+
 // RuntimeProgram returns durable evidence of the override-resolved base command
 // used by the last positively established agent runtime. It is intentionally
 // empty for legacy or uncertain records; Program is intent, not runtime proof.

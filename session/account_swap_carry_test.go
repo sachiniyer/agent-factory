@@ -502,7 +502,7 @@ func TestCarriedLaunchesPassTheAccountBoundary(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, tc.want, program)
 			require.Equal(t, ConversationCaptureCarried, conv.CaptureKind)
-			proof := accountLaunchProof(tc.agent, program, false)
+			proof := accountLaunchProof(tc.agent, program, false, nil)
 			require.NotEmpty(t, proof.GeneratedArgs, "the resume words must be declared as af's own")
 			dir := filepath.Join(t.TempDir(), tc.agent, "work")
 			require.NoError(t, os.MkdirAll(dir, 0o700))

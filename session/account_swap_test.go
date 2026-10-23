@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -809,4 +810,176 @@ func TestSynchronizeAccountSwapRuntimeMetadataRestoresSessionEnvPassthrough(t *t
 	require.NotNil(t, pty.cmd, "the recovered pane never reached its launch environment")
 	require.Contains(t, pty.cmd.Env, passthrough+"=recovered-value",
 		"retiring the recovery marker must not make later tabs forget configured passthrough variables")
+}
+
+// flaggedPaneSwapInstance is a limit-blocked, automatic-swap session whose agent
+// pane already carries af's own injected codex startup-update-check flag — the
+// post-#5433 shape — recorded with its generatedArgs declaration, and whose
+// durable runtime-program evidence is empty (the pane-fallback state after an
+// unverified reattach, a launch whose pane query failed, or a record predating
+// runtime-program evidence). Returns the instance and the registered "work"
+// account directory.
+func flaggedPaneSwapInstance(t *testing.T) (*Instance, string) {
+	t.Helper()
+	return flaggedPaneSwapOsInstance(t, false)
+}
+
+func flaggedPaneSwapOsInstance(t *testing.T, ambientProviderHome bool) (*Instance, string) {
+	t.Helper()
+	if ambientProviderHome {
+		carryAmbientProviderHomes(t)
+	} else {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	}
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: tmux.ProgramCodex}
+	require.NoError(t, config.SaveConfig(cfg))
+	target := registerAccount(t, tmux.ProgramCodex, "work")
+	inst := accountSwapTestInstanceWithProgram(tmux.ProgramCodex)
+	inst.Path = initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	const flagged = "codex -c check_for_update_on_startup=false"
+	ts := tmux.NewTmuxSession(inst.Title, flagged)
+	setLaunchProgram(ts, flagged, sessionenv.AccountLaunchProof{
+		GeneratedArgs: []string{"-c", "check_for_update_on_startup=false"},
+	})
+	inst.mu.Lock()
+	inst.Tabs = []*Tab{newAgentTab(ts)}
+	inst.runtimeProgram = ""
+	if inst.runtimePID != 0 || inst.runtimeStartID != 0 {
+		inst.runtimeEvidenceGeneration.Add(1)
+		inst.runtimePID = 0
+		inst.runtimeStartID = 0
+	}
+	inst.mu.Unlock()
+	require.Empty(t, inst.RuntimeProgram(), "the pane-fallback state has no runtime-program evidence")
+	require.Equal(t, flagged, inst.ResolvedPaneProgram(),
+		"the pane's frozen command carries af's injected flag")
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, inst.ResolvedPaneGeneratedArgs(),
+		"the pane still records the declaration af authored for the injected flag")
+	return inst, target
+}
+
+// accountSwapTestInstanceWithProgram returns an accountSwapTestInstance for
+// the given agent program, isolating the session's agent tab from any sessions
+// already pinned in shared test state.
+func accountSwapTestInstanceWithProgram(program string) *Instance {
+	inst := accountSwapTestInstance(program)
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", program))}
+	return inst
+}
+
+// TestValidateAccountSwapAdmitsCodexPaneFallbackFreshPan is the #5433
+// regression: when the swap base falls back to the pane's frozen program
+// (RuntimeProgram evidence empty) and that program already carries af's own
+// injected update-check flag, the fresh plan leaves base == final and a
+// recomputed proof declares nothing — so ApplyAccount named af's flag as an
+// undeclared user argument and the swap was refused. Seeding the proof from the
+// pane's recorded declaration vouches for af's own word and admits the swap.
+func TestValidateAccountSwapAdmitsCodexPaneFallbackFreshPlan(t *testing.T) {
+	inst, _ := flaggedPaneSwapInstance(t)
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"a fresh swap whose base is af's flagged pane program proceeds after declaring af's flag")
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.NotNil(t, plan)
+	require.Equal(t, "codex -c check_for_update_on_startup=false", plan.base,
+		"the swap base is the flagged pane program the fallback selected")
+	require.Equal(t, "codex -c check_for_update_on_startup=false", plan.program,
+		"a fresh plan with the flag already present re-injects nothing")
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, plan.proof.GeneratedArgs,
+		"the proof declares af's flag from the pane's recording the extension case cannot produce itself")
+}
+
+// TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan is the carry variant
+// of the #5433 regression: the same pane-fallback base, but the swap resumes the
+// outgoing codex conversation — ResumeProgramWithConversationID splices
+// `resume <id>` immediately after the executable, ahead of the flag — producing
+// a mid-command insertion GeneratedArgsBetween refuses. The proof must merge
+// via the GeneratedArgsByInsertion fallback, the way the tmux rewrite path
+// already does, or the swap is refused.
+func TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan(t *testing.T) {
+	inst, target := flaggedPaneSwapOsInstance(t, true)
+	source := registerAccount(t, tmux.ProgramCodex, "old")
+	inst.Account, inst.accountAutoSelected = "old", true
+	recordOutgoingConversation(t, inst, tmux.ProgramCodex, carryTestID)
+	rel := codexRolloutRel(carryTestID)
+	writeCarryFile(t, source, rel, codexRollout(inst.GetWorktreePath()))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"a carried swap that splices resume ahead of af's flagged pane base must still be provable")
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.NotNil(t, plan)
+	require.NotNil(t, plan.carry, "a same-agent swap with a recorded codex conversation must carry it")
+	// ResumeProgramWithConversationID splices `resume <id>` right after the
+	// codex executable; because the flagged pane base already carries the flag
+	// after it, the splice lands BEFORE the flag and injectSystemPrompt leaves
+	// it (the key is already present) — the mid-command insertion shape that
+	// forced the GeneratedArgsByInsertion fallback.
+	require.Equal(t, "codex resume "+carryTestID+" -c check_for_update_on_startup=false", plan.program,
+		"the resume splice lands ahead of af's authored flag, leaving the flag in place")
+	require.Equal(t,
+		[]string{"resume", carryTestID, "-c", "check_for_update_on_startup=false"},
+		plan.proof.GeneratedArgs,
+		"the proof merges the inserted resume and the recorded flag into one declaration")
+
+	// The proof must satisfy the account boundary, the same check the
+	// ApplyAccount step inside validateAccountSwapPlan just passed.
+	scope := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: target, GeneratedArgs: plan.proof.GeneratedArgs}
+	_, err := sessionenv.ApplyAccount(nil, plan.program, scope)
+	require.NoError(t, err, "the merged declaration must satisfy the account boundary")
+
+	// Without the seeding the swap is still refused — proving the fix is what
+	// admits it, not a coincidental accept. base == flagged pane program and
+	// the insertion shape are both unprovable without the recorded declaration.
+	unproof := sessionenv.AccountLaunchProof{}
+	if p, ok := sessionenv.GenerateAccountLaunchProof(plan.base, plan.program, nil); ok {
+		unproof = p
+	}
+	require.Empty(t, unproof.GeneratedArgs,
+		"a recompute with no trusted base args cannot describe the mid-command resume insertion")
+}
+
+// TestValidateAccountSwapAdmitsCodexPaneFallbackControlRuntimeBase confirms the
+// pane-fallback fix does not regress the contrasting case the bug report names
+// as the control: identical flagged pane program, but runtime-program evidence
+// points at the clean base. The swap must keep succeeding exactly as before,
+// the fresh and carry shapes alike — the fix is scoped to the pane-fallback
+// base and must not seed the recorded decl when RuntimeProgram evidence is set.
+func TestValidateAccountSwapAdmitsCodexPaneFallbackControlRuntimeBase(t *testing.T) {
+	carryAmbientProviderHomes(t)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: tmux.ProgramCodex}
+	require.NoError(t, config.SaveConfig(cfg))
+	target := registerAccount(t, tmux.ProgramCodex, "work")
+	inst := accountSwapTestInstanceWithProgram(tmux.ProgramCodex)
+	inst.Path = initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	const flagged = "codex -c check_for_update_on_startup=false"
+	ts := tmux.NewTmuxSession(inst.Title, flagged)
+	setLaunchProgram(ts, flagged, sessionenv.AccountLaunchProof{
+		GeneratedArgs: []string{"-c", "check_for_update_on_startup=false"},
+	})
+	inst.mu.Lock()
+	inst.Tabs = []*Tab{newAgentTab(ts)}
+	inst.setRuntimeEvidenceLocked(tmux.ProgramCodex, 0, 0)
+	inst.mu.Unlock()
+	require.Equal(t, tmux.ProgramCodex, inst.RuntimeProgram(),
+		"the control base is the clean runtime program, evidence present")
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"runtime evidence routes the proof off the flagged pane and the swap proceeds exactly as before")
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.NotNil(t, plan)
+	require.Equal(t, tmux.ProgramCodex, plan.base,
+		"the swap base is the clean runtime program, not the flagged pane")
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, plan.proof.GeneratedArgs,
+		"a clean base describes the injected flag as an ordinary trailing extension")
+	_ = target
 }

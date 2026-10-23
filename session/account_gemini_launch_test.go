@@ -44,7 +44,7 @@ func TestGeminiLaunch_ProducesACommandTheAccountBoundaryAccepts(t *testing.T) {
 		"injectSystemPrompt's gemini arm writes the af skill through the filesystem and returns the command "+
 			"untouched; a flag added here would have to be declared as a generated argument too")
 
-	proof := accountLaunchProof(resolved, program, false)
+	proof := accountLaunchProof(resolved, program, false, nil)
 	require.Empty(t, proof.GeneratedArgs, "af authored no arguments for gemini, so it declares none")
 	require.Empty(t, proof.TrustedExecutable, "gemini has no built-in detected override to trust")
 
