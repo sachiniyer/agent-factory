@@ -677,20 +677,29 @@ func TestCodexResumedRolloutPath(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	otherDir := t.TempDir()
+	// Three orderings disagree deliberately. Filename timestamps give the
+	// creation order stale > foreign > older > recent; mtimes make stale
+	// the freshest; the last recorded event gives foreign > recent > older
+	// = stale. Codex 0.164 resolves --last by ThreadSortKey::UpdatedAt —
+	// the recorded recency, immune to mtime bumps — so --last must pick
+	// `recent` (created-oldest, updated-newest in cwd) and --all `foreign`.
 	older := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	newer := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	recent := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-34-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir)
+	stale := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-39-059f386f-7206-7fc2-803b-f7045e07a246.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", otherDir)
-	// mtime ordering deliberately contradicts session ordering: older is
-	// mtime-freshest, newer mtime-oldest. --last must still follow the
-	// recorded session order in the rollout filenames — copied or touched
-	// rollouts must not redirect tracking (#5471 review).
-	now := time.Now()
-	mid := now.Add(-30 * time.Minute)
-	require.NoError(t, os.Chtimes(older, now, now))
-	require.NoError(t, os.Chtimes(newer, mid, mid))
+	for path, ts := range map[string]string{
+		older:   "2026-07-06T10:17:35Z",
+		recent:  "2026-07-06T10:17:38Z",
+		stale:   "2026-07-06T10:17:35Z",
+		foreign: "2026-07-06T10:17:39Z",
+	} {
+		appendCodexRolloutEvent(t, path, map[string]any{"timestamp": ts})
+	}
+	require.NoError(t, os.Chtimes(stale, time.Now(), time.Now()))
 
 	for _, tc := range []struct {
 		name       string
@@ -704,17 +713,17 @@ func TestCodexResumedRolloutPath(t *testing.T) {
 		{"explicit id", "codex resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
 		{"id ignores the cwd filter", "codex resume 039f386f-7206-7fc2-803b-f7045e07a244", workDir, foreign, true},
 		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"latest picks newest in cwd", "codex resume --last", workDir, newer, true},
-		{"latest --all picks globally newest", "codex resume --last --all", workDir, foreign, true},
+		{"latest picks most recently updated in cwd", "codex resume --last", workDir, recent, true},
+		{"latest --all picks globally newest update", "codex resume --last --all", workDir, foreign, true},
 		{"all before last still unscoped", "codex resume --all --last", workDir, foreign, true},
-		{"latest through an env wrapper", "env FOO=1 codex resume --last", workDir, newer, true},
+		{"latest through an env wrapper", "env FOO=1 codex resume --last", workDir, recent, true},
 		{"latest without a cwd is unresolvable", "codex resume --last", "", "", true},
 		{"bare resume opens the picker", "codex resume", workDir, "", true},
 		{"unknown id", "codex resume 00000000-0000-0000-0000-000000000000", workDir, "", true},
 		{"id beats --last", "codex resume --last 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"option value is not an id", "codex resume -m gpt-5 --last", workDir, newer, true},
+		{"option value is not an id", "codex resume -m gpt-5 --last", workDir, recent, true},
 		{"option value before an id", "codex resume -m gpt-5 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"attached option value", "codex resume --model=gpt-5 --last", workDir, newer, true},
+		{"attached option value", "codex resume --model=gpt-5 --last", workDir, recent, true},
 		{"unmodelled flag is unprovable", "codex resume --include-non-interactive --last", workDir, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -737,9 +746,10 @@ func TestCodexResumedRolloutPath_LastIsWorkingDirScoped(t *testing.T) {
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", otherDir)
+	appendCodexRolloutEvent(t, mine, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
+	appendCodexRolloutEvent(t, foreign, map[string]any{"timestamp": "2026-07-06T10:17:36Z"})
 	stale := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(mine, stale, stale))
-	_ = foreign
 
 	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
 	require.True(t, resume)

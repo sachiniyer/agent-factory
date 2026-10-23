@@ -601,19 +601,75 @@ func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string
 		}
 		pool, _ = codexRolloutFilesForWorkingDir(mapKeys(files), pathutil.ResolveForCompare(workingDir))
 	}
-	// --last continues the most recently started session: order by the
-	// session-start timestamp embedded in the rollout filename, not file
-	// mtime — a touched, restored, or copied rollout would otherwise
-	// diverge from Codex's own selection (#5471 review). Filenames are
-	// rollout-<YYYY-MM-DD>T<HH-MM-SS>-<uuid>.jsonl, so the fixed-width
-	// timestamp prefix sorts lexicographically in session order.
-	var newestName string
+	// --last continues the most recently UPDATED session: codex-rs 0.164
+	// resolves it with ThreadSortKey::UpdatedAt (tui/src/lib.rs
+	// latest_session_lookup_params), anchored on the state DB's recorded
+	// last-write timestamp — not file mtime, which a touched, restored, or
+	// copied rollout can fake. Each rollout's own last event timestamp is
+	// that same recorded recency, readable without the DB (#5471 review).
+	// Files with no parseable record are skipped, mirroring how Codex's
+	// listing drops rollouts it cannot classify.
+	var newestEvent time.Time
 	for _, file := range pool {
-		if base := filepath.Base(file); path == "" || base > newestName {
-			path, newestName = file, base
+		ts, ok := codexRolloutLastEventTime(file)
+		if !ok {
+			continue
+		}
+		if path == "" || ts.After(newestEvent) ||
+			(ts.Equal(newestEvent) && filepath.Base(file) > filepath.Base(path)) {
+			path, newestEvent = file, ts
 		}
 	}
 	return path, true
+}
+
+// codexRolloutTailReadCap bounds the tail window read to recover a rollout's
+// last recorded event timestamp.
+const codexRolloutTailReadCap = 1 << 20
+
+func codexRolloutLastEventTime(path string) (time.Time, bool) {
+	file, err := openCodexRollout(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return time.Time{}, false
+	}
+	start := info.Size() - codexRolloutTailReadCap
+	if start < 0 {
+		start = 0
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return time.Time{}, false
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if start > 0 {
+		// The window can open mid-line; drop the first partial record.
+		_, data, _ = bytes.Cut(data, []byte{'\n'})
+	}
+	lines := bytes.Split(data, []byte{'\n'})
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		var event struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if err := json.Unmarshal(line, &event); err != nil || event.Timestamp == "" {
+			continue
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, event.Timestamp); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func mapKeys(set map[string]struct{}) []string {
