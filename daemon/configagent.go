@@ -428,6 +428,21 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// an unknown flag would kill the agent at exec and read as a readiness
 	// timeout.
 	if req.Prompt != "" {
+		// The pane as it stood AT delivery (#5471 review): the modal that can
+		// absorb the briefing's Enter is up NOW, and the same Enter usually
+		// dismisses or redraws it — the trust modal of #2220 reveals a bare
+		// composer on acceptance — so any capture taken after the send would
+		// log the wrong state and mislead triage. It is also necessarily
+		// pre-attach: no caller can be typing into the pane before this spawn
+		// returns. The buffer is held for the receipt watcher and only logged
+		// if the receipt stays unconfirmed.
+		var paneContent string
+		var paneErr error
+		var paneCapturedAt time.Time
+		if agent == tmux.ProgramCodex {
+			paneCapturedAt = time.Now()
+			paneContent, paneErr = ts.CapturePaneContentContext(ctx)
+		}
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
 		}
@@ -470,19 +485,6 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 						sessionName, descriptor, configAgentPromptReceiptTimeout, err,
 					)
 					m.configAgents.watchReceipt(sessionName, func(receiptCtx context.Context) {
-						// The pane is captured BEFORE the escalation wait, while
-						// SpawnConfigAgent is still returning to the caller: after
-						// that the user may attach and type for up to the whole
-						// window, and everything they type — prompts, private
-						// config, an unlabelled password a narrow credential
-						// scrubber cannot recognize — would land in the excerpt
-						// persisted to the log (#5471 review). The capture loses
-						// no diagnostic value: a modal that could have absorbed
-						// the delivered Enter was already up when the keys
-						// landed, so it is already visible now — and nothing
-						// that appears later could have absorbed them anyway.
-						paneContent, paneErr := ts.CapturePaneContentContext(receiptCtx)
-						paneCapturedAfter := time.Since(briefingDeliveredAt)
 						lateErr := session.WaitForPromptReceipt(
 							receiptCtx,
 							agent,
@@ -524,7 +526,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
 							lateErr,
 						)
-						m.logConfigAgentPaneExcerpt(sessionName, paneContent, paneErr, paneCapturedAfter)
+						m.logConfigAgentPaneExcerpt(sessionName, paneContent, paneErr, briefingDeliveredAt.Sub(paneCapturedAt))
 						// One late re-check (#5471): the 5s/35s windows cannot tell
 						// a slow rollout from a briefing that never became a turn,
 						// so at a horizon where the record is durable-or-absent the
@@ -631,16 +633,17 @@ func (m *Manager) ReapConfigAgent(req ReapConfigAgentRequest) error {
 	return m.configAgents.reap(req.SessionName)
 }
 
-// logConfigAgentPaneExcerpt logs the pre-attach pane capture the receipt
-// watcher took when it started — a bounded, sanitized excerpt (#5471). It
+// logConfigAgentPaneExcerpt logs the pre-delivery pane capture taken just
+// before the briefing was sent — a bounded, sanitized excerpt (#5471). It
 // exists to answer the one question the unconfirmed-receipt windows cannot:
 // whether a modal — trust, login, update — absorbed the Enter meant to submit
 // the briefing, because that modal is what was VISIBLE on the pane when the
-// keys landed. The capture is taken before the spawn return can hand the
-// terminal to an attaching user (see the watcher), so what reaches the log
-// cannot contain anything the user typed. A capture failure still logs,
-// because a pane that cannot be read at that point is itself the diagnostic.
-func (m *Manager) logConfigAgentPaneExcerpt(sessionName, content string, captureErr error, capturedAfter time.Duration) {
+// keys landed. The capture precedes both the send and any possible attach, so
+// what reaches the log shows the modal that was actually up rather than the
+// composer its dismissal revealed — and can never contain user input. A
+// capture failure still logs, because a pane that cannot be read at delivery
+// is itself the diagnostic.
+func (m *Manager) logConfigAgentPaneExcerpt(sessionName, content string, captureErr error, capturedBeforeDelivery time.Duration) {
 	if captureErr != nil {
 		m.warn().Printf(
 			"config agent: %s briefing receipt is unconfirmed and the pane could not be captured for diagnostics: %v",
@@ -649,8 +652,8 @@ func (m *Manager) logConfigAgentPaneExcerpt(sessionName, content string, capture
 		return
 	}
 	m.info().Printf(
-		"config agent: %s pane excerpt after unconfirmed briefing receipt (captured %s after delivery):\n%s",
-		sessionName, capturedAfter.Round(100*time.Millisecond), configAgentPaneExcerpt(content),
+		"config agent: %s pane excerpt after unconfirmed briefing receipt (captured %s before delivery):\n%s",
+		sessionName, capturedBeforeDelivery.Round(100*time.Millisecond), configAgentPaneExcerpt(content),
 	)
 }
 

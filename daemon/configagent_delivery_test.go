@@ -481,9 +481,10 @@ func shortenConfigAgentReceiptWindows(t *testing.T, receipt, escalation, recheck
 }
 
 // TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt covers the first half of
-// #5471: when the receipt is still unconfirmed after the escalation window, the
-// watcher captures the agent pane once and logs a sanitized excerpt — the only
-// place a trust/login/update modal that absorbed Enter would still be visible.
+// #5471: when the receipt is still unconfirmed after the escalation window,
+// the spawn-time pane capture is logged as a sanitized excerpt — the only
+// place a trust/login/update modal that absorbed Enter would still be visible
+// (the same Enter usually dismisses it, so the buffer is taken pre-send).
 func TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt(t *testing.T) {
 	testguard.IsolateTmux(t)
 	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
