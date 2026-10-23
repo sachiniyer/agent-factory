@@ -81,6 +81,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { shortcutRepeatGuard, tabCreateKey } from "./tab_create.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -303,6 +304,7 @@ function mount(): void {
   // included, so it can interrupt the agent (#2517) — and only the ctrl+] detach
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
 
   // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
@@ -1552,6 +1554,7 @@ function guardedTabRebind(
 /** Session+kind creates in flight. The daemon names each CreateTab uniquely, so a
  *  double-click would otherwise start two shells or VS Code servers. */
 const pendingTabCreates = new Set<string>();
+const tabShortcutRepeat = shortcutRepeatGuard();
 
 /** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
@@ -1571,7 +1574,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
     return;
   }
   const selId = sel.id ?? "";
-  const pendingKey = `${selId}\u0000${kind}`;
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
   if (pendingTabCreates.has(pendingKey)) {
     return;
   }
@@ -2968,6 +2971,11 @@ function isNativeControl(el: HTMLElement | null): boolean {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -3059,8 +3067,10 @@ function onKeydown(e: KeyboardEvent): void {
       else switchTab(action.index);
       break;
     case "newTab":
-      // Each create round-trips with no pending guard, so a held key would spawn one tab per repeat.
-      if (!e.repeat) createSessionTab(action.tabKind);
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
