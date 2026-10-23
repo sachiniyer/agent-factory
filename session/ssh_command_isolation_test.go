@@ -226,8 +226,16 @@ func TestSharedTransportErrorsCarryTheOwningBackend(t *testing.T) {
 	assert.Contains(t, sandboxP.sandboxErr(errors.New("clone failed")).Error(), "backend=sandbox:",
 		"the zero value must keep meaning sandbox, so no existing construction site changes meaning")
 
+	hookP := newHookSandboxProvisioner(ProvisionSpec{Title: "t"}, "ssh host", "", "")
+	assert.Contains(t, hookP.sandboxErr(errors.New("clone failed")).Error(), "backend=hook:",
+		"a provision_cmd session's transport errors must name the hook backend, not sandbox")
+	assert.Equal(t, string(BackendHook), hookP.label(),
+		"the hook provisioner must carry the hook label so its transport errors do not default to sandbox")
+
 	assert.Contains(t, sandboxTransportConfigKey(string(BackendSandbox)), "sandbox.ssh")
 	assert.Contains(t, sandboxTransportConfigKey(string(BackendSSH)), "ssh.host")
+	assert.Contains(t, sandboxTransportConfigKey(string(BackendHook)), "remote_hooks.provision_cmd",
+		"a tunnel timeout on the hook path must point at the config surface it actually uses, not sandbox.ssh")
 }
 
 // THE ANSWERED-FAILURE LATCH. `rm && respond` conflates "the far side executed"
