@@ -69,7 +69,7 @@ func (m *Manager) SetAttention(req SetAttentionRequest) (string, string, error) 
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
-	var previous *session.Attention
+	var previous session.AttentionUndo
 	if req.Clear {
 		var cleared bool
 		previous, cleared = instance.ClearAttention(setAt)

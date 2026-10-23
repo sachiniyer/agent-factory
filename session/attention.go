@@ -66,17 +66,22 @@ func (i *Instance) HasAttention() bool {
 	return i.attention != nil
 }
 
-// SetAttention records an attention request and returns the previous value,
-// so a caller whose persist fails can put it back with RestoreAttention. It
-// checks liveness under the same lock that liveness changes take, so a
-// transition either lands first and is refused here, or lands after and clears
-// the request.
-func (i *Instance) SetAttention(reason string, now time.Time) (*Attention, error) {
+// AttentionUndo is what a caller whose persist failed hands to
+// RestoreAttention: the replaced value and the state epoch just after the change.
+type AttentionUndo struct {
+	previous *Attention
+	epoch    uint64
+}
+
+// SetAttention records an attention request and returns how to undo it, for a
+// caller whose persist fails. It checks liveness and the kill tombstone under
+// the same lock that liveness changes take, so a transition either lands first
+// and is refused here, or lands after and clears the request.
+func (i *Instance) SetAttention(reason string, now time.Time) (AttentionUndo, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	switch i.liveness {
-	case LiveArchived, LiveLost, LiveDead, LiveLimitReached:
-		return nil, ErrAttentionNotLive
+	if attentionStoppedLocked(i) {
+		return AttentionUndo{}, ErrAttentionNotLive
 	}
 	previous := i.attention
 	i.attention = &Attention{Reason: NormalizeAttentionReason(reason), SetAt: now.UTC()}
@@ -84,33 +89,36 @@ func (i *Instance) SetAttention(reason string, now time.Time) (*Attention, error
 	// or clear it; the poll re-observes on its next tick.
 	i.stateEpoch++
 	i.touchLocked()
-	return previous, nil
+	return AttentionUndo{previous: previous, epoch: i.stateEpoch}, nil
 }
 
 // ClearAttention removes the attention request. A non-zero setAt clears it
 // only while it is still the request set at that time, so a client that saw an
 // older request cannot erase a newer one. It returns the removed value and
 // whether there was one to remove.
-func (i *Instance) ClearAttention(setAt time.Time) (*Attention, bool) {
+func (i *Instance) ClearAttention(setAt time.Time) (AttentionUndo, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	previous := i.attention
 	if previous == nil || (!setAt.IsZero() && !previous.SetAt.Equal(setAt)) {
-		return nil, false
+		return AttentionUndo{}, false
 	}
 	i.attention = nil
 	i.touchLocked()
-	return previous, true
+	return AttentionUndo{previous: previous, epoch: i.stateEpoch}, true
 }
 
-// RestoreAttention puts back a value that SetAttention or ClearAttention
-// replaced, after the caller could not persist the change.
-// A liveness change between the mutation and the rollback may have stopped the
-// session, so the restored value goes through the same stopped-state check.
-func (i *Instance) RestoreAttention(a *Attention) {
+// RestoreAttention puts back the value that SetAttention or ClearAttention
+// replaced, after the caller could not persist the change. When the state epoch
+// moved since that change, a transition has already reconciled the current
+// value, so the rollback leaves it as it is rather than replay a stale one.
+func (i *Instance) RestoreAttention(u AttentionUndo) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.attention = cloneAttention(a)
+	if i.stateEpoch != u.epoch {
+		return
+	}
+	i.attention = cloneAttention(u.previous)
 	i.dropAttentionIfStoppedLocked()
 	i.touchLocked()
 }
@@ -149,8 +157,20 @@ func (i *Instance) noteAttentionLivenessLocked() {
 // path reaches Lost, Dead, Archived or LimitReached with a request still set.
 // Caller holds i.mu for writing, or owns i before it is shared.
 func (i *Instance) dropAttentionIfStoppedLocked() {
-	switch i.liveness {
-	case LiveArchived, LiveLost, LiveDead, LiveLimitReached:
+	if attentionStoppedLocked(i) {
 		i.attention = nil
 	}
+}
+
+// attentionStoppedLocked reports whether no agent can answer a request: the
+// session is not live, or a kill has committed. Caller holds i.mu.
+func attentionStoppedLocked(i *Instance) bool {
+	if i.userKilled {
+		return true
+	}
+	switch i.liveness {
+	case LiveArchived, LiveLost, LiveDead, LiveLimitReached:
+		return true
+	}
+	return false
 }

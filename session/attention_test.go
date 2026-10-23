@@ -136,6 +136,34 @@ func TestRestoreAttentionKeepsAStoppedSessionClear(t *testing.T) {
 	require.False(t, i.HasAttention(), "a rollback must not put a request on a Lost session")
 }
 
+func TestRestoreAttentionDoesNotUndoALiveTransition(t *testing.T) {
+	fakeAttentionClock(t)
+	i := &Instance{Title: "w", liveness: LiveRunning}
+	_, err := i.SetAttention("A", time.Unix(100, 0))
+	require.NoError(t, err)
+	moveLiveness(i, LiveReady)
+	undo, cleared := i.ClearAttention(time.Time{})
+	require.True(t, cleared)
+	moveLiveness(i, LiveRunning)
+	i.RestoreAttention(undo)
+	require.False(t, i.HasAttention(), "a rollback must not bring back a request a transition already moved past")
+}
+
+func TestSetAttentionRefusesAKillTombstone(t *testing.T) {
+	i := &Instance{Title: "w", liveness: LiveRunning, userKilled: true}
+	_, err := i.SetAttention("", time.Unix(100, 0))
+	require.ErrorIs(t, err, ErrAttentionNotLive)
+	require.False(t, i.HasAttention())
+}
+
+func TestMarkUserKilledClearsAttention(t *testing.T) {
+	i := &Instance{Title: "w", liveness: LiveRunning}
+	_, err := i.SetAttention("", time.Unix(100, 0))
+	require.NoError(t, err)
+	i.MarkUserKilled()
+	require.False(t, i.HasAttention())
+}
+
 func TestNormalizeAttentionReasonCapsLength(t *testing.T) {
 	long := strings.Repeat("é", MaxAttentionReasonLen+10)
 	require.Len(t, []rune(NormalizeAttentionReason(long)), MaxAttentionReasonLen)
