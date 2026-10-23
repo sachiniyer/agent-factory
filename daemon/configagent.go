@@ -368,8 +368,18 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		if rerr != nil {
 			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
 		}
-		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, home)
-		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program); resume {
+		// The rollout's session_meta records the cwd Codex actually ran with,
+		// which is not always AF home: `env -C /tmp codex` leaves AF home before
+		// exec. The command environment models literal env -C directories and
+		// reports unmodelled chdirs (an arbitrary wrapper, Codex's own -C) as
+		// unknown — correlation binds to the proven directory and stays unbound
+		// rather than wrong when it is not (#5471 review).
+		var launchDir string
+		if launch, lerr := tmux.CommandEnvironmentFromCommand(req.Program, home); lerr == nil && launch.WorkingDirKnown() {
+			launchDir = launch.WorkingDir
+		}
+		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launchDir)
+		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program, launchDir); resume {
 			if path != "" {
 				promptReceipt.TrackCodexReceiptRollout(path)
 			} else {
@@ -559,11 +569,15 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 						}
 						// Nothing remains to diagnose once the session is gone —
 						// reaped out from under the watcher, or the pane exited on
-						// its own without one. Skip quietly either way.
+						// its own without one. Skip quietly either way, but ONLY
+						// on positive evidence: ProbeSessionStrict keeps a
+						// transient has-session failure from laundering into
+						// "gone" and silently abandoning the verdict (#5471
+						// review).
 						if m.configAgents.session(sessionName) == nil {
 							return
 						}
-						if exists, known := ts.ProbeSession(); known && !exists {
+						if exists, known, _ := ts.ProbeSessionStrict(); known && !exists {
 							return
 						}
 						finalErr := session.WaitForPromptReceipt(

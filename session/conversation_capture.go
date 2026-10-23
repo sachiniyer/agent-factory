@@ -87,7 +87,7 @@ type ConversationCaptureSnapshot struct {
 	// the snapshot and so can never appear among observed new rollouts even
 	// though it is exactly where the resumed session records its turns (#5471
 	// review).
-	receiptPaths []string
+	receiptPaths []trackedReceiptPath
 	// carried is the conversation a same-agent account swap copied into this
 	// store and resumes (#4367). Its rollout is recorded in codexBefore even
 	// though the copy lands after the snapshot, so capture only ever reports a
@@ -110,13 +110,24 @@ type codexReceiptScan struct {
 	matched bool
 }
 
+// trackedReceiptPath is a rollout the receipt check watches despite it not
+// being a new file. offset is the file's size when tracking began: only events
+// appended AFTER it can be this launch's receipt — a resumed conversation may
+// already hold the identical briefing from an earlier run, and matching that
+// stale turn would suppress the very diagnostics the check exists for (#5471
+// review).
+type trackedReceiptPath struct {
+	path   string
+	offset int64
+}
+
 func newCodexReceiptState() *codexReceiptState {
 	return &codexReceiptState{scans: make(map[string]codexReceiptScan)}
 }
 
-// scanPrompt returns whether path records prompt, reusing the previous result
-// whenever the file has not changed since the last scan.
-func (s *codexReceiptState) scanPrompt(path, prompt string) (bool, error) {
+// scanPrompt returns whether path records prompt after fromOffset, reusing
+// the previous result whenever the file has not changed since the last scan.
+func (s *codexReceiptState) scanPrompt(path, prompt string, fromOffset int64) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("inspect Codex rollout %s: %w", path, err)
@@ -127,7 +138,7 @@ func (s *codexReceiptState) scanPrompt(path, prompt string) (bool, error) {
 		return scan.matched, nil
 	}
 	s.mu.Unlock()
-	matched, err := codexRolloutHasPrompt(path, prompt)
+	matched, err := codexRolloutHasPrompt(path, prompt, fromOffset)
 	if err != nil {
 		return false, err
 	}
@@ -140,9 +151,16 @@ func (s *codexReceiptState) scanPrompt(path, prompt string) (bool, error) {
 // TrackCodexReceiptRollout adds path to the set of rollouts every receipt
 // check scans. The new-rollout set cannot contain a `codex resume` target —
 // it exists before the snapshot by definition — so a resumed config agent's
-// receipt would read as never observed without it (#5471 review).
+// receipt would read as never observed without it (#5471 review). The current
+// file size is recorded as the turn boundary: a resumed transcript can already
+// contain the identical briefing from an earlier run, and only turns appended
+// after this point are this launch's receipt.
 func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) {
-	s.receiptPaths = append(s.receiptPaths, path)
+	var offset int64
+	if info, err := os.Stat(path); err == nil {
+		offset = info.Size()
+	}
+	s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{path: path, offset: offset})
 }
 
 // expectCarriedCodexRollout tells capture that path holds conv's rollout,
@@ -167,7 +185,7 @@ func cloneConversationCaptureSnapshot(snap ConversationCaptureSnapshot) Conversa
 	// than inherit the source's scan memoization. Tracked receipt paths are
 	// launch knowledge, not observation state, so they carry over.
 	copy.receiptState = newCodexReceiptState()
-	copy.receiptPaths = append([]string(nil), snap.receiptPaths...)
+	copy.receiptPaths = append([]trackedReceiptPath(nil), snap.receiptPaths...)
 	return copy
 }
 
@@ -480,17 +498,28 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	seen := make(map[string]struct{}, len(candidates)+len(snap.receiptPaths))
 	matched := 0
-	for _, path := range append(candidates, snap.receiptPaths...) {
+	scan := func(path string, offset int64) error {
 		if _, dup := seen[path]; dup {
-			continue
+			return nil
 		}
 		seen[path] = struct{}{}
-		has, err := state.scanPrompt(path, prompt)
+		has, err := state.scanPrompt(path, prompt, offset)
 		if err != nil {
-			return false, false, err
+			return err
 		}
 		if has {
 			matched++
+		}
+		return nil
+	}
+	for _, path := range candidates {
+		if err := scan(path, 0); err != nil {
+			return false, false, err
+		}
+	}
+	for _, tracked := range snap.receiptPaths {
+		if err := scan(tracked.path, tracked.offset); err != nil {
+			return false, false, err
 		}
 	}
 	switch {
@@ -505,12 +534,16 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 
 // CodexResumedRolloutPath resolves the rollout file a `codex resume` command
 // will append to — the explicit conversation id, or the newest rollout for
-// --last. resume reports whether program is a resume at all: a true resume
-// with an empty path means the target could not be identified (a bare `codex
-// resume` opens Codex's own picker; an id may match no rollout or several),
-// in which case a missing receipt can never be disproven and verdicts must
-// stay indeterminate rather than claiming never-arrived (#5471 review).
-func CodexResumedRolloutPath(codexHome, program string) (path string, resume bool) {
+// --last. Codex scopes `--last` to the session's working directory (only
+// --all widens it), so workingDir is the launch's effective cwd; when it is
+// unknown the newest-file choice cannot be proven and the target stays
+// unresolved. resume reports whether program is a resume at all: a true
+// resume with an empty path means the target could not be identified (a bare
+// `codex resume` opens Codex's own picker; an id may match no rollout or
+// several), in which case a missing receipt can never be disproven and
+// verdicts must stay indeterminate rather than claiming never-arrived (#5471
+// review).
+func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string, resume bool) {
 	selector := tmux.ConversationSelectorArgs(program)
 	if len(selector) == 0 || selector[0] != "resume" {
 		return "", false
@@ -523,8 +556,16 @@ func CodexResumedRolloutPath(codexHome, program string) (path string, resume boo
 		return "", true
 	}
 	if selector[1] == "--last" {
-		var newestMod time.Time
+		if workingDir == "" {
+			return "", true
+		}
+		var all []string
 		for file := range files {
+			all = append(all, file)
+		}
+		candidates, _ := codexRolloutFilesForWorkingDir(all, pathutil.ResolveForCompare(workingDir))
+		var newestMod time.Time
+		for _, file := range candidates {
 			if info, err := os.Stat(file); err == nil && (path == "" || info.ModTime().After(newestMod)) {
 				path, newestMod = file, info.ModTime()
 			}
@@ -542,11 +583,19 @@ func CodexResumedRolloutPath(codexHome, program string) (path string, resume boo
 	return path, true
 }
 
-func codexRolloutHasPrompt(path, prompt string) (bool, error) {
+func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) {
 	data, err := readCodexRollout(path)
 	if err != nil {
 		return false, err
 	}
+	// Only turns appended after the boundary can be this launch's receipt: a
+	// tracked `codex resume` rollout can already hold the identical briefing
+	// from an earlier run (#5471 review). Events are appended as whole JSONL
+	// lines, so a size snapshot at track time lands on a line boundary.
+	if fromOffset > int64(len(data)) {
+		return false, nil
+	}
+	data = data[fromOffset:]
 	normalizedPrompt := normalizePromptReceiptText(prompt)
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {

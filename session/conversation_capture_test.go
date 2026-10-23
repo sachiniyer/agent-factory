@@ -540,55 +540,101 @@ func TestWaitForPromptReceipt_TrackedResumedRollout(t *testing.T) {
 	resumed := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
 	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptRollout(resumed)
 
 	appendCodexRolloutEvent(t, resumed, map[string]any{
 		"type":    "event_msg",
 		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
 	})
-	require.ErrorIs(t,
-		WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
-		ErrPromptReceiptNotObserved,
-		"without tracking, a resumed rollout is invisible to the receipt check")
-
-	snap.TrackCodexReceiptRollout(resumed)
 	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
 		"the tracked resumed rollout is where the briefing lands")
 }
 
+// A resumed transcript can already hold the identical briefing from an
+// earlier run: matching that stale turn would confirm a receipt this launch
+// never earned. Only turns appended after tracking begins count (#5471
+// review).
+func TestWaitForPromptReceipt_ResumedRolloutIgnoresPreTrackTurns(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	resumed := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	appendCodexRolloutEvent(t, resumed, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptRollout(resumed)
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"the same briefing recorded by an earlier run is not this launch's receipt")
+}
+
 // CodexResumedRolloutPath maps a `codex resume` launch onto the rollout it
-// will append to — the named conversation id, or the newest file for --last —
-// and reports "resume, but target unknown" rather than guessing when the
-// target cannot be identified (#5471 review).
+// will append to — the named conversation id, or the newest same-directory
+// file for --last, which Codex scopes to the session cwd — and reports
+// "resume, but target unknown" rather than guessing when the target cannot be
+// identified (#5471 review).
 func TestCodexResumedRolloutPath(t *testing.T) {
 	codexHome := t.TempDir()
-	older := writeCodexRolloutFile(t, codexHome,
-		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
-	newer := writeCodexRolloutFile(t, codexHome,
-		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	workDir := t.TempDir()
+	otherDir := t.TempDir()
+	older := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	newer := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", otherDir)
 	stale := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(older, stale, stale))
 
 	for _, tc := range []struct {
 		name       string
 		program    string
+		workingDir string
 		wantPath   string
 		wantResume bool
 	}{
-		{"not a codex command", "claude --resume 019f386f-7206-7fc2-803b-f7045e07a242", "", false},
-		{"plain codex", "codex", "", false},
-		{"explicit id", "codex resume 019f386f-7206-7fc2-803b-f7045e07a242", older, true},
-		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", older, true},
-		{"latest", "codex resume --last", newer, true},
-		{"latest through an env wrapper", "env FOO=1 codex resume --last", newer, true},
-		{"bare resume opens the picker", "codex resume", "", true},
-		{"unknown id", "codex resume 00000000-0000-0000-0000-000000000000", "", true},
+		{"not a codex command", "claude --resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, "", false},
+		{"plain codex", "codex", workDir, "", false},
+		{"explicit id", "codex resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
+		{"id ignores the cwd filter", "codex resume 039f386f-7206-7fc2-803b-f7045e07a244", workDir, foreign, true},
+		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
+		{"latest picks newest in cwd", "codex resume --last", workDir, newer, true},
+		{"latest through an env wrapper", "env FOO=1 codex resume --last", workDir, newer, true},
+		{"latest without a cwd is unresolvable", "codex resume --last", "", "", true},
+		{"bare resume opens the picker", "codex resume", workDir, "", true},
+		{"unknown id", "codex resume 00000000-0000-0000-0000-000000000000", workDir, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path, resume := CodexResumedRolloutPath(codexHome, tc.program)
+			path, resume := CodexResumedRolloutPath(codexHome, tc.program, tc.workingDir)
 			require.Equal(t, tc.wantResume, resume)
 			require.Equal(t, tc.wantPath, path)
 		})
 	}
+}
+
+// `codex resume --last` is scoped to the session's working directory: when
+// the globally newest rollout belongs to another cwd it is NOT the resumed
+// conversation, and tracking it would scan a stranger's transcript (#5471
+// review).
+func TestCodexResumedRolloutPath_LastIsWorkingDirScoped(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	otherDir := t.TempDir()
+	mine := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", otherDir)
+	stale := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(mine, stale, stale))
+	_ = foreign
+
+	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
+	require.True(t, resume)
+	require.Equal(t, mine, path,
+		"a newer rollout in another working directory is not what --last resumes")
 }
 
 // A store that cannot be enumerated is not an empty store: the late re-check's
