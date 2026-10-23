@@ -20,6 +20,8 @@ import (
 
 const dirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
+const maxDocSize = 8 << 20
+
 var errSymlink = errors.New("is a symlink or not a regular entry; af does not follow links in the proposal store")
 
 func openDirAt(at int, name, display string) (*os.File, error) {
@@ -91,7 +93,14 @@ func (s *Store) readDoc(slug, file string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxDocSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxDocSize {
+		return nil, fmt.Errorf("%s is larger than %d MiB; af does not read proposal docs that large", f.Name(), maxDocSize>>20)
+	}
+	return data, nil
 }
 
 func (s *Store) readSlugDir(slug string) ([]os.DirEntry, error) {
@@ -154,6 +163,9 @@ func (s *Store) removeDoc(slug, file string) error {
 func (s *Store) writeDoc(slug, file string, data []byte) error {
 	if filepath.Base(file) != file {
 		return fmt.Errorf("invalid doc file %q", file)
+	}
+	if len(data) > maxDocSize {
+		return fmt.Errorf("doc is larger than %d MiB; af does not write proposal docs that large", maxDocSize>>20)
 	}
 	dir, err := s.openSlugDir(slug)
 	if err != nil {

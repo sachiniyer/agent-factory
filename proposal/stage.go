@@ -72,7 +72,11 @@ func (s *Store) stage(pathspecs []string) error {
 	}
 	var info strings.Builder
 	present := map[string]bool{}
-	for _, d := range s.diskDocs(include) {
+	onDisk, err := s.diskDocs(include)
+	if err != nil {
+		return err
+	}
+	for _, d := range onDisk {
 		slug, file, ok := isDocPath(d)
 		if !ok || !inScope(slug, file) {
 			continue
@@ -128,11 +132,17 @@ func (s *Store) trackedDocs() (map[string]string, error) {
 }
 
 // diskDocs lists the doc paths on disk under the slugs that include names.
-func (s *Store) diskDocs(include []docSpec) []string {
+// A folder that is gone or is a link holds no docs; any other listing error
+// fails, so an unreadable folder is not staged as deleted.
+func (s *Store) diskDocs(include []docSpec) ([]string, error) {
 	var slugs []string
 	for _, in := range include {
 		if in.slug == "" {
-			slugs, _ = s.Slugs()
+			all, err := s.Slugs()
+			if err != nil {
+				return nil, err
+			}
+			slugs = all
 			break
 		}
 		slugs = append(slugs, in.slug)
@@ -144,12 +154,15 @@ func (s *Store) diskDocs(include []docSpec) []string {
 			continue
 		}
 		seen[slug] = true
-		docs, _ := s.Docs(slug)
+		docs, err := s.Docs(slug)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errSymlink) {
+			return nil, err
+		}
 		for _, d := range docs {
 			out = append(out, slug+"/"+d)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func blobID(data []byte) string {
