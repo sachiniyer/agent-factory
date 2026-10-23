@@ -125,13 +125,12 @@ type watcherSupervisor struct {
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
 	// lifecycle statuses without a task store, recoverStatus substitutes the
-	// conditional stale-terminal recovery write (expected is the arm-time
-	// status the write is a compare-and-swap over), and queueDir redirects
-	// the durable event queues to a scratch directory.
+	// conditional stale-terminal recovery write, and queueDir redirects the
+	// durable event queues to a scratch directory.
 	loadTasks     func() ([]task.Task, error)
 	deliver       func(taskID, line string, options watchDeliveryOptions) error
 	setStatus     func(taskID, status string)
-	recoverStatus func(taskID, expected, status string) (bool, error)
+	recoverStatus func(taskID string, armed task.Task, status string) (bool, error)
 	recordDrops   func(taskID string, total int, droppedAt time.Time) error
 	logPath       func(taskID string) (string, error)
 	queueDir      func() (string, error)
@@ -230,7 +229,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		startedCh:      make(chan struct{}),
 		dropped:        dropped,
 		persistedDrops: dropped,
-		armStatus:      t.LastRunStatus,
+		armTask:        t,
 	}
 	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
 	// the right repo's snapshot (#1238). A resolution failure only costs the
@@ -308,11 +307,10 @@ type taskWatcher struct {
 	// crashWindow recovery timer can tell "alive a full window" from "died
 	// just before it" — only the former may retire a stale terminal status.
 	runAlive bool
-	// armStatus is the task's last_run_status as it stood when this watcher
-	// was created — the value the crashWindow recovery may replace once a
-	// run proves healthy, so a terminal status that landed since (a fresh
-	// arming refusal) is never mistaken for the stale one.
-	armStatus string
+	// armTask is the store row this watcher armed over: the recovery may
+	// replace its last_run_status only while the stored row is still this
+	// one — any rewrite since is newer evidence (Codex #5457).
+	armTask task.Task
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
@@ -564,17 +562,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// A run that stays alive a full crash window has proven healthy, so
 	// while it runs a timer retires a stale terminal status from an earlier
 	// life (#5441). Arming HERE — after startWatchProcess confirms the shell
-	// is actually running — makes the window measure real liveness: a dead
-	// lifeline probe or a failed start can never consume it. The window is
-	// the same budget the breaker counts against: a watch that is still
-	// crash-looping never reaches it, and an exit-0-by-design script exits
-	// before it.
-	w.setRunAlive(true)
-	recovery := time.AfterFunc(w.sup.crashWindow, w.recoverStaleTerminalStatus)
-	defer func() {
-		recovery.Stop()
-		w.setRunAlive(false)
-	}()
+	// is running — makes the window measure real liveness (Codex #5457).
+	disarm := w.armRecovery()
+	defer disarm()
 	// The run's anchor pins the process-group number for the run's whole
 	// life: a live member that ignores the group's SIGTERM — proven before
 	// the spawn returns — so kill(-pgid) can only ever name this run's own
@@ -642,6 +632,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// (reapWatchGroupLeader).
 	groupKilled, waitErr := reapWatchGroupLeader(cmd, anchor, func() {
 		close(leaderExited)
+		// The run ends when the leader is observed dead: disarm HERE, not
+		// at runOnce return — reader drain can hold runOnce open past the
+		// crash window, and a timer firing then would write "started" for
+		// a process that no longer exists.
+		disarm()
 		<-watchdogDone
 	})
 	if lifeline != nil {

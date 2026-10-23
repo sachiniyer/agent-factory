@@ -71,7 +71,7 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	s.setStatus = rec.setStatus
 	// Never let the crashWindow recovery timer reach the real task store from
 	// a test that shrinks the window but keeps the recorder seams.
-	s.recoverStatus = func(string, string, string) (bool, error) { return false, nil }
+	s.recoverStatus = func(string, task.Task, string) (bool, error) { return false, nil }
 	s.recordDrops = func(string, int, time.Time) error { return nil }
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -959,9 +959,9 @@ func TestWatcherRecoveryLeavesNonTerminalStatus(t *testing.T) {
 	var calls atomic.Int32
 	s, _ := newTestSupervisor(t, task.LoadTasks)
 	s.crashWindow = 60 * time.Millisecond
-	s.recoverStatus = func(taskID, expected, status string) (bool, error) {
+	s.recoverStatus = func(taskID string, armed task.Task, status string) (bool, error) {
 		calls.Add(1)
-		return task.RecoverStaleWatcherStatus(taskID, expected, status)
+		return task.RecoverStaleWatcherStatus(taskID, armed, status)
 	}
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -995,10 +995,10 @@ func TestWatcherRecoveryLeavesFreshTerminalStatus(t *testing.T) {
 	var calls atomic.Int32
 	s, _ := newTestSupervisor(t, task.LoadTasks)
 	s.crashWindow = 60 * time.Millisecond
-	s.recoverStatus = func(taskID, expected, status string) (bool, error) {
+	s.recoverStatus = func(taskID string, armed task.Task, status string) (bool, error) {
 		calls.Add(1)
-		require.Equal(t, armedOver, expected, "recovery must compare against the arm-time status")
-		return task.RecoverStaleWatcherStatus(taskID, expected, status)
+		require.Equal(t, armedOver, armed.LastRunStatus, "recovery must compare against the arm-time row")
+		return task.RecoverStaleWatcherStatus(taskID, armed, status)
 	}
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1028,7 +1028,7 @@ func TestWatcherRecoveryNeverFiresWhileCrashLooping(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ec770003", `exit 1`, dir)))
 	s.crashWindow = 200 * time.Millisecond
-	s.recoverStatus = func(string, string, string) (bool, error) {
+	s.recoverStatus = func(string, task.Task, string) (bool, error) {
 		calls.Add(1)
 		return false, nil
 	}

@@ -24,6 +24,19 @@ const (
 	watchRecoveredStatus = "started"
 )
 
+// armRecovery marks the run alive and starts the crashWindow recovery timer.
+// The returned disarm stops the timer and clears liveness; it is safe to call
+// twice — callers invoke it at leader-death observation inside the reap
+// callback, with a deferred call as the backstop for paths that never reap.
+func (w *taskWatcher) armRecovery() (disarm func()) {
+	w.setRunAlive(true)
+	t := time.AfterFunc(w.sup.crashWindow, w.recoverStaleTerminalStatus)
+	return func() {
+		t.Stop()
+		w.setRunAlive(false)
+	}
+}
+
 func (w *taskWatcher) setRunAlive(alive bool) {
 	w.mu.Lock()
 	w.runAlive = alive
@@ -54,7 +67,7 @@ func (w *taskWatcher) recoverStaleTerminalStatus() {
 	if !alive {
 		return
 	}
-	recovered, err := w.sup.recoverStatus(w.taskID, w.armStatus, watchRecoveredStatus)
+	recovered, err := w.sup.recoverStatus(w.taskID, w.armTask, watchRecoveredStatus)
 	if err != nil {
 		log.WarningLog.Printf("watch task %s: could not retire a stale terminal status: %v", w.taskID, err)
 		return
