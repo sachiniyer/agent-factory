@@ -76,10 +76,15 @@ func (s *Store) withLock(fn func() error) error {
 
 // Slugs lists the proposals on disk, sorted by name.
 func (s *Store) Slugs() ([]string, error) {
-	entries, err := os.ReadDir(s.dir)
+	dir, err := s.openStoreDir()
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +94,7 @@ func (s *Store) Slugs() ([]string, error) {
 			slugs = append(slugs, e.Name())
 		}
 	}
+	sort.Strings(slugs)
 	return slugs, nil
 }
 
