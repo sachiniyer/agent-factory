@@ -545,11 +545,11 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		}
 	} else if !filepath.IsAbs(worktreePath) {
 		resolveRelative = true
-	} else if hasPathTraversal(worktreePath) {
-		// An absolute destination with a symlink followed by `..` needs the
-		// same symlink-aware walk: filepath.Dir would lexically collapse the
-		// `..` and probe the wrong filesystem. resolveQualified runs the walk
-		// on the absolute path as-is without rebasing under repoPath.
+	} else if hasPathTraversal(worktreePath) || hasFinalSymlinkComponent(worktreePath) {
+		// An absolute destination with a symlink followed by `..`, a trailing
+		// separator, or a final `.` needs the symlink-aware walk so filepath.Dir
+		// does not collapse the `..` and the probe does not follow a final symlink.
+		// resolveQualified runs the walk on the absolute path as-is (no repo rebase).
 		resolveRelative = true
 		resolveQualified = true
 	}
@@ -908,6 +908,7 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	var statErr error
 	var lstatErr error
 	var readDirErr error
+	var gitDirStatErr error
 	if st, sErr := statSpaceProbe(worktreePath); sErr == nil && st != nil && st.IsDir() {
 		// Stat follows a final symlink, so a destination whose final name is a
 		// symlink to an existing directory looks like a directory here. `git
@@ -961,17 +962,13 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 				if empty {
 					dirs = append(dirs, worktreePath)
 				} else if gitInfo, gitErr := lstatSpaceProbe(filepath.Join(worktreePath, ".git")); gitErr == nil && gitInfo.Mode().IsRegular() {
-					// A regular `.git` file is a gitfile; validate its gitdir — a
-					// live gitdir means a registered worktree (skip), an orphaned
-					// gitfile is debris (probe). Restricting to a regular file
-					// excludes a FIFO/device/`.git` symlink the unbounded read in
-					// gitdirFromGitfile would wedge; a non-regular or unrecognized
-					// `.git` is pre-existing content, not debris (see gitdirFromGitfile).
+					// orphanedGitfileDebris restricts to ENOENT (a live but
+					// inaccessible gitdir is preserved, not probed).
 					gitFile := filepath.Join(worktreePath, ".git")
-					if gitDir, ok := gitdirFromGitfile(gitFile); ok {
-						if _, dErr := statSpaceProbe(gitDir); dErr != nil {
-							dirs = append(dirs, worktreePath)
-						}
+					if debris, dErr := orphanedGitfileDebris(gitFile); debris {
+						dirs = append(dirs, worktreePath)
+					} else if dErr != nil {
+						gitDirStatErr = dErr
 					}
 				}
 			} else if !os.IsNotExist(dErr) {
@@ -995,6 +992,9 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	}
 	if ancestorStatErr != nil {
 		out = errors.Join(out, fmt.Errorf("stat probe ancestor %s: %w", ancestorStatPath, ancestorStatErr))
+	}
+	if gitDirStatErr != nil {
+		out = errors.Join(out, gitDirStatErr)
 	}
 	return out
 }

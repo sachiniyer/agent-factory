@@ -485,6 +485,31 @@ func hasPathTraversal(path string) bool {
 	return false
 }
 
+// hasFinalSymlinkComponent reports whether an absolute path ends in a separator
+// or a final `.` component, so the symlink-aware walk's trailing-separator and
+// final-dot preservation must run the way it does for a relative path. Without
+// it, a trailing separator makes os.Lstat follow a final symlink (a nonempty
+// target looks like a regular directory rather than the symlink the
+// existing-destination check must see un-resolved), and a final `.` collapses
+// the same way after filepath.Split, so a nonempty symlinked target git rejects
+// without writing would be write-probed and a coincidental ENOSPC on its
+// filesystem would stall the lost-restore loop on a structural "already
+// exists" rejection. `..` is covered by hasPathTraversal; a plain absolute path
+// with no trailing separator and no final `.` returns false.
+func hasFinalSymlinkComponent(path string) bool {
+	if path == "" {
+		return false
+	}
+	if strings.HasSuffix(path, string(filepath.Separator)) {
+		return true
+	}
+	if filepath.Separator != '/' && strings.HasSuffix(path, "/") {
+		return true
+	}
+	_, base := filepath.Split(path)
+	return base == "."
+}
+
 // gitdirFromGitfile reads a `.git` gitfile (the file `git worktree add` writes
 // at a worktree root pointing at the worktree's gitdir) and returns the gitdir
 // path it names, resolved relative to the gitfile's directory. A non-gitfile
@@ -506,7 +531,21 @@ func gitdirFromGitfile(gitfile string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	dir := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
+	// strings.TrimPrefix returns the original contents when the prefix is
+	// absent, so a nonempty regular `.git` file that is not a gitfile (for
+	// example an ordinary file such as README) would be accepted and its
+	// contents parsed as a gitdir path. A symlinked nonempty destination
+	// containing such a file would then be treated as failed-add debris
+	// (the derived path usually stats as missing), turning a structural
+	// "already exists" rejection into an indefinite environmental retry on a
+	// coincidental ENOSPC. Require the `gitdir:` prefix the way an
+	// unreadable or empty file is rejected, so a non-gitfile `.git` entry is
+	// pre-existing content git rejected the add over.
+	const gitdirPrefix = "gitdir:"
+	if !strings.HasPrefix(string(b), gitdirPrefix) {
+		return "", false
+	}
+	dir := strings.TrimSpace(strings.TrimPrefix(string(b), gitdirPrefix))
 	if dir == "" {
 		return "", false
 	}
@@ -514,4 +553,29 @@ func gitdirFromGitfile(gitfile string) (string, bool) {
 		dir = filepath.Join(filepath.Dir(gitfile), dir)
 	}
 	return dir, true
+}
+
+// orphanedGitfileDebris reports whether a regular `.git` file at gitFile is
+// partial-attempt debris from a failed `git worktree add` (a gitfile whose
+// referenced gitdir no longer exists) rather than a pre-existing destination
+// git rejected the add without writing. A live gitdir means the worktree is
+// already registered, so a coincidental ENOSPC on its filesystem is not the
+// real resource errno and the probe must not target it; only an ENOENT gitdir
+// (the add created the gitfile and then failed, leaving it orphaned) is debris
+// the probe covers. A non-ENOENT stat error (EACCES, EIO, ErrProbeTimedOut)
+// is environmental evidence about a live but temporarily inaccessible gitdir,
+// not proof of an orphaned gitfile; the error is returned so the caller
+// preserves it the way it preserves the destination and ancestor stat errors,
+// rather than probing a registered worktree git rejected the add over.
+func orphanedGitfileDebris(gitFile string) (bool, error) {
+	gitDir, ok := gitdirFromGitfile(gitFile)
+	if !ok {
+		return false, nil
+	}
+	if _, dErr := statSpaceProbe(gitDir); os.IsNotExist(dErr) {
+		return true, nil
+	} else if dErr != nil {
+		return false, dErr
+	}
+	return false, nil
 }

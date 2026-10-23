@@ -422,3 +422,218 @@ func TestAnnotateWorktreeAddError_AbsoluteWorktreePathTraversalResolvesSymlink(t
 		"the lexical parent (base) must not be probed — the symlink resolves to a different "+
 			"filesystem, so a coincidental ENOSPC there would be unrelated to the git failure")
 }
+
+// TestAnnotateWorktreeAddError_SymlinkedDestinationNonGitfileSkipsProbe pins the contract the
+// #5421 review added: a nonempty symlinked destination whose `.git` file is not a gitfile (its
+// contents lack the `gitdir:` prefix, for example an ordinary file such as README) must not be
+// treated as failed-add debris. strings.TrimPrefix returns the original contents when the prefix
+// is absent, so without an explicit HasPrefix check any nonempty regular `.git` file would be
+// parsed as a gitdir path, the derived path would usually stat as missing, and the destination
+// would be write-probed even though git rejects a pre-existing destination without writing there.
+func TestAnnotateWorktreeAddError_SymlinkedDestinationNonGitfileSkipsProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+	// A regular `.git` file whose contents lack the `gitdir:` prefix — not a
+	// gitfile from `git worktree add`, so the destination is pre-existing content
+	// git rejects without writing, not partial-attempt debris.
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, ".git"), []byte("README"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "file"), []byte("x"), 0o644))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	destPath := filepath.Join(resolvedRepo, "dest")
+
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		if dir == destPath {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a nonempty target whose `.git` file is not a gitfile (no `gitdir:` prefix) is pre-existing "+
+			"content git rejected the add over, not partial-attempt debris — a coincidental ENOSPC on "+
+			"its filesystem must not turn the structural 'already exists' rejection into an environmental "+
+			"retry: %v", out)
+	require.NotContains(t, probedDirs, destPath,
+		"the write probe must not target a symlinked destination whose `.git` file is not a gitfile — "+
+			"git rejects the add without writing there, so a full filesystem on that target cannot fix the "+
+			"structural failure")
+}
+
+// TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsProbe pins the
+// contract the #5421 review added: a `.git` file pointing at a live gitdir whose stat returns a
+// non-ENOENT error (EACCES, EIO, ErrProbeTimedOut) must not be treated as orphaned debris. Only
+// ENOENT establishes an orphaned gitfile; a live but temporarily inaccessible gitdir means the
+// worktree is registered and git rejected the add without writing, so the probe must not target
+// the destination and the stat error must be preserved so the classifier reads it as
+// environmental evidence rather than bare structural silence.
+func TestAnnotateWorktreeAddError_SymlinkedDestinationLiveGitdirNonENOENTSkipsProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	repo := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(repo, "dest"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(repo, "dest")))
+	// A `.git` file pointing at a live gitdir whose stat returns a non-ENOENT
+	// error (EACCES) — the worktree is registered, so git rejects the add
+	// without writing; the inaccessible gitdir is environmental evidence, not
+	// an orphaned gitfile.
+	gitDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(realTarget, "README"), []byte("x"), 0o644))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	destPath := filepath.Join(resolvedRepo, "dest")
+
+	statErr := errors.New("gitdir stat: permission denied")
+	statSpaceProbe = func(p string) (os.FileInfo, error) {
+		if p == gitDir {
+			return nil, statErr
+		}
+		return os.Stat(p)
+	}
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		if dir == destPath {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: "dest"}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a nonempty target whose `.git` file points at a live but inaccessible gitdir is an "+
+			"already-registered worktree git rejects the add for without writing, not orphaned "+
+			"debris — a coincidental ENOSPC on its filesystem must not turn the structural 'already "+
+			"exists' rejection into an environmental retry: %v", out)
+	require.NotContains(t, probedDirs, destPath,
+		"the write probe must not target a symlinked destination whose `.git` file points at a "+
+			"live gitdir whose stat returned a non-ENOENT error — the gitdir is inaccessible, not "+
+			"orphaned, so the destination is not failed-add debris")
+	require.True(t, errors.Is(out, statErr),
+		"a non-ENOENT stat error on a live gitdir must be preserved as environmental evidence so "+
+			"the lost-restore classifier reads it alongside the git failure: %v", out)
+}
+
+// TestAnnotateWorktreeAddError_AbsoluteWorktreePathTrailingSepPreservesFinalSymlink pins the
+// contract the #5421 review added for an absolute worktree path ending in a separator: the
+// trailing-separator and final-dot preservation the resolveRelative block applies to a relative
+// path must also apply to an absolute path. Without it, filepath.Dir collapses the trailing
+// separator and os.Lstat follows the final symlink to its nonempty target, so the
+// destination-directory probe write-probes a target git rejects without writing — a coincidental
+// ENOSPC on that target would stall the lost-restore loop on a structural "already exists"
+// rejection.
+func TestAnnotateWorktreeAddError_AbsoluteWorktreePathTrailingSepPreservesFinalSymlink(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// An absolute worktree path ending in a separator: the final component is
+	// a symlink to a nonempty directory, so `git worktree add` rejects the add
+	// without writing to the symlink target. The destination probe must not
+	// follow the trailing separator and write-probe the target.
+	base := t.TempDir()
+	realTarget := t.TempDir()
+	require.NotEqual(t, realTarget, filepath.Join(base, "link"))
+	require.NoError(t, os.Symlink(realTarget, filepath.Join(base, "link")))
+	worktreePath := filepath.Join(base, "link") + string(filepath.Separator)
+
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+
+	resolvedRealTarget, err := filepath.EvalSymlinks(realTarget)
+	require.NoError(t, err)
+	symlinkTargetParent := filepath.Dir(resolvedRealTarget)
+	require.NotEqual(t, symlinkTargetParent, base,
+		"the symlink target's parent must differ from the base dir, otherwise the test cannot "+
+			"distinguish the fix from the bug")
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		if dir == symlinkTargetParent {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: base, worktreePath: worktreePath}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a full filesystem at the symlink target's parent must not add ENOSPC — git rejected the "+
+			"add because the destination already exists, so the trailing separator must not make the "+
+			"probe follow the symlink and write-probe the target: %v", out)
+	require.NotContains(t, probedDirs, symlinkTargetParent,
+		"the write probe must not target the symlink target's parent (the trailing separator must "+
+			"not make Lstat follow the final symlink the way a non-trailing-separator path does not)")
+}
