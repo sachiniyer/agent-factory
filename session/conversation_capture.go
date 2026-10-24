@@ -37,11 +37,15 @@ var (
 	// which rollout, even when only one has recorded it so far (#2228 review).
 	ErrPromptReceiptAmbiguous = errors.New("prompt receipt ambiguous")
 	// ErrPromptReceiptUndecidable means the wait expired while a NEW rollout
-	// existed whose session_meta never became classifiable. It is neither
-	// absence nor receipt: the file could still be the launched process's own
-	// rollout mid-write, so a never-arrived verdict must not claim it. It is a
-	// recognized unconfirmed outcome — callers that keep observing on
-	// ErrPromptReceiptNotObserved keep observing on this too (#5471 review).
+	// existed whose session_meta never became classifiable, or the prompt
+	// itself cannot produce a receipt verdict. In the first case the file
+	// could still be the launched process's own rollout mid-write, so a
+	// never-arrived verdict must not claim it (#5471 review). In the second,
+	// a prompt empty after trimming the whitespace Codex strips from a
+	// recorded turn would degrade the substring matcher to an empty needle —
+	// which matches every rollout — so it is refused up front (#5488). It is
+	// a recognized unconfirmed outcome — callers that keep observing on
+	// ErrPromptReceiptNotObserved keep observing on this too.
 	ErrPromptReceiptUndecidable = errors.New("prompt receipt undecidable")
 )
 
@@ -271,15 +275,18 @@ func WaitForPromptReceipt(
 	if agent != tmux.ProgramCodex {
 		return fmt.Errorf("%w for agent %q", ErrPromptReceiptUnavailable, agent)
 	}
+	// Codex trims leading and trailing whitespace from a submitted turn before
+	// recording it (codex-rs/tui chat_composer.rs prepare_submission_text_*),
+	// so the matcher compares a trailing-whitespace-stripped prompt against the
+	// recorded text. A prompt that is empty after that trim would degrade
+	// strings.Contains to an empty needle (which matches every rollout), so it
+	// is refused as undecidable up front rather than polling to a timeout or
+	// falsely confirming (#5488).
+	if normalizedReceiptPrompt(prompt) == "" {
+		return fmt.Errorf("%w: prompt is empty after trimming whitespace", ErrPromptReceiptUndecidable)
+	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if normalizedReceiptPrompt(prompt) == "" {
-		// A prompt with no attributable text can never prove its own receipt —
-		// and must not degrade to an empty needle that matches every recorded
-		// turn. Refuse as undecidable instead of waiting out the timeout
-		// (#5488).
-		return fmt.Errorf("%w: the prompt has no attributable text", ErrPromptReceiptUndecidable)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
@@ -813,13 +820,17 @@ func normalizePromptReceiptText(text string) string {
 	return strings.ReplaceAll(text, "\r", "\n")
 }
 
-// normalizedReceiptPrompt is the prompt side of a receipt match: normalized
-// line endings plus trailing whitespace removed. Codex strips the trailing
-// newline when recording a submitted turn, so a prompt that ends in one — the
-// config-agent briefing always does — could never be contained in its own
-// receipt (#5488). Leading and interior whitespace stay meaningful: the
-// prompt is evidence, and relaxing them would let a different recorded turn
-// pass for it.
+// normalizedReceiptPrompt prepares the prompt for use as the needle of a
+// substring match against a recorded Codex user turn. Codex strips trailing
+// whitespace from a submitted turn before it is ever recorded
+// (codex-rs/tui/src/bottom_pane/chat_composer.rs prepare_submission_text_*:
+// `text = text.trim().to_string()`), so a prompt that ends in whitespace —
+// which configagent.BuildBriefing's output does ("\n\n") — can never appear as a
+// contiguous substring of the trimmed recorded text. Trimming the prompt's
+// trailing whitespace restores the symmetry: the trimmed prompt is a suffix of
+// what Codex recorded. Only the trailing edge is trimmed: the matcher uses
+// strings.Contains, so the prompt's leading edge must be preserved to keep it
+// anchored to its actual position within the recorded message (#5488).
 func normalizedReceiptPrompt(prompt string) string {
 	return strings.TrimRightFunc(normalizePromptReceiptText(prompt), unicode.IsSpace)
 }

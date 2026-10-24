@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -334,61 +335,6 @@ func TestWaitForPromptReceipt_DifferentUserTurnDoesNotConfirmBriefing(t *testing
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
 	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
 		"a concurrent/unrelated user turn must not acknowledge the config briefing")
-}
-
-// TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn is the
-// #5488 production failure: the config-agent briefing ends in a newline and
-// Codex strips it when recording the submitted turn, so the verbatim prompt
-// was never contained in its own receipt. The fixture below is a real
-// response_item turn as Codex 0.164 records it — identical to the prompt
-// except rstripped.
-func TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn(t *testing.T) {
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	snap := BeginConversationCapture()
-	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
-
-	const prompt = "the config-agent briefing\nwith several lines\n\n"
-	appendCodexRolloutEvent(t, path, map[string]any{
-		"type": "response_item",
-		"payload": map[string]any{
-			"type": "message",
-			"role": "user",
-			"content": []map[string]any{{
-				"type": "input_text",
-				// Codex strips trailing whitespace when recording the turn.
-				"text": "the config-agent briefing\nwith several lines",
-			}},
-		},
-	})
-
-	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, 0),
-		"a turn recorded as prompt.rstrip() is still the prompt's receipt")
-}
-
-// A prompt with no attributable text can never be proven in the rollout —
-// refusing it as undecidable keeps an empty needle from matching every
-// recorded turn (#5488).
-func TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable(t *testing.T) {
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	snap := BeginConversationCapture()
-	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
-	appendCodexRolloutEvent(t, path, map[string]any{
-		"type": "response_item",
-		"payload": map[string]any{
-			"type": "message",
-			"role": "user",
-			"content": []map[string]any{{
-				"type": "input_text",
-				"text": "a recorded turn that must not satisfy a whitespace prompt",
-			}},
-		},
-	})
-
-	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, " \n\t", 0)
-	require.ErrorIs(t, err, ErrPromptReceiptUndecidable,
-		"a whitespace-only prompt must not become a match-everything empty needle")
 }
 
 // A lone prompt match is not yet unique attribution while another new
@@ -848,4 +794,103 @@ func TestWaitForPromptReceipt_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T) {
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramClaude, ConversationCaptureSnapshot{}, "briefing", 0)
 	require.True(t, errors.Is(err, ErrPromptReceiptUnavailable))
+}
+
+// TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn is the
+// #5488 reproduction: configagent.BuildBriefing returns a prompt that ends with
+// trailing whitespace ("\n\n"), but Codex 0.144.6 trims a submitted turn before
+// recording it (chat_composer.rs prepare_submission_text_*: text.trim()), so the
+// recorded user_message has its trailing whitespace removed. The receipt matcher
+// must trim the prompt's trailing whitespace to match the stripped recorded turn
+// — without that, every real Codex config-agent spawn logs "briefing receipt was
+// not observed" even though the briefing landed.
+func TestWaitForPromptReceipt_TrailingWhitespacePromptMatchesStrippedTurn(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	// The delivered prompt ends in the same trailing whitespace BuildBriefing
+	// produces ("\n\n"). A mini-briefing stands in for the real one; it is the
+	// trailing edge that matters.
+	prompt := "You are the agent-factory configuration assistant.\n\n## The settings\n\nkeep going\n\n"
+	// Codex records the submitted turn with leading AND trailing whitespace
+	// stripped (text.trim()); the matcher's job is to confirm this recorded
+	// text against the untrimmed prompt.
+	recorded := strings.Trim(prompt, " \t\r\n")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type": "event_msg",
+		"payload": map[string]any{
+			"type":    "user_message",
+			"message": recorded,
+		},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, time.Second),
+		"a prompt ending in trailing whitespace must match the Codex-trimmed recorded turn")
+}
+
+// TestWaitForPromptReceipt_CRLFAndTrailingWhitespaceNormalized confirms the
+// matcher trims trailing whitespace AFTER normalizing CRLF/CR line endings, so a
+// prompt delivered with Windows line endings and a trailing newline still
+// matches a Codex-recorded turn stored with LF endings and no trailing whitespace.
+func TestWaitForPromptReceipt_CRLFAndTrailingWhitespaceNormalized(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	// CRLF line endings plus a trailing CRLF, modeling a paste that crossed a
+	// Windows-shaped boundary.
+	prompt := "line one\r\nline two\r\n\r\n"
+	recorded := "line one\nline two"
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": recorded},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, time.Second))
+}
+
+// TestWaitForPromptReceipt_TrailingWhitespacePromptDoesNotMatchUnrelatedTurn
+// guards the false-positive direction of the #5488 fix: trimming the prompt's
+// trailing whitespace must not let it match a recorded turn that does not
+// contain the briefing at all.
+func TestWaitForPromptReceipt_TrailingWhitespacePromptDoesNotMatchUnrelatedTurn(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "an unrelated user turn"},
+	})
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config-agent briefing\n\n", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"a trimmed trailing-whitespace prompt must not match an unrelated recorded turn")
+}
+
+// TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable guards the
+// degenerate needle: a prompt that is empty after trimming the whitespace Codex
+// strips would make strings.Contains match every rollout, so the matcher must
+// refuse it as undecidable up front rather than polling to a timeout or falsely
+// confirming.
+func TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	// A rollout that DOES contain a user turn: without the undecidable guard
+	// an empty needle would falsely confirm against it.
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "someone else's turn"},
+	})
+
+	for _, prompt := range []string{"", "   ", "\n\n", "\t\r\n ", "\r"} {
+		err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, time.Second)
+		require.ErrorIs(t, err, ErrPromptReceiptUndecidable,
+			"a whitespace-only prompt (%q) must be refused as undecidable, not matched or timed out", prompt)
+	}
 }

@@ -82,7 +82,7 @@ backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
-Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
+Tab, **^C**, **Paste** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
 keys and More keys. Tap Ctrl or Alt to modify the next key, including the bar’s own
 keys; double tap to lock (shown
 by ▸ and an outline), then tap again to release. IME composition is sent unchanged

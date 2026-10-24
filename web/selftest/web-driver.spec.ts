@@ -2835,9 +2835,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const mouseHint = host.locator(".af-mouse-capture-hint");
-    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    // Seed off the live grid, not a constant: #5492 halves the phone font, so a
+    // count sized for the 13px grid underflows the doubled row count. Five lines
+    // per visible row also keeps the scrollback deeper in PIXELS than the flick
+    // plus its coast can cross — the margin 200 lines bought on ~15px cells.
+    const hostRows = host.locator(".xterm-rows > div");
+    await expect.poll(() => hostRows.count()).toBeGreaterThan(0);
+    const lineCount = (await hostRows.count()) * 5;
+    const lastLine = `touch-scroll-${lineCount}`;
+    await p.keyboard.type(`for i in $(seq 1 ${lineCount}); do printf 'touch-scroll-%s\\n' "$i"; done`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+    await expect(host).toContainText(lastLine, { timeout: 20_000 });
 
     // Aim at the screen — the element a finger actually lands on. The scrollable
     // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
@@ -2862,7 +2870,7 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       /enable-mouse-events/,
     );
     const bottom = await viewport.evaluate((el) => el.scrollTop);
-    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    expect(bottom, `${lineCount} lines of fresh output must leave real scrollback above the view`).toBeGreaterThan(0);
     await dragIntoHistory();
     await expect
       .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
@@ -8284,8 +8292,6 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
   };
   const sessionName = "peer-agent-2347";
-  const lineCount = 40;
-  const lastLine = `peer-agent-line-${lineCount}`;
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -8300,6 +8306,23 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
+    // lineCount has to sit between the two grids this test drives: above the live
+    // local rows so the seeded output overflows them, yet under HALF the tall
+    // peer's — every typed line emits two rows (the PTY echo plus cat's copy),
+    // and the peer check only proves its point while the tall grid swallows all
+    // of them. Size it from the settled grid, not a constant: #5492's font
+    // halving roughly doubled the phone row count a fixed count was sized for.
+    let localRows = 0;
+    await expect
+      .poll(async () => {
+        const next = await firstRows();
+        const settled = next > 0 && next === localRows;
+        localRows = next;
+        return settled;
+      }, { message: "the phone grid must finish its attach fit before it is measured" })
+      .toBe(true);
+    const lineCount = Math.floor((localRows * 3) / 2);
+    const lastLine = `peer-agent-line-${lineCount}`;
     await expect.poll(firstRows).toBeLessThan(lineCount);
 
     // The fixture's `claude` is the real agent-tab PTY path with a deterministic

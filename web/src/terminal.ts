@@ -116,6 +116,20 @@ const RESIZE_DEBOUNCE_MS = 120;
 // bounds work done synchronously in touchstart for EVERY touch; see snapshotPress.
 const TOUCH_PRESS_MAX_ROWS = 32;
 
+// The default cell pitch halves at the phone breakpoint (#5492): 13px gives a
+// ~390px viewport only ~50 columns, so agent TUIs wrap or truncate; at phone
+// pixel densities 6.5px stays legible. The breakpoint is the ONE the mobile
+// layout already uses — (max-width: 768px), the same media query ui.ts,
+// terminal-keybar.ts, and appbarControls() hold — so the terminal crosses
+// with the rest of the shell rather than on a width of its own.
+const FONT_SIZE_DESKTOP = 13;
+const FONT_SIZE_PHONE = FONT_SIZE_DESKTOP / 2;
+
+/** The default xterm font size for a viewport's device class (#5492). */
+export function terminalFontSize(phone: boolean): number {
+  return phone ? FONT_SIZE_PHONE : FONT_SIZE_DESKTOP;
+}
+
 /** A long press resolved at touchstart: the flattened wrapped block, the index the
  *  finger landed on, and the grid it was all read against. */
 interface TouchPressSnapshot {
@@ -221,6 +235,10 @@ export class AttachTerminal {
   private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
+  // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
+  // appbarControls() hold the same query. It picks the halved default pitch
+  // (#5492) at construction, and its "change" listener re-fits across it.
+  private readonly phone = window.matchMedia("(max-width: 768px)");
 
   private ws: WebSocket | null = null;
   private stopped = false;
@@ -327,6 +345,9 @@ export class AttachTerminal {
       this.mouseOverrideKeyHeld = false;
     }
   };
+  // A crossing of the phone boundary re-picks the default pitch (#5492) —
+  // rotation past 768px, or a desktop window dragged narrow and back.
+  private readonly onPhoneChange = (): void => this.applyDeviceFontSize();
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
@@ -601,7 +622,9 @@ export class AttachTerminal {
       allowProposedApi: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      // Half the desktop pitch at phone width (#5492); the "change" listener
+      // below re-picks it if the viewport crosses the breakpoint.
+      fontSize: terminalFontSize(this.phone.matches),
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
       theme: terminalSurface(container, currentXtermTheme()),
@@ -743,6 +766,7 @@ export class AttachTerminal {
     window.addEventListener("focus", this.onWindowFocus);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.addEventListener("change", this.onPhoneChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
@@ -794,6 +818,7 @@ export class AttachTerminal {
     window.removeEventListener("focus", this.onWindowFocus);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.removeEventListener("change", this.onPhoneChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
@@ -1212,7 +1237,7 @@ export class AttachTerminal {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   private rowHeight(): number {
     const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? FONT_SIZE_DESKTOP) * 1.2;
   }
 
   private handleHistoryWheel(event: WheelEvent): boolean {
@@ -1428,6 +1453,20 @@ export class AttachTerminal {
   }
 
   // --- resize ----------------------------------------------------------------
+
+  /** Re-derives the default pitch from the phone breakpoint (#5492). A real
+   *  crossing re-assigns xterm's fontSize — its option setter re-measures cell
+   *  metrics synchronously — then refits on the next painted frame, where the
+   *  changed grid goes out as an ordinary OpResize. The size guard keeps a
+   *  repeated call from scheduling a no-op fit. */
+  private applyDeviceFontSize(): void {
+    const size = terminalFontSize(this.phone.matches);
+    if (this.term.options.fontSize === size) {
+      return;
+    }
+    this.term.options.fontSize = size;
+    this.scheduleVisibleFit();
+  }
 
   /** Fits on the next painted frame, after visibility/layout changes have settled.
    *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
