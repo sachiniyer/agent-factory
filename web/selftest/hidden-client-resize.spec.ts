@@ -317,10 +317,15 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
     // Establish the environment honestly: the non-front tab's frames ARE alive
     // in headless — there is no organic parked state to lean on — so park it by
-    // cutting frame delivery, then prove the cut took. The cursor goes to the
-    // appbar corner first: a layout shift under it must not synthesize the
-    // pointerenter a hidden tab could never see (see the header comment).
+    // cutting frame delivery, then prove the cut took. BOTH cursors go to the
+    // appbar corner first: a layout shift under either must not synthesize the
+    // pointerenter no real run of this scenario could see — on `first` a
+    // parked tab has no pointer at all, and on `second` a reflow under the
+    // attach()-left cursor boundary-enters af-pane-host, which (verified in a
+    // CI dbg trace) is a trusted activation that re-asserts the peer's grid
+    // and stomps the flush this leg exists to observe.
     await second.bringToFront();
+    await second.mouse.move(1, 1);
     await first.mouse.move(1, 1);
     expect(await frameAlive(first)).toBe(true);
     await park(first);
