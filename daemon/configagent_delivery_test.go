@@ -89,6 +89,95 @@ func TestConfigAgentCodexTrustModalSubmitsBriefing(t *testing.T) {
 	}
 }
 
+// TestConfigAgentCodexTrimsRecordedTurnAndConfirmsReceipt models Codex 0.144.6's
+// chat_composer.rs trim of a submitted turn before it is recorded, then asserts
+// the spawn's receiver-side receipt (session.WaitForPromptReceipt) confirms a
+// prompt that ends in the trailing whitespace configagent.BuildBriefing produces.
+//
+// The hermetic fixture's default "accept" mode records the pasted draft verbatim,
+// so a prompt with no trailing whitespace never exercises the #5488 mismatch.
+// This test pads the prompt with a trailing "\n\n" (the shape BuildBriefing
+// ships) and uses the "accept-trim" fixture mode so the recorded turn is
+// trailing-whitespace stripped — exactly what real Codex stores. The receipt
+// must still confirm within the initial window; before #5488 it never did
+// because the untrimmed prompt could not be a substring of the trimmed record.
+func TestConfigAgentCodexTrimsRecordedTurnAndConfirmsReceipt(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "accept-trim")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+
+	// Mirror configagent.BuildBriefing's trailing shape: a long multi-line
+	// prompt ending in trailing whitespace ("\n\n"), with a sentinel payload
+	// so the recorded turn can be inspected. Real Codex trims the turn before
+	// recording; the fixture's "accept-trim" mode does the same.
+	prompt := strings.Repeat("config-agent briefing line\n", 256) +
+		configAgentCodexFixtureSentinel + "\n\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// The receipt must be CONFIRMED within the initial window. With the #5488
+	// bug, the trimmed recorded turn never contained the untrimmed prompt, so
+	// the spawn logged "briefing receipt was not observed" and escalated.
+	require.NotContains(t, info.String(), "briefing receipt was not observed",
+		"a trailing-whitespace prompt must confirm against the trimmed recorded turn within the window")
+	require.Empty(t, warnings.String(),
+		"a confirmed receipt must not escalate to a warning")
+
+	// Prove the fixture actually modeled the trim, so the confirmation above is
+	// meaningful: the recorded user_message is the prompt with its trailing
+	// whitespace stripped (it ends in the sentinel, not in "\n\n"). Without this
+	// check the test could pass against a verbatim recording for the wrong
+	// reason. The hermetic tmux paste delivers "\r" line endings (tmux converts
+	// "\n" to "\r" inside a bracketed paste), while real Codex records "\n";
+	// normalize the recorded turn's line endings so the comparison reflects the
+	// shape real Codex stores.
+	require.True(t, strings.HasSuffix(prompt, "\n\n"),
+		"the prompt must end in trailing whitespace so the test is non-vacuous")
+	message, err := readConfigAgentCodexUserMessage(rollout)
+	require.NoError(t, err)
+	require.NotEmpty(t, message, "the accept-trim fixture must record a user turn")
+	normalizedMessage := strings.ReplaceAll(strings.ReplaceAll(message, "\r\n", "\n"), "\r", "\n")
+	require.Equal(t, strings.TrimSpace(prompt), normalizedMessage,
+		"the accept-trim fixture must record the trailing-whitespace-stripped turn (modeling Codex text.trim())")
+}
+
+// readConfigAgentCodexUserMessage returns the message of the first Codex
+// user_message event recorded in rollout, or "" if none is present.
+func readConfigAgentCodexUserMessage(rollout string) (string, error) {
+	data, err := os.ReadFile(rollout)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var event struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil {
+			continue
+		}
+		if event.Type == "event_msg" && event.Payload.Type == "user_message" && event.Payload.Message != "" {
+			return event.Payload.Message, nil
+		}
+	}
+	return "", nil
+}
+
 // TestConfigAgentUnconfirmedReceiptStillAttaches is #2483. A receiver that never
 // records the briefing turn within the confirmation window is exactly what a
 // slow or degraded Codex looks like — and it is what broke the assistant on
@@ -381,7 +470,19 @@ func runConfigAgentCodexFixture(mode string) error {
 					draft.Reset()
 					continue
 				}
-				if err := appendConfigAgentCodexUserTurn(rollout, draft.String()); err != nil {
+				recorded := draft.String()
+				if mode == "accept-trim" {
+					// Model Codex 0.144.6's chat_composer.rs
+					// prepare_submission_text_with_options, which trims a
+					// submitted turn before recording it
+					// (text.trim().to_string()). The default "accept" mode
+					// records the pasted draft verbatim and so hides the
+					// trailing-whitespace mismatch the receipt matcher must
+					// handle (#5488); this mode reproduces the real recorded
+					// shape so the receipt path is exercised in CI.
+					recorded = strings.TrimSpace(recorded)
+				}
+				if err := appendConfigAgentCodexUserTurn(rollout, recorded); err != nil {
 					return err
 				}
 				phase = "working"
