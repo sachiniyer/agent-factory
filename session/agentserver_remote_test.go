@@ -296,6 +296,159 @@ func TestRemoteAgentCallWithin_DeadlineExceededCode(t *testing.T) {
 	}
 }
 
+// TestRemoteAgentCallWithin_BoundedProbeNoAnswerCode pins the wire-carrying
+// half of the #5295 wire contract the lost-restore classifier's
+// deadline+sentinel arm needs for SANDBOX sessions: a failure envelope
+// carrying ErrorCodeBoundedProbeNoAnswer is reconstructed on the client side
+// as BOTH the sentinel (apiproto.ErrRemoteBoundedProbeNoAnswer) AND
+// context.DeadlineExceeded joined into the error chain — the exact
+// deadline+sentinel signature the in-process classifier already accepts, so
+// the classifier's verdict survives the wire hop. The bare-deadline code
+// (ErrorCodeDeadlineExceeded) reconstructs ONLY context.DeadlineExceeded —
+// the preserve push's own network deadline legitimately has no sentinel half,
+// and stays structural on the Recover path — so the two codes must NOT cross
+// contaminate. The resource-exhausted code stays sentinel-free for both.
+// Other codes and no code stay pair-free. Mirrors the existing
+// TestRemoteAgentCallWithin_ResourceExhaustedCode and _DeadlineExceededCode
+// tests (#5295 review).
+func TestRemoteAgentCallWithin_BoundedProbeNoAnswerCode(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		code             string
+		wantSentinel     bool
+		wantDeadline     bool
+		wantResourceSntl bool
+	}{
+		{name: "bounded_probe_no_answer reconstructs sentinel+deadline pair",
+			code: apiproto.ErrorCodeBoundedProbeNoAnswer, wantSentinel: true, wantDeadline: true},
+		{name: "bare deadline_exceeded reconstructs only the deadline",
+			code: apiproto.ErrorCodeDeadlineExceeded, wantSentinel: false, wantDeadline: true},
+		{name: "resource_exhausted reconstructs only its own sentinel",
+			code: apiproto.ErrorCodeResourceExhausted, wantSentinel: false, wantDeadline: false, wantResourceSntl: true},
+		{name: "plain failure reconstructs neither half",
+			code: "", wantSentinel: false, wantDeadline: false},
+		{name: "unrelated code reconstructs neither half",
+			code: "some_other_code", wantSentinel: false, wantDeadline: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				errObj := map[string]any{"message": "sandbox: has-session probe did not answer"}
+				if tc.code != "" {
+					errObj["code"] = tc.code
+				}
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  nil,
+					"error": errObj,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			c, err := newRemoteAgentClient(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("newRemoteAgentClient: %v", err)
+			}
+			err = c.callWithin("/v1/agent/snapshot", map[string]any{}, nil, time.Second)
+			if err == nil {
+				t.Fatal("callWithin: want error, got nil")
+			}
+			if got := errors.Is(err, apiproto.ErrRemoteBoundedProbeNoAnswer); got != tc.wantSentinel {
+				t.Fatalf("errors.Is(err, ErrRemoteBoundedProbeNoAnswer) = %v, want %v (err: %v)", got, tc.wantSentinel, err)
+			}
+			if got := errors.Is(err, context.DeadlineExceeded); got != tc.wantDeadline {
+				t.Fatalf("errors.Is(err, context.DeadlineExceeded) = %v, want %v (err: %v)", got, tc.wantDeadline, err)
+			}
+			if got := errors.Is(err, apiproto.ErrRemoteResourceExhausted); got != tc.wantResourceSntl {
+				t.Fatalf("errors.Is(err, ErrRemoteResourceExhausted) = %v, want %v (err: %v)", got, tc.wantResourceSntl, err)
+			}
+		})
+	}
+}
+
+// TestProvisionCallBudgetCoversTheInSandboxGitProbe pins the provision route
+// budget to the in-sandbox bounded git probe's own bound (#5295 review). The
+// headless agent-server handler does not observe the request context, so an
+// outer call that expires before the inner probe's deadline returns the
+// client's own bare context.DeadlineExceeded and disconnects — before the
+// server can emit the bounded_probe_no_answer envelope code the lost-restore
+// classifier's deadline+sentinel arm needs. The 60s here mirrors
+// session/git.localGitTimeout, which bounds the worktree
+// setup/common-dir/ownership probes that run during a sandbox restore; the
+// provision budget must outlive it with transport slack to spare, and this
+// test keeps anyone from decoupling the two again.
+func TestProvisionCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
+	const inSandboxBoundedProbeBound = 60 * time.Second
+	if slack := provisionCallTimeout - inSandboxBoundedProbeBound; slack < 10*time.Second {
+		t.Fatalf("provisionCallTimeout (%s) must exceed the in-sandbox bounded git probe bound (%s) with transport slack; got %s slack",
+			provisionCallTimeout, inSandboxBoundedProbeBound, slack)
+	}
+}
+
+// TestLaunchCallBudgetCoversTheInSandboxGitProbe pins the launch route budget to
+// the in-sandbox bounded probes its handler runs (#5295 review). The Launch RPC
+// is the one that drives the bounded worktree setup/common-dir/ownership probes
+// (session/git.localGitTimeout, 60s) and the tmux pre-spawn has-session gate
+// (tmuxCommandTimeout, 10s) inside the sandbox: LocalBackend.Launch runs
+// gw.Setup() and tmuxSession.Start() (whereas Provision only does the in-memory
+// worktree record), so it is Launch — not Provision — whose outer call must
+// outlive the inner probes. The headless agent-server handler does not observe
+// the request context, so an outer call that expires before an inner probe's
+// deadline returns the client's own bare context.DeadlineExceeded and
+// disconnects before the server can emit the bounded_probe_no_answer envelope
+// code the lost-restore classifier's deadline+sentinel arm needs.
+//
+// The inner probes are SEQUENTIAL, not alternatives: clearStaleWorktreePath runs
+// the ownership, remove, and prune git commands one after another (each under its
+// own localGitTimeout), and the new-branch path's deleteStaleSetupBranch adds a
+// fourth bounded git command after that. A budget sized for a SINGLE
+// localGitTimeout trips the client's deadline before a later probe in the
+// sequence can stall — so the bound here is the CUMULATIVE worst case.
+//
+// The budget must ALSO cover the failure-cleanup path the handler runs before it
+// can serialize the error: LocalBackend.launch defers CleanupFailedCreate until
+// after setupErr is set, so a setup that stalls and then fails cannot return the
+// bounded_probe_no_answer envelope until the deferred teardown finishes. The
+// worktree-add failure path additionally runs gitCommonDir (in
+// annotateWorktreeAddError, another localGitTimeout-bounded probe) before that
+// cleanup, and CleanupFailedCreate's teardown runs its OWN sequence of bounded
+// git commands — the worktree-list ownership probe, worktree remove -f, prune,
+// branch -D, and a final prune (Cleanup runs five localGitTimeout-bounded git
+// commands, see worktree_ops.go's cleanupRun). Each is another localGitTimeout a
+// stalled filesystem can spend before the handler returns, so sizing the budget
+// for the setup probes alone left the cumulative failure path (setup +
+// gitCommonDir + cleanup) able to outlast the outer call. The bound therefore
+// covers the setup probes (4), the common-dir probe (1), AND the cleanup path's
+// bounded git commands (5) — 10 localGitTimeout-bounded git commands plus the
+// tmux pre-spawn gate — plus transport slack, and this test keeps anyone from
+// decoupling them again.
+func TestLaunchCallBudgetCoversTheInSandboxGitProbe(t *testing.T) {
+	const (
+		localGitTimeoutBound    = 60 * time.Second // session/git.localGitTimeout
+		tmuxCommandTimeoutBound = 10 * time.Second // session/tmux.tmuxCommandTimeout
+		// clearStaleWorktreePath runs three sequential localGitTimeout-bounded git
+		// commands (ownership, remove, prune); the new-branch path's
+		// deleteStaleSetupBranch adds a fourth.
+		boundedGitProbeSteps = 4
+		// gitCommonDir runs in annotateWorktreeAddError on a worktree-add failure,
+		// another localGitTimeout-bounded probe the handler runs before the
+		// deferred cleanup can return the sentinel.
+		commonDirProbeSteps = 1
+		// CleanupFailedCreate's teardown runs five localGitTimeout-bounded git
+		// commands (worktree-list ownership probe, worktree remove -f, prune,
+		// branch -D, final prune — see worktree_ops.go's cleanupRun). The handler
+		// cannot serialize the setup error until this whole sequence finishes, so
+		// the outer call must outlive it too.
+		failedCreateCleanupSteps = 5
+	)
+	inSandboxBoundedProbeBound := time.Duration(boundedGitProbeSteps+commonDirProbeSteps+failedCreateCleanupSteps)*localGitTimeoutBound + tmuxCommandTimeoutBound
+	if slack := launchCallTimeout - inSandboxBoundedProbeBound; slack < 10*time.Second {
+		t.Fatalf("launchCallTimeout (%s) must exceed the in-sandbox cumulative bounded probe bound (%s) with transport slack; got %s slack",
+			launchCallTimeout, inSandboxBoundedProbeBound, slack)
+	}
+}
+
 // TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
 // contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
 // URL fails at validation with an actionable message rather than at dial time. The

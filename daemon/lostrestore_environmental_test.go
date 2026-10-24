@@ -71,6 +71,20 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		// server verified a resource errno and the client reconstructed the
 		// sentinel — the errno itself cannot cross the wire (#5295 review).
 		{"remote resource-exhaustion sentinel", fmt.Errorf("%s: %w", "archive failed", apiproto.ErrRemoteResourceExhausted), lostRestoreEnvErrno},
+		// The remote agent-server's bounded-probe-non-answer class: an
+		// in-sandbox probe (pre-spawn has-session gate, fsprobe write-capacity
+		// flight, git worktree setup/common-dir/ownership probe) died on its
+		// bound and the client reconstructed the sentinel joined with the
+		// deadline — the sentinel cannot cross the wire, so the code carries
+		// the class, the same way the errno class is carried
+		// (#5295 review). Paired with the deadline it is the environmental
+		// bounded class; bare it is structural, matching the in-process
+		// sentinels' own rule.
+		{"remote bounded-probe sentinel paired with deadline", errors.Join(
+			apiproto.ErrRemoteBoundedProbeNoAnswer, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"remote bounded-probe sentinel paired with deadline and message", fmt.Errorf(
+			"recover: %w: %w", apiproto.ErrRemoteBoundedProbeNoAnswer, context.DeadlineExceeded), lostRestoreEnvDeadline},
+		{"remote bounded-probe sentinel bare", fmt.Errorf("probe: %w", apiproto.ErrRemoteBoundedProbeNoAnswer), lostRestoreEnvNone},
 		{"relocate unknown carrying enospc", errors.Join(fmt.Errorf("probe: %w", syscall.ENOSPC), sessiongit.ErrRelocateStateUnknown), lostRestoreEnvErrno},
 		// The #5295 play-test producer: `git worktree add` fails with ENOSPC
 		// trapped in *exec.ExitError stderr text — invisible to errors.Is. The

@@ -117,7 +117,8 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 			errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven) ||
 			errors.Is(err, sessiongit.ErrCommonDirProbeNoAnswer) ||
 			errors.Is(err, fsprobe.ErrProbeTimedOut) ||
-			errors.Is(err, sessiontmux.ErrTmuxServerNoAnswer)) {
+			errors.Is(err, sessiontmux.ErrTmuxServerNoAnswer) ||
+			errors.Is(err, apiproto.ErrRemoteBoundedProbeNoAnswer)) {
 		return lostRestoreEnvDeadline
 	}
 	return lostRestoreEnvNone
@@ -133,6 +134,30 @@ func lostRestoreResourceErrno(err error) bool {
 		}
 	}
 	return false
+}
+
+// lostRestoreDeadlineProbeNoAnswer reports whether the chain carries the
+// deadline+sentinel signature of a bounded probe that did not answer inside
+// its bound — the signature the classifier's lostRestoreEnvDeadline arm
+// requires. Exported within the package so the HTTP layer can emit the
+// matching envelope code when an in-sandbox probe's failure crosses the wire:
+// the sentinel's errors.Is identity dies in serialization, so the code
+// carries the class the way lostRestoreResourceErrno does for the errno
+// class. The errno check ordering above still wins when both hold, mirroring
+// the classifier's own resource-wins-over-deadline ordering (a full disk
+// reads as both ErrProbeTimedOut and ENOSPC, but the errno class is the
+// stronger environmental signal — unbounded wait, not bounded) (#5295
+// review).
+func lostRestoreDeadlineProbeNoAnswer(err error) bool {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, sessiongit.ErrRelocateStateUnknown) ||
+		errors.Is(err, sessiongit.ErrWorktreeSetupStalled) ||
+		errors.Is(err, sessiongit.ErrSetupRemovalOwnershipUnproven) ||
+		errors.Is(err, sessiongit.ErrCommonDirProbeNoAnswer) ||
+		errors.Is(err, fsprobe.ErrProbeTimedOut) ||
+		errors.Is(err, sessiontmux.ErrTmuxServerNoAnswer)
 }
 
 // lostRestoreEnvironmentalErr is the bool form of
