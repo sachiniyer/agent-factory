@@ -173,6 +173,34 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) bool
 	return true
 }
 
+// TrackCodexReceiptPool bounds every rollout a resume WITHOUT an explicit id
+// could append to, recording each file's current size as its receipt
+// boundary. Codex picks `--last` (or a picker selection) by rules that move
+// between releases, so af does not predict the file: the briefing can only be
+// CONFIRMED from bytes appended past one of these offsets, and its absence
+// stays indeterminate rather than "never arrived" (#5486 direction change).
+//
+// The scoped pool is the snapshot's working-directory set plus files whose
+// session metadata cannot be classified — unclassifiable is unknown, not
+// foreign. unscoped (--all, the picker, an unprovable selector, or an
+// unprovable launch directory) covers the whole store and is stat-only: it
+// never reads transcript contents to decide membership.
+func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
+	files, err := codexRolloutFiles(s.codexHome)
+	if err != nil {
+		return
+	}
+	for path := range files {
+		if !unscoped && s.workingDir != "" {
+			if cwd, ok := codexRolloutWorkingDir(path); ok &&
+				pathutil.ResolveForCompare(cwd) != s.workingDir {
+				continue
+			}
+		}
+		s.TrackCodexReceiptRollout(path)
+	}
+}
+
 // expectCarriedCodexRollout tells capture that path holds conv's rollout,
 // placed there by af rather than minted by the replacement.
 func (s *ConversationCaptureSnapshot) expectCarriedCodexRollout(conv AgentConversationData, path string) {
@@ -452,69 +480,25 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {
-	cwd, _, ok := codexRolloutSessionMeta(path)
-	return cwd, ok
+	return codexRolloutSessionMeta(path)
 }
 
-// codexRolloutSessionSource returns the session_meta `source` of a rollout —
-// "cli", "vscode", "exec", "mcp", and friends — which Codex's resume listing
-// filters on. ok reports only that the header was classifiable, so callers
-// drop unclassifiable files the same way codexRolloutWorkingDir does.
-func codexRolloutSessionSource(path string) (string, bool) {
-	_, source, ok := codexRolloutSessionMeta(path)
-	return source, ok
-}
-
-func codexRolloutSessionMeta(path string) (cwd, source string, ok bool) {
+func codexRolloutSessionMeta(path string) (cwd string, ok bool) {
 	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
-		return "", "", false
+		return "", false
 	}
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Cwd    string          `json:"cwd"`
-			Source json.RawMessage `json:"source"`
+			Cwd string `json:"cwd"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line, &metadata); err != nil ||
 		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", "", false
+		return "", false
 	}
-	return metadata.Payload.Cwd, codexSessionSourceString(metadata.Payload.Source), true
-}
-
-// codexSessionSourceString unwraps the session_meta `source` when Codex wrote
-// it as a plain string ("cli", "exec", "mcp", ...). Data-bearing variants
-// serialize as objects instead — {"subagent":"review"}, {"internal":...} —
-// none of which is an interactive [cli, vscode] kind, so the empty result is
-// already the right answer for the resume filter. Crucially the odd shape
-// must not fail the metadata decode and take the valid cwd down with it
-// (#5486 review).
-func codexSessionSourceString(raw json.RawMessage) string {
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
-	}
-	return s
-}
-
-// codexInteractiveRollouts keeps only rollouts whose session_meta marks an
-// interactive session — the [cli, vscode] sourceKinds `codex resume --last`
-// and its picker list by default. Non-interactive sources (exec, mcp,
-// internal_*, subagent_*), an absent source, and files whose header cannot be
-// classified are all dropped, mirroring Codex's own resume listing, which
-// never offers them as resume targets (#5486 review).
-func codexInteractiveRollouts(paths []string) []string {
-	var keep []string
-	for _, path := range paths {
-		source, ok := codexRolloutSessionSource(path)
-		if !ok || (source != "cli" && source != "vscode") {
-			continue
-		}
-		keep = append(keep, path)
-	}
-	return keep
+	return metadata.Payload.Cwd, true
 }
 
 func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
@@ -543,8 +527,10 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 // whether exactly one candidate rollout recorded prompt as a user turn.
 // Candidates are the NEW rollout files correlated to the snapshot's launch
 // working directory — the same fail-closed rule capture uses — plus any
-// explicitly tracked paths (a `codex resume` target, which predates the
-// snapshot and so can never appear among new files, #5471 review). Attribution
+// tracked paths: a pinned `codex resume` target or the unpinned resume pool
+// (TrackCodexReceiptPool), each bounded at its size when tracking began
+// because the files predate the snapshot and so can never appear among new
+// rollouts (#5471 review, #5486 direction). Attribution
 // is the prompt match itself, not a previously pinned path: a candidate can
 // only be proven by recording the briefing, so a same-cwd sibling appearing
 // first cannot steal the identity (two config agents share AF home), and a
@@ -604,202 +590,56 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	}
 }
 
-// CodexResumedRolloutPath resolves the rollout file a `codex resume` command
-// will append to — the explicit conversation id, or the newest rollout for
-// --last. Codex scopes `--last` to the session's working directory (only
-// --all widens it), so workingDir is the launch's effective cwd; when it is
-// unknown the newest-file choice cannot be proven and the target stays
-// unresolved. resume reports whether program is a resume at all: a true
-// resume with an empty path means the target could not be identified (a bare
-// `codex resume` opens Codex's own picker; an id may match no rollout or
-// several), in which case a missing receipt can never be disproven and
-// verdicts must stay indeterminate rather than claiming never-arrived (#5471
-// review).
-func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string, resume bool) {
-	selector, resume := tmux.CodexResumeSelection(program)
-	if !resume {
-		return "", false
-	}
-	// A selector with no identifiable target opens Codex's own picker —
-	// resumable but unidentifiable; an unmodelled option is unprovable rather
-	// than guessed (same "resume, target unknown" result either way).
-	id, last, all, ok := tmux.CodexResumeTarget(selector)
-	if !ok || (id == "" && !last) {
-		return "", true
-	}
+// CodexRolloutPathByID resolves an explicit `codex resume <SESSION_ID>`
+// selector to its rollout file. Only an explicit id can pin the resumed file
+// at all: `--last`, the bare picker, and unmodelled selectors resolve by
+// Codex-side rules that move between releases (working-directory and source
+// filtering, provider, empty-thread exclusion, recorded recency), and a wrong
+// prediction only ever produces a false "never arrived" on a briefing that
+// did land. Those callers must instead bound the resume pool —
+// TrackCodexReceiptPool — and keep the verdict positive-only (#5486 direction
+// change). An id matching no rollout, or several, returns "": the target is
+// then unpinned, so a missing receipt can never be disproven and verdicts
+// must stay indeterminate rather than claiming never-arrived (#5471 review).
+func CodexRolloutPathByID(codexHome, id string) string {
 	files, err := codexRolloutFiles(codexHome)
 	if err != nil {
-		return "", true
+		return ""
 	}
-	if id != "" {
-		// An explicit SESSION_ID is the selector; Codex documents --last as the
-		// fallback "if omitted", so the id wins when both are present.
-		for file := range files {
-			if strings.EqualFold(codexConversationIDFromPath(file), id) {
-				if path != "" {
-					return "", true
-				}
-				path = file
+	var path string
+	for file := range files {
+		if strings.EqualFold(codexConversationIDFromPath(file), id) {
+			if path != "" {
+				return ""
 			}
-		}
-		return path, true
-	}
-	var pool []string
-	if all {
-		// --all disables --last's working-directory scope: the resumed
-		// file is the globally newest rollout, so filtering by cwd would
-		// track a different conversation's transcript (#5471 review).
-		pool = mapKeys(files)
-	} else {
-		if workingDir == "" {
-			return "", true
-		}
-		pool, _ = codexRolloutFilesForWorkingDir(mapKeys(files), pathutil.ResolveForCompare(workingDir))
-	}
-	// --last also filters the pool to interactive sessions: Codex lists
-	// resume candidates with sourceKinds [cli, vscode] and widens to
-	// exec/app-server only under --include-non-interactive (tui/src/lib.rs
-	// resume_source_kinds). That flag is already unmodelled above, so every
-	// --last reaching here is interactive-only — a same-cwd `codex exec`
-	// rollout can be newest by recorded recency yet is never Codex's pick,
-	// and must not win this selection either. A file whose session source
-	// cannot be classified is dropped the same way Codex's listing drops
-	// rollouts it cannot classify (#5486 review).
-	pool = codexInteractiveRollouts(pool)
-	// --last continues the most recently UPDATED session: codex-rs 0.164
-	// resolves it with ThreadSortKey::UpdatedAt (tui/src/lib.rs
-	// latest_session_lookup_params), anchored on the state DB's recorded
-	// last-write timestamp — not file mtime, which a touched, restored, or
-	// copied rollout can fake. Each rollout's own last event timestamp is
-	// that same recorded recency, readable without the DB (#5471 review).
-	// Files with no parseable record are skipped, mirroring how Codex's
-	// listing drops rollouts it cannot classify.
-	var newestEvent time.Time
-	for _, file := range pool {
-		ts, ok := codexRolloutLastEventTime(file)
-		if !ok {
-			continue
-		}
-		if path == "" || ts.After(newestEvent) ||
-			(ts.Equal(newestEvent) && filepath.Base(file) > filepath.Base(path)) {
-			path, newestEvent = file, ts
+			path = file
 		}
 	}
-	return path, true
-}
-
-// codexRolloutTailReadCap bounds the tail window read to recover a rollout's
-// last recorded event timestamp.
-const codexRolloutTailReadCap = 1 << 20
-
-func codexRolloutLastEventTime(path string) (time.Time, bool) {
-	file, err := openCodexRollout(path)
-	if err != nil {
-		return time.Time{}, false
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil || info.Size() == 0 {
-		return time.Time{}, false
-	}
-	// Scan backward in bounded windows so neither a huge rollout nor a single
-	// record larger than the window lands whole in memory. A segment counts
-	// as a record start only when a newline precedes it (or the scan reaches
-	// offset 0); segments inside a record are skipped, and the record's own
-	// start — with its timestamp — surfaces when the scan walks far enough
-	// left (#5486 review). A start near a window edge can have its leading
-	// timestamp split across two windows, so a bounded prefix of each
-	// mid-record fragment is carried into the earlier window to complete the
-	// head that window's last segment truncated. Runs only at spawn-time
-	// target resolution.
-	var one [1]byte
-	var carry []byte
-	for end := info.Size(); end > 0; {
-		start := end - codexRolloutTailReadCap
-		if start < 0 {
-			start = 0
-		}
-		buf := make([]byte, end-start)
-		if _, err := file.ReadAt(buf, start); err != nil {
-			return time.Time{}, false
-		}
-		lines := bytes.Split(buf, []byte{'\n'})
-		var carryNext []byte
-		for i := len(lines) - 1; i >= 0; i-- {
-			seg := lines[i]
-			if i == 0 && start > 0 {
-				if _, err := file.ReadAt(one[:], start-1); err != nil || one[0] != '\n' {
-					// A mid-record fragment: the record's start lives in an
-					// earlier window, whose matching tail segment may end
-					// mid-timestamp at this boundary. Carry a bounded prefix
-					// so that window can complete the head.
-					carryNext = seg[:min(len(seg), codexLineTimestampHeadCap)]
-					break
-				}
-			}
-			if i == len(lines)-1 && len(carry) > 0 && len(seg) < codexLineTimestampHeadCap {
-				n := min(len(carry), codexLineTimestampHeadCap-len(seg))
-				seg = append(seg[:len(seg):len(seg)], carry[:n]...)
-			}
-			if ts, ok := codexLineTimestamp(seg); ok {
-				return ts, true
-			}
-		}
-		carry = carryNext
-		end = start
-	}
-	return time.Time{}, false
-}
-
-// codexTimestampField matches the record's leading timestamp; it is the first
-// JSON key Codex writes on every event line, ahead of any payload content.
-var codexTimestampField = regexp.MustCompile(`"timestamp"\s*:\s*"([^"]+)"`)
-
-// codexLineTimestampHeadCap bounds the head bytes searched for a record's
-// timestamp — the field is the record's first key — and caps the fragment
-// bytes the backward scan carries across a window boundary: only a head
-// worth of continuation can ever matter to the search.
-const codexLineTimestampHeadCap = 16 << 10
-
-// codexLineTimestamp returns the timestamp of the JSONL record beginning at
-// line. Only a bounded head is searched — the field is the record's first
-// key, so truncation past it cannot hide the value, and a windowed scan can
-// call this on a segment that runs past the buffer's right edge.
-func codexLineTimestamp(line []byte) (time.Time, bool) {
-	head := line
-	if len(head) > codexLineTimestampHeadCap {
-		head = head[:codexLineTimestampHeadCap]
-	}
-	m := codexTimestampField.FindSubmatch(bytes.TrimSpace(head))
-	if m == nil {
-		return time.Time{}, false
-	}
-	ts, err := time.Parse(time.RFC3339Nano, string(m[1]))
-	return ts, err == nil
-}
-
-func mapKeys(set map[string]struct{}) []string {
-	keys := make([]string, 0, len(set))
-	for key := range set {
-		keys = append(keys, key)
-	}
-	return keys
+	return path
 }
 
 func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) {
-	data, err := readCodexRollout(path)
+	file, err := openCodexRollout(path)
 	if err != nil {
 		return false, err
 	}
+	defer file.Close()
+
 	// Only turns appended after the boundary can be this launch's receipt: a
 	// tracked `codex resume` rollout can already hold the identical briefing
 	// from an earlier run (#5471 review). Events are appended as whole JSONL
-	// lines, so a size snapshot at track time lands on a line boundary.
-	if fromOffset > int64(len(data)) {
-		return false, nil
+	// lines, so a size snapshot at track time lands on a line boundary —
+	// seek to it rather than reading the whole transcript, whose pre-launch
+	// history can be arbitrarily large (#5486 review). A shrunken file leaves
+	// the seek past the end and reads empty, the same "no receipt" answer
+	// the length check gave.
+	if _, err := file.Seek(fromOffset, io.SeekStart); err != nil {
+		return false, fmt.Errorf("seek Codex rollout %s: %w", path, err)
 	}
-	data = data[fromOffset:]
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return false, fmt.Errorf("read Codex rollout %s: %w", path, err)
+	}
 	normalizedPrompt := normalizedReceiptPrompt(prompt)
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -857,20 +697,6 @@ func openCodexRollout(path string) (*os.File, error) {
 		return nil, fmt.Errorf("read Codex rollout %s: not a regular file (%s)", path, info.Mode().Type())
 	}
 	return file, nil
-}
-
-func readCodexRollout(path string) ([]byte, error) {
-	file, err := openCodexRollout(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
-	}
-	return data, nil
 }
 
 // codexSessionMetaReadCap bounds the bytes working-directory classification

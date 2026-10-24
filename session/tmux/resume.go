@@ -357,19 +357,21 @@ func CodexResumeSelection(command string) (selector []string, resume bool) {
 
 // CodexResumeTarget models the target of a CodexResumeSelection: the session
 // id positional, and the --last / --all modifiers that select the newest
-// rollout when no id is given (Codex documents SESSION_ID as the selector and
-// --last as its fallback "if omitted"). Flags may sit in any order, and
-// resume accepts the shared global options, so value-taking operands are
-// consumed before the first bare token is read as the id. It reports ok=false
-// when the selector carries an option af cannot model — including resume's
-// own --include-non-interactive, which widens --last's pool to sessions the
-// rollout set cannot distinguish — so the caller treats the target as
-// unprovable instead of guessing (#5471 review).
+// rollout when no id is given. Under --last Codex's parser reinterprets the
+// positional as the initial prompt (cli/src/main.rs) — never a session id —
+// so it is consumed but never returned as id; a uuid-shaped prompt must not
+// pin a rollout (#5486 review). Flags may sit in any order, and resume
+// accepts the shared global options, so value-taking operands are consumed
+// before the first bare token is read as the id. It reports ok=false when
+// the selector carries an option af cannot model — including resume's own
+// --include-non-interactive — so the caller treats the target as unprovable
+// instead of guessing (#5471 review).
 func CodexResumeTarget(selector []string) (id string, last, all, ok bool) {
 	args := selector
 	if len(args) > 0 && args[0] == "resume" {
 		args = args[1:]
 	}
+	var positional string
 	for idx := 0; idx < len(args); idx++ {
 		tok := args[idx]
 		switch {
@@ -382,11 +384,43 @@ func CodexResumeTarget(selector []string) (id string, last, all, ok bool) {
 			idx++
 		case strings.HasPrefix(tok, "-"):
 			return "", false, false, false
-		case id == "":
-			id = tok
+		case positional == "":
+			positional = tok
 		}
 	}
-	return id, last, all, true
+	if last {
+		// `codex resume --last <X>` takes X as the initial prompt; the id
+		// shape is unreachable here.
+		positional = ""
+	}
+	return positional, last, all, true
+}
+
+// CodexResumeRunsRemote reports whether command routes Codex through a remote
+// app-server endpoint: `--remote <endpoint>` is a global option that converts
+// the launch into a remote client (cli/src/main.rs), so its resume writes its
+// rollout remotely — the local CODEX_HOME can never carry that receipt and a
+// remote resume must not resolve against the local store (#5486 review).
+// Global options are position-independent, so the scan walks every token
+// after the codex word — both the pre-subcommand region and the resume
+// selector — while consuming option values so `--remote` as a -c operand can
+// never be mistaken for the flag.
+func CodexResumeRunsRemote(command string) bool {
+	tokens, _ := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
+		return false
+	}
+	for idx := agentIdx + 1; idx < len(tokens); idx++ {
+		tok := tokens[idx]
+		switch {
+		case tok == "--remote" || strings.HasPrefix(tok, "--remote="):
+			return true
+		case codexGlobalOptionTakesValue(tok):
+			idx++
+		}
+	}
+	return false
 }
 
 // codexSubcommandIndex returns the first Codex subcommand or prompt token

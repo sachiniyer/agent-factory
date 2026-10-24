@@ -365,11 +365,14 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// one on a busy box (#5471).
 	agent := tmux.DetectAgentFromCommand(req.Program)
 	var promptReceipt session.ConversationCaptureSnapshot
-	// resumedUntracked marks a `codex resume` launch whose target rollout could
-	// not be identified: the resumed file predates the snapshot, so absence
-	// from the new-rollout set proves nothing and "never arrived" would be a
-	// false verdict (#5471 review).
-	var resumedUntracked bool
+	// resumePositiveOnly keeps an unpinned resume's receipt verdict from ever
+	// claiming "never arrived": af does not predict which rollout Codex will
+	// resume into — its selection rules (cwd, source, provider, empty threads,
+	// recency) move between releases — so a briefing is confirmed only from
+	// bytes appended after launch inside the resume pool, and its absence
+	// stays indeterminate (#5486 direction). Only an explicit-id resume that
+	// resolves to and bounds its own file keeps the hard verdict.
+	var resumePositiveOnly bool
 	// isCodexResume additionally suppresses the pane excerpt: a resumed pane
 	// can still show the previous conversation — arbitrary private text a
 	// credential scrubber cannot recognize (#5471 review).
@@ -390,10 +393,35 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 			launchDir = launch.WorkingDir
 		}
 		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launchDir)
-		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program, launchDir); resume {
+		if selector, resume := tmux.CodexResumeSelection(req.Program); resume {
 			isCodexResume = true
-			if path == "" || !promptReceipt.TrackCodexReceiptRollout(path) {
-				resumedUntracked = true
+			resumePositiveOnly = true
+			id, _, all, ok := tmux.CodexResumeTarget(selector)
+			switch {
+			case tmux.CodexResumeRunsRemote(req.Program):
+				// A --remote resume writes its rollout on the remote
+				// app-server endpoint, never into the local CODEX_HOME —
+				// tracking a local file could only misattribute (#5486
+				// review). Checked before the unmodelled-selector branch so a
+				// remote flag keeps resolving nothing locally either way.
+			case !ok:
+				// A selector af cannot model could still launch a resumable
+				// session: bound the whole store so post-launch appends can
+				// confirm, and keep the verdict indeterminate.
+				promptReceipt.TrackCodexReceiptPool(true)
+			case id != "":
+				// An explicit SESSION_ID pins the rollout deterministically;
+				// a resolved and bounded path keeps the hard verdict.
+				if path := session.CodexRolloutPathByID(codexHome, id); path != "" &&
+					promptReceipt.TrackCodexReceiptRollout(path) {
+					resumePositiveOnly = false
+				}
+			default:
+				// --last (scoped to the launch directory unless --all) and
+				// the bare picker: every rollout the resume could append to
+				// is bounded at its current size; only bytes appended past
+				// those offsets can confirm.
+				promptReceipt.TrackCodexReceiptPool(all)
 			}
 		}
 	}
@@ -517,6 +545,12 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 					if errors.Is(err, session.ErrPromptReceiptUndecidable) {
 						descriptor = "still undecidable"
 					}
+					if resumePositiveOnly && errors.Is(err, session.ErrPromptReceiptNotObserved) {
+						// An unpinned resume can only ever confirm — its absence
+						// from the appended ranges is indeterminate, never a
+						// negative (#5486 direction change).
+						descriptor = "indeterminate (the resumed rollout is not pinned to an identifiable file)"
+					}
 					m.info().Printf(
 						"config agent: %s briefing receipt was %s within %s (%v)",
 						sessionName, descriptor, configAgentPromptReceiptTimeout, err,
@@ -546,6 +580,17 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							)
 							return
 						}
+						if errors.Is(lateErr, session.ErrPromptReceiptAmbiguous) {
+							// Two rollouts recorded the briefing — a durable,
+							// non-negative answer a later re-check cannot change.
+							m.warn().Printf(
+								"config agent: %s briefing receipt is ambiguous %s after delivery: %v",
+								sessionName,
+								time.Since(briefingDeliveredAt).Round(100*time.Millisecond),
+								lateErr,
+							)
+							return
+						}
 						if !errors.Is(lateErr, session.ErrPromptReceiptNotObserved) && !errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
 							m.warn().Printf(
 								"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
@@ -556,6 +601,9 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 						descriptor := "not observed"
 						if errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
 							descriptor = "undecidable"
+						}
+						if resumePositiveOnly && errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+							descriptor = "indeterminate (the resumed rollout is not pinned to an identifiable file)"
 						}
 						m.warn().Printf(
 							"config agent: %s briefing receipt was still %s after %s (%v); delivery remains unconfirmed",
@@ -620,12 +668,13 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 								sessionName, elapsed,
 							)
 						case errors.Is(finalErr, session.ErrPromptReceiptNotObserved):
-							if resumedUntracked {
-								// The resumed rollout could not be identified,
-								// so absence from the new-file set cannot disprove
-								// delivery — an indeterminate result, not never.
+							if resumePositiveOnly {
+								// The resume target is not pinned to one
+								// rollout, so its absence from the appended
+								// ranges cannot disprove delivery — an
+								// indeterminate result, not never (#5486).
 								m.warn().Printf(
-									"config agent: %s briefing receipt could not be verified; the resumed rollout was not identifiable %s after delivery",
+									"config agent: %s briefing receipt could not be verified; the resumed rollout is not pinned to an identifiable file %s after delivery",
 									sessionName, elapsed,
 								)
 							} else {
@@ -634,6 +683,11 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 									sessionName, elapsed,
 								)
 							}
+						case errors.Is(finalErr, session.ErrPromptReceiptAmbiguous):
+							m.warn().Printf(
+								"config agent: %s briefing receipt is ambiguous %s after delivery: %v",
+								sessionName, elapsed, finalErr,
+							)
 						default:
 							m.warn().Printf(
 								"config agent: %s late receipt re-check could not determine the outcome: %v",

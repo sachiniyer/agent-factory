@@ -627,77 +627,48 @@ func TestTrackCodexReceiptRollout_UnstattablePathRefuses(t *testing.T) {
 	require.False(t, snap.TrackCodexReceiptRollout(filepath.Join(t.TempDir(), "gone.jsonl")))
 }
 
-// CodexResumedRolloutPath maps a `codex resume` launch onto the rollout it
-// will append to — the named conversation id, or the newest same-directory
-// file for --last, which Codex scopes to the session cwd — and reports
-// "resume, but target unknown" rather than guessing when the target cannot be
-// identified (#5471 review).
-func TestCodexResumedRolloutPath(t *testing.T) {
+// CodexRolloutPathByID resolves only an explicit `codex resume <SESSION_ID>`
+// selector: filename holds the id verbatim, the working-directory filter does
+// not apply to a named id, and an id that matches no rollout — or several —
+// resolves to nothing rather than guessing (#5471 review, #5486 direction).
+func TestCodexRolloutPathByID(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	otherDir := t.TempDir()
-	// Three orderings disagree deliberately. Filename timestamps give the
-	// creation order stale > foreign > older > recent; mtimes make stale
-	// the freshest; the last recorded event gives foreign > recent > older
-	// = stale. Codex 0.164 resolves --last by ThreadSortKey::UpdatedAt —
-	// the recorded recency, immune to mtime bumps — so --last must pick
-	// `recent` (created-oldest, updated-newest in cwd) and --all `foreign`.
-	older := writeCodexRolloutFileWithCwd(t, codexHome,
+	mine := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	recent := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-34-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir)
-	stale := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-39-059f386f-7206-7fc2-803b-f7045e07a246.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", otherDir)
-	for path, ts := range map[string]string{
-		older:   "2026-07-06T10:17:35Z",
-		recent:  "2026-07-06T10:17:38Z",
-		stale:   "2026-07-06T10:17:35Z",
-		foreign: "2026-07-06T10:17:39Z",
-	} {
-		appendCodexRolloutEvent(t, path, map[string]any{"timestamp": ts})
-	}
-	require.NoError(t, os.Chtimes(stale, time.Now(), time.Now()))
+	// Two distinct filenames can carry the same conversation id only by
+	// corruption or a race mid-rename; either way the id cannot pin one file.
+	dupID := "059f386f-7206-7fc2-803b-f7045e07a246"
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-38-"+dupID+".jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-39-"+dupID+".jsonl", workDir)
 
 	for _, tc := range []struct {
-		name       string
-		program    string
-		workingDir string
-		wantPath   string
-		wantResume bool
+		name string
+		id   string
+		want string
 	}{
-		{"not a codex command", "claude --resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, "", false},
-		{"plain codex", "codex", workDir, "", false},
-		{"explicit id", "codex resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"id ignores the cwd filter", "codex resume 039f386f-7206-7fc2-803b-f7045e07a244", workDir, foreign, true},
-		{"id after global flags", "codex -c check_for_update_on_startup=false resume 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"latest picks most recently updated in cwd", "codex resume --last", workDir, recent, true},
-		{"latest --all picks globally newest update", "codex resume --last --all", workDir, foreign, true},
-		{"all before last still unscoped", "codex resume --all --last", workDir, foreign, true},
-		{"latest through an env wrapper", "env FOO=1 codex resume --last", workDir, recent, true},
-		{"latest without a cwd is unresolvable", "codex resume --last", "", "", true},
-		{"bare resume opens the picker", "codex resume", workDir, "", true},
-		{"unknown id", "codex resume 00000000-0000-0000-0000-000000000000", workDir, "", true},
-		{"id beats --last", "codex resume --last 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"option value is not an id", "codex resume -m gpt-5 --last", workDir, recent, true},
-		{"option value before an id", "codex resume -m gpt-5 019f386f-7206-7fc2-803b-f7045e07a242", workDir, older, true},
-		{"attached option value", "codex resume --model=gpt-5 --last", workDir, recent, true},
-		{"unmodelled flag is unprovable", "codex resume --include-non-interactive --last", workDir, "", true},
+		{"explicit id", "019f386f-7206-7fc2-803b-f7045e07a242", mine},
+		{"id ignores the cwd filter", "039f386f-7206-7fc2-803b-f7045e07a244", foreign},
+		{"uppercase id still matches", "019F386F-7206-7FC2-803B-F7045E07A242", mine},
+		{"unknown id resolves nothing", "00000000-0000-0000-0000-000000000000", ""},
+		{"duplicated id is unpinnable", dupID, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path, resume := CodexResumedRolloutPath(codexHome, tc.program, tc.workingDir)
-			require.Equal(t, tc.wantResume, resume)
-			require.Equal(t, tc.wantPath, path)
+			require.Equal(t, tc.want, CodexRolloutPathByID(codexHome, tc.id))
 		})
 	}
 }
 
-// `codex resume --last` is scoped to the session's working directory: when
-// the globally newest rollout belongs to another cwd it is NOT the resumed
-// conversation, and tracking it would scan a stranger's transcript (#5471
-// review).
-func TestCodexResumedRolloutPath_LastIsWorkingDirScoped(t *testing.T) {
+// TrackCodexReceiptPool's scoped set is the snapshot's working directory PLUS
+// every rollout whose session metadata cannot be classified — unclassifiable
+// is unknown, never proven foreign (#5471 review, #5486). Only a rollout whose
+// meta positively reports another cwd is left out.
+func TestTrackCodexReceiptPool_ScopedKeepsUnknownRollouts(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	otherDir := t.TempDir()
@@ -705,124 +676,126 @@ func TestCodexResumedRolloutPath_LastIsWorkingDirScoped(t *testing.T) {
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
 	foreign := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", otherDir)
-	appendCodexRolloutEvent(t, mine, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
-	appendCodexRolloutEvent(t, foreign, map[string]any{"timestamp": "2026-07-06T10:17:36Z"})
-	stale := time.Now().Add(-time.Hour)
-	require.NoError(t, os.Chtimes(mine, stale, stale))
+	// No classifiable session_meta at all: predates the field, still being
+	// written, or malformed — the pool must keep it either way.
+	unknown := writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-37-039f386f-7206-7fc2-803b-f7045e07a244.jsonl")
 
-	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
-	require.True(t, resume)
-	require.Equal(t, mine, path,
-		"a newer rollout in another working directory is not what --last resumes")
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+
+	tracked := make(map[string]bool, len(snap.receiptPaths))
+	for _, tr := range snap.receiptPaths {
+		tracked[tr.path] = true
+	}
+	require.True(t, tracked[mine], "same-directory rollout must be in the pool")
+	require.True(t, tracked[unknown],
+		"unclassifiable metadata is unknown, not foreign — the pool must keep it")
+	require.False(t, tracked[foreign],
+		"a rollout proven to another working directory is out of scope")
 }
 
-// `codex resume --last` picks only INTERACTIVE sessions: Codex lists resume
-// candidates with sourceKinds [cli, vscode] and adds exec/app-server only
-// under --include-non-interactive (tui/src/lib.rs resume_source_kinds — itself
-// unmodelled above, so af never reaches this code for that flag). A `codex
-// exec` rollout in the same cwd can hold the newest recorded event yet is
-// never the resumed conversation; tracking it would watch the wrong file
-// while the briefing lands in the real target (#5486 review).
-func TestCodexResumedRolloutPath_LastSkipsNonInteractive(t *testing.T) {
+// The unscoped pool (--all, the picker, an unprovable selector or launch
+// directory) is stat-only: membership never reads a byte of transcript, so a
+// rollout whose contents cannot be read at all still gets bounded by its
+// size (#5486 approval notes).
+func TestTrackCodexReceiptPool_UnscopedIsStatOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not constrain root")
+	}
+	codexHome := t.TempDir()
+	// An unreadable rollout: any membership rule that touched contents would
+	// fail to classify it; the stat-only pool must bound it anyway.
+	unreadable := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", t.TempDir())
+	require.NoError(t, os.Chmod(unreadable, 0))
+	info, err := os.Stat(unreadable)
+	require.NoError(t, err)
+
+	snap := BeginConversationCaptureAtCodexHome(codexHome)
+	snap.TrackCodexReceiptPool(true)
+
+	require.Len(t, snap.receiptPaths, 1)
+	require.Equal(t, unreadable, snap.receiptPaths[0].path)
+	require.Equal(t, info.Size(), snap.receiptPaths[0].offset,
+		"the recorded boundary is the stat size — no contents were needed")
+}
+
+// A briefing appended to a pool rollout AFTER tracking confirms the receipt;
+// the same bytes already present before tracking cannot — the offset boundary
+// is what keeps an earlier run's identical turn from counting (#5471 review).
+func TestTrackCodexReceiptPool_ConfirmsOnlyAppendedBytes(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
-	interactive := writeCodexRolloutFileWithCwd(t, codexHome,
+	// The resumed conversation may already hold the identical briefing from an
+	// earlier run — bytes present before the boundary must not confirm.
+	stale := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	execRollout := writeCodexRolloutFileWithSource(t, codexHome,
-		"rollout-2026-07-06T10-17-38-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir, "exec")
-	noSource := writeCodexRolloutFileWithSource(t, codexHome,
-		"rollout-2026-07-06T10-17-39-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", workDir, nil)
+	appendCodexRolloutEvent(t, stale, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	resumed := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"the briefing byte-identical to a pre-launch turn must not count as this launch's receipt")
+
+	appendCodexRolloutEvent(t, resumed, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"bytes appended past a pool offset are this launch's receipt")
+}
+
+// Two pool rollouts that both record the briefing after launch stay
+// non-negative: the verdict is ambiguous, never "not observed" — for an
+// unpinned resume a negative would be a lie about an unpinned file (#5486
+// approval notes).
+func TestWaitForPromptReceipt_UnpinnedPoolTwoMatchesStayNonNegative(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	first := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	second := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+
+	for _, path := range []string{first, second} {
+		appendCodexRolloutEvent(t, path, map[string]any{
+			"type":    "event_msg",
+			"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+		})
+	}
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
+		"two post-launch matches must surface as ambiguous")
+	require.NotErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"two post-launch matches must never report not-observed")
+}
+
+// Codex serializes data-bearing SessionSource variants as objects — a
+// subagent rollout's session_meta carries "source":{"subagent":"review"} —
+// and decoding that into a string field must not lose the rollout's cwd or
+// a same-cwd subagent stays uncorrelatable forever (#5486 review).
+func TestCodexRolloutWorkingDir_ObjectSourceKeepsCwd(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
 	subagent := writeCodexRolloutFileWithSource(t, codexHome,
 		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
 		map[string]any{"subagent": "review"})
-	appendCodexRolloutEvent(t, interactive, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
-	appendCodexRolloutEvent(t, execRollout, map[string]any{"timestamp": "2026-07-06T10:17:38Z"})
-	appendCodexRolloutEvent(t, noSource, map[string]any{"timestamp": "2026-07-06T10:17:39Z"})
-	appendCodexRolloutEvent(t, subagent, map[string]any{"timestamp": "2026-07-06T10:17:40Z"})
 
-	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
-	require.True(t, resume)
-	require.Equal(t, interactive, path,
-		"a newer same-cwd exec or source-less rollout is not a --last candidate")
-
-	path, resume = CodexResumedRolloutPath(codexHome, "codex resume --last --all", workDir)
-	require.True(t, resume)
-	require.Equal(t, interactive, path,
-		"--all widens the pool globally but does not add non-interactive sources")
-
-	// The object-shaped source must not fail the metadata decode: the
-	// subagent rollout's cwd still classifies (it is excluded by the
-	// interactive predicate, not by losing its cwd) — a same-cwd subagent
-	// otherwise stays uncorrelatable forever (#5486 review).
 	cwd, ok := codexRolloutWorkingDir(subagent)
 	require.True(t, ok, "an object-shaped source must not discard a valid cwd")
 	require.Equal(t, workDir, cwd)
-}
-
-// A rollout whose LAST record is larger than the tail read cap still has a
-// last recorded event — it is just more than a window back. Codex's listing
-// knows that session's recency, so --last must not silently fall through to
-// an older rollout merely because the newest one's final line is huge
-// (#5486 review).
-func TestCodexResumedRolloutPath_LastHandlesOversizedFinalRecord(t *testing.T) {
-	codexHome := t.TempDir()
-	workDir := t.TempDir()
-	older := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	big := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-34-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
-	appendCodexRolloutEvent(t, older, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
-	// The newest recorded event is a single JSONL line larger than the tail
-	// read cap: the window opens inside it, so a tail-only scan finds no
-	// line boundary at all. Written timestamp-first like every real Codex
-	// record — a map-marshal would sort the field to the end of the line,
-	// which is not the shape Codex produces.
-	bigRecord := []byte(`{"timestamp":"2026-07-06T10:17:36Z","payload":{"data":"` +
-		strings.Repeat("x", codexRolloutTailReadCap+1024) + `"}}`)
-	require.Greater(t, len(bigRecord), codexRolloutTailReadCap)
-	f, err := os.OpenFile(big, os.O_APPEND|os.O_WRONLY, 0644)
-	require.NoError(t, err)
-	_, err = f.Write(append(bigRecord, '\n'))
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
-	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
-	require.True(t, resume)
-	require.Equal(t, big, path,
-		"a rollout ending in an oversized record still has recency and must win --last")
-}
-
-// A final record of exactly tailCap+10 bytes starts 11 bytes before the
-// end-relative window boundary: its head fragment ends inside the leading
-// `"timestamp"` field (no closing quote for the regex) and the continuation
-// lands in the next window as a mid-record fragment — parsed in neither.
-// The backward scan must carry the partial fragment across the boundary or
-// this rollout silently loses --last to an older one (#5486 review).
-func TestCodexResumedRolloutPath_LastHandlesTimestampSplitAcrossWindows(t *testing.T) {
-	codexHome := t.TempDir()
-	workDir := t.TempDir()
-	older := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	split := writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-34-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
-	appendCodexRolloutEvent(t, older, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
-	// Exactly cap+10 bytes: meta line + record + '\n' makes the file size
-	// metaLen+cap+12, so the last window boundary sits 11 bytes into the
-	// record — inside `{"timestamp":"..."`.
-	prefix := `{"timestamp":"2026-07-06T10:17:36Z","payload":{"data":"`
-	record := []byte(prefix +
-		strings.Repeat("x", codexRolloutTailReadCap+10-len(prefix)-2) + `"}`)
-	require.Equal(t, codexRolloutTailReadCap+10, len(record))
-	f, err := os.OpenFile(split, os.O_APPEND|os.O_WRONLY, 0644)
-	require.NoError(t, err)
-	_, err = f.Write(append(record, '\n'))
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
-	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
-	require.True(t, resume)
-	require.Equal(t, split, path,
-		"a rollout whose final record's timestamp straddles a read window still has recency")
 }
 
 // A store that cannot be enumerated is not an empty store: the late re-check's

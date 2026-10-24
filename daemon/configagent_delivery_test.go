@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -413,8 +415,13 @@ func runConfigAgentCodexFixture(mode string) error {
 	if err != nil {
 		return fmt.Errorf("encode fake Codex session_meta: %w", err)
 	}
-	if err := os.WriteFile(rollout, append(meta, '\n'), 0600); err != nil {
-		return fmt.Errorf("create fake Codex rollout: %w", err)
+	// A pre-seeded rollout models `codex resume` in place: the same file keeps
+	// its history and takes new turns appended (#4367 measured the real
+	// behavior), so the fixture must not truncate it away.
+	if _, statErr := os.Stat(rollout); errors.Is(statErr, os.ErrNotExist) {
+		if err := os.WriteFile(rollout, append(meta, '\n'), 0600); err != nil {
+			return fmt.Errorf("create fake Codex rollout: %w", err)
+		}
 	}
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -731,6 +738,198 @@ func TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout(t *testing.T) {
 		"a same-cwd sibling rollout must not make the late re-check ambiguous")
 	require.NotContains(t, warnings.String(), "late receipt re-check could not determine")
 	require.NotContains(t, warnings.String(), "briefing receipt never arrived")
+}
+
+// newConfigAgentCodexResumeFixture builds the same fake Codex as
+// newConfigAgentCodexFixture but through a wrapper SCRIPT so the program
+// string can carry `resume` argv the test binary's own flag parsing would
+// reject. It also pre-seeds the deterministic rollout — a resumed rollout
+// predates the receipt snapshot by definition — with session_meta bound to
+// the AF home the pane launches in. Returns the manager, the codex binary
+// path (to which the caller appends the resume selector), and the rollout
+// path.
+func newConfigAgentCodexResumeFixture(t *testing.T, mode string) (*Manager, string, string) {
+	t.Helper()
+	afHome := testguard.SocketTempDir(t)
+	codexHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv(configAgentCodexFixtureEnv, "1")
+	t.Setenv(configAgentCodexFixtureModeEnv, mode)
+
+	binDir := testguard.SocketTempDir(t)
+	codexBin := filepath.Join(binDir, "codex")
+	script := "#!/bin/sh\nexec " + shSingleQuote(os.Args[0]) +
+		" -test.run=^TestConfigAgentCodexFixtureProcess$\n"
+	require.NoError(t, os.WriteFile(codexBin, []byte(script), 0755))
+
+	rollout := configAgentCodexFixtureRollout(codexHome)
+	require.NoError(t, os.MkdirAll(filepath.Dir(rollout), 0755))
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": pathutil.ResolveForCompare(afHome)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rollout, append(meta, '\n'), 0600))
+
+	cfg := config.DefaultConfig()
+	cfg.SessionEnvPassthrough = []string{configAgentCodexFixtureEnv, configAgentCodexFixtureModeEnv}
+	require.NoError(t, config.SaveConfig(cfg))
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	return manager, codexBin, rollout
+}
+
+// TestConfigAgentResumeLastConfirmsBriefingFromPool is the #5486 direction:
+// `codex resume --last` no longer predicts WHICH rollout Codex reopens — a
+// newer same-directory rollout with no turns is exactly the empty-thread trap
+// every naive "newest" pick falls for — so af bounds the whole same-directory
+// pool at each file's current size, and the briefing appended to the resumed
+// file confirms the receipt on its own post-launch bytes.
+func TestConfigAgentResumeLastConfirmsBriefingFromPool(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, codexBin, rollout := newConfigAgentCodexResumeFixture(t, "accept")
+	_, warnings := captureConfigAgentReceiptLogs(t)
+
+	// The empty-thread trap: a newer same-directory rollout with no recorded
+	// turns. Any prediction of Codex's selection rules can land here; the pool
+	// covers both files so the receipt needs no prediction.
+	trap := filepath.Join(os.Getenv("CODEX_HOME"),
+		"sessions", "2026", "07", "21",
+		"rollout-2026-07-21T23-59-59-039f386f-7206-7fc2-803b-f7045e07a244.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(trap), 0755))
+	trapMeta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": pathutil.ResolveForCompare(os.Getenv("AGENT_FACTORY_HOME"))},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(trap, append(trapMeta, '\n'), 0600))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: codexBin + " resume --last",
+		Prompt:  "briefing recorded on the resumed rollout",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Empty(t, warnings.String(),
+		"a receipt confirmed inside the pool must not warn")
+	data, err := os.ReadFile(rollout)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "briefing recorded on the resumed rollout",
+		"the resumed rollout must carry the appended briefing turn")
+	require.Equal(t, 1, strings.Count(string(data), "session_meta"),
+		"the resumed rollout kept its history — the fixture appended, not truncated")
+}
+
+// TestConfigAgentResumeLastUnconfirmedStaysIndeterminate is the positive-only
+// verdict: when the resumed rollout never records the briefing the result is
+// indeterminate, not "never arrived" — af cannot pin which file Codex
+// reopened, so absence from the appended ranges disproves nothing (#5486).
+func TestConfigAgentResumeLastUnconfirmedStaysIndeterminate(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, codexBin, _ := newConfigAgentCodexResumeFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		1500*time.Millisecond, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: codexBin + " resume --last",
+		Prompt:  "briefing the resumed receiver never records",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Contains(t, info.String(),
+		"briefing receipt was indeterminate (the resumed rollout is not pinned to an identifiable file) within 250ms",
+		"the initial window already knows an unpinned resume cannot go negative")
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(),
+			"briefing receipt could not be verified; the resumed rollout is not pinned to an identifiable file")
+	}, 6*time.Second, 50*time.Millisecond,
+		"an unpinned resume must end indeterminate at the late re-check")
+	require.NotContains(t, warnings.String(), "never arrived",
+		"an unpinned resume can never support a never-arrived verdict")
+}
+
+// TestConfigAgentResumeRemoteIgnoresLocalRollout covers `--remote`: the
+// resume runs against a remote app-server endpoint, so the local CODEX_HOME
+// can never carry its receipt — even when, as the fixture does here, a
+// same-named local rollout does record the briefing bytes. af must not
+// resolve a remote launch against the local store: the verdict stays
+// indeterminate (#5486 review).
+func TestConfigAgentResumeRemoteIgnoresLocalRollout(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, codexBin, rollout := newConfigAgentCodexResumeFixture(t, "accept")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		1500*time.Millisecond, 250*time.Millisecond)
+
+	const prompt = "briefing a remote resume writes remotely"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: codexBin + " --remote ws://endpoint.invalid resume --last",
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// The fixture still appends the turn to the local rollout — proving the
+	// indeterminate verdict comes from refusing to resolve a remote launch
+	// against the local store, not from the bytes being absent.
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(rollout)
+		return err == nil && strings.Contains(string(data), prompt)
+	}, 3*time.Second, 25*time.Millisecond,
+		"the fixture itself must still record the turn locally")
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(),
+			"briefing receipt could not be verified; the resumed rollout is not pinned to an identifiable file")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a remote resume must never resolve against the local store")
+	require.NotContains(t, warnings.String(), "never arrived")
+	require.NotContains(t, info.String(), "receipt confirmed",
+		"bytes in the local rollout must not confirm a remote resume")
+}
+
+// TestConfigAgentResumeExplicitIdKeepsHardVerdict: `codex resume <id>` pins
+// the rollout by name, so a bounded explicit target keeps the full
+// never-arrived verdict — only UNPINNED resumes are positive-only (#5486).
+func TestConfigAgentResumeExplicitIdKeepsHardVerdict(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, codexBin, _ := newConfigAgentCodexResumeFixture(t, "drop")
+	_, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		1500*time.Millisecond, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		// 019f386f-… is the fixture rollout's own id — the resume is pinned.
+		Program: codexBin + " resume 019f386f-7206-7fc2-803b-f7045e07a242",
+		Prompt:  "briefing the pinned receiver never records",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt never arrived; still unobserved")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a pinned resume target keeps the hard never-arrived verdict")
 }
 
 // TestConfigAgentLateReceiptRecheckSkipsGoneSession is the #5471 review's
