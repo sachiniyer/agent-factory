@@ -923,12 +923,20 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 		// vouch for them — the byte compare remains the fallback verdict.
 		{"byte-equal non-literal stays quiet",
 			`claude "$(cat creds)"`, `claude "$(cat creds)"`, false, ""},
+		{"quoted glob word stays quiet",
+			`claude '*'`, `claude "*"`, false, ""},
 		{"an extra argument is real drift",
 			"/opt/af-detected/claude --dangerously-skip-permissions",
 			"/opt/af-detected/claude --dangerously-skip-permissions --verbose", true,
 			"word count differs (configured 2, running 3)"},
 		{"non-literal byte difference still warns",
 			`claude "$(cat creds)"`, `claude $(cat creds)`, true,
+			"command text differs"},
+		{"unquoted glob is real drift",
+			`claude '*'`, `claude *`, true,
+			"command text differs"},
+		{"unquoted tilde is real drift",
+			`claude '~'`, `claude ~`, true,
 			"command text differs"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

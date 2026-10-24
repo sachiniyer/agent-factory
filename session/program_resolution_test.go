@@ -80,6 +80,49 @@ func TestBuiltInProgramOverride_ComparesArgvNotBytes(t *testing.T) {
 	}
 }
 
+// A configured value the literal parse cannot prove is never trusted (#5487
+// review): an unquoted glob, tilde, escape, or brace in the spelling can
+// produce a different argv than the bytes suggest, so the shell — not the
+// byte compare — would decide what runs.
+func TestBuiltInProgramOverride_RejectsShellExpansions(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured string
+		detected   string
+		why        string
+	}{
+		{"unquoted glob in the executable path",
+			"/opt/a*b/claude --dangerously-skip-permissions",
+			"'/opt/a*b/claude' --dangerously-skip-permissions",
+			"the bare * globs against the filesystem — the executed file is not the written path"},
+		{"unquoted bracket class in the executable path",
+			"/opt/a[0-9]/claude --dangerously-skip-permissions",
+			"'/opt/a[0-9]/claude' --dangerously-skip-permissions", ""},
+		{"leading tilde against a quoted home path",
+			"~/claude --dangerously-skip-permissions",
+			"'/home/u/claude' --dangerously-skip-permissions",
+			"~ resolves a home directory at exec; PATH-style normalization is not the comparison"},
+		{"unquoted escape in the executable path",
+			`/opt/af-detected/claude\ x --dangerously-skip-permissions`,
+			"'/opt/af-detected/claude x' --dangerously-skip-permissions",
+			"the escape rewrites the word at exec — refuse rather than unescape on af's behalf"},
+		{"brace expansion in an argument",
+			"/opt/af-detected/claude --dangerously-skip-permissions{,x}",
+			"'/opt/af-detected/claude' --dangerously-skip-permissions",
+			"{,x} would split one written word into two at exec"},
+		{"ansi-c quoting in an argument",
+			`/opt/af-detected/claude $'--dangerously-skip-permissions'`,
+			"'/opt/af-detected/claude' --dangerously-skip-permissions",
+			"$'..' decodes under bash but is literal under a POSIX sh — ambiguous, refuse"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolved := overrideResolution("claude", test.configured, test.detected)
+			require.False(t, builtInProgramOverride(resolved, "claude", test.configured),
+				test.why)
+		})
+	}
+}
+
 // A detected path containing a space is exactly why detection started quoting;
 // the unquoted respelling of it is NOT the same argv — the space splits it into
 // more words — and must stay refused.
