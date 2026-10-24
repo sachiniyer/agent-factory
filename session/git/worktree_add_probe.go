@@ -521,22 +521,14 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 		// missed or attached spuriously).
 		if vol := filepath.VolumeName(worktreePath); strings.EqualFold(vol, filepath.VolumeName(repoPath)) {
 			rest := strings.TrimPrefix(worktreePath, vol)
-			if strings.ContainsAny(rest, "/\\") {
-				// A same-drive path with a separator (for example
-				// `D:link\..\wt` or `D:link/sub`) carries traversal the
-				// kernel's chdir resolves component by component: the git
-				// child running with cmd.Dir = repoPath (`D:\repo`) resolves
-				// `D:link\..\wt` to `D:\repo\link\..\wt`, following `link`
-				// before `..` collapses it. filepath.Join would lexically
-				// collapse it to `D:\repo\wt`, after which it never reaches
-				// the symlink-aware walk, so a symlinked `link` targeting
-				// another filesystem would leave the probe on the repository
-				// filesystem and miss/attach ENOSPC. Rebase onto the repo's
-				// directory on the same drive without Joining the `..` away,
-				// and run the symlink-aware walk the way a plain relative path
-				// does. The lexical fallbacks the walk joins into the
-				// annotation use relBase (the volume-stripped path) so a `D:`
-				// prefix does not appear as a path component.
+			if strings.ContainsAny(rest, "/\\") || hasPathTraversal(rest) {
+				// A same-drive path with a separator (`D:link\..\wt`) or a
+				// separator-free traversal (`D:..`) carries `..` the kernel's
+				// chdir resolves component by component; filepath.Join would
+				// lexically collapse it without following the symlink. Rebase
+				// onto the repo's directory without Joining the `..` away and
+				// run the symlink-aware walk. The lexical fallbacks the walk joins
+				// use relBase (volume-stripped) so a `D:` prefix is not a component.
 				relBase = rest
 				resolveRelative = true
 			} else {
@@ -759,14 +751,22 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 							break
 						}
 					}
-					// Resolve the intermediate through symlinks and rejoin the un-resolved final
-					// component; a symlinked-repo `..` must not leave filepath.Dir on its parent (#5421).
-					worktreePath = parent
-					if d, f := filepath.Split(parent); f != "." && f != ".." {
-						if d = strings.TrimRight(d, seps); d == "" || d == vol {
-							d = vol + string(filepath.Separator)
-						}
-						if r, to, rerr, _ := resolveSymlinkPrefixBounded(d); !to && rerr == nil {
+					// A bare `.` is the repo dir itself; the git child already cwd'd
+					// into the resolved repo, so use the resolved parent (#5421).
+					if parent == repoPath {
+						worktreePath = resolvedParent
+					} else {
+						worktreePath = parent
+						if d, f := filepath.Split(parent); f != "." && f != ".." {
+							if d = strings.TrimRight(d, seps); d == "" || d == vol {
+								d = vol + string(filepath.Separator)
+							}
+							// Return on error so the classifier reads the resolution
+							// failure instead of falling back to the unresolved parent.
+							r, _, rerr, _ := resolveSymlinkPrefixBounded(d)
+							if rerr != nil {
+								return errors.Join(g.annotateGitWriteError(err, creatableParents...), fmt.Errorf("symlink resolution of %s: %w", lexicalPath, rerr))
+							}
 							worktreePath = filepath.Join(r, f)
 						}
 					}
