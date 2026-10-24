@@ -130,6 +130,52 @@ func TestParkManualAccountSwapRecordsMissionNonDelivery(t *testing.T) {
 		"an incoming limit observed before submission must retain scheduled recovery")
 }
 
+// TestRestoreLimitIdentityUnderResumeFence pins the identity restoration a
+// limit-blocked manual swap's attach-pause deferral relies on (#5422 review):
+// ClearLimitReached erases limitAgent/limitAccount, and ReparkLimitUnderResumeFence
+// restores only the liveness and reset window. Without RestoreLimitIdentityUnderResumeFence
+// a re-parked row would persist LiveLimitReached with no incoming-account attribution,
+// so LimitIdentity and the reloaded session no longer identify which account produced
+// the current wall.
+func TestRestoreLimitIdentityUnderResumeFence(t *testing.T) {
+	inst := &Instance{
+		Program:    "claude",
+		Account:    "work",
+		liveness:   LiveLimitReached,
+		inFlightOp: OpRespawning,
+		pendingAccountSwap: &AccountSwapData{
+			Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+		},
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession("swap", tmux.ProgramClaude))
+	resetAt := time.Now().Add(time.Hour)
+
+	// ParkManualAccountSwapAtLimit attributes the wall to the current (incoming)
+	// identity and records the reset window.
+	require.NoError(t, inst.ParkManualAccountSwapAtLimit(resetAt))
+	agent, account, ok := inst.LimitIdentity()
+	require.True(t, ok, "ParkManualAccountSwapAtLimit must attribute the limit identity")
+	require.NotEmpty(t, agent, "limitAgent must be set")
+	require.Equal(t, "work", account, "limitAccount must be the incoming account")
+
+	// ClearLimitReached erases the identity fields, and ReparkLimitUnderResumeFence
+	// restores only the liveness and reset window — not the identity.
+	inst.ClearLimitReached()
+	require.NoError(t, inst.ReparkLimitUnderResumeFence(resetAt))
+	reparkAgent, reparkAccount, okAfterRepark := inst.LimitIdentity()
+	require.True(t, okAfterRepark, "the re-park restores LiveLimitReached")
+	require.Empty(t, reparkAgent, "ReparkLimitUnderResumeFence must not restore limitAgent")
+	require.Empty(t, reparkAccount, "ReparkLimitUnderResumeFence must not restore limitAccount")
+
+	// RestoreLimitIdentityUnderResumeFence re-attributes the wall to the captured
+	// agent and account under the same OpRespawning fence the re-park required.
+	inst.RestoreLimitIdentityUnderResumeFence(agent, account)
+	agentAfter, accountAfter, okAfter := inst.LimitIdentity()
+	require.True(t, okAfter, "RestoreLimitIdentityUnderResumeFence must restore the limit identity")
+	require.Equal(t, agent, agentAfter, "limitAgent must be restored")
+	require.Equal(t, account, accountAfter, "limitAccount must be restored")
+}
+
 // A committed AUTOMATIC swap's retry resolves the account in the namespace the
 // commit recorded — for a legacy pending record that namespace is the durable
 // accountAgent pin, not a fresh resolution under overrides that may have moved

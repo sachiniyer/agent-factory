@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -289,6 +290,30 @@ func (m *Manager) resumeLimitedSession(
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
+	// An attached TUI holds the pause-poll lease for this session (#1160), and
+	// holding it is the daemon's contract to DEFER automated deliveries into the
+	// pane — so a scheduled prompt can't paste into and submit the user's
+	// in-progress input (#1586/#1638). Every DeliverPrompt send path re-checks
+	// the lease right before sending via deferWhileAttached; the auto-resume
+	// scheduler is an automated delivery into the same pane and reaches the same
+	// SendPromptWithEvidence / deliverManualAccountMission send arms, so it must
+	// honor the same lease here. The explicit ResumeFromLimit RPC bypasses
+	// resumeLimitedSession entirely (it is an operator action like a manual send)
+	// and stays exempt. This gate is the fast path: it returns BEFORE
+	// limitResumeAttempted records the attempt, so the common case — a TUI already
+	// attached at scheduling time — neither burns a backoff step nor logs a failed
+	// attempt. A second recheck inside resumeFromLimitLockedOutcome, at the actual
+	// send boundary and gated on !operatorInitiated, covers the race where a TUI
+	// attaches during the liveness probe / account-swap readiness wait this body
+	// performs after this gate and before the send (see limit.go). The lease is
+	// heartbeat-renewed while attached and lapses within one statusPollLease after
+	// a crashed client, so a deferred resume is delayed, never lost. Covers both
+	// the auto-swap arm that reaches SendPromptWithEvidence and the pending-manual-
+	// swap completion that reaches deliverManualAccountMission, since
+	// resumeLimitedSession is the single scheduler entry to both.
+	if m.isPollPaused(repoID, inst.Title, inst.ID) {
+		return
+	}
 	if accountSwap != nil {
 		// This value only schedules the attempt. admitAccountSwap rebuilds all facts
 		// after the limit-resume fence is raised and is the only result allowed to
@@ -303,8 +328,13 @@ func (m *Manager) resumeLimitedSession(
 
 	// Record the attempt and set the backoff/interval gate BEFORE firing, so a
 	// resume that re-hits the wall on the very next tick is already throttled —
-	// never a hot re-limit loop.
+	// never a hot re-limit loop. Capture the pre-charge state so an attach-pause
+	// deferral mid-pass (resumeDeferredByAttachPause) can roll it back: the lease
+	// lapsed after the top-level gate, not the prompt, so the next tick after
+	// detach must re-fire immediately instead of honoring the backoff a genuine
+	// failed attempt would (#5422 review).
 	ordinaryAttempt := ordinarySchedulable && !now.Before(ordinaryDue)
+	prevAttempts, prevNextAttempt, prevOrdinaryAttemptedFor := st.attempts, st.nextAttempt, st.ordinaryAttemptedFor
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
@@ -314,6 +344,19 @@ func (m *Manager) resumeLimitedSession(
 	}
 	if resumeErr != nil {
 		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
+		return
+	}
+	if outcome == resumeDeferredByAttachPause {
+		// A TUI attached after the top-level gate but before a destructive or send
+		// boundary inside resumeFromLimitLockedOutcome. Nothing was sent and no
+		// identity was committed, so the attempt the gate already charged is not a
+		// genuine failure: roll it back so the scheduler re-fires on the first tick
+		// after the lease lapses instead of backing off (#5422 review).
+		m.mu.Lock()
+		st.attempts = prevAttempts
+		st.nextAttempt = prevNextAttempt
+		st.ordinaryAttemptedFor = prevOrdinaryAttemptedFor
+		m.mu.Unlock()
 		return
 	}
 	// resumeFromLimitLockedOutcome returns (resumeNotPerformed, nil) for several
@@ -389,3 +432,94 @@ func limitResumeBackoffFor(attempts int) time.Duration {
 	}
 	return backoff
 }
+
+// attachPauseLeaseHeld reports whether an attached TUI now holds the pause lease
+// for this session, which an automated resume must defer to at every destructive
+// boundary in resumeFromLimitLockedOutcome and commitNewAccountSwapIdentity (#5422
+// review): the identity commit, the in-commit teardown, the pane-stop calls, and the
+// respawn all replace a runtime a TUI may have attached to during a liveness probe the
+// scheduler's top-level gate does not cover. The operatorInitiated RPC (the explicit
+// ResumeFromLimit) is exempt, exactly like a manual send-prompt; the caller's
+// !operatorInitiated gate mirrors the send-boundary recheck and the top-level gate
+// above. A deferral returns resumeNotPerformed without clearing the limit, so the
+// scheduler re-fires on the next tick once the lease lapses.
+func (m *Manager) attachPauseLeaseHeld(operatorInitiated bool, repoID string, instance *session.Instance) bool {
+	return !operatorInitiated && m.isPollPaused(repoID, instance.Title, instance.ID)
+}
+
+// errAttachPauseDeferred is the sentinel returned by commitNewAccountSwapIdentity
+// when the attach-lease recheck immediately before its destructive teardown
+// (prepareRuntimeForAccountSwap) defers an automated swap. The caller translates
+// it to a clean resumeNotPerformed return so the scheduler re-fires on the next
+// tick once the lease lapses; it is never surfaced as a real error and is not
+// fallback-eligible, since no identity was committed.
+var errAttachPauseDeferred = errors.New("attach pause lease held: deferred automated account-swap teardown")
+
+// testHookResumeBeforeAccountSwapCommit fires in resumeFromLimitLockedOutcome after
+// the account-swap liveness probe and before the attach-lease recheck that gates the
+// automated identity commit. A test substitutes it to attach the lease in that window
+// so the pre-commit recheck is the only thing that can keep the swap from replacing a
+// runtime a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapCommit = func() {}
+
+// testHookResumeBeforeAccountSwapStop fires in resumeFromLimitLockedOutcome after the
+// liveness probe and before the attach-lease recheck that gates the account-swap
+// pane-stop arms. A test substitutes it to attach the lease in that window so the
+// pre-stop recheck is the only thing that can keep the stop calls from tearing down a
+// pane a TUI just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapStop = func() {}
+
+// testHookResumeAfterRemotePreserve fires in resumeFromLimitLockedOutcome after the
+// remote-sandbox preservation push (preserveSandboxBeforeReap +
+// requireDurableSandboxBranch) in the probeAnsweredDead arm, and before the
+// attach-lease recheck that gates the pane-stop/respawn arms that follow. The
+// preservation is a long network round-trip, so a TUI can attach and renew the
+// lease during it; the pre-stop recheck at the top of the switch ran before the
+// probe, so this is the only seam that can keep the remote-preserve path from
+// replacing a runtime a TUI just attached to. No-op in production.
+var testHookResumeAfterRemotePreserve = func() {}
+
+// testHookResumeBeforeAccountSwapRespawn fires in resumeFromLimitLockedOutcome
+// immediately before the attach-lease recheck that gates the automated respawn, after
+// the identity commit and the pane-stop calls but before the respawn that rebuilds the
+// runtime. A test substitutes it to attach the lease in that window so the pre-respawn
+// recheck is the only thing that can keep the respawn from replacing a runtime a TUI
+// just attached to. No-op in production.
+var testHookResumeBeforeAccountSwapRespawn = func() {}
+
+// testHookResumeBeforeAccountSwapTeardown fires inside
+// commitNewAccountSwapIdentity (account_swap.go) after the admission and the
+// rare in-commit liveness re-probe, immediately before the attach-lease recheck
+// that gates the destructive prepareRuntimeForAccountSwap teardown. A test
+// substitutes it to attach the lease in that window — after the top-level
+// pre-commit recheck in resumeFromLimitLockedOutcome has already passed but
+// before the old panes are stopped — so the pre-teardown recheck is the only
+// thing that can keep the commit from tearing down a runtime a TUI just
+// attached to. No-op in production.
+var testHookResumeBeforeAccountSwapTeardown = func() {}
+
+// testHookResumeBeforeManualMissionSend fires inside deliverManualAccountMission's
+// readiness wait, after the durable settlement write and ClearLimitReached, immediately
+// before the attach-lease recheck that gates the nested manual-mission submission. The
+// send-boundary recheck in resumeFromLimitLockedOutcome ran before this function, but the
+// durable settlement write and the readiness wait inside WaitForReadyAndSubmitPrompt can
+// both outlast it; a test substitutes this hook to attach the lease in that window so the
+// pre-submission recheck is the only thing that can keep the mission out of an attached
+// pane. No-op in production.
+var testHookResumeBeforeManualMissionSend = func() {}
+
+// testHookResumeAfterRepairValidation fires in resumeFromLimitLockedOutcome after
+// the committed-swap repair path's ValidateAccountSwap (which re-runs the full
+// identity preflight) and before the attach-lease recheck that gates the
+// stopForAccountSwap pane teardown in the probeAlive arm. A test substitutes it to
+// attach the lease in that window so the post-validation recheck is the only thing
+// that can keep the repair from tearing down a runtime a TUI just attached to. No-op.
+var testHookResumeAfterRepairValidation = func() {}
+
+// testHookResumeAfterGoneRevalidation fires in resumeFromLimitLockedOutcome after
+// revalidateGoneAccountSwap (which calls ValidateAccountSwap) and before the
+// attach-lease recheck that gates the StopRemainingPanesForAccountSwap teardown in
+// the probeAbsent arm. A test substitutes it to attach the lease in that window so the
+// post-revalidation recheck is the only thing that can keep the recovery from
+// tearing down a runtime a TUI just attached to. No-op in production.
+var testHookResumeAfterGoneRevalidation = func() {}

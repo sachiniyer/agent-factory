@@ -445,6 +445,32 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		}
 	}
 
+	// Recheck the attach lease immediately before the destructive teardown (#5422
+	// review): the admission above and the rare in-commit re-probe run under the
+	// config/account/project fences the top-level pre-commit recheck in
+	// resumeFromLimitLockedOutcome does not cover, so a TUI can attach and renew
+	// the lease in that window. prepareRuntimeForAccountSwap stops the old panes,
+	// so a deferral here keeps the automated swap from tearing down a runtime the
+	// user is now typing into. The operatorInitiated RPC (manual swap) is exempt,
+	// exactly like the other rechecks. A deferral returns errAttachPauseDeferred
+	// (not a real error); the caller translates it to resumeNotPerformed without
+	// clearing the limit, so the scheduler re-fires on the next tick and the
+	// pending swap stays pending (ClearPendingAccountSwap runs only on a successful
+	// send).
+	testHookResumeBeforeAccountSwapTeardown()
+	if m.attachPauseLeaseHeld(operatorInitiated, repoID, instance) {
+		// Admission recorded the account-swap launch plan (ValidateAccountSwap
+		// stores it) but no identity was committed (SelectAccountForHandoff/
+		// SelectAccountAutomatically is below), so pendingAccountSwap is still
+		// nil. EndLimitResume clears accountSwapLaunch in that case, but the
+		// explicit clear here does not depend on the fence's conditional
+		// release: tabSpawnBlockedLocked refuses tab spawns while the plan is
+		// set, and a deferral that left it staged would block an attached TUI
+		// from adding or attaching tabs until the next swap attempt.
+		instance.ClearUncommittedAccountSwapLaunch()
+		return false, errAttachPauseDeferred
+	}
+
 	err = m.prepareRuntimeForAccountSwap(key, instance, probe)
 	if err == nil {
 		// The outgoing runtime is conclusively stopped, so its append-only

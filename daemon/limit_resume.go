@@ -9,6 +9,15 @@ type resumeFromLimitOutcome uint8
 const (
 	resumeNotPerformed resumeFromLimitOutcome = iota
 	resumePerformed
+	// resumeDeferredByAttachPause is an automated resume that aborted because an
+	// attached TUI held the pause lease at a destructive or send boundary the
+	// top-level gate did not cover. It is a clean no-op (nothing was sent, no
+	// identity was committed), but it is distinct from resumeNotPerformed so the
+	// scheduler can undo the attempt state limitResumeAttempted already charged:
+	// the lease lapsed mid-pass after the gate, not the prompt, so the next tick
+	// after detach must re-fire immediately instead of honoring the backoff a
+	// genuine failed attempt would (#5422 review).
+	resumeDeferredByAttachPause
 )
 
 // The TUI and web reach this handler through apiclient/HTTP. The CLI reaches the

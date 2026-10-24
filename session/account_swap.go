@@ -617,6 +617,23 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name, accountAgent st
 	return nil
 }
 
+// ClearUncommittedAccountSwapLaunch retires the staged account-swap launch plan
+// when an attach-lease deferral aborts a swap after admission recorded it but
+// before any identity was committed. EndLimitResume also clears the plan when the
+// resume fence releases with no pending swap, but the explicit clear on the
+// deferral does not depend on the fence's conditional release: tabSpawnBlockedLocked
+// refuses tab spawns while the plan is set, so a deferral that left it staged would
+// block an attached TUI from adding or attaching tabs until the next swap attempt.
+// The caller holds the resume fence; no identity was committed (the swap was not
+// committed), so the plan is uncommitted and safe to retire.
+func (i *Instance) ClearUncommittedAccountSwapLaunch() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp == OpRespawning && i.pendingAccountSwap == nil {
+		i.accountSwapLaunch = nil
+	}
+}
+
 // ClearPendingAccountSwap retires exactly the delivery obligation the caller
 // completed, without allowing a stale attempt to erase a later swap.
 func (i *Instance) ClearPendingAccountSwap(from, to string) bool {

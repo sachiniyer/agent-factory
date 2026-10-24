@@ -699,6 +699,32 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 	return nil
 }
 
+// RestoreLimitIdentityUnderResumeFence re-attributes a re-parked limit wall to
+// the agent and account that produced it. ReparkLimitUnderResumeFence restores the
+// liveness and reset window that ClearLimitReached cleared, but not the
+// limitAgent/limitAccount fields ClearLimitReached also erased; a deferral that
+// re-parks after ClearLimitReached would otherwise persist a LiveLimitReached row
+// with no incoming-account attribution, so LimitIdentity and the reloaded session
+// no longer identify which account produced the current wall (#5422 review). This
+// restores the snapshot the caller took before ClearLimitReached, under the same
+// OpRespawning fence ReparkLimitUnderResumeFence required. It is a no-op when the
+// row is not limit-blocked or the fence is not held.
+func (i *Instance) RestoreLimitIdentityUnderResumeFence(agent, account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.liveness != LiveLimitReached {
+		return
+	}
+	if i.limitAgent != agent {
+		i.limitAgent = agent
+		i.touchLocked()
+	}
+	if i.limitAccount != account {
+		i.limitAccount = account
+		i.touchLocked()
+	}
+}
+
 func (i *Instance) ClearLimitReached() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
