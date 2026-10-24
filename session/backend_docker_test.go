@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -101,7 +102,15 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
-			if len(args) >= 4 && args[2] == "cat" && args[3] == dockerBannerPath {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "sh -c") && strings.Contains(joined, "id -u") {
+				// prepareNonAccountUser probes the image's default USER. This
+				// fake image defaults to root, so the probe reports 0:0 and the
+				// subsequent chown is a no-op — mirroring a root-default BYO
+				// image, the path every shipped/tested image takes.
+				return []byte("0:0\n"), nil
+			}
+			if strings.Contains(joined, "cat "+dockerBannerPath) {
 				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}`), nil
 			}
 			return nil, nil
