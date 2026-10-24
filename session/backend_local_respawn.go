@@ -245,6 +245,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
+	// runtimeReplaced names whether this re-spawn actually replaced the pane
+	// process AF had recorded. A confirmed RestoreRespawned always does; a pure
+	// reattach does only when the surviving tmux name cannot be proven to still
+	// name the recorded launch — `clearRuntimeProgramForUnverifiedReattach`
+	// establishes that. The verdict gates the post-replacement hook below.
+	runtimeReplaced := restoreResult == tmux.RestoreRespawned
 	if restoreResult == tmux.RestoreRespawned {
 		i.setRuntimeLaunch(declarationBase, ts)
 	} else {
@@ -252,7 +258,26 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// root's recorded (pid, start-time) identity decides whether it still
 		// names the launch AF recorded — a match keeps the claim, anything else
 		// retires it.
-		i.clearRuntimeProgramForUnverifiedReattach(ts)
+		if i.clearRuntimeProgramForUnverifiedReattach(ts) {
+			runtimeReplaced = true
+		} else {
+			// clearRuntimeProgramForUnverifiedReattach also returns false when the
+			// durable evidence is already empty — a prior unverified reattach
+			// retired the claim (or the persisted record predates the (pid,
+			// start-time) evidence AF now records). That is NOT a verified
+			// same-launch: with no recorded identity the surviving tmux name
+			// cannot prove it still names the launch, so a broker capture armed
+			// after the prior clear is bound to the current generation and a
+			// later replacement under the same name must invalidate it. Reset for
+			// every unverifiable reattach, not only the ones that retired durable
+			// state on this call (#5367 review).
+			i.mu.RLock()
+			emptyEvidence := i.runtimeProgram == "" && i.runtimePID == 0
+			i.mu.RUnlock()
+			if emptyEvidence {
+				runtimeReplaced = true
+			}
+		}
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)
@@ -265,11 +290,21 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// Ready/Running from the live session from here on and persists the transition.
 	_ = i.Transition(ConfirmLive())
 
-	// The re-spawned tmux is a new pane process; a PTY broker that was still holding
-	// the dead pane's clientless capture must drop it so the next Subscribe streams
-	// the live pane rather than a parked, silent readLoop (#1682). The memoized
-	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
-	// map) and skips a remote runtime's agent-server (not a localAgentServer).
-	resetAgentBrokerCaptures(i)
+	// The post-replacement hook tears down a PTY broker capture still holding the
+	// predecessor pane's clientless capture so the next Subscribe streams the
+	// live pane rather than a parked, silent readLoop (#1682). It must NOT run on
+	// a pure reattach that provably recovered the SAME launch: that pane never
+	// changed, so its capture is healthy, and running the hook would bump the
+	// runtime generation (silently dropping any in-flight conversation-id
+	// capture for the still-live process, #5067) and blip every attached
+	// subscriber by discarding buffered output and clearing size state. The
+	// gate mirrors the sibling load path in LocalBackend.launch, which runs the
+	// hook only on RestoreRespawned and otherwise preserves state ("A pure
+	// reattach preserves them"). The memoized accessor keeps this a no-op for
+	// sessions nobody ever streamed (empty broker map) and skips a remote
+	// runtime's agent-server (not a localAgentServer).
+	if runtimeReplaced {
+		resetAgentBrokerCaptures(i)
+	}
 	return nil
 }
