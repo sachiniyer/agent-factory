@@ -925,6 +925,12 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 			`claude "$(cat creds)"`, `claude "$(cat creds)"`, false, ""},
 		{"quoted glob word stays quiet",
 			`claude '*'`, `claude "*"`, false, ""},
+		{"escaped-space spelling stays quiet",
+			`claude 'a b'`, `claude a\ b`, false, "",
+		},
+		{"apostrophe escape idiom stays quiet",
+			`'/o'\''b/claude' --x`, `"/o'b/claude" --x`, false, "",
+		},
 		{"an extra argument is real drift",
 			"/opt/af-detected/claude --dangerously-skip-permissions",
 			"/opt/af-detected/claude --dangerously-skip-permissions --verbose", true,
@@ -937,6 +943,9 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 			"command text differs"},
 		{"unquoted tilde is real drift",
 			`claude '~'`, `claude ~`, true,
+			"command text differs"},
+		{"nested brace expansion is real drift",
+			`claude '{a{b},c}'`, `claude {a{b},c}`, true,
 			"command text differs"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

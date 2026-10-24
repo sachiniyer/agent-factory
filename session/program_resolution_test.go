@@ -81,9 +81,10 @@ func TestBuiltInProgramOverride_ComparesArgvNotBytes(t *testing.T) {
 }
 
 // A configured value the literal parse cannot prove is never trusted (#5487
-// review): an unquoted glob, tilde, escape, or brace in the spelling can
+// review): an unquoted glob, tilde, or brace — or a bare $'…' spelling — can
 // produce a different argv than the bytes suggest, so the shell — not the
-// byte compare — would decide what runs.
+// byte compare — would decide what runs. (An unquoted escape is decoded per
+// POSIX instead: it is literal text, and the decoded argv is what compares.)
 func TestBuiltInProgramOverride_RejectsShellExpansions(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -102,10 +103,14 @@ func TestBuiltInProgramOverride_RejectsShellExpansions(t *testing.T) {
 			"~/claude --dangerously-skip-permissions",
 			"'/home/u/claude' --dangerously-skip-permissions",
 			"~ resolves a home directory at exec; PATH-style normalization is not the comparison"},
-		{"unquoted escape in the executable path",
-			`/opt/af-detected/claude\ x --dangerously-skip-permissions`,
-			"'/opt/af-detected/claude x' --dangerously-skip-permissions",
-			"the escape rewrites the word at exec — refuse rather than unescape on af's behalf"},
+		{"escape collapsing two words into one",
+			`/opt/af-detected/claude\ --dangerously-skip-permissions`,
+			"'/opt/af-detected/claude' --dangerously-skip-permissions",
+			`the escaped space joins both words into ONE argv word — a different command`},
+		{"nested brace expansion in the executable path",
+			"/opt/{a{b},c}/claude --dangerously-skip-permissions",
+			"'/opt/af-detected/claude' --dangerously-skip-permissions",
+			"bash pairs nested braces — the outer { matches the LAST }, so {a{b},c} still expands"},
 		{"brace expansion in an argument",
 			"/opt/af-detected/claude --dangerously-skip-permissions{,x}",
 			"'/opt/af-detected/claude' --dangerously-skip-permissions",
@@ -138,6 +143,31 @@ func TestBuiltInProgramOverride_SpacedPathStaysQuotedOnly(t *testing.T) {
 	require.True(t, builtInProgramOverride(resolved, "claude",
 		`"/opt/af detected/claude" --dangerously-skip-permissions`),
 		"the same path in another quoting style is the same word")
+}
+
+// Codex review round 2: a detected path containing an apostrophe persists via
+// ShellQuotePath as the '\” idiom — ' quoted text \' literal apostrophe ' —
+// which carries an unquoted backslash. Decoding it (rather than refusing the
+// backslash) is what keeps af's own detected value trusting itself; the same
+// path written escaped-bare or double-quoted is the same argv.
+func TestBuiltInProgramOverride_ApostrophePathRoundTrips(t *testing.T) {
+	detected := config.ShellQuotePath("/o'brien/claude") + " --dangerously-skip-permissions"
+	require.Equal(t, `'/o'\''brien/claude' --dangerously-skip-permissions`, detected,
+		"guard: the fixture must be the exact idiom ShellQuotePath emits")
+	for _, test := range []struct {
+		name       string
+		configured string
+	}{
+		{"the detected spelling itself", detected},
+		{"escaped-apostrophe spelling", `/o\'brien/claude --dangerously-skip-permissions`},
+		{"double-quoted spelling", `"/o'brien/claude" --dangerously-skip-permissions`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolved := overrideResolution("claude", test.configured, detected)
+			require.True(t, builtInProgramOverride(resolved, "claude", test.configured),
+				"every spelling of /o'brien/claude is the same argv word")
+		})
+	}
 }
 
 // The end-to-end repro from #5487: a config written by an older af carries the
