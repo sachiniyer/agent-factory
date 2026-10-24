@@ -102,9 +102,11 @@ test("a starved frame cannot lose the reclaim — the timer twin delivers it", (
     // the wire write is withheld until a frame-coupled signal unparks it.
     win.runTimer();
     assert.deepEqual(calls, ["fit"]);
-    assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
     assert.equal(terminal.parked, true);
+    // The withheld write armed its own wake probe: a frame whose delivery is
+    // itself the reactivation signal.
+    assert.notEqual(terminal.visibleFitFrame, null);
   } finally {
     win.restore();
   }
@@ -150,14 +152,17 @@ test("a parked page's scheduled fit reclaims locally but never writes the grid",
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "connect"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
-    // Nothing was written: the daemon's grid is still the peer's.
+    // Nothing was written: the daemon's grid is still the peer's. And the owed
+    // write did not wait for a later trigger — the suppression armed the wake
+    // probe whose frame delivers the flush.
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
+    assert.notEqual(terminal.visibleFitFrame, null);
   } finally {
     win.restore();
   }
 });
 
-test("the first frame-coupled fit after parking flushes the owed resize", async () => {
+test("the owed write flushes on the wake probe — no external trigger needed", async () => {
   const win = stubWindow();
   try {
     const { terminal, term, calls } = stage();
@@ -168,8 +173,11 @@ test("the first frame-coupled fit after parking flushes the owed resize", async 
     win.runTimer();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "connect"]);
-    terminal.scheduleVisibleFit();
-    win.runFrame(); // a frame delivered ⇒ the page is painting again
+    assert.equal(terminal.parked, true);
+    // No scheduleVisibleFit, no input, no visibilitychange — the suppressed
+    // write armed a frame whose delivery alone flushes it. This is the
+    // deterministic reactivation path a merely-slow page needs.
+    win.runFrame();
     await Promise.resolve();
     // xterm needed no refit — the send is purely the owed convergence flush.
     assert.equal(terminal.parked, false);

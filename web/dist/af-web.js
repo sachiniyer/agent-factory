@@ -10786,6 +10786,18 @@ var AttachTerminal = class {
     window.cancelAnimationFrame(this.visibleFitFrame);
     this.visibleFitFrame = null;
   }
+  /** Arms a frame as the flush vehicle for a write this page was not awake
+   *  enough to make. Its delivery IS the reactivation signal: a page that
+   *  paints has a user — or at least a compositor willing to produce one — so
+   *  the flush no longer depends on focus, visibilitychange, or input ever
+   *  arriving. Shares the scheduled-fit handle so dispose and trusted input
+   *  already clear it; the timer twin is deliberately NOT armed — a timer
+   *  delivery on a still-parked page would only re-suppress the same write. */
+  armWakeProbe() {
+    if (this.visibleFitFrame === null) {
+      this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    }
+  }
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
@@ -10897,17 +10909,22 @@ var AttachTerminal = class {
    *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
    *  cannot be an activation, and it must not steal a live visible peer's grid.
    *  document.visibilityState covers hidden pages; `parked` covers occluded
-   *  pages that still report 'visible' while their frames starve. lastRows/
-   *  lastCols stay stale on a suppressed send; that divergence is what the
-   *  first fit after an unpark converges. */
+   *  pages that still report 'visible' while their frames starve.
+   *
+   *  A withheld write does not silently wait for a later trigger: it arms the
+   *  wake probe, whose armed frame is itself the reactivation detector — the
+   *  first frame this page ever paints delivers the fit that flushes the owed
+   *  resize, whether the page wakes by visibilitychange, focus, input, or a
+   *  compositor deciding to paint again. lastRows/lastCols stay stale on a
+   *  suppressed send; that divergence is what the probe fit converges. */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
       return;
     }
-    if (this.parked) {
-      return;
-    }
-    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+    if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
+      if (rows !== this.lastRows || cols !== this.lastCols) {
+        this.armWakeProbe();
+      }
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
