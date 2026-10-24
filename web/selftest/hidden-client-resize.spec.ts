@@ -184,19 +184,17 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
-  const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
-  let first: Page | undefined;
-  try {
-    first = await ctx.newPage();
-    // TEMPORARY diagnosis for the CI-only no-focus-unpark failure: log every
-    // outgoing wire frame, every rAF arm/deliver/cancel, socket lifecycle,
-    // and wake-adjacent events into window.__dbg (attached to the test run).
-    await first.addInitScript(() => {
+  // TEMPORARY diagnosis for the CI-only no-focus-unpark failure: log every
+  // outgoing wire frame, every inbound resize echo, every rAF
+  // arm/deliver/cancel, socket lifecycle, and wake-adjacent events into
+  // window.__dbg (attached to the test run).
+  const instrument = (page: Page, label: string): Promise<void> =>
+    page.addInitScript((tag) => {
       const w = window as unknown as { __dbg?: string[] };
       w.__dbg = [];
       const log = (m: string): void => {
         (w.__dbg as string[]).push(
-          `${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`,
+          `${(performance.now() / 1000).toFixed(2)} [${tag}] vis=${document.visibilityState} ${m}`,
         );
       };
       const OrigWS = window.WebSocket;
@@ -231,6 +229,18 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         ws.addEventListener("open", () => log("ws.open"));
         ws.addEventListener("close", (e) => log(`ws.close code=${(e as CloseEvent).code}`));
         ws.addEventListener("error", () => log("ws.error"));
+        ws.addEventListener("message", (e) => {
+          try {
+            if (typeof e.data === "string") {
+              const m = JSON.parse(e.data) as { type?: string; rows?: number; cols?: number };
+              if (m.type === "resize") {
+                log(`ws.recv resize ${m.rows}x${m.cols}`);
+              }
+            }
+          } catch {
+            /* logging must never disturb the message path */
+          }
+        });
         return ws;
       } as unknown as typeof WebSocket;
       WS.prototype = OrigWS.prototype;
@@ -264,7 +274,13 @@ test("a parked client reclaims locally but never writes the shared grid", async 
           ),
         true,
       );
-    });
+    }, label);
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  let first: Page | undefined;
+  let second: Page | undefined;
+  try {
+    first = await ctx.newPage();
+    await instrument(first, "first");
     await open(first);
     await attach(first);
     const firstHost = first.locator(".af-term-host");
@@ -283,7 +299,8 @@ test("a parked client reclaims locally but never writes the shared grid", async 
     // The tall peer's first OpResize strands the occluded tab on a grid that
     // cannot be its own — the strand setup #2347 documents. Opening the tab
     // activates it, parking the first — exactly the stranded-page state.
-    const second = await ctx.newPage();
+    second = await ctx.newPage();
+    await instrument(second, "second");
     await second.setViewportSize({ width: 375, height: 2000 });
     await open(second);
     await attach(second);
@@ -399,16 +416,19 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       })
       .toBe(localRows);
   } finally {
-    try {
-      const dbg = first
-        ? await first.evaluate(
-            () => (window as unknown as { __dbg?: string[] }).__dbg ?? ["no __dbg"],
-          )
-        : ["no first page"];
-      await test.info().attach("first-dbg", { body: dbg.join("\n"), contentType: "text/plain" });
-    } catch {
-      /* page may already be gone */
-    }
+    const dump = async (page: Page | undefined, name: string): Promise<void> => {
+      if (!page) return;
+      try {
+        const dbg = await page.evaluate(
+          () => (window as unknown as { __dbg?: string[] }).__dbg ?? ["no __dbg"],
+        );
+        await test.info().attach(name, { body: dbg.join("\n"), contentType: "text/plain" });
+      } catch {
+        /* page may already be gone */
+      }
+    };
+    await dump(first, "first-dbg");
+    await dump(second, "second-dbg");
     await ctx.close();
     try {
       af("sessions", "kill", sessionName);
