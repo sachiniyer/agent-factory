@@ -84,6 +84,13 @@ const frameAlive = (page: Page): Promise<boolean> =>
 // They queue while the page is unpainted, they honor cancelAnimationFrame,
 // and they all fire on the first frame after the page is visible again —
 // the browser's own un-hide semantics, not a synthetic approximation.
+// Observers are stubbed the same way: IntersectionObserver and
+// ResizeObserver callbacks are delivered from the same rendering steps as
+// rAF, so a real parked page produces none — and headless Chromium DOES
+// deliver them, which would un-park the flag through a signal the scenario
+// could never see and let a scheduled fit write (the 2-resize leak this
+// stub exists to prevent). Only constructions while parked are faked;
+// observers already built on the live page keep their real instances.
 const park = (page: Page): Promise<void> =>
   page.evaluate(() => {
     const w = window as unknown as {
@@ -91,12 +98,16 @@ const park = (page: Page): Promise<void> =>
       __afRealCancel?: typeof cancelAnimationFrame;
       __afDeferred?: Map<number, FrameRequestCallback>;
       __afNextRafId?: number;
+      __afRealIO?: typeof IntersectionObserver;
+      __afRealRO?: typeof ResizeObserver;
     };
     if (w.__afRealRaf) {
       return; // already parked — a second park() must not capture the stub
     }
     w.__afRealRaf = window.requestAnimationFrame;
     w.__afRealCancel = window.cancelAnimationFrame;
+    w.__afRealIO = window.IntersectionObserver;
+    w.__afRealRO = window.ResizeObserver;
     w.__afDeferred = new Map();
     w.__afNextRafId = 1;
     window.requestAnimationFrame = (cb: FrameRequestCallback) => {
@@ -108,6 +119,17 @@ const park = (page: Page): Promise<void> =>
     window.cancelAnimationFrame = (id: number) => {
       (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
     };
+    const deadObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): unknown[] { return []; }
+      get root(): null { return null; }
+      get rootMargin(): string { return "0px"; }
+      get thresholds(): readonly number[] { return [0]; }
+    };
+    window.IntersectionObserver = deadObserver as unknown as typeof IntersectionObserver;
+    window.ResizeObserver = deadObserver as unknown as typeof ResizeObserver;
   });
 
 // Un-hide: restore the real scheduling surface, then replay every deferred
@@ -121,12 +143,18 @@ const unpark = (page: Page, withFocus: boolean): Promise<void> =>
       __afRealRaf?: typeof requestAnimationFrame;
       __afRealCancel?: typeof cancelAnimationFrame;
       __afDeferred?: Map<number, FrameRequestCallback>;
+      __afRealIO?: typeof IntersectionObserver;
+      __afRealRO?: typeof ResizeObserver;
     };
     if (w.__afRealRaf) {
       window.requestAnimationFrame = w.__afRealRaf;
       window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
+      window.IntersectionObserver = w.__afRealIO as typeof IntersectionObserver;
+      window.ResizeObserver = w.__afRealRO as typeof ResizeObserver;
       delete w.__afRealRaf;
       delete w.__afRealCancel;
+      delete w.__afRealIO;
+      delete w.__afRealRO;
     }
     const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
     w.__afDeferred?.clear();
