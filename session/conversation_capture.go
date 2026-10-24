@@ -452,21 +452,54 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {
+	cwd, _, ok := codexRolloutSessionMeta(path)
+	return cwd, ok
+}
+
+// codexRolloutSessionSource returns the session_meta `source` of a rollout —
+// "cli", "vscode", "exec", "mcp", and friends — which Codex's resume listing
+// filters on. ok reports only that the header was classifiable, so callers
+// drop unclassifiable files the same way codexRolloutWorkingDir does.
+func codexRolloutSessionSource(path string) (string, bool) {
+	_, source, ok := codexRolloutSessionMeta(path)
+	return source, ok
+}
+
+func codexRolloutSessionMeta(path string) (cwd, source string, ok bool) {
 	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Cwd string `json:"cwd"`
+			Cwd    string `json:"cwd"`
+			Source string `json:"source"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line, &metadata); err != nil ||
 		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", false
+		return "", "", false
 	}
-	return metadata.Payload.Cwd, true
+	return metadata.Payload.Cwd, metadata.Payload.Source, true
+}
+
+// codexInteractiveRollouts keeps only rollouts whose session_meta marks an
+// interactive session — the [cli, vscode] sourceKinds `codex resume --last`
+// and its picker list by default. Non-interactive sources (exec, mcp,
+// internal_*, subagent_*), an absent source, and files whose header cannot be
+// classified are all dropped, mirroring Codex's own resume listing, which
+// never offers them as resume targets (#5486 review).
+func codexInteractiveRollouts(paths []string) []string {
+	var keep []string
+	for _, path := range paths {
+		source, ok := codexRolloutSessionSource(path)
+		if !ok || (source != "cli" && source != "vscode") {
+			continue
+		}
+		keep = append(keep, path)
+	}
+	return keep
 }
 
 func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
@@ -608,6 +641,16 @@ func CodexResumedRolloutPath(codexHome, program, workingDir string) (path string
 		}
 		pool, _ = codexRolloutFilesForWorkingDir(mapKeys(files), pathutil.ResolveForCompare(workingDir))
 	}
+	// --last also filters the pool to interactive sessions: Codex lists
+	// resume candidates with sourceKinds [cli, vscode] and widens to
+	// exec/app-server only under --include-non-interactive (tui/src/lib.rs
+	// resume_source_kinds). That flag is already unmodelled above, so every
+	// --last reaching here is interactive-only — a same-cwd `codex exec`
+	// rollout can be newest by recorded recency yet is never Codex's pick,
+	// and must not win this selection either. A file whose session source
+	// cannot be classified is dropped the same way Codex's listing drops
+	// rollouts it cannot classify (#5486 review).
+	pool = codexInteractiveRollouts(pool)
 	// --last continues the most recently UPDATED session: codex-rs 0.164
 	// resolves it with ThreadSortKey::UpdatedAt (tui/src/lib.rs
 	// latest_session_lookup_params), anchored on the state DB's recorded

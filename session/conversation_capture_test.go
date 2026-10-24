@@ -26,11 +26,23 @@ func writeCodexRolloutFile(t *testing.T, codexHome, name string) string {
 
 func writeCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) string {
 	t.Helper()
+	return writeCodexRolloutFileWithSource(t, codexHome, name, cwd, "cli")
+}
+
+// writeCodexRolloutFileWithSource writes a session_meta whose source is the
+// given kind; an empty source omits the key entirely, modeling rollouts that
+// predate the field.
+func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd, source string) string {
+	t.Helper()
 	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	payload := map[string]any{"cwd": cwd}
+	if source != "" {
+		payload["source"] = source
+	}
 	data, err := json.Marshal(map[string]any{
 		"type":    "session_meta",
-		"payload": map[string]any{"cwd": cwd},
+		"payload": payload,
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0644))
@@ -701,6 +713,37 @@ func TestCodexResumedRolloutPath_LastIsWorkingDirScoped(t *testing.T) {
 	require.True(t, resume)
 	require.Equal(t, mine, path,
 		"a newer rollout in another working directory is not what --last resumes")
+}
+
+// `codex resume --last` picks only INTERACTIVE sessions: Codex lists resume
+// candidates with sourceKinds [cli, vscode] and adds exec/app-server only
+// under --include-non-interactive (tui/src/lib.rs resume_source_kinds — itself
+// unmodelled above, so af never reaches this code for that flag). A `codex
+// exec` rollout in the same cwd can hold the newest recorded event yet is
+// never the resumed conversation; tracking it would watch the wrong file
+// while the briefing lands in the real target (#5486 review).
+func TestCodexResumedRolloutPath_LastSkipsNonInteractive(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	interactive := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	execRollout := writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-38-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir, "exec")
+	noSource := writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-39-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", workDir, "")
+	appendCodexRolloutEvent(t, interactive, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
+	appendCodexRolloutEvent(t, execRollout, map[string]any{"timestamp": "2026-07-06T10:17:38Z"})
+	appendCodexRolloutEvent(t, noSource, map[string]any{"timestamp": "2026-07-06T10:17:39Z"})
+
+	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
+	require.True(t, resume)
+	require.Equal(t, interactive, path,
+		"a newer same-cwd exec or source-less rollout is not a --last candidate")
+
+	path, resume = CodexResumedRolloutPath(codexHome, "codex resume --last --all", workDir)
+	require.True(t, resume)
+	require.Equal(t, interactive, path,
+		"--all widens the pool globally but does not add non-interactive sources")
 }
 
 // A store that cannot be enumerated is not an empty store: the late re-check's
