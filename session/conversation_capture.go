@@ -473,15 +473,30 @@ func codexRolloutSessionMeta(path string) (cwd, source string, ok bool) {
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Cwd    string `json:"cwd"`
-			Source string `json:"source"`
+			Cwd    string          `json:"cwd"`
+			Source json.RawMessage `json:"source"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line, &metadata); err != nil ||
 		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
 		return "", "", false
 	}
-	return metadata.Payload.Cwd, metadata.Payload.Source, true
+	return metadata.Payload.Cwd, codexSessionSourceString(metadata.Payload.Source), true
+}
+
+// codexSessionSourceString unwraps the session_meta `source` when Codex wrote
+// it as a plain string ("cli", "exec", "mcp", ...). Data-bearing variants
+// serialize as objects instead — {"subagent":"review"}, {"internal":...} —
+// none of which is an interactive [cli, vscode] kind, so the empty result is
+// already the right answer for the resume filter. Crucially the odd shape
+// must not fail the metadata decode and take the valid cwd down with it
+// (#5486 review).
+func codexSessionSourceString(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 // codexInteractiveRollouts keeps only rollouts whose session_meta marks an
@@ -703,6 +718,27 @@ func codexRolloutLastEventTime(path string) (time.Time, bool) {
 		// The window can open mid-line; drop the first partial record.
 		_, data, _ = bytes.Cut(data, []byte{'\n'})
 	}
+	if ts, ok := codexLastEventTimestamp(data); ok {
+		return ts, true
+	}
+	if start == 0 {
+		return time.Time{}, false
+	}
+	// The window opened inside a record larger than the tail cap and hid
+	// every complete line — Codex's listing still knows that session's
+	// recency, so falling back to a full-file scan keeps an oversized last
+	// record from silently changing the --last pick (#5486 review). This
+	// path only runs at spawn-time target resolution, not per poll.
+	data, err = readCodexRollout(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return codexLastEventTimestamp(data)
+}
+
+// codexLastEventTimestamp returns the timestamp of the last JSONL record in
+// data that carries one.
+func codexLastEventTimestamp(data []byte) (time.Time, bool) {
 	lines := bytes.Split(data, []byte{'\n'})
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := bytes.TrimSpace(lines[i])

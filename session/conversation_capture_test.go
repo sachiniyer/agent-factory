@@ -30,14 +30,15 @@ func writeCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) str
 }
 
 // writeCodexRolloutFileWithSource writes a session_meta whose source is the
-// given kind; an empty source omits the key entirely, modeling rollouts that
-// predate the field.
-func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd, source string) string {
+// given kind — a string for plain variants, a map for data-bearing ones like
+// {"subagent":"review"}, and nil to omit the key entirely (rollouts that
+// predate the field).
+func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, source any) string {
 	t.Helper()
 	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	payload := map[string]any{"cwd": cwd}
-	if source != "" {
+	if source != nil {
 		payload["source"] = source
 	}
 	data, err := json.Marshal(map[string]any{
@@ -730,10 +731,14 @@ func TestCodexResumedRolloutPath_LastSkipsNonInteractive(t *testing.T) {
 	execRollout := writeCodexRolloutFileWithSource(t, codexHome,
 		"rollout-2026-07-06T10-17-38-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir, "exec")
 	noSource := writeCodexRolloutFileWithSource(t, codexHome,
-		"rollout-2026-07-06T10-17-39-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", workDir, "")
+		"rollout-2026-07-06T10-17-39-039f386f-7206-7fc2-803b-f7045e07a244.jsonl", workDir, nil)
+	subagent := writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
+		map[string]any{"subagent": "review"})
 	appendCodexRolloutEvent(t, interactive, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
 	appendCodexRolloutEvent(t, execRollout, map[string]any{"timestamp": "2026-07-06T10:17:38Z"})
 	appendCodexRolloutEvent(t, noSource, map[string]any{"timestamp": "2026-07-06T10:17:39Z"})
+	appendCodexRolloutEvent(t, subagent, map[string]any{"timestamp": "2026-07-06T10:17:40Z"})
 
 	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
 	require.True(t, resume)
@@ -744,6 +749,48 @@ func TestCodexResumedRolloutPath_LastSkipsNonInteractive(t *testing.T) {
 	require.True(t, resume)
 	require.Equal(t, interactive, path,
 		"--all widens the pool globally but does not add non-interactive sources")
+
+	// The object-shaped source must not fail the metadata decode: the
+	// subagent rollout's cwd still classifies (it is excluded by the
+	// interactive predicate, not by losing its cwd) — a same-cwd subagent
+	// otherwise stays uncorrelatable forever (#5486 review).
+	cwd, ok := codexRolloutWorkingDir(subagent)
+	require.True(t, ok, "an object-shaped source must not discard a valid cwd")
+	require.Equal(t, workDir, cwd)
+}
+
+// A rollout whose LAST record is larger than the tail read cap still has a
+// last recorded event — it is just more than a window back. Codex's listing
+// knows that session's recency, so --last must not silently fall through to
+// an older rollout merely because the newest one's final line is huge
+// (#5486 review).
+func TestCodexResumedRolloutPath_LastHandlesOversizedFinalRecord(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	older := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	big := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-34-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	appendCodexRolloutEvent(t, older, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
+	// The newest recorded event is a single JSONL line larger than the tail
+	// read cap: the window opens inside it, so a tail-only scan finds no
+	// line boundary at all.
+	bigRecord, err := json.Marshal(map[string]any{
+		"timestamp": "2026-07-06T10:17:36Z",
+		"payload":   map[string]any{"data": strings.Repeat("x", codexRolloutTailReadCap+1024)},
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(bigRecord), codexRolloutTailReadCap)
+	f, err := os.OpenFile(big, os.O_APPEND|os.O_WRONLY, 0644)
+	require.NoError(t, err)
+	_, err = f.Write(append(bigRecord, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
+	require.True(t, resume)
+	require.Equal(t, big, path,
+		"a rollout ending in an oversized record still has recency and must win --last")
 }
 
 // A store that cannot be enumerated is not an empty store: the late re-check's
