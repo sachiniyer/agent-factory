@@ -58,6 +58,31 @@ export interface FencedRefetcher {
   invalidate(): void;
 }
 
+/** A bounded background retry for a read whose first attempt degraded to a
+ *  fallback. `attempt` reports whether ITS read landed; `alive` gates every
+ *  wait so a disconnect or a newer connect ends the loop before another
+ *  request goes out. Resolves true on a landed read, false once the delay
+ *  list runs out — the list bounds it, so a permanently failing read cannot
+ *  poll forever. The attempt itself is trusted not to reject (the fence's
+ *  refresh() never does; its failures report through onError inside it). */
+export async function retryWithBackoff(
+  attempt: () => Promise<boolean>,
+  alive: () => boolean,
+  delays: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  for (const delay of delays) {
+    await sleep(delay);
+    if (!alive()) {
+      return false;
+    }
+    if (await attempt()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface FencedRefetchSpec<T> {
   /** The installed credential. `null` is disconnected and no request goes out; ""
    *  is the authorized tokenless credential (#1696) and is a normal token here. */

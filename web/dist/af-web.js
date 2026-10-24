@@ -10781,10 +10781,21 @@ var AttachTerminal = class {
    *  paints again, so a queued frame costs nothing while withheld and its
    *  delivery IS the reactivation. The timer twin is never armed here: on a
    *  withheld write its delivery can change nothing — it would fit, suppress,
-   *  and re-arm forever, a perpetual 250ms poll on a dormant page. */
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries its own fit budget: the parked fit that withheld this
+   *  write reported settled and zeroed visibleFitAttempts, so a transient
+   *  measurement bail on the wake frame would decrement below zero and strand
+   *  the owed write until an unrelated activation signal. Seeding an empty
+   *  budget lets the wake frame retry like any scheduled fit — through the
+   *  delivery pair, which is honest on a page the frame just unparked. A live
+   *  budget is left alone: the probe borrows it rather than extending it. */
   armWakeProbe() {
     if (this.stopped) {
       return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     }
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
@@ -10812,7 +10823,9 @@ var AttachTerminal = class {
       return;
     }
     if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
-      this.visibleFitAttempts = 0;
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
       return;
     }
     this.queueVisibleFit();
@@ -15232,6 +15245,18 @@ function createLatestRequestGate() {
     }
   };
 }
+async function retryWithBackoff(attempt, alive, delays, sleep) {
+  for (const delay2 of delays) {
+    await sleep(delay2);
+    if (!alive()) {
+      return false;
+    }
+    if (await attempt()) {
+      return true;
+    }
+  }
+  return false;
+}
 function createFencedRefetcher(spec) {
   const gate = createLatestRequestGate();
   return {
@@ -18710,7 +18735,11 @@ async function connect(candidate) {
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  if (configResult) setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    void reconcileConfigRead(candidate, attempt);
+  }
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
@@ -19605,10 +19634,12 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+var configReadCommits = 0;
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
     setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
@@ -19622,6 +19653,19 @@ var configRefetcher = createFencedRefetcher({
 });
 function refreshConfig() {
   return configRefetcher.refresh();
+}
+var CONNECT_CONFIG_RETRY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3, 16e3];
+function reconcileConfigRead(candidate, attempt) {
+  return retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await refreshConfig();
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+  );
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,

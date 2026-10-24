@@ -1582,10 +1582,23 @@ export class AttachTerminal {
    *  paints again, so a queued frame costs nothing while withheld and its
    *  delivery IS the reactivation. The timer twin is never armed here: on a
    *  withheld write its delivery can change nothing — it would fit, suppress,
-   *  and re-arm forever, a perpetual 250ms poll on a dormant page. */
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
   private armWakeProbe(): void {
     if (this.stopped) {
       return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     }
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
@@ -1614,7 +1627,13 @@ export class AttachTerminal {
       return;
     }
     if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
-      this.visibleFitAttempts = 0;
+      // A frame still armed is the wake probe a withheld write queued inside
+      // this fit — its delivery retries a transient bail through the delivery
+      // pair like any scheduled fit, so the budget it runs on is preserved
+      // rather than zeroed with this fit's. Nothing armed means truly done.
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
       return;
     }
     this.queueVisibleFit();

@@ -115,7 +115,7 @@ import {
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
-import { createFencedRefetcher, createLatestRequestGate } from "./refetch.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff, type LatestRequest } from "./refetch.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -455,7 +455,18 @@ async function connect(candidate: string): Promise<void> {
   // Landed ahead of phase:"app", so the first AttachTerminal's constructor —
   // and the grid its initial OpResize reports — already reflects the persisted
   // sizes rather than the defaults the controller started on.
-  if (configResult) setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    // The connect-time read fell back to the compiled defaults. That must not
+    // be the last word — a transient GetConfig failure would otherwise leave
+    // the terminal on un-persisted sizes until an unrelated action refetched,
+    // and on a reconnect the module singleton would keep the PREVIOUS
+    // connection's sizes. The bounded reconcile retries through the fenced
+    // refetcher, so the first landed read applies the served values through
+    // the normal commit — always, not only when this fetch succeeded.
+    void reconcileConfigRead(candidate, attempt);
+  }
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
@@ -1888,6 +1899,13 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
+/** Counts config reads that committed through the fence — the landing witness
+ *  for the connect-time read's background reconcile below: only a response
+ *  that passed the generation AND token checks moves it, so a request disowned
+ *  mid-flight still lets the retry continue (the newer read owns that outcome)
+ *  while a transport failure leaves it free to try again. */
+let configReadCommits = 0;
+
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1907,6 +1925,7 @@ const configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
     // Every config read is also the font sizes' update path (#5500): a value
     // stepped from another client lands here on the next read, and our own
     // save's echo refetch is a no-op through the set() change guard.
@@ -1924,6 +1943,31 @@ const configRefetcher = createFencedRefetcher({
 
 function refreshConfig(): Promise<void> {
   return configRefetcher.refresh();
+}
+
+/** Backoff for the background reconcile behind a failed connect-time config
+ *  read: enough attempts to absorb a brief unavailability window without
+ *  turning a dead daemon into an endless poller. */
+const CONNECT_CONFIG_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+/** Retries the config read after the connect-time fetch fell back to
+ *  defaults (#5500). The commit counter is the landing witness — only a read
+ *  that passed the fence counts, so a refresh disowned by a newer one does
+ *  not end the loop (that newer read owns the outcome) and a transport
+ *  failure retries. The connect attempt's freshness is re-checked before
+ *  every request: a disconnect or a newer connect ends the loop rather than
+ *  fetching for a session that is gone. */
+function reconcileConfigRead(candidate: string, attempt: LatestRequest): Promise<boolean> {
+  return retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await refreshConfig();
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    ms => new Promise<void>(resolve => window.setTimeout(resolve, ms)),
+  );
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same

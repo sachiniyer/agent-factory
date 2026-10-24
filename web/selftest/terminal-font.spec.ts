@@ -237,6 +237,45 @@ test("#5500 a failed font save surfaces on the toast, not silently", async ({ pa
     "a refused write must leave the served value as it was").toBe(13);
 });
 
+test("#5500 a failed connect-time config read retries until the persisted pitch lands", async ({ page, request }) => {
+  // Codex P2 on #5501: a failed GetConfig at connect used to degrade to the
+  // compiled defaults for the whole session — nothing scheduled another read,
+  // so the terminal ran an un-persisted pitch until an unrelated action
+  // refetched. The client must reconcile in the background on a bounded
+  // backoff and apply whatever the first landed read serves.
+  await setFont(request, "web.terminal_font_size_desktop", "15");
+  const stream = frameStream(page);
+  let getCalls = 0;
+  // The connect read AND the first retry fail; the second retry — one backoff
+  // step later — is released to the daemon. A one-shot retry would never land.
+  await page.route("**/v1/GetConfig", async route => {
+    if (++getCalls <= 2) {
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "config read unavailable in test" } }),
+      });
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await attachSession(page, request);
+  await expect.poll(() => stream.resizes().length).toBeGreaterThan(0);
+  const defaulted = stream.resizes().at(-1)!;
+
+  // The landed read applies the persisted 15 through the normal commit: the
+  // font controller refits and a corrective OpResize leaves on the coarser
+  // grid — the same convergence an on-time read would have produced before
+  // the first attach.
+  await expect.poll(() => stream.resizes().length,
+    { message: "the retried read must refit the terminal onto the persisted pitch" }).toBeGreaterThan(1);
+  const landed = stream.resizes().at(-1)!;
+  expect(landed.cols, "the landed read must apply the persisted 15px pitch").not.toEqual(defaulted.cols);
+  // And the witness on the wire: two retries behind the failed connect read.
+  await expect.poll(() => getCalls).toBeGreaterThanOrEqual(3);
+});
+
 test("#5500 phone A+ steps the phone pitch, persists it, and leaves an armed modifier armed", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   // Seed a non-default desktop pitch so an untouched leaf is itself evidence.

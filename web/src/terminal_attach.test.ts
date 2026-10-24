@@ -190,6 +190,49 @@ test("the owed write flushes on the wake probe — no external trigger needed", 
   }
 });
 
+// The wake frame IS a scheduled fit's delivery once it lands — a transient
+// measurement bail on it must retry through the delivery pair, not strand the
+// owed write. The parked fit that armed the probe reported settled and used to
+// spend the fit budget to zero, so a probe carrying no budget made the first
+// wake bail final: the pane stayed on the peer's grid until an unrelated
+// activation signal.
+test("a transient bail on the wake frame retries — the probe carries a fit budget", async () => {
+  const win = stubWindow();
+  try {
+    const { terminal, term, fit, calls } = stage();
+    Object.assign(term, { rows: 300, cols: 50 });
+    terminal.lastRows = 300;
+    terminal.lastCols = 50;
+    terminal.scheduleVisibleFit();
+    win.runTimer(); // starved rAF → parked delivery: local reclaim, write withheld, probe armed
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect"]);
+    assert.equal(terminal.parked, true);
+    // The settled parked fit must not spend the probe's budget — zeroing it
+    // while the probe stayed armed is what made the first wake bail final.
+    assert.equal(terminal.visibleFitAttempts > 0, true);
+    // The probe's first delivery meets xterm mid-invalidation — undefined
+    // dimensions used to decrement the spent budget and end, leaving the
+    // peer's grid in place. With a seeded budget it re-arms the pair.
+    const propose = fit.proposeDimensions;
+    fit.proposeDimensions = () => undefined;
+    win.runFrame();
+    await Promise.resolve();
+    assert.equal(terminal.parked, false);
+    assert.deepEqual(calls, ["fit", "connect"]);
+    assert.notEqual(terminal.visibleFitFrame, null);
+    assert.notEqual(terminal.visibleFitTimer, null);
+    // The retry delivers: the owed write finally flushes the local grid.
+    fit.proposeDimensions = propose;
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+  }
+});
+
 // An owed resize re-arms only channels that can change the outcome. On a
 // parked page a timer delivery can change nothing — it would fit, withhold,
 // and re-arm forever: a perpetual 250ms poll on a dormant page. The probe is

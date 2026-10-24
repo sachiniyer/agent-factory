@@ -226,6 +226,9 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     storeToken() {}, listTasks: () => tasks,
     fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
     getConfig: async () => null,
+    // The null config read schedules the bounded background reconcile; the
+    // sandbox exercises the connect path, so the reconcile itself is a no-op.
+    reconcileConfigRead() {},
     setTerminalFontSizes() {}, terminalFontSizesFromConfig: () => ({ phone: 6.5, desktop: 13 }),
     errorText: () => "", connectionAttemptMayCommit: () => true,
     reconcileProject: () => "", loadProjectChoice: () => null,

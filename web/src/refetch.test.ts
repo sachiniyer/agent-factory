@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { RegisteredProject } from "./api.js";
-import { createFencedRefetcher, createLatestRequestGate } from "./refetch.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff } from "./refetch.js";
 import type { ConfigResponse } from "./types.js";
 
 const srcRoot = dirname(fileURLToPath(import.meta.url));
@@ -303,4 +303,63 @@ test("#3659 every refetcher in index.ts commits through the fence, not inline", 
     // with the same credential moves neither the generation nor the token.
     assert.match(teardown, new RegExp(`${refetcher}\\.invalidate\\(\\)`), `stopStream must invalidate ${refetcher}`);
   }
+});
+
+// #5500 — a connect-time config read that fails degrades to the compiled
+// defaults; the bounded background reconcile is what converges the font
+// controller onto the served values. These cover the driver's contract:
+// stopped by a landed read, stopped by a dead session, and bounded by the
+// delay list so a dead daemon is never an endless poller.
+test("#5500 the bounded retry stops at the first landed read", async () => {
+  const slept: number[] = [];
+  let calls = 0;
+  const landed = await retryWithBackoff(
+    async () => ++calls >= 3,
+    () => true,
+    [10, 20, 40, 80],
+    async (ms) => { slept.push(ms); },
+  );
+  assert.equal(landed, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(slept, [10, 20, 40]);
+});
+
+test("#5500 a dead session ends the retry before the next request", async () => {
+  let calls = 0;
+  let alive = true;
+  const landed = await retryWithBackoff(
+    async () => { calls++; alive = false; return false; },
+    () => alive,
+    [10, 20, 40],
+    async () => {},
+  );
+  assert.equal(landed, false);
+  // The second wait observed the dead gate — no further fetch went out.
+  assert.equal(calls, 1);
+});
+
+test("#5500 a read that never lands exhausts its bounded delays", async () => {
+  let calls = 0;
+  const landed = await retryWithBackoff(
+    async () => { calls++; return false; },
+    () => true,
+    [10, 20],
+    async () => {},
+  );
+  assert.equal(landed, false);
+  assert.equal(calls, 2); // exactly one attempt per delay — the bound holds
+});
+
+test("#5500 a failed connect-time config read schedules the bounded reconcile", () => {
+  const source = readFileSync(join(srcRoot, "index.ts"), "utf8");
+  // The bootstrap degrades a failed GetConfig to null — and the null branch
+  // must drive reconcileConfigRead, the only caller of retryWithBackoff for
+  // this projection, rather than leaving the defaults in place.
+  assert.match(source, /getConfig\(candidate\)\.catch\(\(\) => null\)/);
+  assert.match(source, /void reconcileConfigRead\(candidate, attempt\)/);
+  // The reconcile's alive-gate is the same fence the bootstrap commit uses —
+  // a disconnect or token rotation ends the loop before another fetch.
+  const body = topLevelFunction(source, "reconcileConfigRead");
+  assert.match(body, /connectionAttemptMayCommit\(attempt, token, candidate\)/);
+  assert.match(body, /retryWithBackoff\(/);
 });
