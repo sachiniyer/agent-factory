@@ -102,7 +102,25 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		// value, and after a literal env's command slot.
 		{"xargs -I{} echo {}", false},
 		{"xargs -I{} cp {} /tmp", false},
-		{"xargs -I{} nice -n 5 echo {}", false},
+		// A marker that is an ordinary argument of a NESTED scanning wrapper's
+		// child is refused for parity with ionice/taskset: the outer wrapper's
+		// child-tail scan (shadowedChildTailMutates, #4708) judges every suffix
+		// of the child, and a shadowed `./<wrapper>` with `shift N; exec "$@"`
+		// can shift past the inner command (`echo`) and exec the substituted
+		// xargs input as a program. The existing ionice/taskset scans already
+		// refused this shape; the #4708 parity fix extends it to the five
+		// siblings. `xargs -I{} strace -f echo {}` (next row) stays admitted
+		// because strace is an UNmodeled wrapper whose argv the scan judges
+		// only through unrecognizedWrapperHidesAccountAssignment (no every-
+		// suffix child-tail walk), and `xargs -I{} echo {}` (no wrapper) has
+		// no shift boundary to reach the marker from.
+		{"xargs -I{} nice -n 5 echo {}", true},
+		{"xargs -I{} ionice -c 3 echo {}", true},
+		{"xargs -I{} taskset 0x1 echo {}", true},
+		{"xargs -I{} nohup echo {}", true},
+		{"xargs -I{} timeout 5 echo {}", true},
+		{"xargs -I{} setsid echo {}", true},
+		{"xargs -I{} stdbuf -o0 echo {}", true},
 		{"xargs -I{} strace -f echo {}", false},
 		{"xargs -I{} env codex {}", false},
 		{"xargs -I{} env PORT={} codex", false},
