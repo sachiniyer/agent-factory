@@ -746,7 +746,7 @@ func TestReadOnlyLoadRefusesADanglingLink(t *testing.T) {
 // a config.toml between the check and the exclusive create. When that arrival
 // is a broken link, the create reports EEXIST on it, the reread fails, and the
 // old code returned in-memory defaults with no error — the same silent-defaults
-// outcome refuseDanglingConfigLink was added to stop (#3660 review).
+// outcome RefuseDanglingConfigLink was added to stop (#3660 review).
 func TestMaterializeRefusesADanglingLinkInstalledDuringTheRace(t *testing.T) {
 	home, dotfiles := t.TempDir(), t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
