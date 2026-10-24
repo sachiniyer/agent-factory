@@ -10783,13 +10783,15 @@ var AttachTerminal = class {
    *  withheld write its delivery can change nothing — it would fit, suppress,
    *  and re-arm forever, a perpetual 250ms poll on a dormant page.
    *
-   *  The probe carries its own fit budget: the parked fit that withheld this
-   *  write reported settled and zeroed visibleFitAttempts, so a transient
-   *  measurement bail on the wake frame would decrement below zero and strand
-   *  the owed write until an unrelated activation signal. Seeding an empty
-   *  budget lets the wake frame retry like any scheduled fit — through the
-   *  delivery pair, which is honest on a page the frame just unparked. A live
-   *  budget is left alone: the probe borrows it rather than extending it. */
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
   armWakeProbe() {
     if (this.stopped) {
       return;
