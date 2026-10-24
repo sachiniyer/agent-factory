@@ -135,7 +135,7 @@ func TestAgentNameUsedAsDataDoesNotSelectCredentialAllowlist(t *testing.T) {
 		"/srv/af agent-server --listen :43110 --repo /workspace --title codex",
 	} {
 		session := NewTmuxSession("agent-name-data", program)
-		_, environ, imports, err := session.launchEnvironment()
+		_, environ, imports, _, _, err := session.prepareLaunchEnvironment("")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	session := NewTmuxSession("cross-agent-account", "codex")
 	session.SetAccountForAgent("claude", "work")
 
-	_, _, _, err := session.launchEnvironment()
+	_, _, _, _, _, err := session.prepareLaunchEnvironment("")
 	if err == nil {
 		t.Fatal("a Claude account was reinterpreted as a same-named Codex account after the program changed")
 	}
@@ -186,7 +186,7 @@ func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
 
 	session := NewTmuxSession("scoped-grant-fails", "codex")
 	session.SetAccountForAgent("codex", "work")
-	if _, _, _, err := session.launchEnvironment(); err == nil {
+	if _, _, _, _, _, err := session.prepareLaunchEnvironment(""); err == nil {
 		t.Fatal("account-scoped launch on a repository-controlled PATH hit was not refused")
 	} else if !strings.Contains(err.Error(), "cannot attribute") {
 		t.Fatalf("scoped grant refusal lost its reason: %v", err)
@@ -235,7 +235,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 
 	process := agent.NewSiblingSession("account-process", "make -j4")
-	wrapped, environ, imports, err := process.launchEnvironment()
+	wrapped, environ, imports, _, _, err := process.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped, environ, imports, err = shell.launchEnvironment()
+	wrapped, environ, imports, _, _, err = shell.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
 
 	session := NewTmuxSession("inline-cloud-mode", "CLAUDE_CODE_USE_BEDROCK=1 claude")
-	_, environ, imports, err := session.launchEnvironment()
+	_, environ, imports, _, _, err := session.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestLegacyLaunchClearsInheritedSessionMarkers(t *testing.T) {
 	t.Setenv(EnvMarkerSession, "af_parent")
 	t.Setenv(EnvMarkerGeneration, "parent-generation")
 	child := NewTmuxSession("child", "claude")
-	_, environ, imports, err := child.launchEnvironment()
+	_, environ, imports, _, _, err := child.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
