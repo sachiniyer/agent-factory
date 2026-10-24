@@ -9826,10 +9826,14 @@ var AttachTerminal = class {
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
       return accepted;
     });
-    this.ro = new ResizeObserver(() => this.scheduleFit());
+    this.ro = new ResizeObserver(() => {
+      this.parked = false;
+      this.scheduleFit();
+    });
     this.ro.observe(container);
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.parked = false;
         this.scheduleVisibleFit();
       }
     });
@@ -9879,6 +9883,17 @@ var AttachTerminal = class {
   visibleFitFrame = null;
   visibleFitTimer = null;
   visibleFitAttempts = 0;
+  /** Whether this page is currently unpaintable, detected the only way the
+   *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
+   *  250ms timer had to deliver instead. An occluded page keeps
+   *  visibilityState='visible' while its frames starve — document.hidden is
+   *  not a sufficient probe — so the starved frame IS the parked signal. A
+   *  parked page must never write the shared PTY grid: with no user present its
+   *  resizes cannot be activations, and a parked client stealing the grid is
+   *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
+   *  any genuinely page-coupled signal — a delivered frame, an observer
+   *  callback, window focus, or a TRUSTED input event. */
+  parked = false;
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
@@ -9960,13 +9975,17 @@ var AttachTerminal = class {
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  onWindowFocus = () => this.scheduleVisibleFit();
+  onWindowFocus = () => {
+    this.parked = false;
+    this.scheduleVisibleFit();
+  };
   onWindowBlur = () => {
     this.mouseOverrideKeyHeld = false;
     this.endHandedOffDrag();
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
+      this.parked = false;
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
@@ -9974,11 +9993,17 @@ var AttachTerminal = class {
   };
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
-  onPhoneChange = () => this.applyDeviceFontSize();
+  onPhoneChange = () => {
+    this.parked = false;
+    this.applyDeviceFontSize();
+  };
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  onPointerEnter = () => {
+  onPointerEnter = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.fitVisibleHost();
   };
   // A scroll can target an already-focused window after another client resized the
@@ -9989,6 +10014,7 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
+    this.parked = false;
     this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
@@ -10058,6 +10084,9 @@ var AttachTerminal = class {
     event.preventDefault();
   };
   onTouchMove = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.handleUserScroll("touch");
     const touch = event.touches[0];
     const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
@@ -10102,6 +10131,9 @@ var AttachTerminal = class {
     this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
+      if (event.isTrusted) {
+        this.parked = false;
+      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -10701,14 +10733,18 @@ var AttachTerminal = class {
     this.queueVisibleFit();
   }
   queueVisibleFit() {
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit());
-    this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(), VISIBLE_FIT_TIMER_MS);
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
   }
   /** Whichever of the twin triggers delivers first runs the fit and drops the
-   *  other. A fit that still cannot measure the host retries within the attempt
-   *  budget — a transient bail used to be FINAL, which is how one bad instant
-   *  could strand the pane on a peer's grid permanently. */
-  onVisibleFit() {
+   *  other. The channel the delivery arrived on is the parked detector: the
+   *  timer only wins when the frame armed beside it starved, so a timer
+   *  delivery marks the page parked and this fit writes nothing. A fit that
+   *  still cannot measure the host retries within the attempt budget — a
+   *  transient bail used to be FINAL, which is how one bad instant could strand
+   *  the pane on a peer's grid permanently. */
+  onVisibleFit(deliveredByFrame) {
+    this.parked = !deliveredByFrame;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
       this.visibleFitTimer = null;
@@ -10848,13 +10884,18 @@ var AttachTerminal = class {
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
    *  even an unchanged size (used on connect to (re)assert our size to the server).
-   *  A hidden page never writes the shared grid at all: its fit still runs so
-   *  xterm's DOM stays honest, but with no user present a resize cannot be an
-   *  activation — and a scheduled attempt reaching it via the timer twin must
-   *  never steal a live visible peer's grid. lastRows/lastCols stay stale on a
-   *  suppressed send; that divergence is what the first visible fit converges. */
+   *  A parked page never writes the shared grid: its fit still runs so xterm's
+   *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
+   *  cannot be an activation, and it must not steal a live visible peer's grid.
+   *  document.visibilityState covers hidden pages; `parked` covers occluded
+   *  pages that still report 'visible' while their frames starve. lastRows/
+   *  lastCols stay stale on a suppressed send; that divergence is what the
+   *  first fit after an unpark converges. */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (this.parked) {
       return;
     }
     if (typeof document !== "undefined" && document.visibilityState !== "visible") {

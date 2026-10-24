@@ -19,7 +19,7 @@ function stage() {
   };
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
-    pendingViewport: null, lastRows: 0, lastCols: 0,
+    pendingViewport: null, lastRows: 0, lastCols: 0, parked: false,
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
@@ -35,6 +35,7 @@ function stage() {
     visibleFitAttempts: number;
     lastRows: number;
     lastCols: number;
+    parked: boolean;
   };
   return { terminal, host, term, fit, calls };
 }
@@ -97,11 +98,13 @@ test("a starved frame cannot lose the reclaim — the timer twin delivers it", (
     terminal.scheduleVisibleFit();
     assert.notEqual(terminal.visibleFitFrame, null);
     // Never deliver the frame — a page the compositor has parked starves rAF.
-    // The armed timer carries the fit anyway.
+    // The armed timer carries the fit anyway: the DOM reclaims locally while
+    // the wire write is withheld until a frame-coupled signal unparks it.
     win.runTimer();
-    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual(calls, ["fit"]);
     assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
+    assert.equal(terminal.parked, true);
   } finally {
     win.restore();
   }
@@ -127,15 +130,14 @@ test("a scheduled fit that cannot yet measure retries instead of stranding", () 
   }
 });
 
-// The timer twin delivers a scheduled fit even on a document-hidden page — but
-// a hidden page must never write the shared PTY grid: with no user present its
-// resize cannot be an activation, and it must never steal a live visible peer's
-// grid. The fit still runs locally so xterm's DOM is honest when the page next
-// shows; the suppressed write stays owed via lastRows/lastCols divergence.
-test("a hidden page's scheduled fit reclaims locally but never writes the grid", async () => {
+// The timer twin delivers a scheduled fit even on a parked page — but a parked
+// page must never write the shared PTY grid: with no user present its resize
+// cannot be an activation, and it must never steal a live visible peer's grid.
+// "Parked" is detected by the delivery channel — the starved rAF — which covers
+// occluded pages that keep visibilityState='visible'; the document gate inside
+// sendResize covers genuinely hidden pages for every caller.
+test("a parked page's scheduled fit reclaims locally but never writes the grid", async () => {
   const win = stubWindow();
-  const prior = (globalThis as { document?: unknown }).document;
-  (globalThis as { document?: unknown }).document = { visibilityState: "hidden" };
   try {
     const { terminal, term, calls } = stage();
     // A peer's 300x50 echo owns the grid: term follows it, and lastRows/lastCols
@@ -144,7 +146,7 @@ test("a hidden page's scheduled fit reclaims locally but never writes the grid",
     terminal.lastRows = 300;
     terminal.lastCols = 50;
     terminal.scheduleVisibleFit();
-    win.runTimer(); // rAF is dead on a hidden page; only the timer delivers
+    win.runTimer(); // starved rAF → parked delivery: local reclaim only
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "connect"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
@@ -152,15 +154,11 @@ test("a hidden page's scheduled fit reclaims locally but never writes the grid",
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
   } finally {
     win.restore();
-    (globalThis as { document?: unknown }).document = prior;
   }
 });
 
-test("the first fit after the page shows again flushes the resize a hidden fit owed", async () => {
+test("the first frame-coupled fit after parking flushes the owed resize", async () => {
   const win = stubWindow();
-  const doc = { visibilityState: "hidden" };
-  const prior = (globalThis as { document?: unknown }).document;
-  (globalThis as { document?: unknown }).document = doc;
   try {
     const { terminal, term, calls } = stage();
     Object.assign(term, { rows: 300, cols: 50 });
@@ -170,13 +168,27 @@ test("the first fit after the page shows again flushes the resize a hidden fit o
     win.runTimer();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "connect"]);
-    doc.visibilityState = "visible";
     terminal.scheduleVisibleFit();
-    win.runFrame();
+    win.runFrame(); // a frame delivered ⇒ the page is painting again
     await Promise.resolve();
     // xterm needed no refit — the send is purely the owed convergence flush.
+    assert.equal(terminal.parked, false);
     assert.deepEqual(calls, ["fit", "connect", "resize"]);
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a document-hidden page never writes the grid, whatever the delivery channel", () => {
+  const win = stubWindow();
+  const prior = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { visibilityState: "hidden" };
+  try {
+    const { terminal, calls } = stage();
+    terminal.scheduleVisibleFit();
+    win.runFrame(); // even a frame-delivered fit cannot write while hidden
+    assert.deepEqual(calls, ["fit"]);
   } finally {
     win.restore();
     (globalThis as { document?: unknown }).document = prior;
