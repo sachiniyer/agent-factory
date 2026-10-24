@@ -792,6 +792,39 @@ func TestCodexResumedRolloutPath_LastHandlesOversizedFinalRecord(t *testing.T) {
 		"a rollout ending in an oversized record still has recency and must win --last")
 }
 
+// A final record of exactly tailCap+10 bytes starts 11 bytes before the
+// end-relative window boundary: its head fragment ends inside the leading
+// `"timestamp"` field (no closing quote for the regex) and the continuation
+// lands in the next window as a mid-record fragment — parsed in neither.
+// The backward scan must carry the partial fragment across the boundary or
+// this rollout silently loses --last to an older one (#5486 review).
+func TestCodexResumedRolloutPath_LastHandlesTimestampSplitAcrossWindows(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	older := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	split := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-34-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+	appendCodexRolloutEvent(t, older, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
+	// Exactly cap+10 bytes: meta line + record + '\n' makes the file size
+	// metaLen+cap+12, so the last window boundary sits 11 bytes into the
+	// record — inside `{"timestamp":"..."`.
+	prefix := `{"timestamp":"2026-07-06T10:17:36Z","payload":{"data":"`
+	record := []byte(prefix +
+		strings.Repeat("x", codexRolloutTailReadCap+10-len(prefix)-2) + `"}`)
+	require.Equal(t, codexRolloutTailReadCap+10, len(record))
+	f, err := os.OpenFile(split, os.O_APPEND|os.O_WRONLY, 0644)
+	require.NoError(t, err)
+	_, err = f.Write(append(record, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	path, resume := CodexResumedRolloutPath(codexHome, "codex resume --last", workDir)
+	require.True(t, resume)
+	require.Equal(t, split, path,
+		"a rollout whose final record's timestamp straddles a read window still has recency")
+}
+
 // A store that cannot be enumerated is not an empty store: the late re-check's
 // "never arrived" must only fire when the scan really looked. Traversal
 // failures surface as their own indeterminate error, never as absence (#5471

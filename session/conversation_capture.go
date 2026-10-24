@@ -708,8 +708,13 @@ func codexRolloutLastEventTime(path string) (time.Time, bool) {
 	// as a record start only when a newline precedes it (or the scan reaches
 	// offset 0); segments inside a record are skipped, and the record's own
 	// start — with its timestamp — surfaces when the scan walks far enough
-	// left (#5486 review). Runs only at spawn-time target resolution.
+	// left (#5486 review). A start near a window edge can have its leading
+	// timestamp split across two windows, so a bounded prefix of each
+	// mid-record fragment is carried into the earlier window to complete the
+	// head that window's last segment truncated. Runs only at spawn-time
+	// target resolution.
 	var one [1]byte
+	var carry []byte
 	for end := info.Size(); end > 0; {
 		start := end - codexRolloutTailReadCap
 		if start < 0 {
@@ -720,16 +725,28 @@ func codexRolloutLastEventTime(path string) (time.Time, bool) {
 			return time.Time{}, false
 		}
 		lines := bytes.Split(buf, []byte{'\n'})
+		var carryNext []byte
 		for i := len(lines) - 1; i >= 0; i-- {
+			seg := lines[i]
 			if i == 0 && start > 0 {
 				if _, err := file.ReadAt(one[:], start-1); err != nil || one[0] != '\n' {
+					// A mid-record fragment: the record's start lives in an
+					// earlier window, whose matching tail segment may end
+					// mid-timestamp at this boundary. Carry a bounded prefix
+					// so that window can complete the head.
+					carryNext = seg[:min(len(seg), codexLineTimestampHeadCap)]
 					break
 				}
 			}
-			if ts, ok := codexLineTimestamp(lines[i]); ok {
+			if i == len(lines)-1 && len(carry) > 0 && len(seg) < codexLineTimestampHeadCap {
+				n := min(len(carry), codexLineTimestampHeadCap-len(seg))
+				seg = append(seg[:len(seg):len(seg)], carry[:n]...)
+			}
+			if ts, ok := codexLineTimestamp(seg); ok {
 				return ts, true
 			}
 		}
+		carry = carryNext
 		end = start
 	}
 	return time.Time{}, false
@@ -739,15 +756,20 @@ func codexRolloutLastEventTime(path string) (time.Time, bool) {
 // JSON key Codex writes on every event line, ahead of any payload content.
 var codexTimestampField = regexp.MustCompile(`"timestamp"\s*:\s*"([^"]+)"`)
 
+// codexLineTimestampHeadCap bounds the head bytes searched for a record's
+// timestamp — the field is the record's first key — and caps the fragment
+// bytes the backward scan carries across a window boundary: only a head
+// worth of continuation can ever matter to the search.
+const codexLineTimestampHeadCap = 16 << 10
+
 // codexLineTimestamp returns the timestamp of the JSONL record beginning at
 // line. Only a bounded head is searched — the field is the record's first
 // key, so truncation past it cannot hide the value, and a windowed scan can
 // call this on a segment that runs past the buffer's right edge.
 func codexLineTimestamp(line []byte) (time.Time, bool) {
-	const headCap = 16 << 10
 	head := line
-	if len(head) > headCap {
-		head = head[:headCap]
+	if len(head) > codexLineTimestampHeadCap {
+		head = head[:codexLineTimestampHeadCap]
 	}
 	m := codexTimestampField.FindSubmatch(bytes.TrimSpace(head))
 	if m == nil {
