@@ -11,23 +11,29 @@
 // unparks it converges the daemon — the divergence between the local grid and
 // lastRows/lastCols is itself the owed-write marker.
 //
-// "Parked" here means the page's frames have STOPPED, not that a DOM flag
-// flipped: an occluded headless target (and e.g. a fully covered window on some
-// platforms) keeps document.visibilityState='visible' while its rAF is dead.
-// The spec proves the state empirically — it measures that the stranded page's
-// rAF does not fire — rather than trusting a flag.
+// "Parked" means the page's frames have STOPPED — a hidden tab, an occluded
+// window, a renderer under pressure. Headless Chromium cannot produce it
+// organically: verified on this harness, a non-front target keeps
+// visibilityState='visible' AND keeps firing rAF; CDP window minimization is
+// virtual; the only lifecycle state the protocol offers ('frozen') kills
+// timers too — the wrong shape. (That is also why master's lone-rAF reclaim
+// could pass for so long: the strand only bites where frames really starve.)
+// So the spec parks the page exactly the way the production detector sees it:
+// requestAnimationFrame is stubbed to never deliver. Everything downstream is
+// the shipped code: the armed-twin scheduler, the parked latch, the local-only
+// fit, the suppressed OpResize, the unpark-and-flush — driven by the real
+// 250ms timer and a real frame + focus signal.
 //
 // Two tabs of one context, both subscribed to one PTY, prove it end to end:
 //
 //   1. a tall peer strands a 375x667 tab on the peer's 2000px grid;
-//   2. the stranded tab's rAF is measurably dead — the parked state;
+//   2. the stranded tab's frame delivery is switched off — measurably dead;
 //   3. a drawer dispatch refits it: its own rows drop to the local grid (the
 //      timer twin delivered the reclaim) but the peer's rows do NOT move — no
 //      OpResize ever left the parked page, or the daemon would have echoed it
 //      into the peer's xterm;
-//   4. fronting the first tab flushes the owed write: the daemon learns its
-//      grid and the peer is stomped to it — the legitimate last-writer-wins
-//      activation #2347's machinery provides.
+//   4. frame delivery restored + a real activation: the owed write flushes, the
+//      daemon learns the fronted client's grid, and the peer is stomped to it.
 //
 // The same spec run against a master binary shows the other half of the story:
 // master delivers nothing while parked (its only vehicle was the starved rAF),
@@ -72,11 +78,8 @@ test("a parked client reclaims locally but never writes the shared grid", async 
     await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   };
   const rows = (host: Locator): Promise<number> => host.locator(".xterm-rows > div").count();
-  // The empirical parked probe: whether the page's rAF still fires. An occluded
-  // headless target reports visibilityState='visible' while its frames starve,
-  // so the state under test is proven by measuring the missing frame — 1.5s of
-  // silence, ten times the timer twin's 250ms cadence, is unambiguous deadness —
-  // rather than trusting a DOM flag.
+  // The empirical parked probe: whether the page's rAF still fires. 1.5s of
+  // silence — six times the timer twin's 250ms cadence — is unambiguous deadness.
   const frameAlive = (page: Page): Promise<boolean> =>
     page.evaluate(
       () =>
@@ -88,6 +91,23 @@ test("a parked client reclaims locally but never writes the shared grid", async 
           });
         }),
     );
+  // Park the page exactly the way the production detector sees it: the armed
+  // rAF can never run, so only the 250ms timer twin can deliver a scheduled
+  // fit — the same input a hidden tab or occluded window gives it.
+  const park = (page: Page): Promise<void> =>
+    page.evaluate(() => {
+      (window as { __afRealRaf?: typeof requestAnimationFrame }).__afRealRaf =
+        window.requestAnimationFrame;
+      window.requestAnimationFrame = () => -1;
+    });
+  const unpark = (page: Page): Promise<void> =>
+    page.evaluate(() => {
+      const w = window as { __afRealRaf?: typeof requestAnimationFrame };
+      if (w.__afRealRaf) {
+        window.requestAnimationFrame = w.__afRealRaf;
+      }
+      window.dispatchEvent(new Event("focus"));
+    });
 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
@@ -127,10 +147,12 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       .poll(() => rows(firstHost), { message: "the peer's echo must strand the first tab" })
       .toBe(peerRows);
 
-    // Pin the parked state: the peer is the frontmost target, and the stranded
-    // tab's frames must measurably have stopped — the state in which a starved
-    // rAF used to lose the reclaim entirely.
+    // Establish the environment honestly: the non-front tab's frames ARE alive
+    // in headless — there is no organic parked state to lean on — so park it by
+    // cutting frame delivery, then prove the cut took.
     await second.bringToFront();
+    expect(await frameAlive(first)).toBe(true);
+    await park(first);
     await expect
       .poll(() => frameAlive(first), {
         message: "the stranded client must be frame-starved for this leg to prove anything",
@@ -157,10 +179,12 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       "the parked client's reclaim must not move the shared grid off the live peer",
     ).toBe(peerRows);
 
-    // Activation is the legitimate writer: fronting the stranded tab resumes
-    // its frames — a delivered frame or a focus event unparks it — and the next
-    // fit's convergence send flushes the owed resize. The daemon echoes the new
-    // owner to the peer, whose own rows drop to the fronted client's grid.
+    // Activation is the legitimate writer: restore frame delivery, front the
+    // tab (a trusted focus signal), and dispatch focus in case bringToFront's
+    // focus event is not delivered in headless. Either way the page sees the
+    // shipped unpark path — focus/observer/frame — then the next fit's
+    // convergence send flushes the owed resize and the daemon stomps the peer.
+    await unpark(first);
     await first.bringToFront();
     await expect
       .poll(() => frameAlive(first), {

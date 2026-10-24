@@ -10726,15 +10726,24 @@ var AttachTerminal = class {
    *  every later activation into a no-op. The timer still fires on that page, so
    *  the reclaim cannot be lost with the frame. */
   scheduleVisibleFit() {
-    if (this.stopped || this.visibleFitFrame !== null || this.visibleFitTimer !== null) {
+    if (this.stopped) {
       return;
     }
     this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     this.queueVisibleFit();
   }
+  /** Arms whichever twin is missing. A latched frame handle must not suppress
+   *  the timer: the handle can outlive the frame it was promised (armed before
+   *  the page parked, callback queued into a frame that never comes), and
+   *  coalescing onto it would swallow every later trigger — the strand. The
+   *  frame side still coalesces: a live armed frame is the cheapest delivery. */
   queueVisibleFit() {
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
-    this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    if (this.visibleFitFrame === null) {
+      this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    }
+    if (this.visibleFitTimer === null) {
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    }
   }
   /** Whichever of the twin triggers delivers first runs the fit and drops the
    *  other. The channel the delivery arrived on is the parked detector: the
