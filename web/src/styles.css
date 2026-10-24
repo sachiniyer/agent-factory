@@ -870,6 +870,51 @@ button:disabled,
   background: var(--af-surface-raised);
 }
 
+/* A persistent incompleteness notice for the rail (#4742): names the repos the
+ * daemon dropped at startup and the reason each, so a user can tell "repo has no
+ * sessions" from "the daemon dropped this repo's sessions at startup" instead of
+ * seeing them silently vanish. Sourced from SnapshotResponse.skipped_repos, so it
+ * is rebuilt only when the skip set changes and stays put across project/filter
+ * switches — the missing sessions are a property of the snapshot, not the view. */
+.af-rail-skipped {
+  /* flex: 0 1 (not 0 0) so a tall notice with several skipped repos, or a short
+   * mobile/landscape viewport, cannot crowd the sessions list to zero height:
+   * the notice shrinks before the list does, and min-height: 0 + overflow-y: auto
+   * makes the overflow scrollable inside the notice instead of spilling the rail
+   * (the rail itself is not a scroll container; only .af-rail-list is). */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--af-space-2);
+  margin: 0 0 var(--af-space-1) 0;
+  border-left: calc(var(--af-space-1) * 0.5) solid var(--af-dead);
+  background: var(--af-surface-raised);
+  color: var(--af-dead);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.af-rail-skipped-head {
+  font-weight: 600;
+  margin-bottom: var(--af-space-1);
+}
+
+.af-rail-skipped-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+}
+
+.af-rail-skipped-row {
+  margin: 0;
+}
+
+.af-rail-skipped-row strong {
+  color: var(--af-dead);
+  font-weight: 600;
+}
+
 .af-row {
   display: flex;
   align-items: flex-start;

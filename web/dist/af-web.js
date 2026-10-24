@@ -6568,7 +6568,8 @@ async function fetchSessionSnapshot(token2) {
     sessions: resp.instances ?? [],
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
-    daemonBootId: resp.boot_id
+    daemonBootId: resp.boot_id,
+    skippedRepos: resp.skipped_repos
   };
 }
 async function probeAuthRequired() {
@@ -15995,6 +15996,36 @@ function orderChildren(parent, children) {
 }
 
 // src/ui.ts
+var SKIPPED_REPO_REASON = {
+  corrupted: "corrupted-instances-json",
+  unreadable: "unreadable-instances-json",
+  newerSchema: "newer-schema-instances-json",
+  rowsFailed: "rows-failed-to-load"
+};
+function skippedRepoReasonLabel(reason) {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "instances.json could not be read";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "instances.json written by a newer af";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "some sessions could not be loaded (worktree or tmux gone)";
+    default:
+      return "instances.json is corrupted";
+  }
+}
+function skippedRepoRepairHint(reason) {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "Upgrade af to a version that understands the newer state file, then restart the daemon; do not edit or delete these files, they hold sessions this binary cannot read.";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem.";
+    default:
+      return "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files.";
+  }
+}
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
@@ -16766,6 +16797,7 @@ var AppShell = class {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
@@ -16780,7 +16812,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -16916,7 +16948,24 @@ var AppShell = class {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    const skipped = state.skippedRepos ?? [];
+    const skippedRoots = state.registeredProjects.filter((p) => p.repo_id && skipped.some((s) => s.repo_id === p.repo_id)).map((p) => [p.repo_id, p.root]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
+    if (skippedSig !== this.lastSkippedNoticeSignature) {
+      this.lastSkippedNoticeSignature = skippedSig;
+      this.cachedSkippedNotice = this.skippedReposNotice(state);
+    }
+    const head = [];
+    if (this.cachedRailNotice) head.push(this.cachedRailNotice);
+    orderChildren(this.railList, [...head, ...rows]);
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -16929,6 +16978,12 @@ var AppShell = class {
   lastFilterSignature = "";
   lastRailNoticeSignature = "";
   cachedRailNotice = null;
+  lastSkippedNoticeSignature = "";
+  cachedSkippedNotice = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  mountedSkippedNotice = null;
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
@@ -17057,6 +17112,55 @@ var AppShell = class {
       );
     }
     return null;
+  }
+  /** A persistent incompleteness notice for the rail, naming the repos the daemon
+   *  dropped at startup and the daemon's reason for each (#4742). This is the web's
+   *  half of the contract the CLI's list/get/whoami honor by refusing or caveating:
+   *  rather than presenting the truncated `instances` as a complete roster, the rail
+   *  shows WHAT is missing and WHY so a user can tell "repo has no sessions" from
+   *  "the daemon dropped this repo's sessions at startup". Returns null when no repo
+   *  was skipped — the healthy steady state — so the rail renders nothing extra.
+   *
+   *  Each skipped repo is named by its project root when the registry knows it (the
+   *  repo_id is a short hash, not a path), falling back to the bare id; the reason
+   *  renders the daemon's stable code plus a one-line repair hint mirroring
+   *  api/skipped_repos.go verbatim so the web and the CLI send the operator to the
+   *  same remedy. An unknown/empty reason is treated as corrupted, which is all an
+   *  older daemon ever sent. */
+  skippedReposNotice(state) {
+    const skipped = state.skippedRepos ?? [];
+    if (skipped.length === 0) return null;
+    const knownRoot = /* @__PURE__ */ new Map();
+    for (const p of state.registeredProjects) {
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
+    }
+    const body = h("div", { class: "af-rail-skipped-body" });
+    for (const s of skipped) {
+      const label = knownRoot.get(s.repo_id) ?? s.repo_id;
+      const reason = skippedRepoReasonLabel(s.reason);
+      const hint = skippedRepoRepairHint(s.reason);
+      const line = h(
+        "p",
+        { class: "af-rail-skipped-row" },
+        h("strong", {}, label),
+        ` \u2014 ${reason}. `,
+        hint
+      );
+      if (s.failed_rows && s.failed_rows > 0) {
+        line.append(` (${s.failed_rows} session(s) hidden)`);
+      }
+      body.append(line);
+    }
+    return h(
+      "div",
+      { class: "af-rail-skipped", role: "alert" },
+      h(
+        "div",
+        { class: "af-rail-skipped-head" },
+        "Some sessions are hidden \u2014 a daemon repo could not be loaded."
+      ),
+      body
+    );
   }
   /** (Re)builds the filter menu: one checkbox per session state with its scoped
    *  count, plus a reset. Counts come from the PROJECT-scoped list (the filter is a
@@ -18246,6 +18350,9 @@ var store = new Store({
   connecting: true,
   loginError: null,
   sessions: [],
+  // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
+  // the rail renders no notice in this default state.
+  skippedRepos: [],
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
@@ -18377,12 +18484,14 @@ async function connect(candidate) {
   let operationLockTimeoutMs;
   let operationClockMs;
   let daemonBootId;
+  let skippedRepos;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
+    skippedRepos = snapshot.skippedRepos;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
@@ -18414,6 +18523,7 @@ async function connect(candidate) {
     connecting: false,
     loginError: null,
     sessions,
+    skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
     focus: "rail",
@@ -18431,7 +18541,8 @@ async function connect(candidate) {
     generation: restoreSnapshot,
     operationLockTimeoutMs,
     operationClockMs,
-    daemonBootId
+    daemonBootId,
+    skippedRepos
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -19102,7 +19213,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
@@ -19111,7 +19223,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
@@ -19238,7 +19351,8 @@ function renameSessionTab(id, name, editedSessionId) {
       generation: snapshot.generation,
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
-      daemonBootId: snapshot.daemonBootId
+      daemonBootId: snapshot.daemonBootId,
+      skippedRepos: snapshot.skippedRepos
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -19262,7 +19376,8 @@ function reorderSessionTab(from, to) {
       generation: snapshot.generation,
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
-      daemonBootId: snapshot.daemonBootId
+      daemonBootId: snapshot.daemonBootId,
+      skippedRepos: snapshot.skippedRepos
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -19868,7 +19983,13 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
   }
   const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
-  store.set({ sessions, selectedProject, selectedId, activeTab });
+  store.set({
+    sessions,
+    selectedProject,
+    selectedId,
+    activeTab,
+    ...evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}
+  });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({
     id: s.id,
     restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
@@ -19883,6 +20004,7 @@ async function fetchProjectedSnapshot(tok) {
     let operationLockTimeoutMs;
     let operationClockMs;
     let daemonBootId;
+    let skippedRepos;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
       const snapshot = await fetchSessionSnapshot(tok);
@@ -19890,6 +20012,7 @@ async function fetchProjectedSnapshot(tok) {
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
+      skippedRepos = snapshot.skippedRepos;
       return authoritative;
     });
     return sessions === null ? null : {
@@ -19898,7 +20021,8 @@ async function fetchProjectedSnapshot(tok) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     };
   } catch (error) {
     requestResync();
@@ -19938,7 +20062,8 @@ function requestResync() {
         generation: restoreSnapshot,
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
-        daemonBootId: snapshot.daemonBootId
+        daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos
       }, sessions);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();

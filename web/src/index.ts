@@ -132,7 +132,7 @@ import {
   type NewTabKind,
 } from "./ui.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
+import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -162,6 +162,9 @@ const store = new Store<AppState>({
   connecting: true,
   loginError: null,
   sessions: [],
+  // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
+  // the rail renders no notice in this default state.
+  skippedRepos: [],
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
@@ -391,12 +394,14 @@ async function connect(candidate: string): Promise<void> {
   let operationLockTimeoutMs: number | undefined;
   let operationClockMs: number | undefined;
   let daemonBootId: string | undefined;
+  let skippedRepos: SkippedRepo[] | undefined;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
+    skippedRepos = snapshot.skippedRepos;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
@@ -451,6 +456,7 @@ async function connect(candidate: string): Promise<void> {
     connecting: false,
     loginError: null,
     sessions,
+    skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
     focus: "rail",
@@ -465,7 +471,7 @@ async function connect(candidate: string): Promise<void> {
   });
   applySessions(sessions, {
     kind: "snapshot", generation: restoreSnapshot,
-    operationLockTimeoutMs, operationClockMs, daemonBootId,
+    operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -1492,7 +1498,7 @@ function guardedTabRebind(
       }
       const {
         sessions, authoritative, generation,
-        operationLockTimeoutMs, operationClockMs, daemonBootId,
+        operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
       } = snapshot;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
@@ -1508,7 +1514,7 @@ function guardedTabRebind(
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
       applySessions(sessions, {
-        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
+        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
       }, authoritative);
       // Whether the session this gesture was aimed at survived the round trip. A
       // session killed by another client mid-flight ALSO moves the selection
@@ -1765,6 +1771,7 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -1812,6 +1819,7 @@ function reorderSessionTab(from: number, to: number): void {
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -2804,7 +2812,14 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
     ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
     : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
-  store.set({ sessions, selectedProject, selectedId, activeTab });
+  // Stamp the daemon's startup-skipped repo set onto the store when the snapshot
+  // evidence carries it (#4742): the rail renders a persistent incompleteness
+  // notice from this state instead of presenting the truncated rows as complete.
+  // Event deltas (no snapshot evidence) leave skippedRepos untouched — the skip
+  // set changes only on a snapshot refresh, so a session.* event never clears it.
+  store.set({ sessions, selectedProject, selectedId, activeTab,
+    ...(evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}),
+  });
   // Evidence distinguishes causal completion from delayed updates/cache repaints.
   if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
@@ -2821,6 +2836,7 @@ interface AcceptedSessionSnapshot {
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
   daemonBootId?: string;
+  skippedRepos?: SkippedRepo[];
 }
 async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
   if (token !== tok) return null;
@@ -2830,6 +2846,7 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
     let operationLockTimeoutMs: number | undefined;
     let operationClockMs: number | undefined;
     let daemonBootId: string | undefined;
+    let skippedRepos: SkippedRepo[] | undefined;
     const sessions = await optimisticSessions.refresh(async () => {
       // refresh may retry after an intervening event. Carry the issuance stamp
       // and raw rows from the accepted attempt together to the commit site.
@@ -2839,10 +2856,11 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
+      skippedRepos = snapshot.skippedRepos;
       return authoritative;
     });
     return sessions === null ? null : {
-      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
+      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
     };
   } catch (error) {
     // The gesture cannot safely rebind without its post-mutation roster. Keep
@@ -2898,6 +2916,7 @@ function requestResync(): void {
           operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
           operationClockMs: snapshot.operationClockMs,
           daemonBootId: snapshot.daemonBootId,
+          skippedRepos: snapshot.skippedRepos,
         }, sessions);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
