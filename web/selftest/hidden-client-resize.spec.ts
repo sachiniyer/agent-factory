@@ -121,6 +121,10 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         __afRealCancel?: typeof cancelAnimationFrame;
         __afDeferred?: Map<number, FrameRequestCallback>;
         __afNextRafId?: number;
+        __dbg?: string[];
+      };
+      const dbg = (m: string): void => {
+        w.__dbg?.push(`${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`);
       };
       if (w.__afRealRaf) {
         return; // already parked — a second park() must not capture the stub
@@ -129,13 +133,16 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       w.__afRealCancel = window.cancelAnimationFrame;
       w.__afDeferred = new Map();
       w.__afNextRafId = 1;
+      dbg("park: rAF stub installed");
       window.requestAnimationFrame = (cb: FrameRequestCallback) => {
         const id = w.__afNextRafId as number;
         w.__afNextRafId = id + 1;
         (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
+        dbg(`stub arm #${id} q=${(w.__afDeferred as Map<number, FrameRequestCallback>).size}`);
         return id;
       };
       window.cancelAnimationFrame = (id: number) => {
+        dbg(`stub cancel #${id}`);
         (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
       };
     });
@@ -151,6 +158,11 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         __afRealCancel?: typeof cancelAnimationFrame;
         __afDeferred?: Map<number, FrameRequestCallback>;
       };
+      const dbg2 = (m: string): void => {
+        (w as { __dbg?: string[] }).__dbg?.push(
+          `${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`,
+        );
+      };
       if (w.__afRealRaf) {
         window.requestAnimationFrame = w.__afRealRaf;
         window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
@@ -159,10 +171,12 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       }
       const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
       w.__afDeferred?.clear();
+      dbg2(`unpark: replaying ${deferred.length} deferred cbs focus=${focus}`);
       const now = performance.now();
-      for (const cb of deferred) {
+      deferred.forEach((cb, i) => {
+        dbg2(`unpark: replay cb ${i + 1}/${deferred.length}`);
         cb(now);
-      }
+      });
       if (focus) {
         window.dispatchEvent(new Event("focus"));
       }
@@ -171,8 +185,83 @@ test("a parked client reclaims locally but never writes the shared grid", async 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
   const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  let first: Page | undefined;
   try {
-    const first = await ctx.newPage();
+    first = await ctx.newPage();
+    // TEMPORARY diagnosis for the CI-only no-focus-unpark failure: log every
+    // outgoing wire frame, every rAF arm/deliver/cancel, socket lifecycle,
+    // and wake-adjacent events into window.__dbg (attached to the test run).
+    await first.addInitScript(() => {
+      const w = window as unknown as { __dbg?: string[] };
+      w.__dbg = [];
+      const log = (m: string): void => {
+        (w.__dbg as string[]).push(
+          `${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`,
+        );
+      };
+      const OrigWS = window.WebSocket;
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (
+        this: WebSocket,
+        data: string | ArrayBufferLike | Blob | ArrayBufferView,
+      ): void {
+        try {
+          if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            const b =
+              data instanceof ArrayBuffer
+                ? new Uint8Array(data)
+                : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            log(
+              `ws.send op=0x${b[0].toString(16).padStart(2, "0")} len=${b.length}` +
+                (b[0] === 2 && b.length >= 5 ? ` dims=${((b[1] << 8) | b[2])}x${((b[3] << 8) | b[4])}` : ""),
+            );
+          }
+        } catch {
+          /* never disturb the send path */
+        }
+        return send.call(this, data);
+      };
+      const WS = function (
+        this: WebSocket,
+        url: string | URL,
+        protocols?: string | string[],
+      ): WebSocket {
+        const ws =
+          protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+        ws.addEventListener("open", () => log("ws.open"));
+        ws.addEventListener("close", (e) => log(`ws.close code=${(e as CloseEvent).code}`));
+        ws.addEventListener("error", () => log("ws.error"));
+        return ws;
+      } as unknown as typeof WebSocket;
+      WS.prototype = OrigWS.prototype;
+      (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = WS;
+      const origRaf = window.requestAnimationFrame.bind(window);
+      let rafSeq = 0;
+      window.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+        const tag = ++rafSeq;
+        log(`raf arm #${tag}`);
+        return origRaf((ts) => {
+          log(`raf deliver #${tag}`);
+          cb(ts);
+        });
+      };
+      const origCancel = window.cancelAnimationFrame.bind(window);
+      window.cancelAnimationFrame = (id: number): void => {
+        log(`raf cancel id=${id}`);
+        origCancel(id);
+      };
+      window.addEventListener("focus", () => log("event focus"));
+      window.addEventListener("resize", () => log("event resize"));
+      document.addEventListener("visibilitychange", () => log("event visibilitychange"));
+      document.addEventListener(
+        "pointerenter",
+        (e) =>
+          log(
+            `event pointerenter trusted=${e.isTrusted} target=${(e.target as Element)?.className ?? "?"}`,
+          ),
+        true,
+      );
+    });
     await open(first);
     await attach(first);
     const firstHost = first.locator(".af-term-host");
@@ -307,6 +396,16 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       })
       .toBe(localRows);
   } finally {
+    try {
+      const dbg = first
+        ? await first.evaluate(
+            () => (window as unknown as { __dbg?: string[] }).__dbg ?? ["no __dbg"],
+          )
+        : ["no first page"];
+      await test.info().attach("first-dbg", { body: dbg.join("\n"), contentType: "text/plain" });
+    } catch {
+      /* page may already be gone */
+    }
     await ctx.close();
     try {
       af("sessions", "kill", sessionName);
