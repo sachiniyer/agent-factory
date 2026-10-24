@@ -359,25 +359,43 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// Detect and snapshot before launch so Codex cannot create its rollout between
 	// the before-image and tmux start. The receipt path is resolved from the exact
 	// command environment, not the daemon's CODEX_HOME (#2228 review), and the
-	// snapshot anchors "new rollout" to launch time: a receipt scan counts only
-	// rollouts created after this point, so an older unrelated rollout cannot be
-	// mistaken for the launched process's own (#5471).
+	// snapshot is bound to the launch working directory: the late re-check waits
+	// five minutes, and a receipt scan that counted EVERY new rollout under
+	// CODEX_HOME would go ambiguous the moment an unrelated Codex session creates
+	// one on a busy box (#5471).
 	agent := tmux.DetectAgentFromCommand(req.Program)
 	var promptReceipt session.ConversationCaptureSnapshot
-	// isCodexResume gates two diagnostics-only mitigations: a resumed pane can
-	// still show the previous conversation — arbitrary private text a credential
-	// scrubber cannot recognize — so the pane excerpt is suppressed, and a
-	// resumed rollout predates the delivery snapshot, so absence from the
-	// new-rollout set cannot disprove delivery and "never arrived" degrades to
-	// an indeterminate verdict (#5471 review).
+	// resumedUntracked marks a `codex resume` launch whose target rollout could
+	// not be identified: the resumed file predates the snapshot, so absence
+	// from the new-rollout set proves nothing and "never arrived" would be a
+	// false verdict (#5471 review).
+	var resumedUntracked bool
+	// isCodexResume additionally suppresses the pane excerpt: a resumed pane
+	// can still show the previous conversation — arbitrary private text a
+	// credential scrubber cannot recognize (#5471 review).
 	var isCodexResume bool
 	if agent == tmux.ProgramCodex && req.Prompt != "" {
 		codexHome, rerr := configAgentCodexReceiptHome(req.Program, home)
 		if rerr != nil {
 			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
 		}
-		promptReceipt = session.BeginConversationCaptureAtCodexHome(codexHome)
-		isCodexResume = len(tmux.ConversationSelectorArgs(req.Program)) > 0
+		// The rollout's session_meta records the cwd Codex actually ran with,
+		// which is not always AF home: `env -C /tmp codex` leaves AF home before
+		// exec. The command environment models literal env -C directories and
+		// reports unmodelled chdirs (an arbitrary wrapper, Codex's own -C) as
+		// unknown — correlation binds to the proven directory and stays unbound
+		// rather than wrong when it is not (#5471 review).
+		var launchDir string
+		if launch, lerr := tmux.CommandEnvironmentFromCommand(req.Program, home); lerr == nil && launch.WorkingDirKnown() {
+			launchDir = launch.WorkingDir
+		}
+		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launchDir)
+		if path, resume := session.CodexResumedRolloutPath(codexHome, req.Program, launchDir); resume {
+			isCodexResume = true
+			if path == "" || !promptReceipt.TrackCodexReceiptRollout(path) {
+				resumedUntracked = true
+			}
+		}
 	}
 
 	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession
@@ -490,10 +508,18 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 				if ctx.Err() != nil {
 					return fail(fmt.Errorf("config agent: spawn cancelled while awaiting the briefing receipt: %w", err))
 				}
-				if errors.Is(err, session.ErrPromptReceiptNotObserved) {
+				// A rollout whose session_meta is still mid-write when the window
+				// expires is an unconfirmed receipt too (#5471 review): the file
+				// may be this agent's own, moments from being readable, so the
+				// diagnostic watcher continues on it exactly as on absence.
+				if errors.Is(err, session.ErrPromptReceiptNotObserved) || errors.Is(err, session.ErrPromptReceiptUndecidable) {
+					descriptor := "not observed"
+					if errors.Is(err, session.ErrPromptReceiptUndecidable) {
+						descriptor = "still undecidable"
+					}
 					m.info().Printf(
-						"config agent: %s briefing receipt was not observed within %s (%v)",
-						sessionName, configAgentPromptReceiptTimeout, err,
+						"config agent: %s briefing receipt was %s within %s (%v)",
+						sessionName, descriptor, configAgentPromptReceiptTimeout, err,
 					)
 					m.configAgents.watchReceipt(sessionName, func(receiptCtx context.Context) {
 						lateErr := session.WaitForPromptReceipt(
@@ -520,16 +546,20 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							)
 							return
 						}
-						if !errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+						if !errors.Is(lateErr, session.ErrPromptReceiptNotObserved) && !errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
 							m.warn().Printf(
 								"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
 								sessionName, configAgentPromptReceiptTimeout, lateErr,
 							)
 							return
 						}
+						descriptor := "not observed"
+						if errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
+							descriptor = "undecidable"
+						}
 						m.warn().Printf(
-							"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
-							sessionName,
+							"config agent: %s briefing receipt was still %s after %s (%v); delivery remains unconfirmed",
+							sessionName, descriptor,
 							configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
 							lateErr,
 						)
@@ -590,12 +620,12 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 								sessionName, elapsed,
 							)
 						case errors.Is(finalErr, session.ErrPromptReceiptNotObserved):
-							if isCodexResume {
-								// The resumed rollout predates the snapshot, so
-								// absence from the new-file set cannot disprove
+							if resumedUntracked {
+								// The resumed rollout could not be identified,
+								// so absence from the new-file set cannot disprove
 								// delivery — an indeterminate result, not never.
 								m.warn().Printf(
-									"config agent: %s briefing receipt could not be verified; a resumed rollout predates the delivery snapshot %s after delivery",
+									"config agent: %s briefing receipt could not be verified; the resumed rollout was not identifiable %s after delivery",
 									sessionName, elapsed,
 								)
 							} else {
