@@ -759,7 +759,17 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 							break
 						}
 					}
+					// Resolve the intermediate through symlinks and rejoin the un-resolved final
+					// component; a symlinked-repo `..` must not leave filepath.Dir on its parent (#5421).
 					worktreePath = parent
+					if d, f := filepath.Split(parent); f != "." && f != ".." {
+						if d = strings.TrimRight(d, seps); d == "" || d == vol {
+							d = vol + string(filepath.Separator)
+						}
+						if r, to, rerr, _ := resolveSymlinkPrefixBounded(d); !to && rerr == nil {
+							worktreePath = filepath.Join(r, f)
+						}
+					}
 				} else {
 					worktreePath = filepath.Join(resolvedParent, base)
 				}
