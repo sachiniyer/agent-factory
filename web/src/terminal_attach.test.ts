@@ -102,11 +102,11 @@ test("a starved frame cannot lose the reclaim — the timer twin delivers it", (
     // the wire write is withheld until a frame-coupled signal unparks it.
     win.runTimer();
     assert.deepEqual(calls, ["fit"]);
-    assert.equal(terminal.visibleFitTimer, null);
     assert.equal(terminal.parked, true);
-    // The withheld write armed its own wake probe: a frame whose delivery is
-    // itself the reactivation signal.
+    // The withheld write keeps the delivery pair armed: whichever channel can
+    // still deliver retries the flush — the frame on wake, the timer meanwhile.
     assert.notEqual(terminal.visibleFitFrame, null);
+    assert.notEqual(terminal.visibleFitTimer, null);
   } finally {
     win.restore();
   }
@@ -153,10 +153,11 @@ test("a parked page's scheduled fit reclaims locally but never writes the grid",
     assert.deepEqual(calls, ["fit", "connect"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
     // Nothing was written: the daemon's grid is still the peer's. And the owed
-    // write did not wait for a later trigger — the suppression armed the wake
-    // probe whose frame delivers the flush.
+    // write did not wait for a later trigger — the suppression kept the whole
+    // delivery pair armed, so the flush does not depend on any one signal.
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
     assert.notEqual(terminal.visibleFitFrame, null);
+    assert.notEqual(terminal.visibleFitTimer, null);
   } finally {
     win.restore();
   }
@@ -183,6 +184,48 @@ test("the owed write flushes on the wake probe — no external trigger needed", 
     assert.equal(terminal.parked, false);
     assert.deepEqual(calls, ["fit", "connect", "resize"]);
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+  }
+});
+
+// A send() that returns false dropped the frame on a socket that could not
+// carry it. Crediting lastRows/lastCols anyway would erase the divergence
+// marker — the daemon never got the grid but every later dedupe would see a
+// converged state: the phantom-sent strand. The marker must stay stale and
+// the delivery pair must keep retrying until a send actually lands.
+test("a dropped resize is never credited — the owed write retries until it lands", async () => {
+  const win = stubWindow();
+  try {
+    const { terminal, calls } = stage();
+    terminal.lastRows = 300;
+    terminal.lastCols = 50;
+    Object.assign(terminal, { send: () => (calls.push("resize"), false) });
+    terminal.scheduleVisibleFit();
+    win.runFrame();
+    await Promise.resolve();
+    // The frame was attempted and dropped: no credit, and the pair re-armed.
+    assert.deepEqual(calls, ["fit", "resize", "connect"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
+    assert.notEqual(terminal.visibleFitTimer, null);
+    // A timer delivery marks the page parked — it suppresses the send rather
+    // than attempting it — but the pair stays armed for the next delivery.
+    win.runTimer();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "connect"]);
+    assert.equal(terminal.parked, true);
+    assert.notEqual(terminal.visibleFitTimer, null);
+    // A frame-delivered attempt retries the write: still dropped, still owed.
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
+    Object.assign(terminal, { send: () => (calls.push("resize"), true) });
+    win.runFrame();
+    await Promise.resolve();
+    // The first send that actually lands converges the marker; the loop stops.
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+    assert.equal(terminal.visibleFitTimer, null);
   } finally {
     win.restore();
   }

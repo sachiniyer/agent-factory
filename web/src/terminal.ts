@@ -1558,15 +1558,20 @@ export class AttachTerminal {
     this.queueVisibleFit();
   }
 
-  /** Arms whichever twin is missing. A latched frame handle must not suppress
-   *  the timer: the handle can outlive the frame it was promised (armed before
-   *  the page parked, callback queued into a frame that never comes), and
-   *  coalescing onto it would swallow every later trigger — the strand. The
-   *  frame side still coalesces: a live armed frame is the cheapest delivery. */
+  /** Arms the delivery pair. The frame side is RE-armed, not trusted: an armed
+   *  handle is only a promise — the callback can already have been eaten by a
+   *  parked epoch, leaving a latched handle that would suppress every later
+   *  trigger — the strand. cancelAnimationFrame on a dead handle is a no-op,
+   *  and re-requesting a live one just moves the fit to the next frame. The
+   *  timer side coalesces: one live timer is enough to verify the frame. */
   private queueVisibleFit(): void {
-    if (this.visibleFitFrame === null) {
-      this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    if (this.stopped) {
+      return;
     }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
     if (this.visibleFitTimer === null) {
       this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
     }
@@ -1613,19 +1618,6 @@ export class AttachTerminal {
     }
     window.cancelAnimationFrame(this.visibleFitFrame);
     this.visibleFitFrame = null;
-  }
-
-  /** Arms a frame as the flush vehicle for a write this page was not awake
-   *  enough to make. Its delivery IS the reactivation signal: a page that
-   *  paints has a user — or at least a compositor willing to produce one — so
-   *  the flush no longer depends on focus, visibilitychange, or input ever
-   *  arriving. Shares the scheduled-fit handle so dispose and trusted input
-   *  already clear it; the timer twin is deliberately NOT armed — a timer
-   *  delivery on a still-parked page would only re-suppress the same write. */
-  private armWakeProbe(): void {
-    if (this.visibleFitFrame === null) {
-      this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
-    }
   }
 
   /** Reconciles xterm's grid with this host only when the host is measurable and the
@@ -1755,29 +1747,44 @@ export class AttachTerminal {
    *  document.visibilityState covers hidden pages; `parked` covers occluded
    *  pages that still report 'visible' while their frames starve.
    *
-   *  A withheld write does not silently wait for a later trigger: it arms the
-   *  wake probe, whose armed frame is itself the reactivation detector — the
-   *  first frame this page ever paints delivers the fit that flushes the owed
-   *  resize, whether the page wakes by visibilitychange, focus, input, or a
-   *  compositor deciding to paint again. lastRows/lastCols stay stale on a
-   *  suppressed send; that divergence is what the probe fit converges. */
+   *  An owed write — withheld here, or dropped by a socket that could not
+   *  carry it — keeps the delivery pair armed: whichever channel can still
+   *  deliver retries the flush, so the write converges on the first painted
+   *  frame OR the next timer tick without depending on any single wake
+   *  signal. lastRows/lastCols are only credited once send() reports the
+   *  frame actually left — crediting a dropped write would erase the
+   *  divergence marker and silence every retry (the phantom-sent strand). */
   private sendResize(rows: number, cols: number, force: boolean): void {
     if (rows <= 0 || cols <= 0) {
       return;
     }
     if (this.parked ||
         (typeof document !== "undefined" && document.visibilityState !== "visible")) {
-      if (rows !== this.lastRows || cols !== this.lastCols) {
-        this.armWakeProbe();
-      }
+      this.retryOwedResize(rows, cols);
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
+    if (this.send(encode(resizeFrame(rows, cols)))) {
+      this.lastRows = rows;
+      this.lastCols = cols;
+      return;
+    }
+    // The socket could not carry the frame. It stays owed — lastSent is
+    // deliberately NOT touched — and the reconnect path will force-send on
+    // open; the pair is re-armed in case that socket is a long time coming.
+    this.retryOwedResize(rows, cols);
+  }
+
+  /** Keeps the delivery pair armed while a resize is owed — suppressed by a
+   *  parked/hidden page or dropped by a dead socket. Self-limiting: every
+   *  attempt re-checks the divergence, so a converged grid stops re-arming
+   *  and a parked page just keeps a slow timer + frame probe pending. */
+  private retryOwedResize(rows: number, cols: number): void {
+    if (rows !== this.lastRows || cols !== this.lastCols) {
+      this.queueVisibleFit();
+    }
   }
 
   /** Applies the server's authoritative size to xterm without echoing it back out

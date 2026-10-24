@@ -19,10 +19,16 @@
 // timers too — the wrong shape. (That is also why master's lone-rAF reclaim
 // could pass for so long: the strand only bites where frames really starve.)
 // So the spec parks the page exactly the way the production detector sees it:
-// requestAnimationFrame is stubbed to never deliver. Everything downstream is
-// the shipped code: the armed-twin scheduler, the parked latch, the local-only
-// fit, the suppressed OpResize, the unpark-and-flush — driven by the real
-// 250ms timer and a real frame + focus signal.
+// requestAnimationFrame is stubbed — but faithfully: a real hidden tab does
+// not DROP callbacks, it DEFERS them. A rAF registered while hidden stays
+// queued and fires on the first frame after the page is visible again. The
+// first cut of this stub returned -1 and discarded the callback instead,
+// manufacturing a latched-dead-handle state no browser can produce — which is
+// what let a CI run strand the armed wake probe in a way real parking never
+// could. Everything downstream is the shipped code: the armed-twin scheduler,
+// the parked latch, the local-only fit, the suppressed OpResize, and the
+// unpark-and-flush driven by replayed deferred callbacks plus a real 250ms
+// timer — and, on one leg, no focus signal at all.
 //
 // Two tabs of one context, both subscribed to one PTY, prove it end to end:
 //
@@ -91,23 +97,64 @@ test("a parked client reclaims locally but never writes the shared grid", async 
           });
         }),
     );
-  // Park the page exactly the way the production detector sees it: the armed
-  // rAF can never run, so only the 250ms timer twin can deliver a scheduled
-  // fit — the same input a hidden tab or occluded window gives it.
+  // Park the page the way a REAL hidden tab behaves, which is also how the
+  // production detector sees it: rAF callbacks are deferred, not dropped.
+  // They queue while the page is unpainted, they honor cancelAnimationFrame,
+  // and they all fire on the first frame after the page is visible again —
+  // the browser's own un-hide semantics, not a synthetic approximation.
   const park = (page: Page): Promise<void> =>
     page.evaluate(() => {
-      (window as { __afRealRaf?: typeof requestAnimationFrame }).__afRealRaf =
-        window.requestAnimationFrame;
-      window.requestAnimationFrame = () => -1;
+      const w = window as unknown as {
+        __afRealRaf?: typeof requestAnimationFrame;
+        __afRealCancel?: typeof cancelAnimationFrame;
+        __afDeferred?: Map<number, FrameRequestCallback>;
+        __afNextRafId?: number;
+      };
+      if (w.__afRealRaf) {
+        return; // already parked — a second park() must not capture the stub
+      }
+      w.__afRealRaf = window.requestAnimationFrame;
+      w.__afRealCancel = window.cancelAnimationFrame;
+      w.__afDeferred = new Map();
+      w.__afNextRafId = 1;
+      window.requestAnimationFrame = (cb: FrameRequestCallback) => {
+        const id = w.__afNextRafId as number;
+        w.__afNextRafId = id + 1;
+        (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
+        return id;
+      };
+      window.cancelAnimationFrame = (id: number) => {
+        (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
+      };
     });
-  const unpark = (page: Page): Promise<void> =>
-    page.evaluate(() => {
-      const w = window as { __afRealRaf?: typeof requestAnimationFrame };
+  // Un-hide: restore the real scheduling surface, then replay every deferred
+  // callback in registration order — exactly what a browser does when a
+  // hidden tab becomes visible. `withFocus` additionally dispatches the focus
+  // event; the no-focus variant is the stronger claim — the product must
+  // converge on the replayed callbacks alone, with no wake signal at all.
+  const unpark = (page: Page, withFocus: boolean): Promise<void> =>
+    page.evaluate((focus: boolean) => {
+      const w = window as unknown as {
+        __afRealRaf?: typeof requestAnimationFrame;
+        __afRealCancel?: typeof cancelAnimationFrame;
+        __afDeferred?: Map<number, FrameRequestCallback>;
+      };
       if (w.__afRealRaf) {
         window.requestAnimationFrame = w.__afRealRaf;
+        window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
+        delete w.__afRealRaf;
+        delete w.__afRealCancel;
       }
-      window.dispatchEvent(new Event("focus"));
-    });
+      const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
+      w.__afDeferred?.clear();
+      const now = performance.now();
+      for (const cb of deferred) {
+        cb(now);
+      }
+      if (focus) {
+        window.dispatchEvent(new Event("focus"));
+      }
+    }, withFocus);
 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
@@ -179,12 +226,18 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       "the parked client's reclaim must not move the shared grid off the live peer",
     ).toBe(peerRows);
 
-    // Activation is the legitimate writer: restore frame delivery, front the
-    // tab (a trusted focus signal), and dispatch focus in case bringToFront's
-    // focus event is not delivered in headless. Either way the page sees the
-    // shipped unpark path — focus/observer/frame — then the next fit's
-    // convergence send flushes the owed resize and the daemon stomps the peer.
-    await unpark(first);
+    // CPU-throttle the stranded page 5x for the unpark legs: the window where
+    // an armed frame and an armed timer race on a merely-slow page is where a
+    // signal-dependent flush dies. The page stays in control of its own
+    // convergence — whichever channel delivers must land it.
+    const cdp = await ctx.newCDPSession(first);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 5 });
+
+    // Leg A — the NO-FOCUS variant: un-hide is only the deferred callbacks
+    // replaying — exactly what a real tab restore delivers, no focus event,
+    // no input, no visibilitychange. If the owed write needs any external
+    // wake signal beyond "the page paints again", this leg cannot pass.
+    await unpark(first, false);
     await first.bringToFront();
     await expect
       .poll(() => frameAlive(first), {
@@ -194,7 +247,44 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       .toBe(true);
     await expect
       .poll(() => rows(secondHost), {
-        message: "activation must flush the owed resize — the peer now follows the fronted client",
+        message: "un-hide alone must flush the owed resize — no focus event arrived",
+        timeout: 15_000,
+      })
+      .toBe(localRows);
+
+    // Leg B — a second parked cycle, un-hidden WITH the focus event this time:
+    // the signal path and the replay path must both converge. The peer's own
+    // viewport resize is what re-strands the re-parked tab.
+    await park(first);
+    await second.setViewportSize({ width: 375, height: 2_200 });
+    let peerRows2 = 0;
+    await expect
+      .poll(async () => (peerRows2 = await rows(secondHost)), {
+        message: "the peer's second resize must grow its grid",
+      })
+      .toBeGreaterThan(peerRows);
+    await expect
+      .poll(() => rows(firstHost), {
+        message: "the second peer echo must strand the re-parked tab again",
+      })
+      .toBe(peerRows2);
+    await first.locator(".af-nav-toggle").dispatchEvent("click");
+    await expect
+      .poll(() => rows(firstHost), {
+        message: "the second parked reclaim must still land locally",
+        timeout: 15_000,
+      })
+      .toBeLessThan(peerRows2);
+    await first.waitForTimeout(2_000);
+    expect(
+      await rows(secondHost),
+      "the second parked reclaim must not move the shared grid either",
+    ).toBe(peerRows2);
+    await unpark(first, true);
+    await first.bringToFront();
+    await expect
+      .poll(() => rows(secondHost), {
+        message: "the focus-signalled activation must flush the owed resize too",
         timeout: 15_000,
       })
       .toBe(localRows);
