@@ -660,27 +660,60 @@ func DocTrustPromptPresent(content string) bool {
 	return reverseVideoURLSubject(lines[last-1])
 }
 
+// reverseVideoURLSubject reports whether line is a renderer-owned,
+// reverse-video-styled URL subject — the chrome that distinguishes the
+// aider/gemini doc-trust prompt from an unrelated confirmation that merely
+// happens to sit beneath a printed URL (#2638).
+//
+// SGR is parsed with the CSI grammar the rest of this file already trusts
+// (ansiCSISequence), not a raw 'm' scan. The prior parser split the whole
+// parameter chunk on ';' and conflated the reverse-video attribute "7" with
+// "7" sub-parameters of extended-color sequences (38;5;7, 48;5;7, truecolor
+// R;G;B), so an ordinarily-colored URL was misread as reverse-video chrome and
+// composed with an unrelated confirmation below into a doc-trust false
+// positive that injected D+Enter into a live agent.
 func reverseVideoURLSubject(line string) bool {
 	reverse := false
 	remaining := line
 	for strings.HasPrefix(remaining, "\x1b[") {
-		end := strings.IndexByte(remaining, 'm')
-		if end < 2 {
-			return false
+		loc := ansiCSISequence.FindStringIndex(remaining)
+		if loc == nil || loc[0] != 0 || !strings.HasSuffix(remaining[:loc[1]], "m") {
+			break
 		}
-		for _, code := range strings.Split(remaining[2:end], ";") {
-			switch code {
-			case "", "0", "27":
-				reverse = false
-			case "7":
-				reverse = true
-			}
-		}
-		remaining = remaining[end+1:]
+		reverse = sgrSetsReverse(remaining[2:loc[1]-1], reverse)
+		remaining = remaining[loc[1]:]
 	}
 	visible := strings.TrimSpace(ansiCSISequence.ReplaceAllString(remaining, ""))
 	return reverse && !strings.ContainsAny(visible, " \t") &&
 		(strings.HasPrefix(visible, "https://") || strings.HasPrefix(visible, "http://"))
+}
+
+// sgrSetsReverse applies one SGR parameter list to current and returns the
+// resulting reverse-video state. "7" sets reverse video only as a standalone
+// attribute; a "7" that is a sub-parameter of a 38/48/58 extended-color
+// payload (256-color 5;<index> or truecolor 2;R;G;B) is skipped along with the
+// rest of that payload. "0"/"27"/"" clear the attribute.
+func sgrSetsReverse(params string, current bool) bool {
+	reverse := current
+	tokens := strings.Split(params, ";")
+	for i := 0; i < len(tokens); i++ {
+		switch tokens[i] {
+		case "38", "48", "58":
+			if i+1 < len(tokens) {
+				switch tokens[i+1] {
+				case "5":
+					i += 2 // 5;<palette-index>
+				case "2":
+					i += 4 // 2;<R>;<G>;<B>
+				}
+			}
+		case "", "0", "27":
+			reverse = false
+		case "7":
+			reverse = true
+		}
+	}
+	return reverse
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing
