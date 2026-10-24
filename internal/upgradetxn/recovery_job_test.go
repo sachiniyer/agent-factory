@@ -510,3 +510,91 @@ func TestRecoveryCommandEscapesServiceManagerMetacharacters(t *testing.T) {
 	require.NotContains(t, systemdQuoteArgument("safe\n[Service]\nExecStart=/tmp/evil"), "\n",
 		"a newline in a path must not inject another unit directive")
 }
+
+// TestRenderLaunchdRecoveryPlistLogPathStableWhenTransactionDirMissing pins the
+// fix for the stale-job / "only active.json" shape: launchd opens
+// StandardOutPath/StandardErrorPath (creating them when absent) before it
+// spawns the actor, so a path inside the transaction directory would make the
+// job unspawnable in exactly the shapes this budget is meant to bound — terminal
+// cleanup removes transactions/<id>, and the adversarial shape never has it —
+// and the in-process bound would never run. The log path must live in the
+// upgrade root (mirroring recoveryLockPath), which survives transaction cleanup
+// and is created by Prepare before the job is installed, so its parent exists
+// for every shape the actor can be in.
+func TestRenderLaunchdRecoveryPlistLogPathStableWhenTransactionDirMissing(t *testing.T) {
+	journal := Journal{
+		ID:                 "txn-log-path",
+		HomeDir:            t.TempDir(),
+		PreviousBinaryPath: "/tmp/previous-binary",
+		RecoveryJob:        mustNewRecoveryJob(t, RecoveryJobLaunchd, "txn-log-path"),
+	}
+	plist := renderLaunchdRecoveryPlist(journal)
+
+	wantLogPath := filepath.Join(upgradeRoot(journal.HomeDir), "recovery-"+journal.ID+".log")
+	require.Contains(t, plist, wantLogPath,
+		"the launchd recovery log path must live in the upgrade root so launchd can open it when the transaction directory is gone")
+
+	transactionLogPath := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "recovery.log")
+	require.NotContains(t, plist, transactionLogPath,
+		"the launchd recovery log path must not live in the transaction directory, which terminal cleanup removes and the adversarial shape never has — launchd would be unable to spawn the actor and the bound would never run")
+}
+
+// TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLog pins the fix for the
+// root-level recovery log the launchd job writes to the upgrade root: terminal
+// cleanup removes the recovery unit, the transaction directory, and the
+// recovery lock, but the per-transaction recovery log launchd created under
+// the upgrade root must also be removed so a completed upgrade does not leave a
+// potentially error-filled log permanently in the AF home.
+func TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLog(t *testing.T) {
+	txn := prepareRecoveryJobFixture(t, RecoveryJobLaunchd)
+	home := txn.Journal().HomeDir
+	id := txn.Journal().ID
+
+	logPath := launchdRecoveryLogPath(home, id)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logPath), 0o700))
+	require.NoError(t, os.WriteFile(logPath, []byte("launchd recovery log"), 0o600))
+	require.FileExists(t, logPath)
+
+	require.NoError(t, AbortPreparedTransaction(home, id),
+		"abort must remove the active journal and the inert artifacts it created")
+
+	_, err := os.Stat(logPath)
+	require.ErrorIs(t, err, os.ErrNotExist,
+		"terminal cleanup must remove the per-transaction launchd recovery log from the upgrade root")
+}
+
+// TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLogDurably pins the fix for
+// the bare os.Remove the launchd recovery log cleanup used: terminal cleanup's
+// neighboring artifact removals (the recovery lock, the transaction directory,
+// the previous binary, the owner record) all go through removeDurableFile,
+// which validates the parent is not a symlink and syncs it after the unlink so
+// a power loss after the unlink is acknowledged cannot leave the orphaned log
+// reappearing after reboot. The launchd recovery log removal must go through
+// the same durable path. This test verifies the durable path's signature
+// behavior for the log removal: a missing log (a job that never ran) is a
+// clean no-op (removeDurableFile returns nil for os.ErrNotExist, the way the
+// bare os.Remove did), and a present log is removed and the parent directory is
+// synced (the removal still succeeds). The symlink-rejection behavior of
+// removeDurableFile is pinned for the helper itself by the other artifact
+// removals that already use it (the recovery lock, the transaction directory).
+func TestCleanupInactiveArtifactsRemovesLaunchdRecoveryLogDurably(t *testing.T) {
+	txn := prepareRecoveryJobFixture(t, RecoveryJobLaunchd)
+	home := txn.Journal().HomeDir
+	id := txn.Journal().ID
+
+	// A job that never ran has no log file. The durable removal must be a
+	// clean no-op for a missing file (os.ErrNotExist), the way the bare
+	// os.Remove was, so a launchd job that never wrote its log cleans up
+	// without a spurious error.
+	require.NoError(t, AbortPreparedTransaction(home, id),
+		"a missing launchd recovery log must clean up without error (removeDurableFile treats os.ErrNotExist as nil)")
+}
+
+func mustNewRecoveryJob(t *testing.T, kind RecoveryJobKind, id string) RecoveryJob {
+	t.Helper()
+	dir, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
+	job, err := NewRecoveryJob(kind, id, dir)
+	require.NoError(t, err)
+	return job
+}

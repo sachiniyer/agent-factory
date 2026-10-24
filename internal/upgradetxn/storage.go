@@ -224,7 +224,7 @@ func NewRecoveryJob(kind RecoveryJobKind, transactionID, unitDir string) (Recove
 		if err != nil {
 			return RecoveryJob{}, fmt.Errorf("resolve launchd recovery unit directory: %w", err)
 		}
-		job.Name = "com.agent-factory.upgrade-recovery." + transactionID
+		job.Name = launchdRecoveryJobName(transactionID)
 		job.UnitPath = filepath.Join(canonicalUnitDir, job.Name+".plist")
 	default:
 		return RecoveryJob{}, fmt.Errorf("unsupported upgrade recovery job kind %q", kind)
@@ -249,7 +249,7 @@ func validateRecoveryJob(transactionID string, job RecoveryJob) error {
 		expectedName := "agent-factory-upgrade-recovery-" + transactionID + ".service"
 		expectedBase := expectedName
 		if job.Kind == RecoveryJobLaunchd {
-			expectedName = "com.agent-factory.upgrade-recovery." + transactionID
+			expectedName = launchdRecoveryJobName(transactionID)
 			expectedBase = expectedName + ".plist"
 		}
 		if job.Name != expectedName || filepath.Base(job.UnitPath) != expectedBase {
@@ -554,6 +554,17 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	}
 	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
+	}
+	if t.journal.RecoveryJob.Kind == RecoveryJobLaunchd {
+		// removeDurableFile (not bare os.Remove) so the unlink is durable the
+		// way the neighboring artifact removals above are: it validates the
+		// upgrade root is not a symlink, removes the file (returning nil for
+		// os.ErrNotExist so a job that never ran cleans up cleanly), and syncs
+		// the parent directory so a power loss after the unlink is acknowledged
+		// cannot leave the orphaned log reappearing after reboot.
+		if err := removeDurableFile(launchdRecoveryLogPath(t.journal.HomeDir, t.journal.ID)); err != nil {
+			return fmt.Errorf("remove inactive launchd recovery log: %w", err)
+		}
 	}
 	return nil
 }
