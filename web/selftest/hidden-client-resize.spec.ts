@@ -41,6 +41,18 @@
 //   4. frame delivery restored + a real activation: the owed write flushes, the
 //      daemon learns the fronted client's grid, and the peer is stomped to it.
 //
+// One more simulation-fidelity rule the parked page inherits: it cannot receive
+// POINTER input — a hidden tab has no cursor — but this page still hit-tests.
+// Playwright's virtual mouse stays where the last .click() left it (the rail
+// row used by attach()), and the drawer toggle's layout shift moves elements
+// under that stationary cursor: closing the drawer reveals the pane host right
+// under it, and Chromium synthesizes a REAL isTrusted pointerenter — the same
+// wake signal the product treats as activation (a page that receives trusted
+// pointer input is painting). The send it releases is correct behavior in a
+// state the harness cannot produce honestly — so the spec parks the cursor on
+// the appbar corner before each park: no boundary event can reach the
+// terminal host while it is parked.
+//
 // The same spec run against a master binary shows the other half of the story:
 // master delivers nothing while parked (its only vehicle was the starved rAF),
 // so the property held vacuously at the price of the strand — the peer stays
@@ -196,8 +208,11 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
     // Establish the environment honestly: the non-front tab's frames ARE alive
     // in headless — there is no organic parked state to lean on — so park it by
-    // cutting frame delivery, then prove the cut took.
+    // cutting frame delivery, then prove the cut took. The cursor goes to the
+    // appbar corner first: a layout shift under it must not synthesize the
+    // pointerenter a hidden tab could never see (see the header comment).
     await second.bringToFront();
+    await first.mouse.move(1, 1);
     expect(await frameAlive(first)).toBe(true);
     await park(first);
     await expect
@@ -254,7 +269,10 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
     // Leg B — a second parked cycle, un-hidden WITH the focus event this time:
     // the signal path and the replay path must both converge. The peer's own
-    // viewport resize is what re-strands the re-parked tab.
+    // viewport resize is what re-strands the re-parked tab. The cursor is still
+    // parked on the appbar from leg A, and the drawer toggle here CLOSES the
+    // drawer — the move that would otherwise drop the pane host under a rail-
+    // row cursor and fire the trusted pointerenter this leg must not see.
     await park(first);
     await second.setViewportSize({ width: 375, height: 2_200 });
     let peerRows2 = 0;
