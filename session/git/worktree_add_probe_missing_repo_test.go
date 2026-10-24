@@ -819,3 +819,73 @@ func TestAnnotateWorktreeAddError_MissingRepoPathSkipsResolutionErrorCreatablePa
 			"resolution-error return bypassed the repo-boundary guard, so the guard now runs before "+
 			"the resolution block can probe these unrelated parents")
 }
+
+// TestAnnotateWorktreeAddError_NonDirectoryRepoPathSkipsProbe pins the contract the #5421
+// review added: a restored record whose repoPath resolves to a regular file (or a symlink to
+// one) passes the existence check — EvalSymlinks succeeds — but the git child cannot enter its
+// cmd.Dir, so the worktree add fails before writing anything. This is a structural failure
+// (ENOTDIR, not ENOSPC), the same class as a missing repo: without a non-directory gate the
+// existence check returns true, the worktree-prefix walker treats the worktree parent as
+// creatable, and a coincidental ENOSPC on the worktree parent would turn the structural
+// ENOTDIR into an indefinite environmental retry. The gate verifies the resolved repo boundary
+// is a directory the way the git child's cmd.Dir does, so the probe is skipped the way a
+// missing repo is skipped.
+//
+// Deterministic in both directions: against the form that only checked ENOENT, the file exists
+// so repoMissing stays false, the walker probes the worktree parent and a write probe mocked
+// to fail only there surfaces ENOSPC, so the test fails; with the non directory gate the
+// existence check sees the regular file (EvalSymlinks succeeds, Lstat reports a non-directory),
+// repoMissing is true, the probe is skipped, and the structural git failure is the only answer.
+func TestAnnotateWorktreeAddError_NonDirectoryRepoPathSkipsProbe(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	launchCwd := t.TempDir()
+	oldLaunch := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	defer func() { daemonLaunchCwd = oldLaunch }()
+
+	// A restored record's repoPath resolves to a regular file, not a directory: EvalSymlinks
+	// succeeds (the file exists), so the existence-only check the gate replaced would have
+	// left repoMissing false, but the git child cannot enter its cmd.Dir and the worktree add
+	// fails before writing anything — a structural ENOTDIR, not an environmental ENOSPC.
+	repoFile := filepath.Join(launchCwd, "repo")
+	require.NoError(t, os.WriteFile(repoFile, []byte("not a directory"), 0o644))
+
+	afHome := t.TempDir()
+	require.NotEqual(t, launchCwd, afHome)
+	t.Chdir(afHome)
+
+	// A simple absolute worktreePath skips the symlink-aware resolution block, so the probe
+	// reaches the worktree parent directly (the finding's "simple absolute worktreePath"
+	// case): without the gate the walker would probe the worktree parent and a coincidental
+	// ENOSPC on it would turn the structural ENOTDIR into an indefinite environmental retry.
+	worktreePath := filepath.Join(afHome, "dest")
+
+	// The evalSymlinks and lstat seams are the real fsprobe lookups so the gate sees the
+	// regular file: EvalSymlinks resolves it and Lstat reports a non-directory, so repoMissing
+	// is true and the probe is skipped the way a missing repo is. A write probe mocked to fail
+	// on every path surfaces the bug: without the gate the walker would probe the worktree
+	// parent and the ENOSPC would turn the structural ENOTDIR into an indefinite retry.
+	statSpaceProbe = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: "repo", worktreePath: worktreePath}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a repoPath that resolves to a regular file is a structural failure (git cannot enter its "+
+			"cmd.Dir), so the worktree add never writes — a coincidental ENOSPC on any path the walker "+
+			"would probe must not turn the structural ENOTDIR into an indefinite environmental retry: %v", out)
+	require.Empty(t, probedDirs,
+		"the write probe must not target any path when the repo boundary is a regular file — git "+
+			"never writes there, so a full filesystem on it cannot fix the structural failure")
+}

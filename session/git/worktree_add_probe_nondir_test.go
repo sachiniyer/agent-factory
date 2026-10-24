@@ -1343,3 +1343,89 @@ func TestAnnotateWorktreeAddError_RelativeWorktreePathMultipleTrailingDotsSymlin
 		"the symlink target's filesystem must not be probed for multiple trailing dots "+
 			"after a symlink to a nonempty directory — git never writes there")
 }
+
+// TestAnnotateWorktreeAddError_BareDotTrailingSeparatorRepoPathUsesResolvedParent pins the
+// contract the #5421 review added: when an absolute symlinked repoPath carries a trailing
+// separator (for example `/launch/repo/`) and the worktreePath is a bare `.`, the bare-dot
+// branch must use the symlink-resolved parent rather than re-resolving the repo's parent and
+// rejoining the symlink. The bare-dot comparison trimmed `parent` (the trailing separator is
+// stripped by filepath.Split), but the raw `repoPath` kept its trailing separator, so
+// `parent == repoPath` failed and the fallback re-resolved the repo's parent (the symlink's
+// parent) and rejoined the symlink, preserving the repository symlink instead of using the
+// resolved parent the prefix walk already returned. A coincidental ENOSPC on the symlink's
+// parent would then be probed instead of the real repo's parent, and git already cwd'd into the
+// resolved repo for a bare `.`, so the probe must target the real parent the way it does for a
+// non-trailing-separator repoPath.
+//
+// Deterministic in both directions: against the form that compared the un-trimmed repoPath,
+// the bare-dot branch fell through to the re-resolve path, the write probe targeted the
+// symlink's parent, and a write probe mocked to fail only there returned ENOSPC, so the test
+// failed; with the separator-trimmed comparison the bare-dot branch uses the resolved parent,
+// the write probe targets the real repo's parent, and the symlink's parent is never probed.
+func TestAnnotateWorktreeAddError_BareDotTrailingSeparatorRepoPathUsesResolvedParent(t *testing.T) {
+	oldWrite := writeSpaceProbe
+	defer func() { writeSpaceProbe = oldWrite }()
+	oldStat := statSpaceProbe
+	defer func() { statSpaceProbe = oldStat }()
+	oldLstat := lstatSpaceProbe
+	defer func() { lstatSpaceProbe = oldLstat }()
+	oldEmpty := isEmptyDirSpaceProbe
+	defer func() { isEmptyDirSpaceProbe = oldEmpty }()
+	oldCommon := gitCommonDir
+	defer func() { gitCommonDir = oldCommon }()
+
+	// An absolute symlinked repoPath with a trailing separator: the symlink resolves to a
+	// real repo dir on a distinct filesystem, and a bare-dot worktreePath means the worktree
+	// is the repo dir itself (git already cwd'd into the resolved repo). The bare-dot branch
+	// must use the resolved parent (the real repo), not the re-resolved symlink's parent.
+	realRepo := t.TempDir()
+	linkDir := t.TempDir()
+	require.NotEqual(t, realRepo, linkDir)
+	linkRepo := filepath.Join(linkDir, "repo")
+	require.NoError(t, os.Symlink(realRepo, linkRepo))
+	repoPath := linkRepo + string(filepath.Separator)
+
+	// Resolve the symlink the way the production code does so the expected paths match across
+	// hosts (macOS /var/folders -> /private/var/folders).
+	resolvedRealRepo, err := filepath.EvalSymlinks(realRepo)
+	require.NoError(t, err)
+	resolvedLinkDir, err := filepath.EvalSymlinks(linkDir)
+	require.NoError(t, err)
+	require.NotEqual(t, resolvedLinkDir, filepath.Dir(resolvedRealRepo),
+		"the symlink's parent must differ from the real repo's parent, otherwise the test cannot "+
+			"distinguish the fix from the bug")
+
+	// Stat follows the symlink and reports a directory (the empty real repo); Lstat reports the
+	// symlink itself so the gate excludes it before the write probe targets the symlink's
+	// resolved target. The empty-dir read counts the target's entries so the destination-
+	// directory probe is added for the empty target the way the existing-destination check
+	// probes an empty dir git populates.
+	statSpaceProbe = func(p string) (os.FileInfo, error) { return os.Stat(p) }
+	lstatSpaceProbe = func(p string) (os.FileInfo, error) { return os.Lstat(p) }
+	isEmptyDirSpaceProbe = fsprobe.IsEmptyDir
+
+	var probedDirs []string
+	writeSpaceProbe = func(dir string) error {
+		appendProbedDir(&probedDirs, dir)
+		// A coincidental ENOSPC on the symlink's parent is the bug: the bare-dot comparison
+		// fell through to the re-resolve path, which re-resolved the symlink's parent and
+		// rejoined the symlink, so the probe targeted the symlink's parent rather than the
+		// resolved repo's parent. The fix trims the trailing separator so the bare-dot
+		// branch uses the resolved parent the prefix walk already returned.
+		if dir == resolvedLinkDir {
+			return &os.PathError{Op: "write", Path: ".af-add-probe-x", Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	gitCommonDir = func(*GitWorktree) (string, error) { return "", nil }
+
+	g := &GitWorktree{repoPath: repoPath, worktreePath: "."}
+	out := g.annotateWorktreeAddError(errors.New("git worktree add failed"))
+	require.False(t, errors.Is(out, syscall.ENOSPC),
+		"a bare-dot worktreePath with a trailing-separator repoPath must use the resolved parent: "+
+			"a coincidental ENOSPC on the symlink's parent must not turn the structural rejection of `.` "+
+			"(git already cwd'd into the resolved repo) into an indefinite environmental retry: %v", out)
+	require.NotContains(t, probedDirs, resolvedLinkDir,
+		"the write probe must not target the symlink's parent — the bare-dot comparison must trim the "+
+			"trailing separator so the probe targets the resolved repo's parent, not the re-resolved symlink")
+}

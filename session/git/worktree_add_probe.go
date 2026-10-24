@@ -385,21 +385,17 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 	if !filepath.IsAbs(repoPath) && daemonLaunchCwd != "" {
 		repoPath = filepath.Join(daemonLaunchCwd, repoPath)
 	}
-	// A restored record can carry a relative repoPath that no longer exists
-	// (the user deleted it after the session was saved). The git child cannot
-	// enter its cmd.Dir when the repo is missing, so the worktree add fails
-	// before writing anything — a structural missing-repository failure, not
-	// an environmental ENOSPC. The worktree-prefix walker would otherwise
-	// treat the missing repository component as a creatable prefix and record
-	// its existing parent for a write probe (the existing-ancestor search
-	// walks up to the same parent), and a coincidental ENOSPC on that parent
-	// would turn the structural failure into an indefinite environmental
-	// retry. Validate the repo boundary the way the git child's cmd.Dir does:
-	// the bounded EvalSymlinks flight resolves a symlinked repo and surfaces a
-	// typed non-answer on a stalled mount, so the gate only fires on a
-	// definitive ENOENT.
+	// A restored record can carry a relative repoPath that no longer exists, or
+	// one that resolves to a regular file. The git child cannot enter cmd.Dir
+	// when the repo is missing or not a directory, so the add fails before writing
+	// — a structural failure, not an environmental ENOSPC. Without the gate the
+	// walker would treat the missing/non-dir repo as a creatable prefix and
+	// write-probe its existing parent, turning a coincidental ENOSPC there into
+	// an indefinite retry. The gate fires only on a definitive ENOENT or non-directory.
 	repoMissing := false
-	if _, err := evalSymlinksSpaceProbe(repoPath); err != nil && os.IsNotExist(err) {
+	if resolved, err := evalSymlinksSpaceProbe(repoPath); err != nil {
+		repoMissing = os.IsNotExist(err)
+	} else if info, err := lstatSpaceProbe(resolved); err == nil && !info.IsDir() {
 		repoMissing = true
 	}
 	// Resolve symlinks in the probe path the way the kernel's chdir resolves
@@ -751,9 +747,13 @@ func (g *GitWorktree) annotateWorktreeAddError(err error) error {
 							break
 						}
 					}
-					// A bare `.` is the repo dir itself; the git child already cwd'd
-					// into the resolved repo, so use the resolved parent (#5421).
-					if parent == repoPath {
+					// A bare `.` is the repo dir itself; the git child already cwd'd into the resolved repo, so
+					// use the resolved parent (#5421). Compare the separator-trimmed repoPath so a trailing-separator repoPath matches `parent`.
+					cleanRepo := strings.TrimRight(repoPath, seps)
+					if cleanRepo == "" || cleanRepo == vol {
+						cleanRepo = vol + string(filepath.Separator)
+					}
+					if parent == cleanRepo {
 						worktreePath = resolvedParent
 					} else {
 						worktreePath = parent
