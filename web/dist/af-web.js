@@ -7339,11 +7339,17 @@ function terminalChrome(opts) {
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
   return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
@@ -7969,6 +7975,108 @@ var ConfigPane = class {
   }
 };
 
+// src/terminal-font.ts
+var WEB_ENTRY = "web";
+var CONFIG_KEY_PHONE = "web.terminal_font_size_phone";
+var CONFIG_KEY_DESKTOP = "web.terminal_font_size_desktop";
+var TERMINAL_FONT_SIZE_MIN = 4;
+var TERMINAL_FONT_SIZE_MAX = 32;
+var TERMINAL_FONT_STEP_PHONE = 0.5;
+var TERMINAL_FONT_STEP_DESKTOP = 1;
+var TERMINAL_FONT_SIZE_PHONE_DEFAULT = 6.5;
+var TERMINAL_FONT_SIZE_DESKTOP_DEFAULT = 13;
+var PHONE_MEDIA_QUERY = "(max-width: 768px)";
+var PERSIST_DEBOUNCE_MS = 400;
+var sizes = {
+  phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT,
+  desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT
+};
+var listeners = /* @__PURE__ */ new Set();
+var persist = null;
+var persistTimers = /* @__PURE__ */ new Map();
+function terminalFontSizeFor(phone) {
+  return phone ? sizes.phone : sizes.desktop;
+}
+function subscribeTerminalFontSizes(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+function bindTerminalFontPersist(save) {
+  persist = save;
+}
+function terminalFontSizesFromConfig(entries) {
+  const next = { phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT, desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT };
+  const entry = entries.find((e) => e.key === WEB_ENTRY);
+  if (entry === void 0) {
+    return next;
+  }
+  let table;
+  try {
+    const parsed = JSON.parse(entry.value);
+    if (typeof parsed !== "object" || parsed === null) {
+      return next;
+    }
+    table = parsed;
+  } catch {
+    return next;
+  }
+  const leaf = (name, fallback) => {
+    const value = table[name];
+    return typeof value === "number" && Number.isFinite(value) && value >= TERMINAL_FONT_SIZE_MIN && value <= TERMINAL_FONT_SIZE_MAX ? value : fallback;
+  };
+  return {
+    phone: leaf("terminal_font_size_phone", next.phone),
+    desktop: leaf("terminal_font_size_desktop", next.desktop)
+  };
+}
+function setTerminalFontSizes(next) {
+  let changed = false;
+  for (const cls of ["phone", "desktop"]) {
+    if (persistTimers.has(cls) || next[cls] === sizes[cls]) {
+      continue;
+    }
+    sizes[cls] = next[cls];
+    changed = true;
+  }
+  if (changed) {
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+}
+function stepTerminalFontSize(direction, phone = currentDeviceIsPhone()) {
+  const cls = phone ? "phone" : "desktop";
+  const step = phone ? TERMINAL_FONT_STEP_PHONE : TERMINAL_FONT_STEP_DESKTOP;
+  const next = clampTerminalFontSize(sizes[cls] + Math.sign(direction) * step);
+  if (next === sizes[cls]) {
+    return;
+  }
+  sizes[cls] = next;
+  for (const listener of listeners) {
+    listener();
+  }
+  schedulePersist(cls);
+}
+function currentDeviceIsPhone() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(PHONE_MEDIA_QUERY).matches;
+}
+function clampTerminalFontSize(size) {
+  return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size * 100) / 100));
+}
+function schedulePersist(cls) {
+  const prior = persistTimers.get(cls);
+  if (prior !== void 0) {
+    clearTimeout(prior);
+  }
+  persistTimers.set(cls, setTimeout(() => {
+    persistTimers.delete(cls);
+    persist?.(cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP, formatTerminalFontSize(sizes[cls]));
+  }, PERSIST_DEBOUNCE_MS));
+}
+function formatTerminalFontSize(size) {
+  return String(size);
+}
+
 // src/account_scope.ts
 var AMBIENT_ACCOUNT = "";
 function accountAgentFor(program, catalog) {
@@ -8526,7 +8634,11 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192", "A\u2212", "A+"]];
+var FONT_ZOOM_LABELS = {
+  "A\u2212": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" }
+};
 var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
@@ -8684,12 +8796,13 @@ function keybarSheetClickIsOpeningGesture(event, opening) {
   return opening !== void 0;
 }
 var TerminalKeybar = class {
-  constructor(host, input, paste, refit, applicationCursor) {
+  constructor(host, input, paste, refit, applicationCursor, fontSizeStep) {
     this.host = host;
     this.input = input;
     this.paste = paste;
     this.refit = refit;
     this.applicationCursor = applicationCursor;
+    this.fontSizeStep = fontSizeStep;
     this.originalMaxHeight = host.style.maxHeight;
     this.textarea = host.querySelector(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
@@ -8703,10 +8816,12 @@ var TerminalKeybar = class {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = key;
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
         const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          else if (zoom) this.fontSizeStep(zoom.delta);
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else if (key === "Paste") void this.requestPaste(
             event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : void 0
@@ -9609,10 +9724,8 @@ var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
 var TOUCH_PRESS_MAX_ROWS = 32;
-var FONT_SIZE_DESKTOP = 13;
-var FONT_SIZE_PHONE = FONT_SIZE_DESKTOP / 2;
 function terminalFontSize(phone) {
-  return phone ? FONT_SIZE_PHONE : FONT_SIZE_DESKTOP;
+  return terminalFontSizeFor(phone);
 }
 var AttachTerminal = class {
   constructor(container, token2, endpoint, cb) {
@@ -9652,8 +9765,12 @@ var AttachTerminal = class {
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
       () => this.scheduleVisibleFit(),
-      () => this.term.modes.applicationCursorKeysMode
+      () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize
     );
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -9834,6 +9951,7 @@ var AttachTerminal = class {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   pendingViewport = null;
   exited = false;
+  unsubscribeFontSizes = null;
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
@@ -10068,6 +10186,8 @@ var AttachTerminal = class {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -10376,7 +10496,7 @@ var AttachTerminal = class {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   rowHeight() {
     const renderedRow = this.container.querySelector(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? FONT_SIZE_DESKTOP) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
   handleHistoryWheel(event) {
     if (!this.applicationOwnsWheel() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
@@ -17498,7 +17618,8 @@ var AppShell = class {
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
-      closePane: () => this.actions.closePane?.()
+      closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -18396,13 +18517,21 @@ async function connect(candidate) {
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then((tasks2) => ({ tasks: tasks2, error: "" })).catch((error) => ({ tasks: [], error: errorText(error) })),
-    fetchRegisteredProjects(candidate)
+    fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null)
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  if (configResult) setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
@@ -19301,6 +19430,7 @@ var configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -19412,6 +19542,7 @@ function applyConfigValueNow(key, value, tok) {
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
+bindTerminalFontPersist(applyConfigValue);
 var TASK_HEALTH_POLL_MS = 6e4;
 window.setInterval(() => {
   const state = store.get();
@@ -19742,6 +19873,7 @@ var actions = {
   dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

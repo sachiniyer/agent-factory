@@ -73,6 +73,11 @@ import { TouchScroll } from "./touch-scroll.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
+import {
+  stepTerminalFontSize,
+  subscribeTerminalFontSizes,
+  terminalFontSizeFor,
+} from "./terminal-font.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
@@ -122,12 +127,16 @@ const TOUCH_PRESS_MAX_ROWS = 32;
 // layout already uses — (max-width: 768px), the same media query ui.ts,
 // terminal-keybar.ts, and appbarControls() hold — so the terminal crosses
 // with the rest of the shell rather than on a width of its own.
-const FONT_SIZE_DESKTOP = 13;
-const FONT_SIZE_PHONE = FONT_SIZE_DESKTOP / 2;
+//
+// Since #5500 those defaults are only the fallback: the persisted
+// web.terminal_font_size_* config values (already landed by the time a
+// terminal is constructed — connect() awaits the config read) are what this
+// returns, and terminal-font.ts holds them and the shared subscription.
 
-/** The default xterm font size for a viewport's device class (#5492). */
+/** The xterm font size for a viewport's device class — the persisted value,
+ *  or the #5492 defaults when the config carries none. */
 export function terminalFontSize(phone: boolean): number {
-  return phone ? FONT_SIZE_PHONE : FONT_SIZE_DESKTOP;
+  return terminalFontSizeFor(phone);
 }
 
 /** A long press resolved at touchstart: the flattened wrapped block, the index the
@@ -325,6 +334,7 @@ export class AttachTerminal {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   private pendingViewport: PendingViewportAnchor | null = null;
   private exited = false;
+  private unsubscribeFontSizes: (() => void) | null = null;
 
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
@@ -647,7 +657,13 @@ export class AttachTerminal {
       // block a desktop Ctrl+V produces — and the delivery hold reads the
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
-      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
+      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize);
+    // A stepped or re-read font size refits through the same path a breakpoint
+    // crossing takes: new metrics → fit → OpResize, so the PTY's grid follows.
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -831,6 +847,8 @@ export class AttachTerminal {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -1237,7 +1255,7 @@ export class AttachTerminal {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   private rowHeight(): number {
     const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? FONT_SIZE_DESKTOP) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
 
   private handleHistoryWheel(event: WheelEvent): boolean {

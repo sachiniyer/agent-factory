@@ -25,7 +25,18 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
   return (alt ? "\x1b" : "") + text;
 }
 
-export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
+// The font-size pair (#5500) rides on the arrows page rather than earning a
+// third row: it is an occasional display control, not a PTY key, so it never
+// reaches sendUserInput — act() special-cases it before the byte path. Seven
+// keys keeps the row at the primary page's count, so the 44px/348px narrow
+// math already proven for that row holds here unchanged.
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]] as const;
+
+/** The font-size keys' accessible names — the glyph alone reads as letters. */
+const FONT_ZOOM_LABELS: Record<string, { delta: number; name: string }> = {
+  "A−": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" },
+};
 
 export interface DecodedKeyBytes {
   key: string;
@@ -348,7 +359,8 @@ export class TerminalKeybar {
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly paste: (data: string) => void,
-    private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
+    private readonly refit: () => void, private readonly applicationCursor: () => boolean,
+    private readonly fontSizeStep: (delta: number) => void) {
     this.originalMaxHeight = host.style.maxHeight;
     this.textarea = host.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
@@ -362,10 +374,15 @@ export class TerminalKeybar {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = key;
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
         const act = (event?: PointerEvent) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          // The A−/A+ keys step the shared terminal font size (#5500) — display
+          // state, not input — so they bypass the modifiers and the byte path
+          // entirely and leave an armed modifier armed for the next real key.
+          else if (zoom) this.fontSizeStep(zoom.delta);
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           // The pointer that released on Paste is remembered through the read:
           // if it falls back to the sheet, the tap's own trailing click must not

@@ -4,6 +4,7 @@ import test from "node:test";
 
 register("./browser_stub_loader.mjs", import.meta.url);
 const { AttachTerminal, terminalFontSize } = await import("./terminal.js");
+const { setTerminalFontSizes } = await import("./terminal-font.js");
 const { decode, Op } = await import("./frame.js");
 
 // Exercise the real initial-fit/connection boundary without constructing xterm.
@@ -105,4 +106,29 @@ test("a phone-boundary crossing re-picks the pitch and refits once", () => {
   // A repeat that changes nothing must not schedule a no-op fit.
   terminal.applyDeviceFontSize();
   assert.deepEqual(calls, ["refit"]);
+});
+
+// #5500: the connect-time config read lands the persisted sizes before the
+// first attach, so the xterm constructor — and the grid the initial OpResize
+// reports — reflects the configured pitch, never a default-then-jump. The
+// constructor reads terminalFontSize through the same accessor this asserts.
+test("a persisted config size is what a fresh attach constructs with", () => {
+  setTerminalFontSizes({ phone: 9, desktop: 15 });
+  try {
+    assert.equal(terminalFontSize(true), 9);
+    assert.equal(terminalFontSize(false), 15);
+    const term = { options: { fontSize: 9 } };
+    const calls: string[] = [];
+    const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
+      term,
+      phone: { matches: false },
+      scheduleVisibleFit: () => calls.push("refit"),
+    }) as { applyDeviceFontSize(): void };
+    terminal.applyDeviceFontSize();
+    assert.equal(term.options.fontSize, 15,
+      "a crossing to desktop picks the configured desktop pitch, not the default");
+    assert.deepEqual(calls, ["refit"]);
+  } finally {
+    setTerminalFontSizes({ phone: 6.5, desktop: 13 });
+  }
 });

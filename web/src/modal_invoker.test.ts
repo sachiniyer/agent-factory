@@ -225,6 +225,8 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     shouldForgetToken: () => false, clearToken() {}, describeError: () => "",
     storeToken() {}, listTasks: () => tasks,
     fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
+    getConfig: async () => null,
+    setTerminalFontSizes() {}, terminalFontSizesFromConfig: () => ({ phone: 6.5, desktop: 13 }),
     errorText: () => "", connectionAttemptMayCommit: () => true,
     reconcileProject: () => "", loadProjectChoice: () => null,
     projectRoots: (projects: { root: string }[]) => projects.map((p) => p.root),
