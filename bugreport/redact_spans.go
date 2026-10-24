@@ -302,26 +302,43 @@ func (r *redactor) appendWorktreeSubdirectoryTitleSpansWithBoundary(
 	}
 	for _, afHome := range r.afHomeSpellings {
 		parent := filepath.Join(afHome, "worktrees")
-		for segment := range r.worktreeSubdirectoryTitles {
-			needle := filepath.Join(parent, segment)
-			scan := 0
-			for scan <= len(s)-len(needle) {
-				rel := strings.Index(s[scan:], needle)
-				if rel < 0 {
-					break
-				}
-				start := scan + rel
-				end := start + len(needle)
-				if boundary(s, start, end) {
-					spans = append(spans, redactionSpan{
-						start: start + len(needle) - len(segment),
-						end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
-					})
-					scan = end
-					continue
-				}
-				scan = start + 1
+		spans = appendWorktreeSubdirectoryTitleSpansBelow(spans, s, parent, r.worktreeSubdirectoryTitles, boundary)
+	}
+	return spans
+}
+
+// appendWorktreeSubdirectoryTitleSpansBelow plans the depth-1 title-derived
+// segment replacements that sit immediately under parent. parent is either a
+// literal <afHome>/worktrees directory (the text-pass caller, which sees
+// un-collapsed text) or the [af-home]/worktrees token (the collapsePathField
+// caller, which sees the value after the root has been tokenized). The
+// segment set and boundary policy are owned by the caller; this helper only
+// owns the scan over `s` for one (parent, segment) needle at a time.
+func appendWorktreeSubdirectoryTitleSpansBelow(
+	spans []redactionSpan,
+	s, parent string,
+	segments map[string]struct{},
+	boundary pathBoundary,
+) []redactionSpan {
+	for segment := range segments {
+		needle := filepath.Join(parent, segment)
+		scan := 0
+		for scan <= len(s)-len(needle) {
+			rel := strings.Index(s[scan:], needle)
+			if rel < 0 {
+				break
 			}
+			start := scan + rel
+			end := start + len(needle)
+			if boundary(s, start, end) {
+				spans = append(spans, redactionSpan{
+					start: start + len(needle) - len(segment),
+					end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
+				})
+				scan = end
+				continue
+			}
+			scan = start + 1
 		}
 	}
 	return spans
