@@ -140,6 +140,17 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
+		// A committed auto-create is a durable mutation, not a clean delivery
+		// failure the daemon may freely re-fire: the absent-target branch
+		// provisioned a sandbox but could not confirm its teardown/startup, so
+		// the recorded-for-inspection row still owns the title (#3357). Surface
+		// the committed marker verbatim — without the generic delivery-failure
+		// wrap below — so RunTask's caller (the scheduler, `af tasks trigger`)
+		// can branch on isMutationCommitted and a re-fire does not treat the
+		// durable row as retryable.
+		if isMutationCommitted(err) {
+			return "", false, err
+		}
 		wrapped := fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)
 		// deliverPromptForTask reached the manager over net/rpc, which flattened
 		// any pre-flight notAttempted tag to a plain string. Re-mint the in-process
