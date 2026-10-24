@@ -20,14 +20,45 @@ function stage() {
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
     pendingViewport: null,
+    visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0,
     sendResize: () => calls.push("resize"),
     connect: () => calls.push("connect"),
   }) as {
     fitVisibleHost(): void;
+    scheduleVisibleFit(): void;
     stopped: boolean;
     connect(): void;
+    visibleFitFrame: number | null;
+    visibleFitTimer: number | null;
+    visibleFitAttempts: number;
   };
   return { terminal, host, fit, calls };
+}
+
+/** A fake `window` for the scheduled-fit path: its rAF queues callbacks for
+ *  manual delivery (or drops them — a parked page starves rAF outright) and its
+ *  timers the same, so a test can deliver whichever twin it wants. */
+function stubWindow() {
+  const frames = new Map<number, () => void>();
+  const timers = new Map<number, () => void>();
+  let nextFrame = 1;
+  let nextTimer = 1;
+  const win = {
+    requestAnimationFrame: (cb: () => void) => { const id = nextFrame++; frames.set(id, cb); return id; },
+    cancelAnimationFrame: (id: number) => { frames.delete(id); },
+    setTimeout: (cb: () => void) => { const id = nextTimer++; timers.set(id, cb); return id; },
+    clearTimeout: (id: number) => { timers.delete(id); },
+  };
+  const prior = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = win;
+  return {
+    frames,
+    timers,
+    /** Delivers the pending rAF callback, if one is armed — or drops it (starved). */
+    runFrame: () => { const cb = frames.values().next().value; frames.clear(); cb?.(); },
+    runTimer: () => { const cb = timers.values().next().value; cb?.(); },
+    restore: () => { (globalThis as { window?: unknown }).window = prior; },
+  };
 }
 
 test("measured attach fits immediately and connects once after the owner can assign it", async () => {
@@ -53,6 +84,61 @@ test("hidden or unresolved geometry waits for a later successful measurement", a
   terminal.fitVisibleHost();
   await Promise.resolve();
   assert.deepEqual(calls, ["fit", "resize", "connect"]);
+});
+
+test("a starved frame cannot lose the reclaim — the timer twin delivers it", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, calls } = stage();
+    terminal.scheduleVisibleFit();
+    assert.notEqual(terminal.visibleFitFrame, null);
+    // Never deliver the frame — a page the compositor has parked starves rAF.
+    // The armed timer carries the fit anyway.
+    win.runTimer();
+    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a scheduled fit that cannot yet measure retries instead of stranding", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, fit, calls } = stage();
+    const propose = fit.proposeDimensions;
+    fit.proposeDimensions = () => undefined;
+    terminal.scheduleVisibleFit();
+    win.runFrame();
+    assert.deepEqual(calls, []);
+    // The bail rearmed both triggers — one bad instant is not the last word.
+    assert.notEqual(terminal.visibleFitFrame, null);
+    assert.notEqual(terminal.visibleFitTimer, null);
+    fit.proposeDimensions = propose;
+    win.runFrame();
+    assert.deepEqual(calls, ["fit", "resize"]);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a hidden pane reports settled — retries are not spent on it", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, host, calls } = stage();
+    host.clientHeight = 0;
+    terminal.scheduleVisibleFit();
+    win.runFrame();
+    assert.deepEqual(calls, []);
+    // No requeue: a zero-size pane is genuinely hidden, and the intersection
+    // observer already owns refitting it when it comes back.
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+    assert.equal(win.timers.size, 0);
+  } finally {
+    win.restore();
+  }
 });
 
 test("disposal before the queued attach prevents socket construction and status callbacks", async () => {

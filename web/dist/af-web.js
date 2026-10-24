@@ -9723,6 +9723,8 @@ function holdClockMs() {
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
+var VISIBLE_FIT_TIMER_MS = 250;
+var VISIBLE_FIT_MAX_ATTEMPTS = 60;
 var TOUCH_PRESS_MAX_ROWS = 32;
 function terminalFontSize(phone) {
   return terminalFontSizeFor(phone);
@@ -9875,6 +9877,8 @@ var AttachTerminal = class {
   reconnectTimer = null;
   resizeTimer = null;
   visibleFitFrame = null;
+  visibleFitTimer = null;
+  visibleFitAttempts = 0;
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
@@ -9974,7 +9978,9 @@ var AttachTerminal = class {
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  onPointerEnter = () => this.fitVisibleHost();
+  onPointerEnter = () => {
+    this.fitVisibleHost();
+  };
   // A scroll can target an already-focused window after another client resized the
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
@@ -10137,7 +10143,10 @@ var AttachTerminal = class {
     if (this.pendingViewport === null) {
       return;
     }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    const plan = terminalUserScrollPlan(
+      source,
+      this.visibleFitFrame !== null || this.visibleFitTimer !== null
+    );
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
       this.disposeTouchPressMarker();
@@ -10675,21 +10684,57 @@ var AttachTerminal = class {
     this.scheduleVisibleFit();
   }
   /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
+   *  Repeated activation signals coalesce into one scheduled attempt; unlike the
+   *  resize debounce, this is not a time guess and never repeats on its own.
+   *
+   *  The attempt is delivered two ways: the frame, and a timer armed beside it.
+   *  A page the compositor has parked — exactly what a stranded multi-client pane
+   *  looks like, with a peer's tab holding the screen — starves rAF outright, and
+   *  a frame that never fires would leave visibleFitFrame set forever, coalescing
+   *  every later activation into a no-op. The timer still fires on that page, so
+   *  the reclaim cannot be lost with the frame. */
   scheduleVisibleFit() {
-    if (this.stopped || this.visibleFitFrame !== null) {
+    if (this.stopped || this.visibleFitFrame !== null || this.visibleFitTimer !== null) {
       return;
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
+    this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    this.queueVisibleFit();
+  }
+  queueVisibleFit() {
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit());
+    this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(), VISIBLE_FIT_TIMER_MS);
+  }
+  /** Whichever of the twin triggers delivers first runs the fit and drops the
+   *  other. A fit that still cannot measure the host retries within the attempt
+   *  budget — a transient bail used to be FINAL, which is how one bad instant
+   *  could strand the pane on a peer's grid permanently. */
+  onVisibleFit() {
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
+    }
+    if (this.stopped) {
+      return;
+    }
+    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+      this.visibleFitAttempts = 0;
+      return;
+    }
+    this.queueVisibleFit();
   }
   /** Drops activation work queued before a direct user scroll. Leaving that frame
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   cancelVisibleFitFrame() {
+    this.visibleFitAttempts = 0;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
     if (this.visibleFitFrame === null) {
       return;
     }
@@ -10699,32 +10744,44 @@ var AttachTerminal = class {
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
+   *  writer once, without a resize-echo ping-pong between visible clients.
+   *
+   *  Returns whether the pane reached a settled answer — measured the host and
+   *  either fit or decided no fit was due. False means the measurement itself
+   *  failed (xterm metrics mid-invalidation, the element mid-move, a detach
+   *  between proposal and fit): a transient the scheduled path retries within
+   *  its attempt budget. A zero-size pane reports settled — it is genuinely
+   *  hidden, and the intersection observer already owns refitting it when it
+   *  comes back. */
   fitVisibleHost() {
     if (this.stopped) {
-      return;
+      return true;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (host.width <= 0 || host.height <= 0) {
+      return true;
     }
     let proposed;
     try {
       proposed = this.fit.proposeDimensions();
     } catch {
-      return;
+      return false;
     }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
+    if (proposed === void 0) {
+      return false;
     }
     const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
     if (needsFit) {
       try {
         this.fit.fit();
       } catch {
-        return;
+        return false;
       }
       this.sendResize(this.term.rows, this.term.cols, false);
     }
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
+    return true;
   }
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
    *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
