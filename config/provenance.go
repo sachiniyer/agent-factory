@@ -33,6 +33,15 @@ type CandidateTrace struct {
 	Value   any    `json:"value"`
 	Result  string `json:"result"`
 	Reason  string `json:"reason"`
+	// collapsedLeafSpellings maps each canonical struct-leaf name to the
+	// physical spelling collapseStructLeaves retained for this candidate's
+	// struct-backed composite (the decoder-winning spelling when a source
+	// supplied conflicting case-variant keys). ResolvedValuePath uses it to
+	// project each candidate's own value from its raw metadata map rather
+	// than the winner's physical spelling, so a shadowed candidate whose raw
+	// map carries both spellings projects the value the decoder kept. Unset
+	// for map-backed composites and non-struct values (#5397 review).
+	collapsedLeafSpellings map[string]string `json:"-"`
 }
 
 // ResolvedValue is an effective config value and the complete trace that
@@ -231,6 +240,26 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if !ok {
 		return computedValue{}, fmt.Errorf("manifest key has no schema field")
 	}
+	// A struct-backed MergeTableByField composite resolves case-variant leaf
+	// spellings to one struct field (taggedFieldByKey folds case). Without
+	// canonicalizing the leafValues merge key, a higher-precedence [root_agent]
+	// Enabled = true leaf and a lower-precedence built-in enabled leaf would
+	// occupy separate leafValues entries ("Enabled" and "enabled") that
+	// buildComposite would assign to the same field in map-iteration order,
+	// so the higher-precedence value could randomly lose and the trace would
+	// report both sources as effective. Canonicalize the merge key for struct
+	// targets so the two spellings share one entry; map-backed composites
+	// (MergeMapByKey) keep exact keys so program_overrides can carry distinct
+	// mixed-case entries (#5397 review).
+	structBacked := false
+	structMergeKeys := make(map[string]string)
+	structBaseType := targetType
+	for structBaseType.Kind() == reflect.Pointer {
+		structBaseType = structBaseType.Elem()
+	}
+	if structBaseType.Kind() == reflect.Struct {
+		structBacked = true
+	}
 
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
@@ -252,6 +281,47 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		candidate.leaves = leaves
 		candidate.configuredCount = configuredCount
 		candidate.normalizedCount = normalizedCount
+		if structBacked {
+			// A single source that contains both "image" and "Image" decodes
+			// both onto the same struct field (the decoder is last-write-wins),
+			// so compositeLeaves leaves them as two physical spellings in leaves
+			// that both point at the same reflect.Value. Collapse them to one
+			// entry per canonical struct field before the merge loop and the
+			// surviving-count accounting iterate leaves, otherwise the merge
+			// loop deletes and re-adds the origin under the same canonical
+			// mergeKey in map-iteration order (non-deterministic winning
+			// KeyPath) and the surviving count reports the single source as
+			// partially-shadowed (#5397 review). configuredCount is reduced by
+			// the number of collapsed duplicates so the ignored accounting
+			// (configuredCount - len(leaves)) does not count the folded
+			// spellings as load-time-removed; the decoder already resolved
+			// them to one field value, so they are not unknown leaves.
+			collapsed := collapseStructLeaves(targetType, leaves, configured)
+			if len(collapsed) != len(leaves) {
+				candidate.configuredCount -= len(leaves) - len(collapsed)
+				// compositeLeaves counted the losing spellings of a folded
+				// struct field as normalized (each spelling's raw value vs the
+				// decoder's final typed value), so a source with
+				// {"image":"a","Image":"b"} (decoder keeps "b") counted the
+				// "image":"a" entry as normalized even though collapse folds both
+				// spellings into one logical configured entry. Recount from the
+				// retained spelling alone so the surviving-count and the
+				// --explain normalization note reflect only the one logical entry
+				// that remains after collapse (#5397 review).
+				candidate.normalizedCount = recountNormalizedAfterCollapse(collapsed, configured)
+				candidate.leaves = collapsed
+				leaves = collapsed
+			}
+			// Record each leaf's physical spelling (the decoder-winning one
+			// after collapse) so ResolvedValuePath projects each candidate's
+			// own value from its raw metadata map at the key the decoder
+			// kept, not the winner's physical spelling (#5397 review).
+			spellings := make(map[string]string, len(leaves))
+			for physical := range leaves {
+				spellings[canonicalStructLeafName(targetType, physical)] = physical
+			}
+			trace.collapsedLeafSpellings = spellings
+		}
 
 		if candidate.document.valueSemantics == sourceValueSnapshot {
 			full, _, _, snapshotMaterialized, err := compositeLeaves(candidate.typed, nil, true)
@@ -264,12 +334,44 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 				}
 				delete(leafValues, leaf)
 				delete(origins, leaf)
+				if structBacked {
+					// The deleted leaf's merge key was canonical for struct-backed
+					// composites, so the same key indexes structMergeKeys.
+					delete(structMergeKeys, leaf)
+				}
 				candidate.removedInherited++
 			}
 			for leaf, value := range full {
-				if explicit, configuredHere := leaves[leaf]; configuredHere {
+				explicit, configuredHere := leaves[leaf]
+				physicalLeaf := leaf
+				if !configuredHere && structBacked {
+					// collapseStructLeaves may have keyed leaves by the
+					// decoder-winning physical spelling rather than the
+					// canonical name full enumerates; fold case to find it so
+					// the snapshot branch treats an explicitly-configured
+					// case-variant leaf as configured instead of an unconfigured
+					// inherited change (#5397 review).
+					for physical, v := range leaves {
+						if strings.EqualFold(physical, leaf) {
+							explicit, configuredHere = v, true
+							physicalLeaf = physical
+							break
+						}
+					}
+				}
+				if configuredHere {
+					if structBacked {
+						// A lower-precedence source may have set the origin under
+						// a different physical spelling (or the canonical key);
+						// drop it so the surviving origin and the surviving-count
+						// accounting reflect this source's physical spelling.
+						if prevPhysical, ok := structMergeKeys[leaf]; ok && prevPhysical != physicalLeaf {
+							delete(origins, prevPhysical)
+						}
+						structMergeKeys[leaf] = physicalLeaf
+					}
 					leafValues[leaf] = cloneExportedValue(explicit)
-					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
+					origins[physicalLeaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, physicalLeaf))
 					continue
 				}
 				inherited, present := leafValues[leaf]
@@ -286,7 +388,21 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 
 		materialized = materialized || candidateMaterialized
 		for leaf, value := range leaves {
-			leafValues[leaf] = cloneExportedValue(value)
+			mergeKey := leaf
+			if structBacked {
+				mergeKey = canonicalStructLeafName(targetType, leaf)
+				// A higher-precedence source's case-variant leaf shares the
+				// canonical merge key with a lower-precedence source's lowercase
+				// leaf (e.g. "Enabled" and "enabled"). Drop the lower-precedence
+				// physical origin so the surviving accounting and the origin map
+				// reflect the winner; the physical spelling the operator wrote
+				// is preserved by the new origin's leafKeyPath.
+				if prevPhysical, ok := structMergeKeys[mergeKey]; ok && prevPhysical != leaf {
+					delete(origins, prevPhysical)
+				}
+				structMergeKeys[mergeKey] = leaf
+			}
+			leafValues[mergeKey] = cloneExportedValue(value)
 			origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
 		}
 	}
@@ -398,6 +514,24 @@ func valueFromSchemas(schemas []any, key string) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
+// taggedFieldByKey resolves key to a struct field by matching the key against
+// the struct's toml/json/config tags.
+//
+// Tag matching folds case. encoding/json and go-toml/v2 both match field
+// names case-insensitively, and the in-repo load path's leaf check
+// (inrepo.go) likewise folds case before its allowlist lookup. A
+// case-variant leaf like [docker] Image is therefore admitted by the typed
+// decode and by the load check, so the resolver's struct-tag lookup must
+// fold case too — otherwise the resolver's composite rebuild silently drops
+// a leaf the load path accepted, masking the value at runtime behind a
+// misleading "docker.image must be set" error and a provenance trace that
+// wrongly blames load-time validation (the silent-drop failure mode #4599's
+// unknown-leaf warning was built to prevent). EqualFold over a struct's
+// own fields is safe: tags within one struct are unique by case, so case
+// folding cannot make two distinct fields collide. Map-key lookups
+// (compositeLeaf's reflect.Map branch, value.MapIndex) stay exact on
+// purpose so a map that legitimately carries distinct mixed-case entries
+// (e.g. program_overrides) keeps them distinct.
 func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
 		key = alias.legacy
@@ -418,11 +552,32 @@ func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 		if !field.IsExported() {
 			continue
 		}
-		if structTagName(field.Tag.Get("toml")) == key || structTagName(field.Tag.Get("json")) == key || field.Tag.Get("config") == key {
+		if strings.EqualFold(structTagName(field.Tag.Get("toml")), key) ||
+			strings.EqualFold(structTagName(field.Tag.Get("json")), key) ||
+			strings.EqualFold(field.Tag.Get("config"), key) {
 			return value.Field(i), true
 		}
 	}
 	return reflect.Value{}, false
+}
+
+// isStructBackedValue reports whether value is a struct (or a pointer to one),
+// the shape a MergeTableByField composite resolves into. ResolvedValuePath uses
+// this to gate the case-insensitive origin fallback: struct-backed composites
+// key Origins by the file's physical spelling (taggedFieldByKey folds case), so
+// a canonical lowercase lookup must fold to match; map-backed composites keep
+// exact map keys, and configLeafValue has already returned false for a
+// non-existent exact map key before reaching the fallback, so a map-backed
+// parent never enters it (#5397 review).
+func isStructBackedValue(value any) bool {
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return false
+		}
+		reflected = reflected.Elem()
+	}
+	return reflected.Kind() == reflect.Struct
 }
 
 func manifestValueType(key string) (reflect.Type, bool) {
@@ -523,6 +678,45 @@ func compositeLeaf(value reflect.Value, name string) (reflect.Value, bool) {
 	default:
 		return reflect.Value{}, false
 	}
+}
+
+// canonicalStructLeafName returns the canonical struct tag name for a leaf of a
+// struct-backed MergeTableByField composite. Case-variant spellings of the
+// same struct field (e.g. "Enabled", "ENABLED", "enabled") all collapse to the
+// field's toml/json/config tag, so a higher-precedence source's case-variant
+// leaf overrides a lower-precedence source's lowercase leaf deterministically
+// instead of leaving both as separate leafValues entries that buildComposite
+// would assign to the same struct field in map-iteration order (#5397 review).
+// The physical spelling is retained separately for source display (origins,
+// leafKeyPath), so the trace still reports the spelling the operator wrote.
+// Map-backed composites (MergeMapByKey) keep exact key matching, so this
+// returns name unchanged when the target is not a struct.
+func canonicalStructLeafName(targetType reflect.Type, name string) string {
+	base := targetType
+	for base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	if base.Kind() != reflect.Struct {
+		return name
+	}
+	for i := 0; i < base.NumField(); i++ {
+		field := base.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if strings.EqualFold(structTagName(field.Tag.Get("toml")), name) ||
+			strings.EqualFold(structTagName(field.Tag.Get("json")), name) ||
+			strings.EqualFold(field.Tag.Get("config"), name) {
+			if tag := structTagName(field.Tag.Get("toml")); tag != "" && tag != "-" {
+				return tag
+			}
+			if tag := structTagName(field.Tag.Get("json")); tag != "" && tag != "-" {
+				return tag
+			}
+			return field.Name
+		}
+	}
+	return name
 }
 
 func configuredChildCount(configured any, builtIn bool) int {
@@ -651,10 +845,54 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	projected.Default = ""
 	projected.Origins = nil
 	winner, present := parent.Origins[leaf]
+	// physicalLeaf is the file's physical spelling for the leaf, used to
+	// project candidate values whose raw map is keyed by that spelling (the
+	// exact-match path below leaves it equal to leaf). The case-variant
+	// fallback sets it to the physical spelling found in Origins so a
+	// non-built-in candidate's map-keyed Value projects the leaf instead of
+	// being marked absent (#5397 review).
+	physicalLeaf := leaf
+	if !present {
+		// Struct-backed composites key Origins by the file's physical spelling
+		// (e.g. "Image"), so a case-variant leaf that survived the resolver
+		// (taggedFieldByKey folds case) is absent under the canonical lowercase
+		// spelling a caller passes in (e.g. "image"). configLeafValue already
+		// folded case to project the value above; fold the origin lookup the
+		// same way for struct-backed parents so ResolvedValuePath("docker.image")
+		// reports the leaf the operator wrote as [docker] Image. Map-backed
+		// composites keep exact map keys (compositeLeaf's reflect.Map branch),
+		// and configLeafValue returns false for a non-existent exact map key
+		// before reaching here, so this fallback never fires for a map-backed
+		// parent. Within one struct, tags are unique by case, so the scan is
+		// unambiguous (#5397 review).
+		if isStructBackedValue(parent.Value) {
+			for physical, candidate := range parent.Origins {
+				if strings.EqualFold(physical, leaf) {
+					winner = candidate
+					present = true
+					physicalLeaf = physical
+					break
+				}
+			}
+		}
+	}
 	if !present {
 		return ResolvedValue{}, false
 	}
-	winner.KeyPath = keyPath
+	// For the exact-match path the queried keyPath equals the physical spelling,
+	// so overwriting is a no-op; for the case-variant fallback the origin's
+	// physical KeyPath is the spelling the operator wrote, which is what the
+	// trace should report, so keep it instead of replacing it with the queried
+	// spelling — but only when the origin is already a leaf-specific path (a
+	// case-variant spelling like "docker.Image", always "<key>.<leaf>"). The
+	// specialized root-agent flow builds table-level origins whose KeyPath is
+	// just the parent key (rootAgentOrigin returns "root_agent"), so preserving
+	// that would leave the winner reporting the table instead of the requested
+	// scalar; table-level origins still need the queried keyPath projected onto
+	// them (#5397 review).
+	if winner.KeyPath == "" || !strings.HasPrefix(winner.KeyPath, key+".") {
+		winner.KeyPath = keyPath
+	}
 	projected.Winner = &winner
 	precedenceRank := make(map[string]int, len(parent.Precedence))
 	for i, layer := range parent.Precedence {
@@ -666,7 +904,61 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	for i, candidate := range parent.Candidates {
 		parentReason := candidate.Reason
 		candidate.KeyPath = keyPath
-		leafValue, present := configLeafValue(candidate.Value, leaf)
+		// projectionLeaf is the key under which this candidate's raw metadata
+		// map stores the leaf, so the candidate's own value is projected rather
+		// than the winner's. physicalLeaf is the winner's physical spelling
+		// (equal to leaf on the exact-match path, or the decoder-winning
+		// spelling a struct-backed case-variant origin was keyed by on the
+		// fallback path). A non-winner candidate may spell the leaf differently
+		// from the winner (e.g. a global [root_agent] ENABLED = false when the
+		// winner is a personal [root_agent] Enabled = true), and a non-built-in
+		// candidate's Value is the raw metadata map keyed by that candidate's
+		// own physical spelling, so reusing only physicalLeaf would miss its
+		// key and mark an explicitly-configured leaf absent instead of
+		// shadowed. For struct-backed composites, resolve each candidate's own
+		// map key case-insensitively (candidateLeafProjectionKey); map-backed
+		// composites never reach the struct-backed origin fallback above, so
+		// physicalLeaf equals leaf there and the helper is not called. Built-in
+		// candidates carry a typed struct Value, so configLeafValue already
+		// folds case for them via taggedFieldByKey and physicalLeaf is
+		// equivalent to leaf (#5397 review).
+		projectionLeaf := physicalLeaf
+		if isStructBackedValue(parent.Value) {
+			// Prefer the candidate's own collapsed spelling (the
+			// decoder-winning physical spelling collapseStructLeaves retained
+			// for this candidate) when it is available, so a shadowed
+			// candidate whose raw map carries both case-variant spellings
+			// projects the value the decoder kept rather than the winner's
+			// spelling. Fall back to candidateLeafProjectionKey's raw-map scan
+			// when the collapsed spelling is unavailable (map-backed composites
+			// and non-struct values never set collapsedLeafSpellings) (#5397
+			// review).
+			//
+			// collapsedLeafSpellings is keyed by the canonical struct-leaf name,
+			// but a caller may pass a case-variant leaf (e.g. root_agent.Enabled,
+			// whose canonical spelling is enabled); a direct leaves[leaf] lookup
+			// misses and falls through to candidateLeafProjectionKey, which
+			// would pick the winner's physical spelling and, when the
+			// candidate's raw map carries both spellings, project the losing
+			// sibling. Fold the queried leaf to its canonical spelling before
+			// indexing so the retained decoder-winning spelling for this
+			// candidate projects (#5397 review).
+			if spelling, ok := collapsedSpellingForLeaf(candidate.collapsedLeafSpellings, leaf); ok {
+				projectionLeaf = spelling
+			} else {
+				projectionLeaf = candidateLeafProjectionKey(candidate.Value, leaf, physicalLeaf)
+			}
+		}
+		leafValue, present := configLeafValue(candidate.Value, projectionLeaf)
+		if !present && projectionLeaf != leaf {
+			// The candidate's raw map does not carry the projection spelling
+			// either (e.g. a built-in source whose typed struct Value is keyed
+			// by the canonical tag, or a non-built-in source that only spells
+			// the leaf one way). Fall back to the queried spelling so the
+			// candidate is not falsely marked absent when the canonical spelling
+			// is the only one present.
+			leafValue, present = configLeafValue(candidate.Value, leaf)
+		}
 		candidate.Present = candidate.Present && present
 		if candidate.Present {
 			candidate.Value = leafValue
@@ -696,49 +988,4 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 		projected.Candidates[i] = candidate
 	}
 	return projected, true
-}
-
-func resolutionNormalizationNote(reason string) string {
-	for _, marker := range []string{"load-time normalization changed", "effective key bindings normalize"} {
-		if index := strings.Index(reason, marker); index >= 0 {
-			return reason[index:]
-		}
-	}
-	return ""
-}
-
-func configLeafValue(value any, leaf string) (any, bool) {
-	if value == nil {
-		return nil, false
-	}
-	reflected := reflect.ValueOf(value)
-	for reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface {
-		if reflected.IsNil() {
-			return nil, false
-		}
-		reflected = reflected.Elem()
-	}
-	switch reflected.Kind() {
-	case reflect.Map:
-		key := reflect.ValueOf(leaf)
-		if !key.Type().AssignableTo(reflected.Type().Key()) {
-			if !key.Type().ConvertibleTo(reflected.Type().Key()) {
-				return nil, false
-			}
-			key = key.Convert(reflected.Type().Key())
-		}
-		entry := reflected.MapIndex(key)
-		if !entry.IsValid() {
-			return nil, false
-		}
-		return clonedInterface(entry), true
-	case reflect.Struct:
-		field, ok := taggedFieldByKey(reflected, leaf)
-		if !ok {
-			return nil, false
-		}
-		return clonedInterface(field), true
-	default:
-		return nil, false
-	}
 }

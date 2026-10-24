@@ -181,3 +181,65 @@ func TestRootAgentEnabledSerializesExplicitFalse(t *testing.T) {
 	assert.Contains(t, string(jsonBytes), "\"enabled\":false",
 		"an explicit enabled=false must be written to JSON (the --explain surface), not omitted")
 }
+
+// TestRootAgentLayerFromShapeFoldsCaseVariantEnabledKey is the regression test
+// for the #5397 review finding that rootAgentLayerFromShape detected [root_agent]
+// presence with an exact sub["enabled"] lookup, so a global or personal
+// [root_agent] table that used a case-variant spelling (e.g. Enabled = true)
+// decoded onto the typed RootAgent.Enabled value via taggedFieldByKey's case
+// fold but left the shape keyed by "Enabled", and GlobalRootAgentLayer /
+// ProjectConfig.RootAgentLayer treated that decoded true as unset (EnabledSet =
+// false). The daemon snapshot and af config get root_agent.enabled resolve the
+// root agent as disabled even though ResolveConfig reports it enabled. The fix
+// folds the enabled presence lookup so a case-variant key is detected.
+func TestRootAgentLayerFromShapeFoldsCaseVariantEnabledKey(t *testing.T) {
+	// rootAgentLayerFromShape receives the inner [root_agent] shape map (the
+	// value topLevel returns for "root_agent"), so the cases below pass that
+	// inner map directly. The shape keys are the physical spellings the
+	// operator wrote (the shapeless decode preserves case).
+	tests := []struct {
+		name   string
+		shape  map[string]any
+		wantOn bool
+	}{
+		{name: "lowercase enabled", shape: map[string]any{"enabled": true}, wantOn: true},
+		{name: "mixed-case Enabled", shape: map[string]any{"Enabled": true}, wantOn: true},
+		{name: "upper-case ENABLED", shape: map[string]any{"ENABLED": true}, wantOn: true},
+		{name: "Enabled = false is still set", shape: map[string]any{"Enabled": false}, wantOn: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			layer := rootAgentLayerFromShape(RootAgent{Enabled: tc.wantOn, Program: "global"}, tc.shape)
+			require.NotNil(t, layer, "a declared [root_agent] table must produce a layer")
+			assert.True(t, layer.EnabledSet,
+				"a case-variant enabled key must be detected as present so the specialized resolver treats the decoded value as set")
+			assert.Equal(t, tc.wantOn, layer.Value.Enabled,
+				"the typed value passes through unchanged")
+		})
+	}
+
+	// A [root_agent] table with only a Program key (no enabled at any case) is
+	// present but does not set enabled; EnabledSet must be false so the
+	// effective enabled falls through to the lower-precedence layer.
+	layer := rootAgentLayerFromShape(RootAgent{Enabled: false, Program: "p"}, map[string]any{"program": "p"})
+	require.NotNil(t, layer)
+	assert.False(t, layer.EnabledSet, "a table without any enabled key must not set EnabledSet")
+
+	// No [root_agent] table at all returns nil (the source did not declare it).
+	assert.Nil(t, rootAgentLayerFromShape(RootAgent{}, nil), "an absent [root_agent] table produces no layer")
+	assert.Nil(t, rootAgentLayerFromShape(RootAgent{}, "not a map"), "a non-map shape produces no layer")
+}
+
+// TestGlobalRootAgentLayerFoldsCaseVariantEnabledKey covers the GlobalRootAgentLayer
+// integration path the #5397 review finding names: the daemon snapshot and af
+// config get root_agent.enabled resolve through this layer, so a global [root_agent]
+// Enabled = true (case variant) must report EnabledSet = true (and the decoded
+// Enabled value), not be treated as unset.
+func TestGlobalRootAgentLayerFoldsCaseVariantEnabledKey(t *testing.T) {
+	cfg := &Config{RootAgent: RootAgent{Enabled: true, Program: "global"}}
+	cfg.source = sourceMetadata{shape: map[string]any{"root_agent": map[string]any{"Enabled": true, "program": "global"}}}
+	layer := GlobalRootAgentLayer(cfg)
+	require.NotNil(t, layer)
+	assert.True(t, layer.EnabledSet, "a case-variant [root_agent] Enabled = true must set EnabledSet")
+	assert.True(t, layer.Value.Enabled, "the decoded Enabled value passes through")
+}

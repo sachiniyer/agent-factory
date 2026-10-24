@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // This file is the canonical root-agent resolver and the permanent legacy
 // `root_agents` compatibility adapter (#2216 Phase 6). It defines the singleton
 // root-agent profile and ResolveRootAgent — the single authority on how every
@@ -131,12 +133,31 @@ func GlobalRootAgentLayer(cfg *Config) *RootAgentLayer {
 // and the source's shape entry for "root_agent" (the shapeless decode used for
 // presence). It returns nil when [root_agent] was not declared, and sets
 // EnabledSet from whether the file's [root_agent] table carried an `enabled` key.
+//
+// The shape map keys are the physical spellings the operator wrote (encoding/json
+// and go-toml/v2 preserve key case in a shapeless decode), so a case-variant
+// [root_agent] Enabled = true decodes onto the typed RootAgent.Enabled value via
+// taggedFieldByKey's case fold but leaves the shape keyed by "Enabled". The
+// presence lookup folds case to match, otherwise GlobalRootAgentLayer and
+// ProjectConfig.RootAgentLayer would treat that decoded true as unset (EnabledSet
+// = false) and resolve the root agent as disabled even though ResolveConfig
+// reports it enabled — the same case-variant leaf the generic resolver already
+// admits (#5397 review). Within one [root_agent] table the enabled key is unique
+// by case (a struct tag), so the fold is unambiguous.
 func rootAgentLayerFromShape(value RootAgent, rootAgentShape any) *RootAgentLayer {
 	sub, ok := rootAgentShape.(map[string]any)
 	if !ok {
 		return nil
 	}
 	_, enabledSet := sub["enabled"]
+	if !enabledSet {
+		for key := range sub {
+			if strings.EqualFold(key, "enabled") {
+				enabledSet = true
+				break
+			}
+		}
+	}
 	return &RootAgentLayer{Value: value, EnabledSet: enabledSet}
 }
 

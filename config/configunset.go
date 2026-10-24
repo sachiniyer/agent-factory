@@ -45,7 +45,14 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	var result *UnsetResult
 	writeErr := WithFileLock(path, func() error {
 		var err error
-		result, err = applyProjectUnset(path, prettyPath, section, leaf, key, spec.structured && section == "")
+		// A fixed struct-field subkey (root_agent.enabled, root_agent.program)
+		// decodes onto its struct field case-insensitively (taggedFieldByKey),
+		// so a case-variant on-disk spelling (Enabled = true) is the same leaf as
+		// the canonical enabled but deleteTOMLScalar's exact-key line match would
+		// miss it. A dynamic family (program_overrides.<name>) is a map key and is
+		// case-sensitive, so it is NOT folded (#5397 review).
+		caseFoldLeaf := spec.parent != "" && !spec.dynamic
+		result, err = applyProjectUnset(path, prettyPath, section, leaf, key, spec.structured && section == "", caseFoldLeaf)
 		return err
 	})
 	if writeErr != nil {
@@ -61,7 +68,12 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 
 // applyProjectUnset removes the target key line from a project's config.toml
 // under the caller-held lock. A missing file or absent key is a clean no-op.
-func applyProjectUnset(path, prettyPath, section, leaf, key string, structured bool) (*UnsetResult, error) {
+// caseFoldLeaf reports whether leaf is a fixed struct-field subkey whose on-disk
+// spelling may be a case variant of the canonical key the decoder matches (e.g.
+// root_agent.Enabled for root_agent.enabled); deleteTOMLScalar must target the
+// physical spelling on disk, or a case-variant [root_agent] Enabled = true would
+// survive an unset that the loader treats as effective (#5397 review).
+func applyProjectUnset(path, prettyPath, section, leaf, key string, structured, caseFoldLeaf bool) (*UnsetResult, error) {
 	current, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -79,7 +91,28 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 		}
 		removed = updated != string(current)
 	} else {
-		updated, removed = deleteTOMLScalar(updated, section, leaf)
+		// A fixed struct-field subkey (root_agent.enabled, root_agent.program)
+		// can carry more than one case-equivalent on-disk spelling at once — a
+		// hand-written [root_agent] Enabled = true plus a later enabled = false
+		// set over it, or any pair the operator typed. Each one decodes onto the
+		// same struct field, so deleting only the canonical (or any single)
+		// spelling leaves the surviving variant setting the field and the unset
+		// reports Removed: true while restoring nothing (#5397 review). Collect
+		// every case-folded spelling and delete each, so the field is actually
+		// cleared. Dynamic map keys never reach this branch (caseFoldLeaf gates
+		// them out and stays exact-match).
+		spellings := []string{leaf}
+		if caseFoldLeaf {
+			spellings = physicalLeafSpellingsForUnset(updated, section, leaf)
+		}
+		removed = false
+		for _, sp := range spellings {
+			var r bool
+			updated, r = deleteTOMLScalar(updated, section, sp)
+			if r {
+				removed = true
+			}
+		}
 	}
 	if !removed {
 		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
@@ -248,4 +281,40 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	// Same rule as scalarWrite.apply: hashed from the committed bytes, never
 	// from a re-read.
 	return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: true, RequiresRestart: true}, digestConfigBytes([]byte(updated)), nil
+}
+
+// physicalLeafSpellingsForUnset returns every on-disk spelling of leaf under
+// [section] that the typed decoder folds onto the same struct field as leaf, so
+// the unset path can remove each one. A fixed struct-field subkey
+// (root_agent.enabled, root_agent.program) decodes case-insensitively
+// (taggedFieldByKey), so a personal [root_agent] Enabled = true and a
+// hand-written enabled = false are the same effective leaf and both must be
+// removed to restore inheritance — deleting only the canonical (or any single)
+// spelling would report Removed: true while a surviving variant re-sets the
+// field (#5397 review). Dynamic map keys are case-sensitive and never reach
+// this path (caseFoldLeaf gates them out). Returns []string{leaf} when section
+// is empty, the section is absent, or no case-variant is present, so callers
+// that already use the canonical spelling are unaffected.
+func physicalLeafSpellingsForUnset(content, section, leaf string) []string {
+	if section == "" {
+		return []string{leaf}
+	}
+	var root map[string]any
+	if err := toml.Unmarshal([]byte(content), &root); err != nil {
+		return []string{leaf}
+	}
+	sub, ok := root[section].(map[string]any)
+	if !ok {
+		return []string{leaf}
+	}
+	var spellings []string
+	for k := range sub {
+		if strings.EqualFold(k, leaf) {
+			spellings = append(spellings, k)
+		}
+	}
+	if len(spellings) == 0 {
+		return []string{leaf}
+	}
+	return spellings
 }

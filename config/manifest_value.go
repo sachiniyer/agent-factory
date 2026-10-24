@@ -40,6 +40,26 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 	return taggedFieldByKey(reflect.ValueOf(cfg), canonicalConfigKey(key))
 }
 
+// shapeKeyPresentFolded reports whether the shape map carries key under any
+// case-variant spelling. The shape map keys are the physical spellings the
+// operator wrote (encoding/json and go-toml/v2 preserve key case in a shapeless
+// decode), so a case-variant [root_agent] Enabled = true decodes onto the typed
+// RootAgent.Enabled value via taggedFieldByKey's case fold but leaves the shape
+// keyed by "Enabled"; an exact table["enabled"] lookup misses it. Mirrors
+// rootAgentLayerFromShape's presence fold so the editor form CurrentValue builds
+// agrees with the daemon's resolution (#5397 review).
+func shapeKeyPresentFolded(table map[string]any, key string) bool {
+	if _, p := table[key]; p {
+		return true
+	}
+	for k := range table {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
 // CurrentValue returns cfg's live value for one global manifest key in the form
 // an editor should show and `af config set` would accept back: a string bare, a
 // bool as "true"/"false", an int in decimal, a comma-list key (isCommaListKey)
@@ -93,12 +113,22 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 		if !present {
 			return "{}", true
 		}
+		// The shape map keys are the physical spellings the operator wrote
+		// (encoding/json and go-toml/v2 preserve key case in a shapeless
+		// decode), so a case-variant [root_agent] Enabled = true decodes onto
+		// RootAgent.Enabled via taggedFieldByKey's case fold but leaves the
+		// shape keyed by "Enabled". An exact table["enabled"] lookup misses it
+		// and the editor form renders {} (or omits enabled), and saving that
+		// displayed value could disable the agent — the same case-variant leaf
+		// rootAgentLayerFromShape already folds for the daemon (#5397 review).
+		// Within one [root_agent] table the enabled/program keys are unique by
+		// case (struct tags), so the fold is unambiguous.
 		var value rootAgentConfigJSON
-		if _, p := table["enabled"]; p {
+		if shapeKeyPresentFolded(table, "enabled") {
 			enabled := field.FieldByName("Enabled").Bool()
 			value.Enabled = &enabled
 		}
-		if _, p := table["program"]; p {
+		if shapeKeyPresentFolded(table, "program") {
 			program := field.FieldByName("Program").String()
 			value.Program = &program
 		}
