@@ -234,6 +234,9 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         return ws;
       } as unknown as typeof WebSocket;
       WS.prototype = OrigWS.prototype;
+      // The ctor wrapper drops WebSocket's readyState statics — production's
+      // `readyState === WebSocket.OPEN` must keep resolving to 1.
+      Object.setPrototypeOf(WS, OrigWS);
       (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = WS;
       const origRaf = window.requestAnimationFrame.bind(window);
       let rafSeq = 0;
