@@ -189,6 +189,9 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	// First two has-session calls report missing (the outer Restore check, then
@@ -261,6 +264,9 @@ func TestStartTmuxSession(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false
@@ -438,6 +444,7 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 	t.Helper()
 	var captureCalls atomic.Int32
 	var hasSessionCalls atomic.Int32
+	captureExitErr := exitErrorWithStderr(t, 1, "")
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -454,7 +461,11 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 			if strings.Contains(cmd.String(), "capture-pane") {
 				captureCalls.Add(1)
 				if !captureOK.Load() {
-					return nil, fmt.Errorf("exit status 1")
+					// A genuine *exec.ExitError: tmux ran and answered
+					// failure — the transient shape these tests pin.
+					// A non-ExitError would mean capture-pane never ran,
+					// which now classifies as infrastructure (#5327).
+					return nil, captureExitErr
 				}
 				return []byte("pane content"), nil
 			}
