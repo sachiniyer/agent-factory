@@ -252,11 +252,12 @@ test("request generations reject an older completion for the same token", () => 
 
 // --- the wiring -------------------------------------------------------------
 
-/** The source of one top-level `function name(): void { … }`, closing brace included.
+/** The source of one top-level `function name()… { … }`, closing brace included.
  *  Top-level declarations close at column 0, which is what makes this reliable
- *  without parsing TypeScript. */
+ *  without parsing TypeScript. The return type is left out of the header on
+ *  purpose: a delegator may return the refetcher's settle promise. */
 function topLevelFunction(source: string, name: string): string {
-  const header = `function ${name}(): void {`;
+  const header = `function ${name}(`;
   const start = source.indexOf(header);
   assert.notEqual(start, -1, `index.ts must declare ${name}`);
   const end = source.indexOf("\n}\n", start);
@@ -285,9 +286,10 @@ test("#3659 every refetcher in index.ts commits through the fence, not inline", 
   const teardown = topLevelFunction(source, "stopStream");
 
   for (const refetcher of refetchers) {
-    // Locate the refresh* function whose body calls `<refetcher>.refresh()`.
+    // Locate the refresh* function whose body calls `<refetcher>.refresh()`. An
+    // awaitable delegator is fine — the fence's promise returns to the caller.
     const callerMatch = new RegExp(
-      `function (refresh\\w+)\\(\\): void \\{[^}]*?\\b${refetcher}\\.refresh\\(\\)`,
+      `function (refresh\\w+)\\(\\): (?:void|Promise<void>) \\{[^}]*?\\b${refetcher}\\.refresh\\(\\)`,
       "s",
     ).exec(source);
     assert.ok(callerMatch, `a top-level refresh* function must delegate to ${refetcher}.refresh()`);

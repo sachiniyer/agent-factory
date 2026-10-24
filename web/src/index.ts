@@ -62,6 +62,13 @@ import {
   updateTask,
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
+import {
+  bindTerminalFontPersist,
+  setTerminalFontSizes,
+  stepTerminalFontSize,
+  terminalFontClassForKey,
+  terminalFontSizesFromConfig,
+} from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -429,15 +436,26 @@ async function connect(candidate: string): Promise<void> {
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then(tasks => ({ tasks, error: "" }))
       .catch(error => ({ tasks: [] as TaskData[], error: errorText(error) })),
     fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null),
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  // Landed ahead of phase:"app", so the first AttachTerminal's constructor —
+  // and the grid its initial OpResize reports — already reflects the persisted
+  // sizes rather than the defaults the controller started on.
+  if (configResult) setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
@@ -1889,6 +1907,10 @@ const configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    // Every config read is also the font sizes' update path (#5500): a value
+    // stepped from another client lands here on the next read, and our own
+    // save's echo refetch is a no-op through the set() change guard.
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -1900,8 +1922,8 @@ const configRefetcher = createFencedRefetcher({
   },
 });
 
-function refreshConfig(): void {
-  configRefetcher.refresh();
+function refreshConfig(): Promise<void> {
+  return configRefetcher.refresh();
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -2042,12 +2064,15 @@ function doOpenAccountLogin(agent: string, name: string): void {
  *  the only side that can keep the user's order. */
 const queueConfigSave = createKeyedQueue();
 
-function applyConfigValue(key: string, value: string): void {
+/** Returns the queue item's settle promise — the write AND the refetch it
+ *  triggers — so the font controls' stale-read guard can cover the whole round
+ *  trip rather than lapsing when the POST alone lands. */
+function applyConfigValue(key: string, value: string): Promise<void> {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
@@ -2059,8 +2084,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
         // current session's config view — the write committed and the daemon
         // holds the new value; an open config view would otherwise display the
         // pre-write state until the user leaves and re-enters.
-        refreshConfig();
-        return;
+        return refreshConfig();
       }
       store.set({
         configStatus: {
@@ -2071,13 +2095,28 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
           error: "",
         },
       });
-      refreshConfig();
+      // Awaited, not fired: the queue item — and with it the font module's
+      // pending-save guard — is not done until the post-write read has landed.
+      return refreshConfig();
     })
     .catch((err: unknown) => {
       if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+      // A font-size save has no manifest row to hang this error on — the pane
+      // renders only the `web` table row — so it must reach the shared toast or
+      // the stepped size would keep displaying as though it had saved.
+      if (terminalFontClassForKey(key) !== null) {
+        surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+      }
     });
 }
+
+// The font-size controls' saves ride the same path (#5500): the per-key queue
+// serializes a phone-size write against a desktop-size write, the returned
+// promise carries the write's whole round trip back to the font module's
+// stale-read guard, and a failed write leaves the applied size on screen while
+// the error surfaces on the toast — the size is display state first.
+bindTerminalFontPersist(applyConfigValue);
 
 // How often an OPEN tasks view refetches, for the verdicts that change with the
 // clock rather than with an event (#3626).
@@ -2584,6 +2623,7 @@ const actions = {
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

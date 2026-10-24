@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -229,6 +230,19 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 		if err := keys.ValidateOverrides(overrides); err != nil {
 			return err
 		}
+	case "web":
+		// The whole-table JSON form posts both leaves at once; each gets the
+		// same range check the leaf writer runs, under the leaf's own key name
+		// so a refusal names the field that was wrong.
+		web := field.Interface().(WebConfig)
+		for leaf, value := range map[string]float64{
+			"terminal_font_size_phone":   web.TerminalFontSizePhone,
+			"terminal_font_size_desktop": web.TerminalFontSizeDesktop,
+		} {
+			if err := validateWebTerminalFontSize(leaf, strconv.FormatFloat(value, 'g', -1, 64)); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -409,6 +423,20 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 		// Canonical is the comma-joined trimmed elements — exactly the form the
 		// editor shows and `af config get` prints back, so a set→get round-trips.
 		return strings.Join(elems, ","), encoded, nil
+	case cfgFloat:
+		n, perr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if perr != nil {
+			return "", "", fmt.Errorf("expected a number, got %q", raw)
+		}
+		canonical = strconv.FormatFloat(n, 'g', -1, 64)
+		// The FILE spelling needs a fraction or exponent — a bare "8" would
+		// decode as a TOML integer, which a float64 field refuses at load.
+		// The canonical echo keeps the short "8" `config get` renders.
+		encoded = canonical
+		if !strings.ContainsAny(canonical, ".eE") && !math.IsNaN(n) && !math.IsInf(n, 0) {
+			encoded += ".0"
+		}
+		return canonical, encoded, nil
 	default:
 		return raw, encodeTOMLString(raw), nil
 	}

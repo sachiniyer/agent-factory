@@ -49,9 +49,12 @@ export function createLatestRequestGate(): LatestRequestGate {
 }
 
 /** One projection's fenced refetch: `refresh()` issues a request; `invalidate()`
- *  disowns whatever is already in flight without issuing one. */
+ *  disowns whatever is already in flight without issuing one. The returned promise
+ *  settles when THIS request does — committed, disowned by a newer one, or errored —
+ *  so a caller whose work is not done until the read has landed can await it. It
+ *  never rejects: the failure is reported through onError inside the fence. */
 export interface FencedRefetcher {
-  refresh(): void;
+  refresh(): Promise<void>;
   invalidate(): void;
 }
 
@@ -77,15 +80,15 @@ export interface FencedRefetchSpec<T> {
 export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefetcher {
   const gate = createLatestRequestGate();
   return {
-    refresh(): void {
+    refresh(): Promise<void> {
       const tok = spec.readToken();
       // `=== null` not `!tok`: "" is the authorized tokenless credential (#1696).
       if (tok === null) {
-        return;
+        return Promise.resolve();
       }
       const request = gate.begin();
       const isNewest = (): boolean => request.isCurrent() && spec.readToken() === tok;
-      void spec
+      return spec
         .fetch(tok)
         .then((value) => {
           if (isNewest()) {
