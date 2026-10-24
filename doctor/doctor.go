@@ -251,6 +251,17 @@ type Options struct {
 	killGrace    time.Duration
 	killTermWait time.Duration
 
+	// coderProbeTimeout bounds the `coder whoami` connectivity probe. Zero
+	// means the production default (coderProbeTimeoutDefault); tests shorten
+	// it so the regression suite does not sleep on the real 3s deadline.
+	coderProbeTimeout time.Duration
+	// coderProbeWaitDelay bounds how long Wait blocks after the coder probe
+	// is killed on its deadline, before the inherited pipes are force-closed.
+	// Zero means the production default (coderProbeWaitDelayDefault); tests
+	// widen it so a non-zero self-exit near the deadline is observed before
+	// WaitDelay closes the capture pipe.
+	coderProbeWaitDelay time.Duration
+
 	// minProcessLeakAge is the persistence window for orphan/escape findings.
 	// Production uses processLeakMinAge; tests shorten it when their freshly
 	// spawned fixtures represent already-durable leaks.
@@ -396,6 +407,12 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.minLeakedDaemonAge == 0 {
 		o.minLeakedDaemonAge = leakedDaemonMinAge
+	}
+	if o.coderProbeTimeout == 0 {
+		o.coderProbeTimeout = 3 * time.Second
+	}
+	if o.coderProbeWaitDelay == 0 {
+		o.coderProbeWaitDelay = 500 * time.Millisecond
 	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
