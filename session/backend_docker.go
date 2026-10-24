@@ -223,7 +223,7 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
 		}
 		proof := accountLaunchProof(resolvedProgram, resolvedProgram,
-			builtInProgramOverride(cfg, spec.Program, resolvedProgram))
+			builtInProgramOverride(cfg, spec.Program, resolvedProgram), nil, "")
 		// The built-in proof is established in the host namespace. Docker may not
 		// contain that path (or may contain a different file there), so never grant
 		// its executable identity across the container boundary. A bare agent name

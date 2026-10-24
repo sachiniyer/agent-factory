@@ -250,6 +250,13 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
 		insertAt := agentIdx + 1
+		// Global -c/--config options sit before the subcommand in codex's
+		// grammar, so the splice must land after them — the same position
+		// skipCodexConfigOptions gives resumeProgram's --last splice. Splicing
+		// ahead of them produces `codex resume <id> -c k=v`, which reorders
+		// the option after the subcommand; codex rejects that placement, so
+		// the carried swap would launch a replacement with invalid arguments.
+		insertAt = skipCodexConfigOptions(tokens, insertAt)
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
 			insertAt++
 		}
