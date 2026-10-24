@@ -460,6 +460,19 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d.ArchiveReport = nil
 	d.archiveReportSource = nil
 	d.archiveReportPending = false
+	// Mirror ForStorage's retention-boundary invariant on the read side. The
+	// teardown identity (SSH host/user/key path, dial address, hook delete
+	// command, container/engine ids) is durable on disk — ForStorage publishes
+	// the public field only for committed UserKilled tombstones and
+	// RuntimeCleanupStateUnknown rows — but it is never client-view material.
+	// A live daemon snapshot keeps it solely in the unexported staging field,
+	// so encoding/json never serializes it; the disk-fallback path loads
+	// instances.json into the public field and would re-emit it verbatim,
+	// diverging from the snapshot shape this projection exists to match. The
+	// bugreport redactor drops this field for the same reason (operator-private
+	// infrastructure identity pasted into reports/logs/dashboards).
+	d.RuntimeCleanup = nil
+	d.runtimeCleanup = nil
 	return d
 }
 

@@ -674,6 +674,231 @@ func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
 	}
 }
 
+// TestForClientReadScrubsRuntimeCleanup covers the disk-fallback half of the
+// cleanup-leak contract. Every CLI disk-fallback read (sessions list/get/whoami
+// when the daemon is unreachable) decodes rows from instances.json, calls
+// ForClientRead, and marshals the result verbatim through jsonOut — a plain
+// json.Marshal with no filtering. ForStorage deliberately persists the public
+// RuntimeCleanup field on two retained row kinds — a committed UserKilled
+// tombstone and a RuntimeCleanupStateUnknown row — so those rows carry the
+// operator-private teardown identity (SSH host/user/key path, dial address, hook
+// delete command, container/engine ids, sandbox ssh command) on disk. A live
+// daemon snapshot never serializes the handle because the live path stages it
+// only on the unexported field; ForClientRead's documented contract is to emit
+// the same bounded shape, so it must drop the public field on the read side.
+//
+// The test replays the exact disk-fallback pipeline: ForStorage writes the row
+// to disk (marshal), the CLI loads it back (unmarshal — the unexported staging
+// field is invisible to encoding/json, so only the public field is populated),
+// ForClientRead projects it, and jsonOut marshals the projection. Both
+// retention boundaries are exercised across the off-box backends whose handle
+// material the bug exposes, and the oracle asserts BOTH the storage-only key
+// and each private value are gone.
+func TestForClientReadScrubsRuntimeCleanup(t *testing.T) {
+	tests := []struct {
+		name        string
+		backendType string
+		// row builds the in-memory InstanceData a daemon held before persistence.
+		// runtimeCleanup is staged on the unexported field exactly as the live
+		// path stages it; ForStorage publishes it to the public field on these
+		// retention boundaries.
+		row         func(cleanup *RuntimeCleanupData) InstanceData
+		cleanup     *RuntimeCleanupData
+		privateVals []string
+	}{
+		{
+			name:        "ssh UserKilled tombstone",
+			backendType: "ssh",
+			cleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+				Config:              config.SSHConfig{Host: "secret-host.example", User: "op", Port: 2222, IdentityFile: "/home/op/.ssh/id_ed25519", KnownHosts: "/home/op/.ssh/known_hosts"},
+				SessionDir:          "/srv/af/leaky-ssh",
+				RemotePID:           cleanupFixturePID,
+				DialAddress:         "198.51.100.8:22",
+				HostKeyVerification: config.SSHHostKeyAcceptNew,
+			}},
+			privateVals: []string{
+				"secret-host.example", "op", "/home/op/.ssh/id_ed25519",
+				"/home/op/.ssh/known_hosts", "/srv/af/leaky-ssh", cleanupFixturePID,
+				"198.51.100.8:22",
+			},
+			row: func(c *RuntimeCleanupData) InstanceData {
+				return InstanceData{
+					ID: "inst-ssh-tombstone", Title: "leaky-tombstone", BackendType: "ssh",
+					UserKilled: true, RuntimeCleanup: nil, runtimeCleanup: c,
+				}
+			},
+		},
+		{
+			name:        "docker UserKilled tombstone",
+			backendType: "docker",
+			cleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+				ContainerID: "deadbeefcafe0000000000000000000000000000000000000000000000cafe",
+				EngineID:    "engine-secret-id",
+			}},
+			privateVals: []string{
+				"deadbeefcafe0000000000000000000000000000000000000000000000cafe",
+				"engine-secret-id",
+			},
+			row: func(c *RuntimeCleanupData) InstanceData {
+				return InstanceData{
+					ID: "inst-docker-tombstone", Title: "docker-tombstone", BackendType: "docker",
+					UserKilled: true, RuntimeCleanup: nil, runtimeCleanup: c,
+				}
+			},
+		},
+		{
+			name:        "hook UserKilled tombstone",
+			backendType: "remote",
+			cleanup: &RuntimeCleanupData{Hook: &HookRuntimeCleanupData{
+				DeleteCmd: "/srv/af/hooks/delete-leaky.sh",
+				Slug:      "leaky-hook", Agent: "codex", AgentResolved: true,
+			}},
+			privateVals: []string{"/srv/af/hooks/delete-leaky.sh", "leaky-hook"},
+			row: func(c *RuntimeCleanupData) InstanceData {
+				return InstanceData{
+					ID: "inst-hook-tombstone", Title: "hook-tombstone", BackendType: "remote",
+					UserKilled: true, RuntimeCleanup: nil, runtimeCleanup: c,
+				}
+			},
+		},
+		{
+			name:        "sandbox RuntimeCleanupStateUnknown",
+			backendType: "sandbox",
+			cleanup: &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+				SSHCommand: "ssh -J jump.example:2222 sandbox-host.example -p 2200",
+				SessionDir: "/srv/af/unknown-sandbox",
+				RemotePID:  cleanupFixtureAltPID,
+			}},
+			privateVals: []string{
+				"ssh -J jump.example:2222 sandbox-host.example -p 2200",
+				"/srv/af/unknown-sandbox", cleanupFixtureAltPID,
+			},
+			row: func(c *RuntimeCleanupData) InstanceData {
+				return InstanceData{
+					ID: "inst-sandbox-unknown", Title: "unknown-sandbox", BackendType: "sandbox",
+					RuntimeCleanupStateUnknown: true, RuntimeCleanup: nil, runtimeCleanup: c,
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// ForStorage is what the daemon calls before writing instances.json. On
+			// these retention boundaries it publishes runtimeCleanup to the public
+			// RuntimeCleanup field (the durable handle) and clears the private
+			// staging pointer, exactly as a real tombstone/unknown row persists.
+			onDisk := tt.row(tt.cleanup).ForStorage()
+			if onDisk.RuntimeCleanup == nil {
+				t.Fatalf("ForStorage did not publish the durable cleanup handle for %s", tt.name)
+			}
+			diskBytes, err := json.Marshal(onDisk)
+			if err != nil {
+				t.Fatalf("marshal on-disk %s: %v", tt.name, err)
+			}
+			if !strings.Contains(string(diskBytes), "runtime_cleanup") {
+				t.Fatalf("on-disk %s omitted the handle that the disk fallback must scrub: %s", tt.name, diskBytes)
+			}
+
+			// The disk-fallback read: json.Unmarshal into InstanceData. The
+			// unexported runtimeCleanup field is invisible to encoding/json, so
+			// only the public field is populated — the exact state a CLI disk
+			// fallback passes to ForClientRead.
+			var loaded InstanceData
+			if err := json.Unmarshal(diskBytes, &loaded); err != nil {
+				t.Fatalf("unmarshal on-disk %s: %v", tt.name, err)
+			}
+			if loaded.RuntimeCleanup == nil {
+				t.Fatalf("loaded %s lost the public handle before projection: %s", tt.name, diskBytes)
+			}
+			if loaded.runtimeCleanup != nil {
+				t.Fatalf("loaded %s populated the unexported staging field from JSON: %#v", tt.name, loaded.runtimeCleanup)
+			}
+
+			// ForClientRead is the projection diskListSessions / diskWhoami /
+			// findInstanceByTitle apply before jsonOut marshals to stdout.
+			client := loaded.ForClientRead()
+			if client.RuntimeCleanup != nil {
+				t.Fatalf("ForClientRead kept the public RuntimeCleanup handle for %s: %#v", tt.name, client.RuntimeCleanup)
+			}
+			if client.runtimeCleanup != nil {
+				t.Fatalf("ForClientRead kept the unexported runtimeCleanup handle for %s: %#v", tt.name, client.runtimeCleanup)
+			}
+			out, err := json.Marshal(client)
+			if err != nil {
+				t.Fatalf("marshal client view for %s: %v", tt.name, err)
+			}
+			if leaks := cleanupLeaksIn(t, out, tt.privateVals); len(leaks) > 0 {
+				t.Fatalf("ForClientRead leaked storage-only cleanup state for %s at %v: %s", tt.name, leaks, out)
+			}
+
+			// Teeth: the same on-disk row marshaled WITHOUT ForClientRead (the
+			// pre-fix CLI behavior) must still carry the handle, so the test
+			// catches a regression that re-introduces the leak. If this stops
+			// leaking the oracle has lost its mutation value.
+			unprojected, err := json.Marshal(loaded)
+			if err != nil {
+				t.Fatalf("marshal unprojected %s: %v", tt.name, err)
+			}
+			if leaks := cleanupLeaksIn(t, unprojected, tt.privateVals); len(leaks) == 0 {
+				t.Fatalf("unprojected %s did not leak — the scrub assertion above lost its mutation value: %s", tt.name, unprojected)
+			}
+		})
+	}
+}
+
+// TestForClientReadPreservesNonRetentionRows verifies the scrub is surgical: a
+// row that ForStorage never persists RuntimeCleanup for (an ordinary live/lost
+// session) round-trips through the disk fallback with no behavior change. This
+// is the regression guard against ForClientRead over-scrubbing or mutating
+// fields it must leave alone.
+func TestForClientReadPreservesNonRetentionRows(t *testing.T) {
+	// An ordinary lost session on the SSH backend: ForStorage nils RuntimeCleanup
+	// (the row carries no durable cleanup identity), so instances.json has no
+	// runtime_cleanup key and the disk fallback shape must be unchanged.
+	ordinary := InstanceData{
+		ID: "inst-ordinary", Title: "ordinary", BackendType: "ssh",
+		Liveness: LiveLost,
+		RuntimeCleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: "ordinary.example", User: "remote"},
+			SessionDir: "/srv/af/ordinary", RemotePID: cleanupFixturePID,
+		}},
+		runtimeCleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: "ordinary.example", User: "remote"},
+			SessionDir: "/srv/af/ordinary", RemotePID: cleanupFixturePID,
+		}},
+	}.ForStorage()
+	if ordinary.RuntimeCleanup != nil {
+		t.Fatalf("ForStorage kept RuntimeCleanup on an ordinary lost row: %#v", ordinary.RuntimeCleanup)
+	}
+	diskBytes, err := json.Marshal(ordinary)
+	if err != nil {
+		t.Fatalf("marshal on-disk ordinary: %v", err)
+	}
+	if strings.Contains(string(diskBytes), "runtime_cleanup") {
+		t.Fatalf("ordinary row persisted a cleanup handle: %s", diskBytes)
+	}
+	var loaded InstanceData
+	if err := json.Unmarshal(diskBytes, &loaded); err != nil {
+		t.Fatalf("unmarshal on-disk ordinary: %v", err)
+	}
+	client := loaded.ForClientRead()
+	// The projection must not touch fields it has no business changing on a row
+	// that already matches the snapshot shape.
+	if client.ID != "inst-ordinary" || client.Title != "ordinary" || client.BackendType != "ssh" {
+		t.Fatalf("ForClientRead altered the ordinary row identity: %#v", client)
+	}
+	if client.RuntimeCleanup != nil || client.runtimeCleanup != nil {
+		t.Fatalf("ForClientRead introduced a cleanup handle on an ordinary row: %#v", client)
+	}
+	out, err := json.Marshal(client)
+	if err != nil {
+		t.Fatalf("marshal client view: %v", err)
+	}
+	if strings.Contains(string(out), "runtime_cleanup") {
+		t.Fatalf("ordinary disk-fallback view carries runtime_cleanup: %s", out)
+	}
+}
+
 func TestMissingRemoteCleanupHandleFailsClosed(t *testing.T) {
 	restored, err := FromInstanceData(InstanceData{
 		ID:          "legacy-tombstone-id",
