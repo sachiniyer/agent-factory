@@ -17,7 +17,7 @@ func TestReservedTitleRefusalProjectScopedRemedy(t *testing.T) {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", dir)
 			for _, title := range []string{"root", "ro ot"} {
-				err := ReservedTitleRefusal(title)
+				err := ReservedTitleRefusalFor(title, "")
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "from this repo")
 				assert.Contains(t, err.Error(), "daemon host")
@@ -85,7 +85,6 @@ func TestReservedTitleRefusalForResolvedRepo(t *testing.T) {
 		assert.Contains(t, err.Error(), "af projects add "+quoted)
 		assert.Contains(t, err.Error(), "af config set --project "+quoted)
 		assert.NotContains(t, err.Error(), "from this repo")
-		assert.EqualError(t, ReservedTitleRefusalFor(title, ""), ReservedTitleRefusal(title).Error())
 	}
 	assert.NoError(t, ReservedTitleRefusalFor("ordinary", repo))
 }
