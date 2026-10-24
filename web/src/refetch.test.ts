@@ -362,4 +362,27 @@ test("#5500 a failed connect-time config read schedules the bounded reconcile", 
   const body = topLevelFunction(source, "reconcileConfigRead");
   assert.match(body, /connectionAttemptMayCommit\(attempt, token, candidate\)/);
   assert.match(body, /retryWithBackoff\(/);
+  // The loop's retries are silent — a per-retry toast would keep reporting a
+  // failure the loop recovered from. Only a spent budget surfaces, through
+  // one ordinary loud read.
+  assert.match(body, /refresh\(\{ silent: true \}\)/);
+});
+
+// The reconcile's silence lives in the refetcher: a `silent` refresh must not
+// reach onError at all — even under the fence — while an ordinary refresh
+// still reports through it.
+test("a silent refresh reports no error through the fence", async () => {
+  const errors: unknown[] = [];
+  const commits: string[] = [];
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: () => Promise.reject(new Error("down")),
+    commit: () => commits.push("commit"),
+    onError: (e) => errors.push(e),
+  });
+  await refetcher.refresh({ silent: true });
+  assert.equal(errors.length, 0, "the retry-owned read must not toast");
+  await refetcher.refresh();
+  assert.equal(errors.length, 1, "an ordinary read still surfaces its failure");
+  assert.equal(commits.length, 0);
 });

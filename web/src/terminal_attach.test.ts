@@ -35,7 +35,7 @@ function stage() {
     visibleFitAttempts: number;
     lastRows: number;
     lastCols: number;
-    parked: boolean;
+    parked: boolean | null;
   };
   return { terminal, host, term, fit, calls };
 }
@@ -230,6 +230,47 @@ test("a transient bail on the wake frame retries — the probe carries a fit bud
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
   } finally {
     win.restore();
+  }
+});
+
+// Codex P2 on #5501: before the first probe delivery the parked state is
+// UNKNOWN, not "not parked" — an occluded page still reports
+// visibilityState='visible' while its frames starve, so a socket that opens
+// inside the ~250ms window (the onopen force-resize) must defer to the
+// classification rather than leak a write on the default reading. Whichever
+// twin delivers first then runs the fit that carries — or withholds — the
+// size; the un-credited marker is what makes that fit converge on its own.
+test("a socket opening inside the probe window writes nothing until classified", async () => {
+  const win = stubWindow();
+  const prior = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { visibilityState: "visible" };
+  try {
+    const { terminal, calls } = stage();
+    // Freshly constructed: the constructor's probe pair is armed but no twin
+    // has delivered yet — the occluded-but-visible state under test.
+    terminal.parked = null;
+    terminal.scheduleVisibleFit();
+    // The socket opens inside the probe window — exactly what onopen does.
+    (terminal as unknown as { sendResize(r: number, c: number, f: boolean): void })
+      .sendResize(24, 80, true);
+    assert.deepEqual(calls, [], "an unclassified terminal must not write the shared grid");
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [0, 0],
+      "the un-credited marker is what lets the classified fit converge");
+    // The starved twin classifies the page parked — the owed write stays
+    // withheld (the wake frame stays armed for it), not leaked.
+    win.runTimer();
+    await Promise.resolve();
+    assert.equal(terminal.parked, true);
+    assert.deepEqual(calls, ["fit", "connect"]);
+    // The first delivered frame — the un-occlusion — flushes the owed grid.
+    win.runFrame();
+    await Promise.resolve();
+    assert.equal(terminal.parked, false);
+    assert.deepEqual(calls, ["fit", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+    (globalThis as { document?: unknown }).document = prior;
   }
 });
 

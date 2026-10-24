@@ -264,6 +264,14 @@ test("#5500 a failed connect-time config read retries until the persisted pitch 
   await expect.poll(() => stream.resizes().length).toBeGreaterThan(0);
   const defaulted = stream.resizes().at(-1)!;
 
+  // The loop is silent by contract: a per-retry toast would keep reporting a
+  // failure the reconcile is about to recover from — and a persistent one it
+  // already recovered from would read as a lie. The connect read and the
+  // first retry both fail inside this window; neither may toast.
+  const toast = page.locator(".af-toast.af-toast-show");
+  await page.waitForTimeout(1_800);
+  await expect(toast, "a failed background retry must not surface an error").toBeHidden();
+
   // The landed read applies the persisted 15 through the normal commit: the
   // font controller refits and a corrective OpResize leaves on the coarser
   // grid — the same convergence an on-time read would have produced before
@@ -274,6 +282,9 @@ test("#5500 a failed connect-time config read retries until the persisted pitch 
   expect(landed.cols, "the landed read must apply the persisted 15px pitch").not.toEqual(defaulted.cols);
   // And the witness on the wire: two retries behind the failed connect read.
   await expect.poll(() => getCalls).toBeGreaterThanOrEqual(3);
+  // Recovery leaves nothing behind — the retry-owned failures were never
+  // shown, so there is nothing stale for the success to have to clear.
+  await expect(toast, "a recovered reconcile must leave no stale error").toBeHidden();
 });
 
 test("#5500 phone A+ steps the phone pitch, persists it, and leaves an armed modifier armed", async ({ page, request }) => {

@@ -68,6 +68,15 @@ func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]str
 		return editorValue(value), encoded, nil
 	}
 
+	// A whole-table write may omit a leaf — the loader supplies the compiled
+	// default for an absent one, so the typed form must seed the same defaults
+	// before decoding: a zero value left by an omitted member would read as a
+	// range violation below. An explicitly-written member still decodes over
+	// its seed, so a present-but-invalid value fails as strictly as the leaf
+	// form does.
+	if key == "web" {
+		field.Set(reflect.ValueOf(DefaultConfig().Web))
+	}
 	target := field.Addr().Interface()
 	if err := decodeCompactJSON(key, raw, target); err != nil {
 		return "", "", err

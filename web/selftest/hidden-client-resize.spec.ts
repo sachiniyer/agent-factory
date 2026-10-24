@@ -63,6 +63,81 @@
 // reclaim. That run is the A/B comparison; this spec passes only on the fix.
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { decode, Op } from "../src/frame.js";
+
+// The empirical parked probe: whether the page's rAF still fires. 1.5s of
+// silence — six times the timer twin's 250ms cadence — is unambiguous deadness.
+const frameAlive = (page: Page): Promise<boolean> =>
+  page.evaluate(
+    () =>
+      new Promise<boolean>((resolve) => {
+        const dead = setTimeout(() => resolve(false), 1_500);
+        requestAnimationFrame(() => {
+          clearTimeout(dead);
+          resolve(true);
+        });
+      }),
+  );
+
+// Park the page the way a REAL hidden tab behaves, which is also how the
+// production detector sees it: rAF callbacks are deferred, not dropped.
+// They queue while the page is unpainted, they honor cancelAnimationFrame,
+// and they all fire on the first frame after the page is visible again —
+// the browser's own un-hide semantics, not a synthetic approximation.
+const park = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    const w = window as unknown as {
+      __afRealRaf?: typeof requestAnimationFrame;
+      __afRealCancel?: typeof cancelAnimationFrame;
+      __afDeferred?: Map<number, FrameRequestCallback>;
+      __afNextRafId?: number;
+    };
+    if (w.__afRealRaf) {
+      return; // already parked — a second park() must not capture the stub
+    }
+    w.__afRealRaf = window.requestAnimationFrame;
+    w.__afRealCancel = window.cancelAnimationFrame;
+    w.__afDeferred = new Map();
+    w.__afNextRafId = 1;
+    window.requestAnimationFrame = (cb: FrameRequestCallback) => {
+      const id = w.__afNextRafId as number;
+      w.__afNextRafId = id + 1;
+      (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
+      return id;
+    };
+    window.cancelAnimationFrame = (id: number) => {
+      (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
+    };
+  });
+
+// Un-hide: restore the real scheduling surface, then replay every deferred
+// callback in registration order — exactly what a browser does when a
+// hidden tab becomes visible. `withFocus` additionally dispatches the focus
+// event; the no-focus variant is the stronger claim — the product must
+// converge on the replayed callbacks alone, with no wake signal at all.
+const unpark = (page: Page, withFocus: boolean): Promise<void> =>
+  page.evaluate((focus: boolean) => {
+    const w = window as unknown as {
+      __afRealRaf?: typeof requestAnimationFrame;
+      __afRealCancel?: typeof cancelAnimationFrame;
+      __afDeferred?: Map<number, FrameRequestCallback>;
+    };
+    if (w.__afRealRaf) {
+      window.requestAnimationFrame = w.__afRealRaf;
+      window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
+      delete w.__afRealRaf;
+      delete w.__afRealCancel;
+    }
+    const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
+    w.__afDeferred?.clear();
+    const now = performance.now();
+    for (const cb of deferred) {
+      cb(now);
+    }
+    if (focus) {
+      window.dispatchEvent(new Event("focus"));
+    }
+  }, withFocus);
 
 test("a parked client reclaims locally but never writes the shared grid", async ({ browser }) => {
   const afBin = process.env.AF_BIN;
@@ -99,77 +174,6 @@ test("a parked client reclaims locally but never writes the shared grid", async 
     await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   };
   const rows = (host: Locator): Promise<number> => host.locator(".xterm-rows > div").count();
-  // The empirical parked probe: whether the page's rAF still fires. 1.5s of
-  // silence — six times the timer twin's 250ms cadence — is unambiguous deadness.
-  const frameAlive = (page: Page): Promise<boolean> =>
-    page.evaluate(
-      () =>
-        new Promise<boolean>((resolve) => {
-          const dead = setTimeout(() => resolve(false), 1_500);
-          requestAnimationFrame(() => {
-            clearTimeout(dead);
-            resolve(true);
-          });
-        }),
-    );
-  // Park the page the way a REAL hidden tab behaves, which is also how the
-  // production detector sees it: rAF callbacks are deferred, not dropped.
-  // They queue while the page is unpainted, they honor cancelAnimationFrame,
-  // and they all fire on the first frame after the page is visible again —
-  // the browser's own un-hide semantics, not a synthetic approximation.
-  const park = (page: Page): Promise<void> =>
-    page.evaluate(() => {
-      const w = window as unknown as {
-        __afRealRaf?: typeof requestAnimationFrame;
-        __afRealCancel?: typeof cancelAnimationFrame;
-        __afDeferred?: Map<number, FrameRequestCallback>;
-        __afNextRafId?: number;
-      };
-      if (w.__afRealRaf) {
-        return; // already parked — a second park() must not capture the stub
-      }
-      w.__afRealRaf = window.requestAnimationFrame;
-      w.__afRealCancel = window.cancelAnimationFrame;
-      w.__afDeferred = new Map();
-      w.__afNextRafId = 1;
-      window.requestAnimationFrame = (cb: FrameRequestCallback) => {
-        const id = w.__afNextRafId as number;
-        w.__afNextRafId = id + 1;
-        (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
-        return id;
-      };
-      window.cancelAnimationFrame = (id: number) => {
-        (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
-      };
-    });
-  // Un-hide: restore the real scheduling surface, then replay every deferred
-  // callback in registration order — exactly what a browser does when a
-  // hidden tab becomes visible. `withFocus` additionally dispatches the focus
-  // event; the no-focus variant is the stronger claim — the product must
-  // converge on the replayed callbacks alone, with no wake signal at all.
-  const unpark = (page: Page, withFocus: boolean): Promise<void> =>
-    page.evaluate((focus: boolean) => {
-      const w = window as unknown as {
-        __afRealRaf?: typeof requestAnimationFrame;
-        __afRealCancel?: typeof cancelAnimationFrame;
-        __afDeferred?: Map<number, FrameRequestCallback>;
-      };
-      if (w.__afRealRaf) {
-        window.requestAnimationFrame = w.__afRealRaf;
-        window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
-        delete w.__afRealRaf;
-        delete w.__afRealCancel;
-      }
-      const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
-      w.__afDeferred?.clear();
-      const now = performance.now();
-      for (const cb of deferred) {
-        cb(now);
-      }
-      if (focus) {
-        window.dispatchEvent(new Event("focus"));
-      }
-    }, withFocus);
 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
@@ -310,6 +314,84 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         timeout: 15_000,
       })
       .toBe(localRows);
+  } finally {
+    await ctx.close();
+    try {
+      af("sessions", "kill", sessionName);
+    } catch {
+      // The throwaway daemon may already have removed a failed startup.
+    }
+  }
+});
+
+// Codex P2 on #5501, the attach-time half of the same guarantee: a terminal
+// CONSTRUCTED on a parked page must not get a write through inside the
+// classification window either. Its socket opens on loopback in a few
+// milliseconds — long before the 250ms probe timer classifies the page — and
+// "not yet probed" used to read as "not parked", so the onopen force-send
+// leaked the occluded client's grid onto the shared PTY. The only honest
+// witness is the wire itself: no OpResize may leave until a probe twin has
+// delivered, and the first delivered frame is what flushes it.
+test("a terminal attached while parked sends no OpResize until classified", async ({ browser }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const sessionName = "parked-attach-guard";
+  af("sessions", "create", "--name", sessionName, "--program", "claude");
+
+  const resizes: Array<{ rows: number; cols: number }> = [];
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  try {
+    const page = await ctx.newPage();
+    page.on("websocket", socket => {
+      if (!new URL(socket.url()).pathname.endsWith("/stream")) return;
+      socket.on("framesent", ({ payload }) => {
+        if (typeof payload === "string") return;
+        const frame = decode(payload);
+        if (frame.op === Op.Resize) resizes.push({ rows: frame.rows, cols: frame.cols });
+      });
+    });
+    await page.addInitScript((fixtureRepo) => {
+      if (window.top !== window) return;
+      try {
+        localStorage.setItem("af-project", fixtureRepo);
+      } catch {
+        // Sandboxed documents can deny storage; the real app document does not.
+      }
+    }, mockRepo as string);
+    await page.goto("/");
+    await expect(page.locator(".af-app")).toBeVisible();
+
+    // Park before attach — the terminal constructs inside the parked window
+    // with its probe pair armed and its socket racing the classification. A
+    // parked page receives no trusted input, so the rail navigation is
+    // dispatched as DOM events rather than driven through the virtual mouse.
+    await park(page);
+    await page.locator(".af-nav-toggle").dispatchEvent("click");
+    await page.locator(".af-rail-list .af-row", { hasText: sessionName }).dispatchEvent("click");
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+
+    // Six times the classification timer: on an un-gated build the onopen
+    // force-send has long since written this page's grid onto the shared PTY.
+    await page.waitForTimeout(1_500);
+    expect(
+      resizes.length,
+      "no OpResize may leave while the page is parked — not even the onopen reassert",
+    ).toBe(0);
+
+    // Un-hide without a focus event: the replayed deferred frame classifies
+    // the page visible and the fit that runs on it flushes the attach's grid.
+    await unpark(page, false);
+    await expect
+      .poll(() => resizes.length, {
+        message: "the classified-visible fit must flush the attach's grid",
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0);
   } finally {
     await ctx.close();
     try {

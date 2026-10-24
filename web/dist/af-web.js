@@ -9918,8 +9918,15 @@ var AttachTerminal = class {
    *  resizes cannot be activations, and a parked client stealing the grid is
    *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
    *  any genuinely page-coupled signal — a delivered frame, an observer
-   *  callback, window focus, or a TRUSTED input event. */
-  parked = false;
+   *  callback, window focus, or a TRUSTED input event.
+   *
+   *  Null until the first probe delivery classifies the page — UNKNOWN, not
+   *  "not parked": a socket that opens inside the probe window (the onopen
+   *  force-resize included) must not let a write through on the default, or a
+   *  terminal constructed on an occluded page would stamp its grid onto the
+   *  shared PTY before its frames had a chance to starve. Every signal that
+   *  writes a boolean here IS itself a classification. */
+  parked = null;
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
@@ -10971,6 +10978,9 @@ var AttachTerminal = class {
    *  marker and silence every later attempt (the phantom-sent strand). */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (this.parked === null) {
       return;
     }
     if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
@@ -15262,7 +15272,7 @@ async function retryWithBackoff(attempt, alive, delays, sleep) {
 function createFencedRefetcher(spec) {
   const gate = createLatestRequestGate();
   return {
-    refresh() {
+    refresh(options) {
       const tok = spec.readToken();
       if (tok === null) {
         return Promise.resolve();
@@ -15274,7 +15284,7 @@ function createFencedRefetcher(spec) {
           spec.commit(value);
         }
       }).catch((error) => {
-        if (isNewest()) {
+        if (isNewest() && !options?.silent) {
           spec.onError?.(error);
         }
       });
@@ -19657,17 +19667,20 @@ function refreshConfig() {
   return configRefetcher.refresh();
 }
 var CONNECT_CONFIG_RETRY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3, 16e3];
-function reconcileConfigRead(candidate, attempt) {
-  return retryWithBackoff(
+async function reconcileConfigRead(candidate, attempt) {
+  const landed = await retryWithBackoff(
     async () => {
       const before = configReadCommits;
-      await refreshConfig();
+      await configRefetcher.refresh({ silent: true });
       return configReadCommits > before;
     },
     () => connectionAttemptMayCommit(attempt, token, candidate),
     CONNECT_CONFIG_RETRY_DELAYS_MS,
     (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
   );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,

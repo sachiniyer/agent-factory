@@ -96,6 +96,48 @@ func TestSetGlobalWebWholeTableValidatesEveryLeaf(t *testing.T) {
 		"a refused whole-table write must not have half-applied")
 }
 
+// TestSetGlobalWebWholeTableDefaultsOmittedLeaves covers the documented
+// whole-table form written with a single leaf: the omitted leaf must take the
+// same compiled default the loader gives an absent [web] key — not the zero
+// value the validation would refuse. Both omission directions are pinned,
+// and an explicitly-present invalid value still fails exactly as the leaf
+// form would.
+func TestSetGlobalWebWholeTableDefaultsOmittedLeaves(t *testing.T) {
+	path := writeTempConfig(t, "default_program = 'claude'\n")
+
+	_, err := SetGlobalConfigValue("web", `{"terminal_font_size_phone":8}`)
+	require.NoError(t, err,
+		"an omitted leaf must default — the loader treats an absent key the same way")
+	written, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "terminal_font_size_phone = 8")
+	require.Contains(t, string(written), "terminal_font_size_desktop = 13",
+		"the omitted desktop leaf lands as its compiled default")
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 8.0, cfg.Web.TerminalFontSizePhone)
+	require.Equal(t, 13.0, cfg.Web.TerminalFontSizeDesktop)
+
+	_, err = SetGlobalConfigValue("web", `{"terminal_font_size_desktop":14}`)
+	require.NoError(t, err)
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 6.5, cfg.Web.TerminalFontSizePhone,
+		"omitting phone must not carry over the earlier 8 — each write decodes onto defaults")
+	require.Equal(t, 14.0, cfg.Web.TerminalFontSizeDesktop)
+
+	// A present-but-invalid member still fails strictly — seeding defaults is
+	// not leniency toward what was actually written.
+	_, err = SetGlobalConfigValue("web", `{"terminal_font_size_phone":0}`)
+	require.Error(t, err)
+	_, err = SetGlobalConfigValue("web", `{"terminal_font_size_desktop":null}`)
+	require.Error(t, err)
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 14.0, loaded.Web.TerminalFontSizeDesktop,
+		"the refused writes must not have half-applied")
+}
+
 // TestWebFontSizeLoadSanitizesHandEdits exercises the lenient half of the
 // hand-edit-lenient / typed-strict asymmetry: a value the validator would
 // refuse is still loaded, warned about, and dropped back to the class default

@@ -52,9 +52,12 @@ export function createLatestRequestGate(): LatestRequestGate {
  *  disowns whatever is already in flight without issuing one. The returned promise
  *  settles when THIS request does — committed, disowned by a newer one, or errored —
  *  so a caller whose work is not done until the read has landed can await it. It
- *  never rejects: the failure is reported through onError inside the fence. */
+ *  never rejects: the failure is reported through onError inside the fence —
+ *  unless `silent` is set, for a background retry whose caller owns the error
+ *  surface: a mid-loop failure must not paint a toast the next attempt is
+ *  about to recover. */
 export interface FencedRefetcher {
-  refresh(): Promise<void>;
+  refresh(options?: { silent?: boolean }): Promise<void>;
   invalidate(): void;
 }
 
@@ -105,7 +108,7 @@ export interface FencedRefetchSpec<T> {
 export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefetcher {
   const gate = createLatestRequestGate();
   return {
-    refresh(): Promise<void> {
+    refresh(options?: { silent?: boolean }): Promise<void> {
       const tok = spec.readToken();
       // `=== null` not `!tok`: "" is the authorized tokenless credential (#1696).
       if (tok === null) {
@@ -121,7 +124,7 @@ export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefe
           }
         })
         .catch((error: unknown) => {
-          if (isNewest()) {
+          if (isNewest() && !options?.silent) {
             spec.onError?.(error);
           }
         });
