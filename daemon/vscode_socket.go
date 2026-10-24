@@ -224,20 +224,24 @@ func vscodeSocketDirPath() (string, error) {
 	// ABSOLUTE, always, and resolved HERE — before the path is handed to a child
 	// that does not share our working directory.
 	//
-	// GetConfigDir returns AGENT_FACTORY_HOME as the operator wrote it, tilde
-	// expanded but NOT absolutized, so a relative home ("af-home", "./state")
-	// yields a relative socket path. The daemon would then dial it against the
-	// DAEMON's cwd while the editor bound it against cmd.Dir — the session's
-	// worktree — which is a different file, in a directory that does not exist
-	// there. The child fails to bind and the pane never comes up. A port number
-	// was immune to this, which is why it only appeared once the endpoint became a
-	// path (#1873).
+	// GetConfigDir returns AGENT_FACTORY_HOME as written — tilde expanded, not
+	// absolutized — so a relative home ("af-home", "./state") used to yield a
+	// relative socket path. The daemon would then dial it against the DAEMON's
+	// cwd while the editor bound it against cmd.Dir — the session's worktree,
+	// which is a different file, in a directory that does not exist there. The
+	// child fails to bind and the pane never comes up. A port number was immune
+	// to this, which is why it only appeared once the endpoint became a path
+	// (#1873).
 	//
-	// Absolutizing at the boundary is the fix rather than at the config layer:
-	// GetConfigDir feeds callers that resolve in-process, where a relative path
-	// works fine, and changing it for everyone belongs in its own change.
-	// The rule this file must keep is narrower — a path crossing into a child with
-	// a different cwd must be absolute before it is written into argv.
+	// config.ConfigDirFor now refuses a relative AGENT_FACTORY_HOME at the source
+	// — the same spelling resolves account-by-name selection against an
+	// attacker-controllable cwd and substitutes a planted same-named account at
+	// the credential boundary — so a relative home no longer reaches this
+	// boundary. The filepath.Abs below stays as defense-in-depth (an account.Dir
+	// from before the refusal, or any future regression, still produces an
+	// absolute socket path here) and keeps the rule this file must keep: a path
+	// crossing into a child with a different cwd must be absolute before it is
+	// written into argv.
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolving the af home %q to an absolute path failed: %w", dir, err)
