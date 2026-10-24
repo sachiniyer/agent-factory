@@ -23,7 +23,9 @@ import (
 	crypto_rand "crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -159,6 +161,20 @@ func openProbeFile(dir string) (*os.File, error) {
 // gets probed itself rather than the parent that hosts its name.
 var statPath = os.Stat
 
+// lstatPath is the test seam under Lstat's bounded flight — the metadata
+// syscall that reports the final path component itself without following a
+// symlink, so a worktree destination whose final name is a symlink to an
+// existing directory is not probed through to its target's filesystem.
+var lstatPath = os.Lstat
+
+// evalSymlinksPath is the test seam under EvalSymlinks's bounded flight — the
+// metadata + Readlink walk that resolves a path to its real destination. The
+// raw filepath.EvalSymlinks performs an unbounded sequence of metadata
+// lookups that would wedge the synchronous restore poll on a stalled mount
+// (the same hazard Stat is bounded for), so EvalSymlinks runs it inside a
+// per-dir flight.
+var evalSymlinksPath = filepath.EvalSymlinks
+
 // Write runs the space probe for dir inside a per-dir bounded flight: a
 // filesystem that stops completing writes (a degraded mount) must surface as
 // a typed non-answer — context.DeadlineExceeded carried in the chain —
@@ -207,6 +223,91 @@ func Stat(dir string) (os.FileInfo, error) {
 	return info, err
 }
 
+// Lstat runs os.Lstat for path inside the same per-dir bounded flight shape as
+// Stat. A caller deciding whether the final component of a worktree
+// destination is a symlink — so a `git worktree add` whose destination already
+// exists as a symlink to a nonempty directory is not probed through the symlink
+// — cannot follow the symlink the way Stat does: `git worktree add` rejects a
+// destination that already exists without writing through it, so probing the
+// symlink target's filesystem would target an unrelated filesystem and a
+// coincidental ENOSPC there would stall the lost-restore loop indefinitely on
+// a filesystem freeing it cannot fix. Lstat reports the final component
+// itself so the probe can skip a symlinked destination. The syscall is bounded
+// for the same reason Stat is: an unbounded os.Lstat on a mount that never
+// answers would wedge the synchronous restore poll the probe informs. The
+// returned non-answer carries the same ErrProbeTimedOut +
+// context.DeadlineExceeded pair the other probes use, so the lost-restore
+// classifier reads the bounded environmental class rather than charging the
+// structural budget (#5295 review).
+func Lstat(path string) (os.FileInfo, error) {
+	res, err := runBounded(path, lstatFlights, "lstat probe",
+		"the filesystem did not answer the lstat",
+		func() (any, error) { return lstatPath(path) })
+	info, _ := res.(os.FileInfo)
+	return info, err
+}
+
+// readDirNamesPath is the test seam under IsEmptyDir's bounded flight — the
+// metadata syscall that lists a directory's entries. It follows a symlink in
+// path (os.Open follows it) to read the target the worktree probe already
+// confirmed is a directory via Stat, so an empty vs. nonempty target is the
+// distinction between a destination `git worktree add` populates (an empty
+// directory, even one reached through a symlink) and one it rejects because
+// it already exists (a nonempty directory). It follows a symlink in path
+// the way os.Stat does, so the target the worktree probe already confirmed is
+// a directory via Stat is the directory whose entries are counted.
+var readDirNamesPath = func(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return names, nil
+}
+
+// IsEmptyDir reports whether dir has no entries, following a symlink in dir the
+// way os.Stat does. The worktree probe uses it to distinguish a final symlink
+// whose target is an empty directory — `git worktree add` populates an empty
+// destination even through a symlink, so its filesystem can fail with ENOSPC
+// that the lost-restore classifier must read as environmental — from a symlink
+// whose target already holds content, which `git worktree add` rejects without
+// writing (a coincidental ENOSPC there would stall the loop on a filesystem
+// freeing it cannot fix). The read runs inside the same per-dir bounded flight
+// shape as the other probes: an unbounded readdir on a mount that never
+// answers would wedge the synchronous restore poll the probe informs. The
+// returned non-answer carries the same ErrProbeTimedOut + context.DeadlineExceeded
+// pair the other probes use, so a stalled mount classifies as the bounded
+// environmental non-answer rather than charging the structural budget.
+func IsEmptyDir(dir string) (bool, error) {
+	res, err := runBounded(dir, readDirFlights, "readdir probe",
+		"the filesystem did not answer the readdir",
+		func() (any, error) { return readDirNamesPath(dir) })
+	names, _ := res.([]string)
+	return len(names) == 0, err
+}
+
+// EvalSymlinks runs filepath.EvalSymlinks for path inside the same per-dir
+// bounded flight shape as Stat. A caller resolving a path through symlinks —
+// to mirror the kernel's chdir for a worktree probe, or to find the real
+// filesystem a relative argument writes to — cannot afford an unbounded
+// Readlink/Stat walk: on a degraded mount that never answers, the resolution
+// would wedge the synchronous restore poll before the probe is reached. The
+// returned non-answer carries the same ErrProbeTimedOut +
+// context.DeadlineExceeded pair the other probes use, so the lost-restore
+// classifier reads the bounded environmental class rather than charging the
+// structural budget for a mount stall (#5295 review).
+func EvalSymlinks(path string) (string, error) {
+	res, err := runBounded(path, evalSymlinksFlights, "eval-symlinks probe",
+		"the filesystem did not answer the symlink resolution",
+		func() (any, error) { return evalSymlinksPath(path) })
+	s, _ := res.(string)
+	return s, err
+}
+
 type probeFlight struct {
 	done     chan struct{}
 	res      any
@@ -221,6 +322,9 @@ type flightRegistry struct {
 
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var lstatFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var readDirFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var evalSymlinksFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
 func runBounded(dir string, flights *flightRegistry, what, detail string,
