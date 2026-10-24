@@ -103,10 +103,11 @@ test("a starved frame cannot lose the reclaim — the timer twin delivers it", (
     win.runTimer();
     assert.deepEqual(calls, ["fit"]);
     assert.equal(terminal.parked, true);
-    // The withheld write keeps the delivery pair armed: whichever channel can
-    // still deliver retries the flush — the frame on wake, the timer meanwhile.
+    // The withheld write re-arms ONLY the frame probe — the channel whose
+    // delivery can change the outcome. The timer is never armed for a write
+    // that would just suppress again: a withheld resize is not a poll.
     assert.notEqual(terminal.visibleFitFrame, null);
-    assert.notEqual(terminal.visibleFitTimer, null);
+    assert.equal(terminal.visibleFitTimer, null);
   } finally {
     win.restore();
   }
@@ -153,11 +154,11 @@ test("a parked page's scheduled fit reclaims locally but never writes the grid",
     assert.deepEqual(calls, ["fit", "connect"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
     // Nothing was written: the daemon's grid is still the peer's. And the owed
-    // write did not wait for a later trigger — the suppression kept the whole
-    // delivery pair armed, so the flush does not depend on any one signal.
+    // write did not wait for a later trigger — the suppression armed the frame
+    // probe, whose delivery IS the wake, so the flush needs no external signal.
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
     assert.notEqual(terminal.visibleFitFrame, null);
-    assert.notEqual(terminal.visibleFitTimer, null);
+    assert.equal(terminal.visibleFitTimer, null);
   } finally {
     win.restore();
   }
@@ -189,43 +190,74 @@ test("the owed write flushes on the wake probe — no external trigger needed", 
   }
 });
 
+// An owed resize re-arms only channels that can change the outcome. On a
+// parked page a timer delivery can change nothing — it would fit, withhold,
+// and re-arm forever: a perpetual 250ms poll on a dormant page. The probe is
+// the deferred rAF alone: it costs nothing while the page cannot paint and
+// its delivery IS the reactivation.
+test("a parked terminal's owed write arms the frame probe only — never a timer poll", async () => {
+  const win = stubWindow();
+  try {
+    const { terminal, term, calls } = stage();
+    Object.assign(term, { rows: 300, cols: 50 });
+    terminal.lastRows = 300;
+    terminal.lastCols = 50;
+    terminal.scheduleVisibleFit();
+    win.runTimer(); // starved rAF → parked delivery: local reclaim, write withheld
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect"]);
+    assert.equal(terminal.parked, true);
+    // The withheld write armed a frame probe and NO timer.
+    assert.notEqual(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+    assert.equal(win.timers.size, 0);
+    // Over N timer periods nothing fires — the parked page is quiescent.
+    win.runTimer();
+    win.runTimer();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect"]);
+    // The first delivered frame is the wake — it alone flushes the owed write.
+    win.runFrame();
+    await Promise.resolve();
+    assert.equal(terminal.parked, false);
+    assert.deepEqual(calls, ["fit", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+  }
+});
+
 // A send() that returns false dropped the frame on a socket that could not
 // carry it. Crediting lastRows/lastCols anyway would erase the divergence
 // marker — the daemon never got the grid but every later dedupe would see a
-// converged state: the phantom-sent strand. The marker must stay stale and
-// the delivery pair must keep retrying until a send actually lands.
-test("a dropped resize is never credited — the owed write retries until it lands", async () => {
+// converged state: the phantom-sent strand. The marker must stay stale — and
+// NOTHING is armed: socket-open is the only channel that can change a dead
+// socket's outcome, so the connect path's force-send on open owns the flush
+// rather than the page polling send() forever.
+test("a dropped resize is never credited — the connect-time reassert owns the flush", async () => {
   const win = stubWindow();
   try {
-    const { terminal, calls } = stage();
+    const { terminal, term, calls } = stage();
     terminal.lastRows = 300;
     terminal.lastCols = 50;
     Object.assign(terminal, { send: () => (calls.push("resize"), false) });
     terminal.scheduleVisibleFit();
     win.runFrame();
     await Promise.resolve();
-    // The frame was attempted and dropped: no credit, and the pair re-armed.
+    // The frame was attempted and dropped: no credit, no re-arm — the write
+    // stays owed on the marker alone until the socket can carry it.
     assert.deepEqual(calls, ["fit", "resize", "connect"]);
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
-    assert.notEqual(terminal.visibleFitTimer, null);
-    // A timer delivery marks the page parked — it suppresses the send rather
-    // than attempting it — but the pair stays armed for the next delivery.
-    win.runTimer();
-    await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize", "connect"]);
-    assert.equal(terminal.parked, true);
-    assert.notEqual(terminal.visibleFitTimer, null);
-    // A frame-delivered attempt retries the write: still dropped, still owed.
-    win.runFrame();
-    await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize", "connect", "resize"]);
-    assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
-    Object.assign(terminal, { send: () => (calls.push("resize"), true) });
-    win.runFrame();
-    await Promise.resolve();
-    // The first send that actually lands converges the marker; the loop stops.
-    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+    assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
+    assert.equal(win.timers.size, 0);
+    // The connect-time reassert is what onopen performs: a force sendResize of
+    // the current size. It carries the owed grid and converges the marker.
+    Object.assign(terminal, { send: () => (calls.push("resize"), true) });
+    (terminal as unknown as { sendResize(r: number, c: number, f: boolean): void })
+      .sendResize(term.rows, term.cols, true);
+    assert.deepEqual(calls, ["fit", "resize", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
   } finally {
     win.restore();
   }

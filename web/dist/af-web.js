@@ -10750,6 +10750,21 @@ var AttachTerminal = class {
       this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
     }
   }
+  /** Arms ONLY the frame probe — the wake detector for a resize this page is
+   *  not allowed to write yet. A parked or hidden page defers rAF until it
+   *  paints again, so a queued frame costs nothing while withheld and its
+   *  delivery IS the reactivation. The timer twin is never armed here: on a
+   *  withheld write its delivery can change nothing — it would fit, suppress,
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page. */
+  armWakeProbe() {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+  }
   /** Whichever of the twin triggers delivers first runs the fit and drops the
    *  other. The channel the delivery arrived on is the parked detector: the
    *  timer only wins when the frame armed beside it starved, so a timer
@@ -10904,13 +10919,15 @@ var AttachTerminal = class {
    *  document.visibilityState covers hidden pages; `parked` covers occluded
    *  pages that still report 'visible' while their frames starve.
    *
-   *  An owed write — withheld here, or dropped by a socket that could not
-   *  carry it — keeps the delivery pair armed: whichever channel can still
-   *  deliver retries the flush, so the write converges on the first painted
-   *  frame OR the next timer tick without depending on any single wake
-   *  signal. lastRows/lastCols are only credited once send() reports the
-   *  frame actually left — crediting a dropped write would erase the
-   *  divergence marker and silence every retry (the phantom-sent strand). */
+   *  An owed write re-arms only a channel that can change its outcome.
+   *  Withheld on a parked/hidden page, that is the frame probe alone — its
+   *  delivery IS the reactivation, and it costs nothing while queued. The
+   *  timer twin is never armed for a withheld write (each tick would just
+   *  fit-and-withhold again — a perpetual poll), and a dead socket arms
+   *  nothing at all: the connect path force-sends the current size on open.
+   *  lastRows/lastCols are only credited once send() reports the frame
+   *  actually left — crediting a dropped write would erase the divergence
+   *  marker and silence every later attempt (the phantom-sent strand). */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
       return;
@@ -10927,15 +10944,15 @@ var AttachTerminal = class {
       this.lastCols = cols;
       return;
     }
-    this.retryOwedResize(rows, cols);
   }
-  /** Keeps the delivery pair armed while a resize is owed — suppressed by a
-   *  parked/hidden page or dropped by a dead socket. Self-limiting: every
-   *  attempt re-checks the divergence, so a converged grid stops re-arming
-   *  and a parked page just keeps a slow timer + frame probe pending. */
+  /** Keeps the wake probe armed while a resize is owed — withheld by a
+   *  parked/hidden page. Self-limiting: the check re-reads the divergence,
+   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  the channel whose delivery can change the outcome; arming the timer
+   *  would just fit-and-withhold again on every tick. */
   retryOwedResize(rows, cols) {
     if (rows !== this.lastRows || cols !== this.lastCols) {
-      this.queueVisibleFit();
+      this.armWakeProbe();
     }
   }
   /** Applies the server's authoritative size to xterm without echoing it back out
