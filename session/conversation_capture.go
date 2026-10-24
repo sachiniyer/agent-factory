@@ -700,62 +700,61 @@ func codexRolloutLastEventTime(path string) (time.Time, bool) {
 	defer file.Close()
 
 	info, err := file.Stat()
-	if err != nil {
+	if err != nil || info.Size() == 0 {
 		return time.Time{}, false
 	}
-	start := info.Size() - codexRolloutTailReadCap
-	if start < 0 {
-		start = 0
-	}
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return time.Time{}, false
-	}
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return time.Time{}, false
-	}
-	if start > 0 {
-		// The window can open mid-line; drop the first partial record.
-		_, data, _ = bytes.Cut(data, []byte{'\n'})
-	}
-	if ts, ok := codexLastEventTimestamp(data); ok {
-		return ts, true
-	}
-	if start == 0 {
-		return time.Time{}, false
-	}
-	// The window opened inside a record larger than the tail cap and hid
-	// every complete line — Codex's listing still knows that session's
-	// recency, so falling back to a full-file scan keeps an oversized last
-	// record from silently changing the --last pick (#5486 review). This
-	// path only runs at spawn-time target resolution, not per poll.
-	data, err = readCodexRollout(path)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return codexLastEventTimestamp(data)
-}
-
-// codexLastEventTimestamp returns the timestamp of the last JSONL record in
-// data that carries one.
-func codexLastEventTimestamp(data []byte) (time.Time, bool) {
-	lines := bytes.Split(data, []byte{'\n'})
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 {
-			continue
+	// Scan backward in bounded windows so neither a huge rollout nor a single
+	// record larger than the window lands whole in memory. A segment counts
+	// as a record start only when a newline precedes it (or the scan reaches
+	// offset 0); segments inside a record are skipped, and the record's own
+	// start — with its timestamp — surfaces when the scan walks far enough
+	// left (#5486 review). Runs only at spawn-time target resolution.
+	var one [1]byte
+	for end := info.Size(); end > 0; {
+		start := end - codexRolloutTailReadCap
+		if start < 0 {
+			start = 0
 		}
-		var event struct {
-			Timestamp string `json:"timestamp"`
+		buf := make([]byte, end-start)
+		if _, err := file.ReadAt(buf, start); err != nil {
+			return time.Time{}, false
 		}
-		if err := json.Unmarshal(line, &event); err != nil || event.Timestamp == "" {
-			continue
+		lines := bytes.Split(buf, []byte{'\n'})
+		for i := len(lines) - 1; i >= 0; i-- {
+			if i == 0 && start > 0 {
+				if _, err := file.ReadAt(one[:], start-1); err != nil || one[0] != '\n' {
+					break
+				}
+			}
+			if ts, ok := codexLineTimestamp(lines[i]); ok {
+				return ts, true
+			}
 		}
-		if ts, err := time.Parse(time.RFC3339Nano, event.Timestamp); err == nil {
-			return ts, true
-		}
+		end = start
 	}
 	return time.Time{}, false
+}
+
+// codexTimestampField matches the record's leading timestamp; it is the first
+// JSON key Codex writes on every event line, ahead of any payload content.
+var codexTimestampField = regexp.MustCompile(`"timestamp"\s*:\s*"([^"]+)"`)
+
+// codexLineTimestamp returns the timestamp of the JSONL record beginning at
+// line. Only a bounded head is searched — the field is the record's first
+// key, so truncation past it cannot hide the value, and a windowed scan can
+// call this on a segment that runs past the buffer's right edge.
+func codexLineTimestamp(line []byte) (time.Time, bool) {
+	const headCap = 16 << 10
+	head := line
+	if len(head) > headCap {
+		head = head[:headCap]
+	}
+	m := codexTimestampField.FindSubmatch(bytes.TrimSpace(head))
+	if m == nil {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, string(m[1]))
+	return ts, err == nil
 }
 
 func mapKeys(set map[string]struct{}) []string {

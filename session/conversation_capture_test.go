@@ -774,12 +774,11 @@ func TestCodexResumedRolloutPath_LastHandlesOversizedFinalRecord(t *testing.T) {
 	appendCodexRolloutEvent(t, older, map[string]any{"timestamp": "2026-07-06T10:17:35Z"})
 	// The newest recorded event is a single JSONL line larger than the tail
 	// read cap: the window opens inside it, so a tail-only scan finds no
-	// line boundary at all.
-	bigRecord, err := json.Marshal(map[string]any{
-		"timestamp": "2026-07-06T10:17:36Z",
-		"payload":   map[string]any{"data": strings.Repeat("x", codexRolloutTailReadCap+1024)},
-	})
-	require.NoError(t, err)
+	// line boundary at all. Written timestamp-first like every real Codex
+	// record — a map-marshal would sort the field to the end of the line,
+	// which is not the shape Codex produces.
+	bigRecord := []byte(`{"timestamp":"2026-07-06T10:17:36Z","payload":{"data":"` +
+		strings.Repeat("x", codexRolloutTailReadCap+1024) + `"}}`)
 	require.Greater(t, len(bigRecord), codexRolloutTailReadCap)
 	f, err := os.OpenFile(big, os.O_APPEND|os.O_WRONLY, 0644)
 	require.NoError(t, err)
