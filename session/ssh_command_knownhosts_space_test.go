@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -136,6 +137,12 @@ func rotateLoopbackSSHDHostKey(t *testing.T, lab *loopbackSSHD) error {
 			}
 		}
 	}
+	// sshd was started without -D, so it detached and the PID-file process is not
+	// a child this test can Wait on for synchronization — Kill itself does not
+	// wait for the process to exit either. Poll the listener until the old sshd
+	// has released the port, otherwise the restart below races it and fails with
+	// "Address already in use".
+	waitForLoopbackPortClosed(lab.port)
 	hostKey := filepath.Join(lab.dir, "host_key")
 	_ = os.Remove(hostKey)
 	_ = os.Remove(hostKey + ".pub")
@@ -158,6 +165,52 @@ func rotateLoopbackSSHDHostKey(t *testing.T, lab *loopbackSSHD) error {
 	return nil
 }
 
+// waitForLoopbackPortClosed polls until nothing is listening on port or the
+// deadline passes. It complements waitForListener: waitForListener waits for a
+// sshd to come UP, this waits for one to go DOWN, which rotateLoopbackSSHDHostKey
+// needs because the detached sshd's Kill/Wait does not synchronize listener
+// release.
+func waitForLoopbackPortClosed(port int) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// skipIfAccountLocked skips the loopback sshd e2e tests when the invoking
+// account is locked in /etc/shadow (e.g. root with `!` or `*`): with UsePAM no,
+// OpenSSH rejects the account in allowed_user before public-key authentication,
+// so PermitRootLogin yes does not make this fixture root-compatible and both
+// end-to-end tests fail at their first connection. /etc/shadow is only readable
+// as root, so on a non-root run this is a no-op (the locked-account failure mode
+// does not apply to the invoking user there).
+func skipIfAccountLocked(t *testing.T, u *user.User) {
+	t.Helper()
+	shadow, err := os.ReadFile("/etc/shadow")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(shadow), "\n") {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) < 2 || fields[0] != u.Username {
+			continue
+		}
+		if pw := fields[1]; pw == "*" || strings.HasPrefix(pw, "!") {
+			t.Skipf("invoking account %q has a locked password (%q); sshd with UsePAM no rejects it before public-key auth",
+				u.Username, pw)
+		}
+		return
+	}
+}
+
 func startLoopbackSSHD(t *testing.T) *loopbackSSHD {
 	t.Helper()
 	sshdBin := lookSSHD(t)
@@ -167,6 +220,7 @@ func startLoopbackSSHD(t *testing.T) *loopbackSSHD {
 	}
 	me, err := user.Current()
 	require.NoError(t, err)
+	skipIfAccountLocked(t, me)
 
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))
