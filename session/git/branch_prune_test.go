@@ -179,6 +179,21 @@ func TestLocalBranchExists_DeterminateVersusUnknown(t *testing.T) {
 	}
 }
 
+// TestLocalBranchExists_IgnoresAmbientGitDir pins the repository-selector
+// sanitization (#5136 Codex round 12): a GIT_DIR inherited by the daemon —
+// a process launched inside a hook, say — must not redirect the probe at a
+// foreign repository that coincidentally holds the branch name, fabricating
+// a recovery handle the real origin does not have.
+func TestLocalBranchExists_IgnoresAmbientGitDir(t *testing.T) {
+	foreign := branchRepo(t, "af-shared")
+	root := branchRepo(t, "af-target")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	exists, err := LocalBranchExists(root, "af-shared")
+	require.NoError(t, err)
+	assert.False(t, exists, "the ambient GIT_DIR repo holds af-shared; the probed repo must be the answer")
+}
+
 // TestDeleteLocalBranch_UnreadableLooseRefIsErrorNotAbsence closes the hole the
 // PR review caught: git itself folds an EACCES on a LOOSE ref file into the
 // same silent exit 1 as "no such ref" (git 2.43; git ≥2.45 grew
