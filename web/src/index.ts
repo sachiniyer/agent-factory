@@ -66,6 +66,7 @@ import {
   bindTerminalFontPersist,
   setTerminalFontSizes,
   stepTerminalFontSize,
+  terminalFontClassForKey,
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
@@ -1921,8 +1922,8 @@ const configRefetcher = createFencedRefetcher({
   },
 });
 
-function refreshConfig(): void {
-  configRefetcher.refresh();
+function refreshConfig(): Promise<void> {
+  return configRefetcher.refresh();
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -2063,12 +2064,15 @@ function doOpenAccountLogin(agent: string, name: string): void {
  *  the only side that can keep the user's order. */
 const queueConfigSave = createKeyedQueue();
 
-function applyConfigValue(key: string, value: string): void {
+/** Returns the queue item's settle promise — the write AND the refetch it
+ *  triggers — so the font controls' stale-read guard can cover the whole round
+ *  trip rather than lapsing when the POST alone lands. */
+function applyConfigValue(key: string, value: string): Promise<void> {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
@@ -2080,8 +2084,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
         // current session's config view — the write committed and the daemon
         // holds the new value; an open config view would otherwise display the
         // pre-write state until the user leaves and re-enters.
-        refreshConfig();
-        return;
+        return refreshConfig();
       }
       store.set({
         configStatus: {
@@ -2092,18 +2095,27 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
           error: "",
         },
       });
-      refreshConfig();
+      // Awaited, not fired: the queue item — and with it the font module's
+      // pending-save guard — is not done until the post-write read has landed.
+      return refreshConfig();
     })
     .catch((err: unknown) => {
       if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+      // A font-size save has no manifest row to hang this error on — the pane
+      // renders only the `web` table row — so it must reach the shared toast or
+      // the stepped size would keep displaying as though it had saved.
+      if (terminalFontClassForKey(key) !== null) {
+        surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+      }
     });
 }
 
 // The font-size controls' saves ride the same path (#5500): the per-key queue
-// serializes a phone-size write against a desktop-size write, the status lands
-// in configStatus like any pane save, and a failed write leaves the applied
-// size on screen while the error surfaces — the size is display state first.
+// serializes a phone-size write against a desktop-size write, the returned
+// promise carries the write's whole round trip back to the font module's
+// stale-read guard, and a failed write leaves the applied size on screen while
+// the error surfaces on the toast — the size is display state first.
 bindTerminalFontPersist(applyConfigValue);
 
 // How often an OPEN tasks view refetches, for the verdicts that change with the

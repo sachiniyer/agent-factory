@@ -122,6 +122,121 @@ test("#5500 desktop A+ refits into a smaller grid, persists, and survives a relo
   expect(stream.resizes()[before].cols, "reload's first OpResize is the persisted pitch").toBe(stepped.cols);
 });
 
+test("#5500 a config read landing behind a queued save must not stomp the stepped size", async ({ page, request }) => {
+  // Codex P2 on #5501: the stale-read guard used to end with the debounce
+  // timer, but the save it armed can still be queued or in flight — and the
+  // first save's own refetch then delivers the PRE-second-write value. The
+  // guard must cover a class until its saves complete.
+  //
+  // The wire choreography makes that window deterministic: every manifest read
+  // after attach is held at the route, and the SECOND desktop write is held at
+  // the route too — so when the first save's refetch is released, the file
+  // provably still serves the first stepped value while the second write is
+  // still outstanding. A guard that ended with the debounce would refit the
+  // terminal back down here, emitting an OpResize this spec counts.
+  const stream = frameStream(page);
+  let holdGets = false;
+  const heldGets: Array<() => void> = [];
+  const heldPosts: Array<() => void> = [];
+  let fontPosts = 0;
+  await page.route("**/v1/GetConfig", async route => {
+    if (holdGets) {
+      await new Promise<void>(res => heldGets.push(res));
+    }
+    await route.fallback();
+  });
+  await page.route("**/v1/SetConfigValue", async route => {
+    const key = (route.request().postDataJSON() as { key?: string } | null)?.key;
+    if (key === "web.terminal_font_size_desktop" && ++fontPosts >= 2) {
+      await new Promise<void>(res => heldPosts.push(res));
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await attachSession(page, request);
+  await expect.poll(() => stream.resizes().length).toBeGreaterThan(0);
+  holdGets = true;
+
+  const zoom = page.locator(".af-term-head").first()
+    .getByRole("button", { name: "Increase terminal text size", exact: true });
+  const before = stream.resizes().length;
+
+  // First step (13→14): its save completes the POST, then its refetch parks at
+  // the held route — the queue entry stays open around it.
+  await zoom.click();
+  await expect.poll(() => heldGets.length,
+    { message: "the first save's refetch must reach the held route" }).toBeGreaterThanOrEqual(1);
+
+  // Second step (14→15): its debounce fires while the first save's round trip
+  // is still open, so the write queues behind it (or, on a build without the
+  // guard, stalls at the held route). Either way the daemon still serves 14.
+  await zoom.click();
+  await expect.poll(() => stream.resizes().length,
+    { message: "both steps must refit before the stale read is released" }).toBe(before + 2);
+  await page.waitForTimeout(600); // the second debounce fires — its save is queued
+  const resizesAfterSteps = stream.resizes().length;
+
+  // The first save's refetch lands the pre-second-write 14 — and must be
+  // ignored, because the second save is still outstanding.
+  heldGets.forEach(release => release());
+  holdGets = false;
+  await expect.poll(() => heldPosts.length,
+    { message: "the queued second save must reach the route once the first save settles" }).toBe(1);
+  await page.waitForTimeout(700); // give a wrong refit time to emit its OpResize
+  expect(stream.resizes().length,
+    "the stale read must not refit the terminal back to the pre-step grid").toBe(resizesAfterSteps);
+
+  // Now the queued write lands: the daemon ends at 15 and still no refit fires
+  // — the settled size and the served size already agree.
+  heldPosts.forEach(release => release());
+  await expect.poll(() => fontLeaf(request, "terminal_font_size_desktop"),
+    { message: "the queued save must still write the settled 15" }).toBe(15);
+  await page.waitForTimeout(1200);
+  expect(stream.resizes().length,
+    "the echo of the queued save must not refit either").toBe(resizesAfterSteps);
+});
+
+test("#5500 a failed font save surfaces on the toast, not silently", async ({ page, request }) => {
+  // Codex P2 on #5501: a dotted leaf key has no manifest row to carry a save
+  // error, so a refused font write used to vanish into configStatus while the
+  // stepped size kept displaying as though it had persisted. The failure must
+  // reach the shared toast.
+  await page.route("**/v1/SetConfigValue", async route => {
+    const key = (route.request().postDataJSON() as { key?: string } | null)?.key;
+    if (typeof key === "string" && key.startsWith("web.terminal_font_size_")) {
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "config write refused in test" } }),
+      });
+    }
+    return route.fallback();
+  });
+
+  const stream = frameStream(page);
+  await page.goto("/");
+  await attachSession(page, request);
+  await expect.poll(() => stream.resizes().length).toBeGreaterThan(0);
+
+  const zoom = page.locator(".af-term-head").first()
+    .getByRole("button", { name: "Increase terminal text size", exact: true });
+  const before = stream.resizes().length;
+  await zoom.click();
+
+  // The size still applies locally — display state is honest about what it is —
+  // but the refusal reaches the user on the toast rather than landing on a
+  // config row nothing renders.
+  await expect.poll(() => stream.resizes().length,
+    { message: "the stepped size still applies locally while its save fails" }).toBe(before + 1);
+  const toast = page.locator(".af-toast.af-toast-show");
+  await expect(toast, "a refused font save must surface a visible error").toBeVisible();
+  await expect(toast).toContainText("not saved");
+  await expect(toast).toContainText("config write refused in test");
+  expect(await fontLeaf(request, "terminal_font_size_desktop"),
+    "a refused write must leave the served value as it was").toBe(13);
+});
+
 test("#5500 phone A+ steps the phone pitch, persists it, and leaves an armed modifier armed", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   // Seed a non-default desktop pitch so an untouched leaf is itself evidence.

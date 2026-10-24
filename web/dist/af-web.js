@@ -7895,7 +7895,7 @@ var ConfigPane = class {
     row.append(label);
     row.append(this.renderControl(e));
     const status = this.status;
-    if (status && status.key === e.key) {
+    if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
         row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
       } else {
@@ -7994,6 +7994,7 @@ var sizes = {
 var listeners = /* @__PURE__ */ new Set();
 var persist = null;
 var persistTimers = /* @__PURE__ */ new Map();
+var pendingSaves = /* @__PURE__ */ new Map();
 function terminalFontSizeFor(phone) {
   return phone ? sizes.phone : sizes.desktop;
 }
@@ -8003,6 +8004,11 @@ function subscribeTerminalFontSizes(listener) {
 }
 function bindTerminalFontPersist(save) {
   persist = save;
+}
+function terminalFontClassForKey(key) {
+  if (key === CONFIG_KEY_PHONE) return "phone";
+  if (key === CONFIG_KEY_DESKTOP) return "desktop";
+  return null;
 }
 function terminalFontSizesFromConfig(entries) {
   const next = { phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT, desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT };
@@ -8032,7 +8038,7 @@ function terminalFontSizesFromConfig(entries) {
 function setTerminalFontSizes(next) {
   let changed = false;
   for (const cls of ["phone", "desktop"]) {
-    if (persistTimers.has(cls) || next[cls] === sizes[cls]) {
+    if (persistTimers.has(cls) || pendingSaves.has(cls) || next[cls] === sizes[cls]) {
       continue;
     }
     sizes[cls] = next[cls];
@@ -8070,8 +8076,28 @@ function schedulePersist(cls) {
   }
   persistTimers.set(cls, setTimeout(() => {
     persistTimers.delete(cls);
-    persist?.(cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP, formatTerminalFontSize(sizes[cls]));
+    const save = persist;
+    if (save === null) {
+      return;
+    }
+    pendingSaves.set(cls, (pendingSaves.get(cls) ?? 0) + 1);
+    const settle = () => {
+      const left = (pendingSaves.get(cls) ?? 1) - 1;
+      if (left > 0) {
+        pendingSaves.set(cls, left);
+      } else {
+        pendingSaves.delete(cls);
+      }
+    };
+    try {
+      void Promise.resolve(save(configKeyFor(cls), formatTerminalFontSize(sizes[cls]))).then(settle, settle);
+    } catch {
+      settle();
+    }
   }, PERSIST_DEBOUNCE_MS));
+}
+function configKeyFor(cls) {
+  return cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP;
 }
 function formatTerminalFontSize(size) {
   return String(size);
@@ -15212,11 +15238,11 @@ function createFencedRefetcher(spec) {
     refresh() {
       const tok = spec.readToken();
       if (tok === null) {
-        return;
+        return Promise.resolve();
       }
       const request = gate.begin();
       const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      void spec.fetch(tok).then((value) => {
+      return spec.fetch(tok).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
@@ -19595,7 +19621,7 @@ var configRefetcher = createFencedRefetcher({
   }
 });
 function refreshConfig() {
-  configRefetcher.refresh();
+  return configRefetcher.refresh();
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
@@ -19669,16 +19695,15 @@ var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
     if (requestGeneration !== connectionGeneration || token !== tok) {
-      refreshConfig();
-      return;
+      return refreshConfig();
     }
     store.set({
       configStatus: {
@@ -19689,10 +19714,13 @@ function applyConfigValueNow(key, value, tok) {
         error: ""
       }
     });
-    refreshConfig();
+    return refreshConfig();
   }).catch((err) => {
     if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+    if (terminalFontClassForKey(key) !== null) {
+      surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+    }
   });
 }
 bindTerminalFontPersist(applyConfigValue);

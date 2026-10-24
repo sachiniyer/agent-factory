@@ -45,7 +45,7 @@ const PHONE_MEDIA_QUERY = "(max-width: 768px)";
  *  one, and index.ts's per-key queue keeps two settled saves in order. */
 const PERSIST_DEBOUNCE_MS = 400;
 
-type DeviceClass = "phone" | "desktop";
+export type DeviceClass = "phone" | "desktop";
 
 const sizes: Record<DeviceClass, number> = {
   phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT,
@@ -56,11 +56,24 @@ const listeners = new Set<() => void>();
 
 /** The shell's config writer — index.ts installs applyConfigValue, which
  *  serializes same-key saves through createKeyedQueue so presses cannot race
- *  the file. Null before the app connects; a step with no writer still applies
- *  locally (the size is display state before it is a config value). */
-let persist: ((key: string, value: string) => void) | null = null;
+ *  the file. The returned promise settles when the save's whole round trip —
+ *  the write AND the manifest refetch it triggers — has completed; a bound save
+ *  that resolves early shortens the stale-read guard accordingly. Null before
+ *  the app connects; a step with no writer still applies locally (the size is
+ *  display state before it is a config value). */
+let persist: ((key: string, value: string) => Promise<unknown>) | null = null;
 
 const persistTimers = new Map<DeviceClass, ReturnType<typeof setTimeout>>();
+
+/** Saves that have left the debounce but not yet completed, per class. The
+ *  armed timer is only the first half of "a stepped size is newer than anything
+ *  the daemon can serve": on a slow link the timer lapses the moment the write
+ *  STARTS, while the save sits queued behind another or its echo refetch is
+ *  still in the air — and a config read landing in that window carries the
+ *  pre-write value. Guarding on the timer alone accepts it and drops the
+ *  stepped size back (Codex P2 on #5501): the count covers the write through
+ *  completion instead. */
+const pendingSaves = new Map<DeviceClass, number>();
 
 /** The font size a terminal on this device class should use right now. */
 export function terminalFontSizeFor(phone: boolean): number {
@@ -77,9 +90,19 @@ export function subscribeTerminalFontSizes(listener: () => void): () => void {
 
 /** Installs the save path. index.ts binds it to applyConfigValue so a stepped
  *  size reaches config.toml through the same validated, per-key-serialized
- *  write the config pane uses. */
-export function bindTerminalFontPersist(save: (key: string, value: string) => void): void {
+ *  write the config pane uses. The bound save resolves its promise when the
+ *  write's whole round trip — POST and the refetch it triggers — is done. */
+export function bindTerminalFontPersist(save: (key: string, value: string) => Promise<unknown>): void {
   persist = save;
+}
+
+/** Maps a config key back to its device class — null for every key that is not
+ *  a font leaf. The shell uses it to route a failed font save to a surface the
+ *  user can see, since no manifest row exists for the dotted leaves. */
+export function terminalFontClassForKey(key: string): DeviceClass | null {
+  if (key === CONFIG_KEY_PHONE) return "phone";
+  if (key === CONFIG_KEY_DESKTOP) return "desktop";
+  return null;
 }
 
 /** Reads the two sizes out of a GetConfig manifest: the `web` entry's compact-
@@ -117,15 +140,17 @@ export function terminalFontSizesFromConfig(entries: ConfigEntry[]): Record<Devi
  *  refetch land here. A value identical to the current one notifies nothing,
  *  so the post-save refetch that echoes our own write back is free.
  *
- *  A class whose save is still armed is deliberately SKIPPED: the stepped size
- *  is newer than anything the daemon can know yet, and dropping it back to the
- *  pre-write value — then snapping forward when the write lands — is exactly
- *  the flicker the debounce exists to prevent. The armed timer still writes;
- *  its echo refetch re-reads what settled. */
+ *  A class with an armed debounce OR a save still queued or in flight is
+ *  deliberately SKIPPED: the stepped size is newer than anything the daemon
+ *  can serve yet, and dropping it back to the pre-write value — then snapping
+ *  forward when the write lands — is exactly the flicker the debounce exists
+ *  to prevent. The guard ends only when the last pending save's whole round
+ *  trip completes, so the refetch a save triggers cannot reintroduce the
+ *  pre-write value while the next queued write is still outstanding. */
 export function setTerminalFontSizes(next: Record<DeviceClass, number>): void {
   let changed = false;
   for (const cls of ["phone", "desktop"] as const) {
-    if (persistTimers.has(cls) || next[cls] === sizes[cls]) {
+    if (persistTimers.has(cls) || pendingSaves.has(cls) || next[cls] === sizes[cls]) {
       continue;
     }
     sizes[cls] = next[cls];
@@ -138,14 +163,15 @@ export function setTerminalFontSizes(next: Record<DeviceClass, number>): void {
   }
 }
 
-/** Test seam: drops the sizes AND any armed saves, so a step in one test cannot
- *  fire its write in the next. Production never calls this — a live debounce
- *  must survive anything but the page going away. */
+/** Test seam: drops the sizes AND any armed or in-flight saves, so a step in
+ *  one test cannot fire its write in the next. Production never calls this — a
+ *  live save must survive anything but the page going away. */
 export function resetTerminalFontSizesForTest(): void {
   for (const timer of persistTimers.values()) {
     clearTimeout(timer);
   }
   persistTimers.clear();
+  pendingSaves.clear();
   sizes.phone = TERMINAL_FONT_SIZE_PHONE_DEFAULT;
   sizes.desktop = TERMINAL_FONT_SIZE_DESKTOP_DEFAULT;
 }
@@ -183,7 +209,9 @@ function clampTerminalFontSize(size: number): number {
 }
 
 /** Arms the debounced save for one class. A burst re-arms, so the wire sees
- *  only where it ended; the per-key queue in index.ts orders two bursts. */
+ *  only where it ended; the per-key queue in index.ts orders two bursts. The
+ *  dispatched save is then tracked to completion in pendingSaves, so the stale-
+ *  read guard outlives the debounce that launched it. */
 function schedulePersist(cls: DeviceClass): void {
   const prior = persistTimers.get(cls);
   if (prior !== undefined) {
@@ -191,8 +219,32 @@ function schedulePersist(cls: DeviceClass): void {
   }
   persistTimers.set(cls, setTimeout(() => {
     persistTimers.delete(cls);
-    persist?.(cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP, formatTerminalFontSize(sizes[cls]));
+    const save = persist;
+    if (save === null) {
+      return;
+    }
+    pendingSaves.set(cls, (pendingSaves.get(cls) ?? 0) + 1);
+    const settle = (): void => {
+      const left = (pendingSaves.get(cls) ?? 1) - 1;
+      if (left > 0) {
+        pendingSaves.set(cls, left);
+      } else {
+        pendingSaves.delete(cls);
+      }
+    };
+    try {
+      // Settle on EITHER arm: a refused write completes the pending window the
+      // same as a landed one — the shell owns the failure's visible surface.
+      void Promise.resolve(save(configKeyFor(cls), formatTerminalFontSize(sizes[cls]))).then(settle, settle);
+    } catch {
+      // A synchronously-throwing writer still completes the pending window.
+      settle();
+    }
   }, PERSIST_DEBOUNCE_MS));
+}
+
+function configKeyFor(cls: DeviceClass): string {
+  return cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP;
 }
 
 /** The scalar spelling the config writer canonicalizes — plain %g, no trailing

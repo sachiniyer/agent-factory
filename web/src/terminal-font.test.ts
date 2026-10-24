@@ -112,7 +112,9 @@ test("steps clamp at the daemon's own bounds and stop notifying at the edge", ()
 test("a burst of presses debounces into one save carrying the settled value", async () => {
   reset();
   const writes: Array<[string, string]> = [];
-  bindTerminalFontPersist((key, value) => writes.push([key, value]));
+  bindTerminalFontPersist(async (key, value) => {
+    writes.push([key, value]);
+  });
   stepTerminalFontSize(1, true);
   stepTerminalFontSize(1, true);
   stepTerminalFontSize(1, true);
@@ -138,6 +140,62 @@ test("a config read landing mid-burst must not stomp the armed class", () => {
   setTerminalFontSizes({ phone: 6.5, desktop: 15 });
   assert.equal(terminalFontSizeFor(true), 7, "the stepped size stays applied while its write is pending");
   assert.equal(terminalFontSizeFor(false), 15, "an unarmed class still takes the inbound value");
+  reset();
+});
+
+test("the stale-read guard covers a save queued or in flight, not only its debounce", async () => {
+  reset();
+  // Deferred saves: the test decides when each write's round trip completes,
+  // modelling a link slow enough for the debounce to lapse first.
+  const completions: Array<() => void> = [];
+  const writes: string[] = [];
+  bindTerminalFontPersist((key, value) => {
+    writes.push(value);
+    return new Promise<void>((resolve) => completions.push(resolve));
+  });
+
+  stepTerminalFontSize(1, false); // desktop 13 → 14
+  await new Promise((resolve) => setTimeout(resolve, 480)); // debounce fires; save A in flight
+  assert.deepEqual(writes, ["14"]);
+
+  // The timer has already run, yet the save is still pending — a read carrying
+  // the pre-step value arriving NOW must still be skipped. (The pre-fix guard
+  // ended with the timer and would have dropped the display to 13.)
+  setTerminalFontSizes({ phone: 9, desktop: 13 });
+  assert.equal(terminalFontSizeFor(false), 14, "an in-flight save still guards its class");
+  assert.equal(terminalFontSizeFor(true), 9, "an unguarded class takes the read normally");
+
+  // A second burst settles at 15 while the first save is outstanding: its write
+  // queues behind it, so the guard must hold through BOTH completions.
+  stepTerminalFontSize(1, false);
+  await new Promise((resolve) => setTimeout(resolve, 480));
+  assert.deepEqual(writes, ["14", "15"]);
+  completions[0](); // save A's round trip ends; save B is still pending
+  await new Promise((resolve) => setImmediate(resolve));
+  setTerminalFontSizes({ phone: 9, desktop: 13 });
+  assert.equal(terminalFontSizeFor(false), 15, "a queued save keeps the guard up after an earlier save settles");
+
+  completions[1](); // save B ends; the guard drains
+  await new Promise((resolve) => setImmediate(resolve));
+  setTerminalFontSizes({ phone: 9, desktop: 20 });
+  assert.equal(terminalFontSizeFor(false), 20, "once every pending save completes, a read lands again");
+  reset();
+});
+
+test("a failed or rejected save still drains its pending window", async () => {
+  reset();
+  let fail = false;
+  bindTerminalFontPersist(() => (fail ? Promise.reject(new Error("boom")) : Promise.resolve()));
+  stepTerminalFontSize(1, true);
+  await new Promise((resolve) => setTimeout(resolve, 480));
+  // The save resolved fine. Now arm another that rejects: the module must not
+  // leak the pending count and wedge the class's guard forever.
+  fail = true;
+  stepTerminalFontSize(1, true);
+  await new Promise((resolve) => setTimeout(resolve, 480));
+  await new Promise((resolve) => setImmediate(resolve)); // let the rejection settle
+  setTerminalFontSizes({ phone: 6.5, desktop: 13 });
+  assert.equal(terminalFontSizeFor(true), 6.5, "a rejected save must not hold the guard past its settle");
   reset();
 });
 
