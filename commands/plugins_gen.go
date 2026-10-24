@@ -88,6 +88,7 @@ var pluginReleaseDigests = []string{
 	"787978c996f9632b42e5bfd4dfc78a2adabcbd0b81c77f122e83154ec38edea1", // 3.23 — shared scope rule names both cross-project opt-ins (#5136)
 	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
 	"338d85ab38d72bffdb161020f6110f118965535f33266c90564cbd5273bbee0e", // 3.25 — Codex preflight capture: run af version to completion and take the first line via parameter expansion, so a real (non-zero) af version failure is reported as broken instead of masked by || true
+	"9f9af14485acb7d9f3c385d2bce7d4d56fb4fd190ddc9b8dcd297c8ae65b89b4", // 3.26 — Codex preflight: bound the af version capture with a 10s timeout so a hanging/flooding wrapper cannot stall SessionStart, and exit 0 on the broken-CLI branch so Codex surfaces the reinstall report instead of discarding it on a non-zero exit
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -352,20 +353,37 @@ func codexHooks() map[string]any {
 // The hook has three branches, so it reports in every state: af missing → print
 // the install command; af healthy → print its version; af on PATH but failing
 // to exec (corrupt/wrong-architecture binary, missing shebang interpreter, or a
-// wrapper that emits a line then exits non-zero) → print the reinstall command
-// and exit non-zero. set -e is intentionally absent: the version capture runs
-// under pipefail, and a present-but-unexecutable af makes it exit non-zero. With
-// set -e the assignment would abort the script before the report echo, and the
-// 2>/dev/null on the capture would also swallow bash's own exec-failure
-// diagnostic — leaving the hook with no stdout, no stderr, and only an opaque
-// non-zero exit, which is not a report. The capture sits inside an elif
-// condition, so a failing capture just falls through to the else branch instead.
+// wrapper that emits a line then exits non-zero) → print the reinstall command.
+// All three branches exit 0: this is an informational SessionStart hook, and
+// Codex surfaces a hook's stdout to the session only on a zero exit — a non-zero
+// exit makes Codex record "hook exited with code N" and discard the stdout, so
+// the broken-CLI branch's reinstall guidance would never reach the session.
+// Reporting the broken state (the whole point of this hook) requires the zero
+// exit; the report text itself names the broken state, so the model still learns
+// af is unusable without a non-zero exit hiding it.
+//
+// set -e is intentionally absent: the version capture runs under pipefail, and
+// a present-but-unexecutable af makes it exit non-zero. With set -e the
+// assignment would abort the script before the report echo, and the 2>/dev/null
+// on the capture would also swallow bash's own exec-failure diagnostic —
+// leaving the hook with no stdout, no stderr, and only an opaque non-zero exit,
+// which is not a report. The capture sits inside an elif condition, so a failing
+// capture just falls through to the else branch instead.
+//
 // The whole `af version` output is captured into a variable first, then the
 // first line is selected with a parameter expansion rather than piping into
 // `head -n 1`: `af version` then runs to completion (no `head` to send it
 // SIGPIPE under pipefail), so its real exit status decides the branch, and a
 // wrapper that prints a version-looking line then exits non-zero is reported as
 // broken instead of masked as healthy by a `|| true`.
+//
+// The capture is wall-clock bounded so a wrapper that hangs or floods output
+// cannot stall session startup for the 600s Codex applies when a hook declares
+// no timeout: af_version_bounded wraps `af version` in `timeout 10s` where
+// timeout(1) is available (Linux, macOS-with-coreutils), and falls back to the
+// unbounded capture where it is missing rather than misreport a healthy af as
+// broken. A timeout (exit 124) or any non-zero exit is a failure that routes to
+// the broken branch.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
 		"# " + pluginGenBanner + "\n" +
@@ -374,20 +392,35 @@ func afPreflightHook() string {
 		"# downloads or installs anything (see docs/agent-plugins.md).\n" +
 		"set -uo pipefail\n" +
 		"\n" +
+		"# af_version_bounded runs `af version` with a short wall-clock bound so a\n" +
+		"# wrapper that hangs or floods output cannot stall SessionStart for the 600s\n" +
+		"# Codex applies when a hook declares no timeout. timeout(1) is on Linux and\n" +
+		"# macOS-with-coreutils; where it is missing the probe falls back to the\n" +
+		"# unbounded capture (the prior behavior) rather than misreport a healthy af\n" +
+		"# as broken. The whole `af version` output is captured into a variable first\n" +
+		"# (no head in the pipe), so af version runs to completion and its real exit\n" +
+		"# status — not a masked pipeline — decides the branch; a timeout (exit 124)\n" +
+		"# or a wrapper that prints a version-looking line then exits non-zero is\n" +
+		"# reported as broken, not masked as healthy by a || true.\n" +
+		"af_version_bounded() {\n" +
+		"\tif command -v timeout >/dev/null 2>&1; then\n" +
+		"\t\ttimeout 10s af version 2>/dev/null\n" +
+		"\telse\n" +
+		"\t\taf version 2>/dev/null\n" +
+		"\tfi\n" +
+		"}\n" +
+		"\n" +
 		"if ! command -v af >/dev/null 2>&1; then\n" +
 		"\techo \"af is not installed. Install it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
-		"elif af_out=$(af version 2>/dev/null) && [ -n \"$af_out\" ]; then\n" +
+		"\telif af_out=$(af_version_bounded) && [ -n \"$af_out\" ]; then\n" +
 		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
-		"\t# hook only wants the version itself. Capture the whole output first so a\n" +
-		"\t# real `af version` failure (non-zero exit, even after printing a line) is\n" +
-		"\t# detected instead of masked, then keep only the first line.\n" +
+		"\t# hook only wants the version itself, so keep only the first line.\n" +
 		"\tversion=${af_out%%$'\\n'*}\n" +
 		"\techo \"${version} is available.\"\n" +
 		"else\n" +
 		"\techo \"af is on PATH but failed to execute. Reinstall it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
-		"\texit 1\n" +
 		"fi\n"
 }
 
