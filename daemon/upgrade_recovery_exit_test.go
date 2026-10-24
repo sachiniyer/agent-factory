@@ -244,13 +244,14 @@ const recoveryExit0ReexecEnv = "AF_TEST_RECOVERY_EXIT0_REEXEC"
 // daemonless-after-irreversible-commit outcome this test guards.
 func recoveryExit0ReexecMain() {
 	// runRecoveryActorFn: a successful commit removes active.json during
-	// lease.Cleanup (supervisor.go cleanup()). The stub removes it so the
-	// second upgradetxn.Load in RunUpgradeRecoveryActor returns
-	// ErrNoActiveTransaction, unlocking the adoptAfterUpgradeCommitFn
-	// hand-off — the same signal a real committed supervisor produces.
-	runRecoveryActorFn = func(_ context.Context, invocation upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) error {
+	// lease.Cleanup (supervisor.go cleanup()) and reaches PhaseCommitted. The
+	// stub removes active.json and returns PhaseCommitted so the phase gate
+	// in RunUpgradeRecoveryActor (ourTransaction && phase == PhaseCommitted)
+	// unlocks the adoptAfterUpgradeCommitFn hand-off — the same combined
+	// signal a real committed supervisor produces.
+	runRecoveryActorFn = func(_ context.Context, invocation upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) (error, upgradetxn.Phase) {
 		_ = os.Remove(filepath.Join(invocation.HomeDir, "upgrade", "active.json"))
-		return nil
+		return nil, upgradetxn.PhaseCommitted
 	}
 	// adoptAfterUpgradeCommitFn: simulates the candidateAbsent + fresh-daemon
 	// failure path (upgrade_forward.go:174-178) — the upgrade is

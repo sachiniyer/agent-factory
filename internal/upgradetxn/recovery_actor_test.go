@@ -42,7 +42,7 @@ func TestRecoveryActorRunnerStandsDownWhenAnotherActorWon(t *testing.T) {
 	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
 	superviseCalls := 0
 
-	err := runRecoveryActorWith(
+	err, _ := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(*Transaction) (*RecoveryLease, error) { return nil, ErrRecoveryActive },
 		func(context.Context, *Transaction, *RecoveryLease) error {
@@ -59,7 +59,7 @@ func TestRecoveryActorRunnerStandsDownWhenAnotherActorWon(t *testing.T) {
 func TestRecoveryActorRunnerStandsDownForStaleTransactionBeforeAcquiring(t *testing.T) {
 	_, home, _ := prepareFixture(t)
 	acquireCalls := 0
-	err := runRecoveryActorWith(
+	err, _ := runRecoveryActorWith(
 		context.Background(),
 		RecoveryInvocation{HomeDir: home, TransactionID: "different-transaction"},
 		func(*Transaction) (*RecoveryLease, error) {
@@ -77,7 +77,7 @@ func TestRecoveryActorRunnerStandsDownForStaleTransactionBeforeAcquiring(t *test
 func TestRecoveryActorRunnerExitsCleanlyAfterJournalCleanup(t *testing.T) {
 	home := t.TempDir()
 	acquireCalls := 0
-	err := runRecoveryActorWith(
+	err, _ := runRecoveryActorWith(
 		context.Background(),
 		RecoveryInvocation{HomeDir: home, TransactionID: "already-cleaned"},
 		func(*Transaction) (*RecoveryLease, error) {
@@ -115,7 +115,7 @@ func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testi
 			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 			require.NoError(t, err)
 
-			err = runRecoveryActorWith(
+			err, _ = runRecoveryActorWith(
 				context.Background(), invocation,
 				func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 				func(context.Context, *Transaction, *RecoveryLease) error { return tc.runErr },
@@ -162,7 +162,7 @@ func TestRunRecoveryActor_LeaseReleaseFailureDoesNotFailTheRecovery(t *testing.T
 			// proves this fixture actually breaks Release.
 			require.NoError(t, lease.file.Close())
 
-			err = runRecoveryActorWith(
+			err, _ = runRecoveryActorWith(
 				context.Background(), invocation,
 				func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 				func(context.Context, *Transaction, *RecoveryLease) error { return tc.runErr },
@@ -181,7 +181,7 @@ func TestRunRecoveryActor_SupervisionFailureStillFails(t *testing.T) {
 	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 	require.NoError(t, err)
 
-	err = runRecoveryActorWith(
+	err, _ = runRecoveryActorWith(
 		context.Background(), invocation,
 		func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 		func(context.Context, *Transaction, *RecoveryLease) error {
@@ -223,7 +223,7 @@ func TestRecoveryActorRetriesWhenThePhaseEndedWithTheJobStillArmed(t *testing.T)
 		errors.New("record the rolled-back candidate as rejected: disk full"),
 	)
 
-	err := runRecoveryActorWith(
+	err, _ := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(t *Transaction) (*RecoveryLease, error) {
 			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
@@ -245,7 +245,7 @@ func TestRecoveryActorStillExitsZeroOnceTheJobIsDisarmed(t *testing.T) {
 	txn, home, _ := prepareFixture(t)
 	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
 
-	err := runRecoveryActorWith(
+	err, _ := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(t *Transaction) (*RecoveryLease, error) {
 			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
@@ -255,4 +255,89 @@ func TestRecoveryActorStillExitsZeroOnceTheJobIsDisarmed(t *testing.T) {
 
 	require.NoError(t, err,
 		"a terminal rollback failure reached AFTER the disarm must not restart-loop the unit")
+}
+
+// TestRunRecoveryActorWith_RealRollbackProducesCommitSignal drives the REAL
+// Supervisor.Run (with stubbed SupervisorOperations) through a failed
+// candidate validation → stopCandidateAndRestore → PhaseRollbackRestored →
+// PhasePreviousStarting → PhasePreviousValidating → PhaseRolledBack. It
+// verifies that runRecoveryActorWith returns nil AND PhaseRolledBack AND the
+// journal is gone — the exact "nil + journal gone" signal the old daemon-layer
+// predicate treated as proof of commit. The fix keys on the phase instead, so
+// the returned PhaseRolledBack is the load-bearing property: it survives
+// lease.Cleanup() in-memory (storage.go cleanup never mutates
+// txn.journal.Phase) and is what tells RunUpgradeRecoveryActor this was a
+// rollback, not a commit.
+func TestRunRecoveryActorWith_RealRollbackProducesCommitSignal(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: false}
+	supervisor := Supervisor{Operations: runtime.operations()}
+
+	var capturedTxn *Transaction
+	err, phase := runRecoveryActorWith(
+		context.Background(), invocation,
+		func(t *Transaction) (*RecoveryLease, error) {
+			capturedTxn = t
+			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
+		},
+		supervisor.Run,
+	)
+
+	require.NoError(t, err,
+		"a successful rollback must exit 0 so Restart=on-failure cannot undo the circuit breaker")
+	require.Equal(t, PhaseRolledBack, phase,
+		"the returned phase must be rolled_back, not committed — the signal the hand-off must gate on")
+	require.Equal(t, PhaseRolledBack, capturedTxn.Journal().Phase,
+		"the in-memory phase must survive lease.Cleanup() so runRecoveryActorWith can return it")
+
+	_, loadErr := Load(home)
+	require.ErrorIs(t, loadErr, ErrNoActiveTransaction,
+		"the journal must be gone after rollback, identical to a committed transaction — "+
+			"the signal the old journal-gone predicate could not distinguish from commit")
+}
+
+// TestRunRecoveryActorWith_RealAbortProducesCommitSignal drives the REAL
+// Supervisor.Run through the PhaseSupervisorReady → ErrActivationNotAuthorized
+// → PhaseAborted arm (the same pattern as
+// TestSupervisorRefusesCallbackWithoutActorBoundApproval: the AwaitActivation
+// override returns nil without authorizing, so the supervisor's
+// ActivationAuthorized check fails and the previous daemon is never signalled
+// to stop). It verifies runRecoveryActorWith returns nil AND PhaseAborted AND
+// the journal is gone — the same indistinguishable-from-commit signal a
+// rollback produces, but for the abort path. Gating on phase == PhaseCommitted
+// excludes this, so no "committed upgrade candidate" WARNING is emitted after
+// an abort.
+func TestRunRecoveryActorWith_RealAbortProducesCommitSignal(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: true}
+	operations := runtime.operations()
+	operations.AwaitActivation = func(context.Context, Journal) error {
+		runtime.calls = append(runtime.calls, "await-activation")
+		return nil
+	}
+	supervisor := Supervisor{Operations: operations}
+
+	var capturedTxn *Transaction
+	err, phase := runRecoveryActorWith(
+		context.Background(), invocation,
+		func(t *Transaction) (*RecoveryLease, error) {
+			capturedTxn = t
+			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
+		},
+		supervisor.Run,
+	)
+
+	require.NoError(t, err,
+		"a successful abort must exit 0 so Restart=on-failure cannot undo the circuit breaker")
+	require.Equal(t, PhaseAborted, phase,
+		"the returned phase must be aborted, not committed — the signal the hand-off must gate on")
+	require.Equal(t, PhaseAborted, capturedTxn.Journal().Phase,
+		"the in-memory phase must survive lease.Cleanup() so runRecoveryActorWith can return it")
+
+	_, loadErr := Load(home)
+	require.ErrorIs(t, loadErr, ErrNoActiveTransaction,
+		"the journal must be gone after abort, identical to a committed transaction — "+
+			"the signal the old journal-gone predicate could not distinguish from commit")
 }
