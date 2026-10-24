@@ -7260,6 +7260,24 @@ function actionsDisclosure(label = "Session actions", enabled = () => true, onDi
   });
   return { el: el2, panel, trigger, open, close, dismiss, dispose: close };
 }
+function placeMenu(trigger, panel) {
+  panel.classList.remove("af-menu-up");
+  const anchor = trigger.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = trigger.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "") continue;
+    const clip = node.getBoundingClientRect();
+    top = Math.max(top, clip.top);
+    bottom = Math.min(bottom, clip.bottom);
+  }
+  const box = panel.getBoundingClientRect();
+  const needed = box.height + Math.max(0, box.top - anchor.bottom);
+  const below = bottom - anchor.bottom;
+  const above = anchor.top - top;
+  if (needed > below && above > below) panel.classList.add("af-menu-up");
+}
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
 }) {
@@ -16876,6 +16894,7 @@ var AppShell = class {
     }
     const activeBefore = document.activeElement;
     let restoreChangedFocus;
+    const reopened = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
@@ -16895,7 +16914,11 @@ var AppShell = class {
           (target) => this.rowActions(target, s.id === state.selectedId),
           previous
         );
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : void 0;
+        if (menu) {
+          menu.open();
+          reopened.push(menu);
+        }
         if (focusedName) restoreChangedFocus = () => row.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
       },
@@ -16917,6 +16940,7 @@ var AppShell = class {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -16941,6 +16965,9 @@ var AppShell = class {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("\u2026");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
