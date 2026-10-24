@@ -446,56 +446,72 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 }
 
 // unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
-// words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
-// whose NAME is one af removes for the selected account, specifically by
-// nesting an env invocation inside the wrapper's argument list.
+// words of an unrecognized wrapper carry a mutation the account-environment
+// guard would refuse at the top level.
 //
 // unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
 // nohup/nice/timeout/setsid/stdbuf/ionice/taskset/xargs); every other binary
-// that runs a child command and passes argv through (strace/perf/valgrind/
-// gdb --args/...) falls to the default arm and was returned opaque. Wrapping the
-// modelled `env NAME=value <agent>` mutation — which the guard already refuses
-// bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
-// assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
-// while `nohup env CODEX_HOME=/other codex` was refused.
+// falls to the default arm. Wrappers come in two execution shapes, both of
+// which the guard must "not treat as opaque leaf programs whose arguments are
+// inert" (the design rule stated in account_environment_followup_test.go):
 //
-// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: scan
-// the wrapper's literal argv tail for an `env` invocation and delegate to
-// envCallMutatesAccountEnvironment when one is found. Commands that do not
-// contain a nested env invocation are not refused even when an argument
-// resembles a NAME=value token, so noun-uses such as `echo CODEX_HOME=/tmp`,
-// `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
-// `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
-// invocation with a denied assignment) stay allowed.
+//   - argv-passthrough wrappers (strace/perf/valgrind/gdb --args/...) exec their
+//     operand as argv, so the wrapper's literal tail words ARE the child's
+//     argv. Wrapping the modelled `env NAME=value <agent>` mutation — which the
+//     guard already refuses bare and under every modelled wrapper — in such a
+//     wrapper hid the inner assignment from the walk, so
+//     `strace env CODEX_HOME=/other codex` was accepted while
+//     `nohup env CODEX_HOME=/other codex` was refused, over the same effect.
 //
-// The same tail scan applies the modeled path's other two rules one level
-// down: a shell word with argv is judged by shellCommandIsUnproven exactly as
-// a bare `sh -c '...'` command is, and a literal option word whose VALUE is a
-// denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
-// and --env=var=val) is refused — a wrapper's own options can place the
-// mutation without any env word.
+//   - string-executor wrappers (watch/tmux/screen/nix-shell --run/...) exec
+//     a SINGLE quoted operand as `sh -c <script>` (or its tmux/screen/nix-shell
+//     analog). The whole script reaches the wrapper as ONE argv word, so the
+//     passthrough tail scan sees only that word and never the
+//     identity-variable mutation the inner shell runs one level deeper.
+//     `watch 'unset CODEX_HOME; codex'` was therefore accepted while the
+//     semantically identical `bash -c 'unset CODEX_HOME; codex'`,
+//     `watch bash -c 'unset CODEX_HOME; codex'`, and
+//     `strace sh -c 'unset CODEX_HOME; codex'` were all refused.
 //
-// The scan is memoized per (position, strace): the verdict at a tail word
-// depends only on the words from there on, so the tail of a wrapper nested in
-// another wrapper's tail — `echo env env … env x` — is scanned once, not once
-// per enclosing env word (#4966).
+// This lifts three of the modeled path's rules one level down (the env NAME=
+// rule, the shellCommandIsUnproven `sh -c '...'` rule, and the
+// `--opt=DENIED` option rule), and adds a fourth for the string-executor
+// shape: a known string-executor wrapper's literal tail word that carries
+// shell metacharacters is an unproven shell script and fails closed.
+//
+// noun-uses stay allowed: an argument that merely resembles a NAME=value
+// token is not executed (echo CODEX_HOME=/tmp, rg 'OPENAI_API_KEY=', man env,
+// make env, git grep env, ls env/bin, pip show env), and a NAME=print env
+// invocation or one with a denied assignment but no command word overrides no
+// running agent.
+//
+// The scan is memoized per (position, strace, stringExecutor): the verdict at
+// a tail word depends only on the words from there on, so the tail of a
+// wrapper nested in another wrapper's tail — `echo env env … env x` — is
+// scanned once, not once per enclosing env word (#4966).
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	return wrapperTailHidesAccountAssignment(words[1:], isAccountCommandName(words[0], "strace"), names, memo)
+	return wrapperTailHidesAccountAssignment(
+		words[1:],
+		isAccountCommandName(words[0], "strace"),
+		isStringExecutorWrapper(words[0]),
+		names,
+		memo,
+	)
 }
 
 // wrapperTailHidesAccountAssignment scans an unrecognized wrapper's tail from
 // words[0]. Every position the scan steps on gets the scan's answer: the scan
 // from there follows the same steps to the same end.
-func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
+func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, stringExecutor bool, names map[string]struct{}, memo operandTailMemo) bool {
 	var chain []*syntax.Word
 	answer := false
 	for len(words) > 0 {
-		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace}]; seen {
+		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace, stringExecutor: stringExecutor}]; seen {
 			answer = cached
 			break
 		}
 		chain = append(chain, words[0])
-		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo)
+		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, stringExecutor, names, memo)
 		if hides {
 			answer = true
 			break
@@ -503,14 +519,14 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 		words = words[width:]
 	}
 	for _, word := range chain {
-		memo.wrapperTails[wrapperTailKey{word: word, strace: strace}] = answer
+		memo.wrapperTails[wrapperTailKey{word: word, strace: strace, stringExecutor: stringExecutor}] = answer
 	}
 	return answer
 }
 
 // wrapperTailWordHidesAccountAssignment judges the tail word at words[0] and
 // reports how many words it consumed.
-func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, stringExecutor bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
 	word := words[0]
 	if isAccountCommandName(word, "env") {
 		// A nested env only mutates the child it execs; requireCommand
@@ -536,8 +552,29 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// under `nice sh -c ...`. Only the trusted account-shell form
 		// proves out. A trailing shell name with no argv (echo sh,
 		// strace -p 1 sh) has nothing to judge and stays allowed.
-		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
-			shellCommandIsUnproven(words)
+		if len(words) > 1 && knownShellName(filepath.Base(literal)) &&
+			shellCommandIsUnproven(words) {
+			return 1, true
+		}
+		// A string-executor wrapper (watch/tmux/screen/nix-shell --run/...)
+		// runs its single quoted operand as `sh -c <script>` (or its
+		// tmux/screen/nix-shell analog), so a literal tail word that
+		// carries a shell metacharacter (`;`, `|`, `&`, `$`, `` ` ``,
+		// `'`, `"`) is a multi-statement shell script the static walk
+		// cannot scan one argv word at a time — fail closed the same way
+		// the shell-name branch above fails closed on
+		// `sh -c 'unset CODEX_HOME; codex'`. A metacharacter-free operand
+		// (a bare command such as `watch 'codex'` or
+		// `tmux new-session 'npm run dev'`, or a NAME= noun such as
+		// `watch 'echo CODEX_HOME=/tmp'`) stays admitted: the wrapper
+		// execs one bare command whose identity neutrality the leaf-
+		// operand scan above already proves, and a NAME= without an
+		// inner env invocation is not a mutation either (see the
+		// `strace env CODEX_HOME codex` control).
+		if stringExecutor && shellScriptLiteralHasMetacharacters(literal) {
+			return 1, true
+		}
+		return 1, false
 	}
 	if strace {
 		switch {
@@ -566,4 +603,33 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, accountEnvironmentOperandDenied(value, names)
 	}
 	return 1, false
+}
+
+// isStringExecutorWrapper reports whether word names a known unmodeled
+// wrapper that execs a single quoted operand as a shell COMMAND STRING
+// (watch runs its operand with `sh -c`; tmux new-session/new and
+// split-window run their shell-command operand via `/bin/sh`; GNU screen
+// execs its command argument via the shell; nix-shell --run runs its
+// argument under bash). The whole script reaches the wrapper as ONE argv
+// word, so the passthrough tail scan sees only that word and never the
+// inner-shell mutation one level deeper. isAccountCommandName matches by
+// basename, so a PATH-qualified or repo-local spelling of the same name is
+// caught the same way peelAccountWrapper catches the modelled wrappers.
+func isStringExecutorWrapper(word *syntax.Word) bool {
+	return isAccountCommandName(word, "watch") ||
+		isAccountCommandName(word, "tmux") ||
+		isAccountCommandName(word, "screen") ||
+		isAccountCommandName(word, "nix-shell")
+}
+
+// shellScriptLiteralHasMetacharacters reports whether literal contains a
+// shell metacharacter that makes it a script rather than a single bare
+// command line: a command separator (`;`, `&`), pipe (`|`), expansion (`$`,
+// “ ` “), or a quote character (`'`, `"`) — the same dimensions the
+// shellCommandIsUnproven path reasons over once `sh -c '...'` is peeled.
+// A literal without any of these is a bare command a string-executor
+// wrapper hands to `sh -c` verbatim, and the wrapper tail scan judges it
+// the way it judges a leaf operand.
+func shellScriptLiteralHasMetacharacters(literal string) bool {
+	return strings.ContainsAny(literal, ";|&$`'\"")
 }

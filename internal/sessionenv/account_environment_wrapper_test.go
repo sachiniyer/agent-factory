@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -342,5 +343,320 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)
+	}
+}
+
+// String-executor wrappers — watch, tmux new-session/new (and split-window),
+// GNU screen, nix-shell --run/--command — exec a SINGLE quoted operand as
+// `sh -c <script>` (or its tmux/screen/nix-shell analog). The whole script
+// reaches the wrapper as ONE argv word, so the argv-passthrough tail scan
+// above saw only that word and never the identity-variable mutation the
+// inner shell ran one level deeper. `watch 'unset CODEX_HOME; codex'` was
+// therefore ACCEPTED while the semantically identical
+// `bash -c 'unset CODEX_HOME; codex'`, `watch bash -c 'unset CODEX_HOME; codex'`,
+// and `strace sh -c 'unset CODEX_HOME; codex'` were REFUSED — over the same
+// effect on the sibling tab's applied account environment. The same hole
+// underlies ionice/taskset's design rule (account_environment_followup_test.go:
+// "a scoped command must not treat them as opaque leaf programs whose
+// arguments are inert"): a wrapper that "runs an arbitrary command" must not
+// have its operand scored inert.
+//
+// The fix treats a literal tail word that carries a shell metacharacter
+// (`;`, `|`, `&`, `$`, “ ` “, `'`, `"`) as an unproven shell script and
+// fails closed, but only under a known string-executor wrapper. Each
+// identity-mutating script below was ACCEPTED before the fix and is now
+// refused by ValidateAccountEnvironmentCommand — confirmed against the
+// installed `watch`/`tmux`/`screen`/`nix-shell` semantics (each documented
+// to run its operand via the shell) before this test was written.
+func TestValidateAccountEnvironmentCommand_RefusesStringExecutorWrapperScriptOperand(t *testing.T) {
+	for _, command := range []string{
+		// The exact exploitation shapes from the report's evidence table.
+		"watch 'unset CODEX_HOME; codex'",
+		"watch 'export CODEX_HOME=/other; codex'",
+		"watch 'unset OPENAI_API_KEY; codex'",
+		"watch 'unset BASH_ENV; codex'",
+		"watch 'unset ZDOTDIR; codex'",
+		"watch 'unset PROMPT_COMMAND; codex'",
+		"tmux new-session 'unset CODEX_HOME; codex'",
+		"tmux new-session -d 'unset CODEX_HOME; codex'",
+		"tmux new 'unset CODEX_HOME; codex'",
+		"tmux split-window 'unset CODEX_HOME; codex'",
+		"screen 'unset CODEX_HOME; codex'",
+		"screen -dmS sess 'unset CODEX_HOME; codex'",
+		"nix-shell --run 'unset CODEX_HOME; codex'",
+		"nix-shell --pure --run 'unset CODEX_HOME; codex'",
+		"nix-shell --command 'unset CODEX_HOME; codex'",
+		// watch flag variants: the metacharacter fires on the script word,
+		// so the wrapper's own flags before it do not change the verdict.
+		"watch -g 'unset CODEX_HOME; codex'",
+		"watch -n 5 'unset CODEX_HOME; codex'",
+		"watch -b 'unset CODEX_HOME; codex'",
+		// Each shell metacharacter the rule fires on, paired with a mutation.
+		"watch 'unset CODEX_HOME && codex'",
+		"watch 'unset CODEX_HOME || codex'",
+		"watch 'unset CODEX_HOME | codex'",
+		"watch 'codex; export OPENAI_API_KEY=stolen'",
+		"watch 'codex && export CODEX_HOME=/other'",
+		"watch 'unset CODEX_HOME; codex'",
+		// Quoted forms under the wrapper reduce to the same script after
+		// outer-quote stripping, so the metacharacter scan sees them too.
+		`watch "unset CODEX_HOME; codex"`,
+		`tmux new-session "export CODEX_HOME=/other; codex"`,
+		`screen "unset OPENAI_API_KEY; codex"`,
+		`nix-shell --run "unset CODEX_HOME; codex"`,
+		// Path-qualified wrapper names: isAccountCommandName matches by
+		// basename, matching peelAccountWrapper's trust boundary.
+		"/usr/bin/watch 'unset CODEX_HOME; codex'",
+		"/usr/bin/tmux new-session 'unset CODEX_HOME; codex'",
+		"./tmux new 'unset CODEX_HOME; codex'",
+		"/usr/bin/screen 'unset CODEX_HOME; codex'",
+		"./nix-shell --run 'unset CODEX_HOME; codex'",
+		// Nested under a modeled wrapper: nohup/nice/timeout unwrap, leaving
+		// watch at the head; watch is the unmodeled string-executor wrapper
+		// and the tail scan refuses its metacharacter-bearing script operand.
+		"nohup watch 'unset CODEX_HOME; codex'",
+		"nice -n 5 watch 'unset CODEX_HOME; codex'",
+		"timeout 10 watch 'unset CODEX_HOME; codex'",
+		"exec watch 'unset CODEX_HOME; codex'",
+		"command watch 'unset CODEX_HOME; codex'",
+		// A shell-expansion metacharacter ($, backtick) inside the script is
+		// unprovable exactly like a `;`-separated multi-statement.
+		"watch 'codex; echo $CODEX_HOME'",
+		"watch 'codex `echo hi`'",
+		// A NAME= in front of a metacharacter-bearing shell script is still
+		// the same exploit, not the leaf-noun shape — the wrapper execs the
+		// whole script, not just `NAME=`.
+		"watch 'X=1; unset CODEX_HOME; codex'",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q hides an identity-mutating shell script behind a string-executor wrapper", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
+
+// commandMutatesAccountEnvironment is the predicate ValidateAccountEnvironmentCommand
+// delegates to. Pin its verdict directly so the boolean signal — not just the
+// end-to-end error — is locked against the report's evidence table, including
+// the narrow-safe controls that must keep passing and the unchanged behavior of
+// non-string-executor wrappers.
+func TestCommandMutatesAccountEnvironment_StringExecutorScriptOperand(t *testing.T) {
+	names := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		names[name] = struct{}{}
+	}
+	cases := []struct {
+		command string
+		want    bool
+	}{
+		// Control baselines the guard already had: bare and modeled-wrapper
+		// sh -c '...' forms refuse.
+		{"bash -c 'unset CODEX_HOME; codex'", true},
+		{"sh -c 'unset CODEX_HOME; codex'", true},
+		{"strace sh -c 'unset CODEX_HOME; codex'", true},
+		{"watch bash -c 'unset CODEX_HOME; codex'", true},
+		{"sh 'unset CODEX_HOME; codex'", true},
+		// String-executor wrappers now refuse the same script one level deep.
+		{"watch 'unset CODEX_HOME; codex'", true},
+		{"watch 'export CODEX_HOME=/other; codex'", true},
+		{"watch 'unset OPENAI_API_KEY; codex'", true},
+		{"watch 'unset BASH_ENV; codex'", true},
+		{"watch 'unset ZDOTDIR; codex'", true},
+		{"tmux new-session 'unset CODEX_HOME; codex'", true},
+		{"tmux new-session -d 'unset CODEX_HOME; codex'", true},
+		{"tmux new 'unset CODEX_HOME; codex'", true},
+		{"tmux split-window 'unset CODEX_HOME; codex'", true},
+		{"screen 'unset CODEX_HOME; codex'", true},
+		{"screen -dmS sess 'unset CODEX_HOME; codex'", true},
+		{"nix-shell --run 'unset CODEX_HOME; codex'", true},
+		{"nix-shell --command 'unset CODEX_HOME; codex'", true},
+		// Each metacharacter fires the rule.
+		{"watch 'unset CODEX_HOME && codex'", true},
+		{"watch 'unset CODEX_HOME || codex'", true},
+		{"watch 'unset CODEX_HOME | codex'", true},
+		{"watch 'codex; export OPENAI_API_KEY=stolen'", true},
+		{"watch 'codex `unset CODEX_HOME`'", true},
+		// Quoted forms reduce to the same script after quote removal.
+		{`watch "unset CODEX_HOME; codex"`, true},
+		{`tmux new-session "export CODEX_HOME=/other; codex"`, true},
+		// Path-qualified wrapper-name spellings match by basename.
+		{"/usr/bin/watch 'unset CODEX_HOME; codex'", true},
+		{"./tmux new 'unset CODEX_HOME; codex'", true},
+		// Nested behind a modeled wrapper: unwrap leaves watch at the head.
+		{"nohup watch 'unset CODEX_HOME; codex'", true},
+		{"nice -n 5 watch 'unset CODEX_HOME; codex'", true},
+		{"timeout 10 watch 'unset CODEX_HOME; codex'", true},
+		// Nested behind exec/command the same way.
+		{"exec watch 'unset CODEX_HOME; codex'", true},
+		{"command watch 'unset CODEX_HOME; codex'", true},
+		// Narrow-safe controls that must keep passing. Each carries no
+		// shell metacharacter, so the wrapper execs one bare command whose
+		// identity neutrality the leaf-operand scan already proves, and a
+		// NAME= without an inner env invocation is not a mutation.
+		{"watch 'codex'", false},
+		{"watch 'npm run dev'", false},
+		{"watch 'echo CODEX_HOME=/tmp'", false},
+		{"watch 'echo CODEX_HOME'", false},
+		{"watch 'rg OPENAI_API_KEY= .'", false},
+		{"watch 'tail -f /var/log/system.log'", false},
+		{"watch -g codex", false},
+		{"watch -n 5 'npm run dev'", false},
+		{"watch -g 'npm run dev'", false},
+		{"tmux new-session 'npm run dev'", false},
+		{"tmux new 'npm run dev'", false},
+		{"tmux split-window 'npm run dev'", false},
+		{"tmux new-session -s myname 'npm run dev'", false},
+		{"screen 'npm run dev'", false},
+		{"nix-shell --run 'npm run dev'", false},
+		{"nix-shell --run codex", false},
+		{"nix-shell --pure --run codex", false},
+		// Non-script tmux/screen operands without metacharacters stay
+		// admitted: the wrapper passes nothing to `sh -c` and the literal
+		// is judged as a leaf operand.
+		{"tmux ls", false},
+		{"tmux kill-session -t sess", false},
+		// Unchanged behavior for non-string-executor wrappers: strace/perf/
+		// nice/etc. are argv-passthrough, so a single quoted 'X; Y' word is a
+		// binary name strace execve()s (no such file → no mutation). The
+		// existing scan already accepted these and the new string-executor
+		// branch does not touch them.
+		{"strace 'unset CODEX_HOME; codex'", false},
+		{"strace 'env CODEX_HOME=1 codex'", false},
+		{"perf 'unset CODEX_HOME; codex'", false},
+		{"nice -n 5 'unset CODEX_HOME; codex'", false},
+		{"echo 'unset CODEX_HOME; codex'", false},
+		// The existing wrapper-tail controls are unaffected: noun-uses,
+		// modeled-wrapper env invocations, strace -E/--env, xargs markers,
+		// and all the shapes in TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment.
+		{"strace env CODEX_HOME=/other codex", true},
+		{"strace -E CODEX_HOME=/other codex", true},
+		{"strace --env=CODEX_HOME=/other codex", true},
+		{"xargs -I{} env CODEX_HOME=/other codex", true},
+		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
+		{"strace npm run dev", false},
+		{"strace -p 1234 env", false},
+		{"man env", false},
+		{"strace env PORT=3000 npm start", false},
+		{"strace echo CODEX_HOME", false},
+		{"strace env CODEX_HOME codex", false},
+		{"strace env CODEX_HOME=/other", false},
+		{"strace $W CODEX_HOME=/other", false},
+		{"xargs --process-slot-var=PORT env codex", false},
+		{"strace --env=PORT=3000 codex", false},
+	}
+	for _, test := range cases {
+		got := commandMutatesAccountEnvironment(test.command, names)
+		require.Equal(t, test.want, got, "command %q", test.command)
+	}
+}
+
+// The end-to-end ApplyAccountEnvironment path is the production gate the exec
+// shim calls. Confirm a string-executor-wrapped identity mutation is refused
+// before any scoped environment is produced, mirroring the modeled-wrapper
+// ApplyAccountEnvironment tests.
+func TestApplyAccountEnvironment_RefusesStringExecutorWrapperScriptOperand(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"watch 'unset CODEX_HOME; codex'",
+		"watch 'export CODEX_HOME=/other; codex'",
+		"watch 'unset OPENAI_API_KEY; codex'",
+		"watch 'unset BASH_ENV; codex'",
+		"tmux new-session 'unset CODEX_HOME; codex'",
+		"tmux new 'unset CODEX_HOME; codex'",
+		"screen 'unset CODEX_HOME; codex'",
+		"nix-shell --run 'unset CODEX_HOME; codex'",
+		"nohup watch 'unset CODEX_HOME; codex'",
+		"nice -n 5 watch 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "command %q must not replace the sibling account environment", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+	for _, command := range []string{
+		"watch 'codex'",
+		"watch 'npm run dev'",
+		"watch 'echo CODEX_HOME=/tmp'",
+		"tmux new-session 'npm run dev'",
+		"screen 'npm run dev'",
+		"nix-shell --run 'npm run dev'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.NoError(t, err, "command %q carries no identity mutation and must stay allowed", command)
+	}
+}
+
+// The wrapper guard must hold for every supported agent's config variable,
+// credential names, and cloud-mode selectors — not just codex. Each agent's
+// account is constructed through the same ValidateAccountEnvironmentCommand
+// entry point that feeds the production names map, so a string-executor
+// wrapper hides their identity mutation the same way `strace env X=y <agent>`
+// did under TestValidateAccountEnvironmentCommand_RefusesUnmodeledWrapperAcrossAgents.
+func TestValidateAccountEnvironmentCommand_StringExecutorWrappersAcrossAgents(t *testing.T) {
+	cases := []struct {
+		agent   string
+		command string
+	}{
+		{"codex", "watch 'unset CODEX_HOME; codex'"},
+		{"codex", "watch 'unset OPENAI_API_KEY; codex'"},
+		{"codex", "watch 'unset CODEX_API_KEY; codex'"},
+		{"codex", "watch 'unset CODEX_ACCESS_TOKEN; codex'"},
+		{"codex", "tmux new-session 'unset CODEX_HOME; codex'"},
+		{"codex", "nix-shell --run 'unset OPENAI_API_KEY; codex'"},
+		{"claude", "watch 'unset CLAUDE_CONFIG_DIR; claude'"},
+		{"claude", "watch 'unset ANTHROPIC_API_KEY; claude'"},
+		{"claude", "watch 'unset ANTHROPIC_AUTH_TOKEN; claude'"},
+		{"claude", "watch 'unset CLAUDE_CODE_OAUTH_TOKEN; claude'"},
+		{"claude", "tmux new-session 'unset CLAUDE_CONFIG_DIR; claude'"},
+		{"claude", "nix-shell --run 'unset ANTHROPIC_API_KEY; claude'"},
+		{"gemini", "watch 'unset GEMINI_CLI_HOME; gemini'"},
+		{"gemini", "watch 'unset GEMINI_API_KEY; gemini'"},
+		{"gemini", "watch 'unset GOOGLE_API_KEY; gemini'"},
+		{"gemini", "tmux new-session 'unset GEMINI_CLI_HOME; gemini'"},
+		{"gemini", "nix-shell --run 'unset GEMINI_API_KEY; gemini'"},
+	}
+	for _, test := range cases {
+		account := Account{Agent: test.agent, Name: "work", Dir: "/afhome/accounts/" + test.agent + "/work"}
+		err := ValidateAccountEnvironmentCommand(test.command, account)
+		require.Error(t, err, "agent %q: command %q hides an identity mutation behind a string-executor wrapper",
+			test.agent, test.command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"agent %q: command %q must be refused by the account-environment guard",
+			test.agent, test.command)
+	}
+}
+
+// A cloud-mode selector carries an identity: it can redirect the agent off the
+// selected account (CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY,
+// GOOGLE_GENAI_USE_VERTEXAI). A string-executor wrapper hides a `;`-separated
+// mutation of a selector exactly the same way it hides a config-root
+// mutation, so the fix must cover them too.
+func TestValidateAccountEnvironmentCommand_StringExecutorWrappersCoverCloudSelectors(t *testing.T) {
+	for _, command := range []string{
+		"watch 'unset CLAUDE_CODE_USE_BEDROCK; codex'",
+		"watch 'unset CLAUDE_CODE_USE_VERTEX; codex'",
+		"tmux new-session 'export CLAUDE_CODE_USE_BEDROCK=1; claude'",
+		"screen 'unset GOOGLE_GENAI_USE_VERTEXAI; gemini'",
+	} {
+		account := Account{
+			Agent: accountAgentForCommand(command), Name: "work",
+			Dir: "/afhome/accounts/" + accountAgentForCommand(command) + "/work",
+		}
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "command %q hides a cloud-selector mutation behind a string-executor wrapper", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+}
+
+// accountAgentForCommand picks the agent whose names the named wrapper
+// attempts to mutate, so the cloud-selector test above runs each shape
+// through its own agent's account (rather than a single codex bucket).
+func accountAgentForCommand(command string) string {
+	switch {
+	case strings.Contains(command, "GOOGLE_") || strings.Contains(command, "GEMINI"):
+		return "gemini"
+	case strings.Contains(command, "ANTHROPIC_") || strings.Contains(command, "CLAUDE_"):
+		return "claude"
+	default:
+		return "codex"
 	}
 }
