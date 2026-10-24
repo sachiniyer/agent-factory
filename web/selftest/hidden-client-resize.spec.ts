@@ -44,14 +44,17 @@
 // One more simulation-fidelity rule the parked page inherits: it cannot receive
 // POINTER input — a hidden tab has no cursor — but this page still hit-tests.
 // Playwright's virtual mouse stays where the last .click() left it (the rail
-// row used by attach()), and the drawer toggle's layout shift moves elements
-// under that stationary cursor: closing the drawer reveals the pane host right
-// under it, and Chromium synthesizes a REAL isTrusted pointerenter — the same
-// wake signal the product treats as activation (a page that receives trusted
-// pointer input is painting). The send it releases is correct behavior in a
-// state the harness cannot produce honestly — so the spec parks the cursor on
-// the appbar corner before each park: no boundary event can reach the
-// terminal host while it is parked.
+// row used by attach()), and a layout shift under that stationary cursor makes
+// Chromium synthesize a REAL isTrusted pointerenter — the same wake signal the
+// product treats as activation (a page that receives trusted pointer input is
+// painting). This has bitten twice: a drawer shift moved elements under
+// `first`'s cursor, and on `second` the echo's term.resize reflowed the DOM
+// under ITS attach-left cursor — the trusted enter re-fit and re-asserted the
+// peer's grid, stomping the flush this spec exists to observe (CI dbg trace).
+// The send it releases is correct behavior in a state the harness cannot
+// produce honestly — so the spec parks BOTH cursors on the appbar corner
+// before each park: no reflow under either can boundary-enter the terminal
+// host while the scenario runs.
 //
 // The same spec run against a master binary shows the other half of the story:
 // master delivers nothing while parked (its only vehicle was the starved rAF),
@@ -121,10 +124,6 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         __afRealCancel?: typeof cancelAnimationFrame;
         __afDeferred?: Map<number, FrameRequestCallback>;
         __afNextRafId?: number;
-        __dbg?: string[];
-      };
-      const dbg = (m: string): void => {
-        w.__dbg?.push(`${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`);
       };
       if (w.__afRealRaf) {
         return; // already parked — a second park() must not capture the stub
@@ -133,16 +132,13 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       w.__afRealCancel = window.cancelAnimationFrame;
       w.__afDeferred = new Map();
       w.__afNextRafId = 1;
-      dbg("park: rAF stub installed");
       window.requestAnimationFrame = (cb: FrameRequestCallback) => {
         const id = w.__afNextRafId as number;
         w.__afNextRafId = id + 1;
         (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
-        dbg(`stub arm #${id} q=${(w.__afDeferred as Map<number, FrameRequestCallback>).size}`);
         return id;
       };
       window.cancelAnimationFrame = (id: number) => {
-        dbg(`stub cancel #${id}`);
         (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
       };
     });
@@ -158,11 +154,6 @@ test("a parked client reclaims locally but never writes the shared grid", async 
         __afRealCancel?: typeof cancelAnimationFrame;
         __afDeferred?: Map<number, FrameRequestCallback>;
       };
-      const dbg2 = (m: string): void => {
-        (w as { __dbg?: string[] }).__dbg?.push(
-          `${(performance.now() / 1000).toFixed(2)} vis=${document.visibilityState} ${m}`,
-        );
-      };
       if (w.__afRealRaf) {
         window.requestAnimationFrame = w.__afRealRaf;
         window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
@@ -171,12 +162,10 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       }
       const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
       w.__afDeferred?.clear();
-      dbg2(`unpark: replaying ${deferred.length} deferred cbs focus=${focus}`);
       const now = performance.now();
-      deferred.forEach((cb, i) => {
-        dbg2(`unpark: replay cb ${i + 1}/${deferred.length}`);
+      for (const cb of deferred) {
         cb(now);
-      });
+      }
       if (focus) {
         window.dispatchEvent(new Event("focus"));
       }
@@ -184,103 +173,9 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
   // One context, two tabs: bringToFront gives airtight frontmost control — the
   // non-front tab stops getting frames, which is the state under test.
-  // TEMPORARY diagnosis for the CI-only no-focus-unpark failure: log every
-  // outgoing wire frame, every inbound resize echo, every rAF
-  // arm/deliver/cancel, socket lifecycle, and wake-adjacent events into
-  // window.__dbg (attached to the test run).
-  const instrument = (page: Page, label: string): Promise<void> =>
-    page.addInitScript((tag) => {
-      const w = window as unknown as { __dbg?: string[] };
-      w.__dbg = [];
-      const log = (m: string): void => {
-        (w.__dbg as string[]).push(
-          `${(performance.now() / 1000).toFixed(2)} [${tag}] vis=${document.visibilityState} ${m}`,
-        );
-      };
-      const OrigWS = window.WebSocket;
-      const send = WebSocket.prototype.send;
-      WebSocket.prototype.send = function (
-        this: WebSocket,
-        data: string | ArrayBufferLike | Blob | ArrayBufferView,
-      ): void {
-        try {
-          if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-            const b =
-              data instanceof ArrayBuffer
-                ? new Uint8Array(data)
-                : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-            log(
-              `ws.send op=0x${b[0].toString(16).padStart(2, "0")} len=${b.length}` +
-                (b[0] === 2 && b.length >= 5 ? ` dims=${((b[1] << 8) | b[2])}x${((b[3] << 8) | b[4])}` : ""),
-            );
-          }
-        } catch {
-          /* never disturb the send path */
-        }
-        return send.call(this, data);
-      };
-      const WS = function (
-        this: WebSocket,
-        url: string | URL,
-        protocols?: string | string[],
-      ): WebSocket {
-        const ws =
-          protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
-        ws.addEventListener("open", () => log("ws.open"));
-        ws.addEventListener("close", (e) => log(`ws.close code=${(e as CloseEvent).code}`));
-        ws.addEventListener("error", () => log("ws.error"));
-        ws.addEventListener("message", (e) => {
-          try {
-            if (typeof e.data === "string") {
-              const m = JSON.parse(e.data) as { type?: string; rows?: number; cols?: number };
-              if (m.type === "resize") {
-                log(`ws.recv resize ${m.rows}x${m.cols}`);
-              }
-            }
-          } catch {
-            /* logging must never disturb the message path */
-          }
-        });
-        return ws;
-      } as unknown as typeof WebSocket;
-      WS.prototype = OrigWS.prototype;
-      // The ctor wrapper drops WebSocket's readyState statics — production's
-      // `readyState === WebSocket.OPEN` must keep resolving to 1.
-      Object.setPrototypeOf(WS, OrigWS);
-      (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = WS;
-      const origRaf = window.requestAnimationFrame.bind(window);
-      let rafSeq = 0;
-      window.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-        const tag = ++rafSeq;
-        log(`raf arm #${tag}`);
-        return origRaf((ts) => {
-          log(`raf deliver #${tag}`);
-          cb(ts);
-        });
-      };
-      const origCancel = window.cancelAnimationFrame.bind(window);
-      window.cancelAnimationFrame = (id: number): void => {
-        log(`raf cancel id=${id}`);
-        origCancel(id);
-      };
-      window.addEventListener("focus", () => log("event focus"));
-      window.addEventListener("resize", () => log("event resize"));
-      document.addEventListener("visibilitychange", () => log("event visibilitychange"));
-      document.addEventListener(
-        "pointerenter",
-        (e) =>
-          log(
-            `event pointerenter trusted=${e.isTrusted} target=${(e.target as Element)?.className ?? "?"}`,
-          ),
-        true,
-      );
-    }, label);
   const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
-  let first: Page | undefined;
-  let second: Page | undefined;
   try {
-    first = await ctx.newPage();
-    await instrument(first, "first");
+    const first = await ctx.newPage();
     await open(first);
     await attach(first);
     const firstHost = first.locator(".af-term-host");
@@ -299,8 +194,7 @@ test("a parked client reclaims locally but never writes the shared grid", async 
     // The tall peer's first OpResize strands the occluded tab on a grid that
     // cannot be its own — the strand setup #2347 documents. Opening the tab
     // activates it, parking the first — exactly the stranded-page state.
-    second = await ctx.newPage();
-    await instrument(second, "second");
+    const second = await ctx.newPage();
     await second.setViewportSize({ width: 375, height: 2000 });
     await open(second);
     await attach(second);
@@ -319,11 +213,7 @@ test("a parked client reclaims locally but never writes the shared grid", async 
     // in headless — there is no organic parked state to lean on — so park it by
     // cutting frame delivery, then prove the cut took. BOTH cursors go to the
     // appbar corner first: a layout shift under either must not synthesize the
-    // pointerenter no real run of this scenario could see — on `first` a
-    // parked tab has no pointer at all, and on `second` a reflow under the
-    // attach()-left cursor boundary-enters af-pane-host, which (verified in a
-    // CI dbg trace) is a trusted activation that re-asserts the peer's grid
-    // and stomps the flush this leg exists to observe.
+    // pointerenter no real run of this scenario could see (header comment).
     await second.bringToFront();
     await second.mouse.move(1, 1);
     await first.mouse.move(1, 1);
@@ -383,10 +273,10 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
     // Leg B — a second parked cycle, un-hidden WITH the focus event this time:
     // the signal path and the replay path must both converge. The peer's own
-    // viewport resize is what re-strands the re-parked tab. The cursor is still
-    // parked on the appbar from leg A, and the drawer toggle here CLOSES the
-    // drawer — the move that would otherwise drop the pane host under a rail-
-    // row cursor and fire the trusted pointerenter this leg must not see.
+    // viewport resize is what re-strands the re-parked tab. Both cursors are
+    // still parked on the appbar from leg A — the peer's reflow under its own
+    // cursor is what fired the trusted pointerenter and bounced the grid on
+    // the CI run this comment now guards (see the header).
     await park(first);
     await second.setViewportSize({ width: 375, height: 2_200 });
     let peerRows2 = 0;
@@ -421,19 +311,6 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       })
       .toBe(localRows);
   } finally {
-    const dump = async (page: Page | undefined, name: string): Promise<void> => {
-      if (!page) return;
-      try {
-        const dbg = await page.evaluate(
-          () => (window as unknown as { __dbg?: string[] }).__dbg ?? ["no __dbg"],
-        );
-        await test.info().attach(name, { body: dbg.join("\n"), contentType: "text/plain" });
-      } catch {
-        /* page may already be gone */
-      }
-    };
-    await dump(first, "first-dbg");
-    await dump(second, "second-dbg");
     await ctx.close();
     try {
       af("sessions", "kill", sessionName);
