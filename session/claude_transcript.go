@@ -32,9 +32,34 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	transcripts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(launchDir)))
-	if err != nil {
-		return ClaudeProjectConversationState{}, err
+	// Claude names a project after the directory it was launched in. A symlinked
+	// env -C chdir records the link as the launch directory, but on chdir the
+	// kernel resolves it and Claude's getcwd reports the resolved path, so its
+	// transcripts land under the resolved path's project name. Scan both
+	// candidates, matching conversationCarry.locateClaude, so the verifier the
+	// root-agent restore and live poller gate on finds the transcript the carry
+	// feature already knew to look for.
+	launchDirs := []string{launchDir}
+	if resolved, err := filepath.EvalSymlinks(launchDir); err == nil && resolved != launchDir {
+		launchDirs = append(launchDirs, resolved)
+	}
+	// Keep per-candidate transcripts so the fallback can prefer the effective
+	// resolved project. Claude launched through a symlink files under the
+	// resolved-path project name, so it cannot resume a transcript filed under
+	// the raw link-path project; taking the newest across both stores could let
+	// a newer stale link-project transcript win over a valid replacement in the
+	// resolved project. The recorded id is still matched across both
+	// candidates, since af records the link while Claude files under the
+	// resolved path.
+	var transcripts []claudeTranscript
+	perCandidate := make([][]claudeTranscript, len(launchDirs))
+	for i, dir := range launchDirs {
+		ts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(dir)))
+		if err != nil {
+			return ClaudeProjectConversationState{}, err
+		}
+		perCandidate[i] = ts
+		transcripts = append(transcripts, ts...)
 	}
 	conversation := func(id string) AgentConversationData {
 		return AgentConversationData{
@@ -52,7 +77,15 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 		}
 	}
 	state := ClaudeProjectConversationState{}
-	if newest, ok := newestClaudeTranscript(transcripts); ok {
+	// Fallback: prefer the effective (resolved) project's transcripts, since
+	// Claude can only resume transcripts filed under the project it launches
+	// with. Only fall back to the link-path project when the resolved project
+	// has no transcripts.
+	fallback := perCandidate[len(perCandidate)-1]
+	if len(fallback) == 0 && len(perCandidate) > 1 {
+		fallback = perCandidate[0]
+	}
+	if newest, ok := newestClaudeTranscript(fallback); ok {
 		state.Resume = conversation(newest.id)
 	}
 	return state, nil
