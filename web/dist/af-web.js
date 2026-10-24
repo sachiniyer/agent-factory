@@ -7652,9 +7652,272 @@ function canCommit(shown, current) {
 function shouldCloseSavedField(status, editing, statusIsNew) {
   return statusIsNew && status !== null && !status.error && status.key === editing;
 }
+function isListenerExposureWarning(w) {
+  return w.includes("is reachable from the network");
+}
+function listenerExposureIdentity(w) {
+  const m = w.match(/^(\S+) "((?:[^"\\]|\\.)*)"/);
+  if (!m) return "";
+  const addr = goUnquote(m[2]);
+  return `${m[1]} ${addr}`;
+}
+function goUnquote(s) {
+  return s.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)/g, (_m, esc) => {
+    if (esc.startsWith("x")) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("u")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("U")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    switch (esc) {
+      case "n":
+        return "\n";
+      case "t":
+        return "	";
+      case "r":
+        return "\r";
+      case "a":
+        return "\x07";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      case "\\":
+        return "\\";
+      case '"':
+        return '"';
+      default:
+        return esc;
+    }
+  });
+}
+function listenerExposureDedup(writeId, applyId, bindSucceeded, rebindAttempted) {
+  if (writeId === applyId) {
+    return true;
+  }
+  const wSpace = writeId.indexOf(" ");
+  const aSpace = applyId.indexOf(" ");
+  if (wSpace < 0 || aSpace < 0) {
+    return false;
+  }
+  if (writeId.slice(0, wSpace) !== applyId.slice(0, aSpace)) {
+    return false;
+  }
+  const wAddr = splitListenHostPort(writeId.slice(wSpace + 1));
+  const aAddr = splitListenHostPort(applyId.slice(aSpace + 1));
+  if (!wAddr || !aAddr) {
+    return false;
+  }
+  const wHost = normalizeListenHost(wAddr.host, bindSucceeded && rebindAttempted);
+  const aHost = normalizeListenHost(aAddr.host, bindSucceeded && rebindAttempted);
+  if (wHost !== aHost) {
+    if (!(bindSucceeded && rebindAttempted && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
+      return false;
+    }
+  }
+  const wPort = normalizeListenPort(wAddr.port);
+  const aPort = normalizeListenPort(aAddr.port);
+  if (wPort === aPort) {
+    return true;
+  }
+  if (bindSucceeded && rebindAttempted && aPort !== "0" && isDecimalPort(aPort)) {
+    if (wPort === "0" || !isDecimalPort(wPort)) {
+      return true;
+    }
+  }
+  return false;
+}
+function isListenHostLiteral(host) {
+  if (host.includes(":")) {
+    return true;
+  }
+  const octets = host.split(".");
+  if (octets.length !== 4) return false;
+  return octets.every((o) => /^(0|[1-9]\d{0,2})$/.test(o) && Number(o) <= 255);
+}
+function splitListenHostPort(addr) {
+  if (addr.startsWith("[")) {
+    const close = addr.indexOf("]");
+    if (close < 0) return null;
+    const after = addr.slice(close + 1);
+    if (!after.startsWith(":")) return null;
+    return { host: addr.slice(1, close), port: after.slice(1) };
+  }
+  const colon = addr.lastIndexOf(":");
+  if (colon < 0) return null;
+  return { host: addr.slice(0, colon), port: addr.slice(colon + 1) };
+}
+function normalizeListenHost(host, bindSucceeded) {
+  if (host === "") {
+    return bindSucceeded ? "0.0.0.0" : "";
+  }
+  if (host.includes(":")) {
+    const v6 = canonicalizeIPv6Host(host, bindSucceeded);
+    if (v6 === "::") {
+      return bindSucceeded ? "0.0.0.0" : "::";
+    }
+    return v6;
+  }
+  return host;
+}
+function canonicalizeIPv6Host(host, bindSucceeded) {
+  let zone = "";
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    zone = host.slice(pct);
+    host = host.slice(0, pct);
+    if (zone === "%") return host + zone;
+  }
+  const groups = parseIPv6Groups(host);
+  if (groups === null) {
+    return host + zone;
+  }
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 65535) {
+    const hi = groups[6];
+    const lo = groups[7];
+    const ipv4 = `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
+    if (ipv4 === "0.0.0.0" && !bindSucceeded) {
+      return "::ffff:0.0.0.0";
+    }
+    return ipv4;
+  }
+  let bestStart = -1;
+  let bestLen = 0;
+  let curStart = -1;
+  let curLen = 0;
+  for (let i2 = 0; i2 < 8; i2++) {
+    if (groups[i2] === 0) {
+      if (curStart < 0) curStart = i2;
+      curLen++;
+      if (curLen > bestLen) {
+        bestLen = curLen;
+        bestStart = curStart;
+      }
+    } else {
+      curStart = -1;
+      curLen = 0;
+    }
+  }
+  if (bestLen < 2) bestStart = -1;
+  const parts = [];
+  let i = 0;
+  while (i < 8) {
+    if (bestStart >= 0 && i === bestStart) {
+      if (bestStart === 0) parts.push("");
+      parts.push("");
+      i += bestLen;
+      if (i === 8) parts.push("");
+    } else {
+      parts.push(groups[i].toString(16));
+      i++;
+    }
+  }
+  const canonical = parts.join(":");
+  if (canonical === "::") {
+    return canonical;
+  }
+  return canonical + zone;
+}
+function parseIPv6Groups(host) {
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    host = host.slice(0, pct);
+  }
+  const dbl = host.indexOf("::");
+  if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
+  let head;
+  let tail;
+  let ipv4Groups = null;
+  if (dbl < 0) {
+    const parts = host.split(":");
+    if (parts.length > 0 && parts[parts.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(parts[parts.length - 1]);
+      if (ipv4Groups === null) return null;
+      if (parts.length !== 7) return null;
+      head = parts.slice(0, 6);
+      tail = [];
+    } else {
+      if (parts.length !== 8) return null;
+      head = parts;
+      tail = [];
+    }
+  } else {
+    const h2 = host.slice(0, dbl);
+    const t = host.slice(dbl + 2);
+    head = h2 === "" ? [] : h2.split(":");
+    tail = t === "" ? [] : t.split(":");
+    if (tail.length > 0 && tail[tail.length - 1].includes(".")) {
+      ipv4Groups = parseIPv4Embedded(tail[tail.length - 1]);
+      if (ipv4Groups === null) return null;
+      tail = tail.slice(0, -1);
+      if (head.length + tail.length + 2 >= 8) return null;
+    } else {
+      if (head.length + tail.length >= 8) return null;
+    }
+  }
+  const groups = new Array(8).fill(0);
+  for (let i = 0; i < head.length; i++) {
+    const g = parseHexGroup(head[i]);
+    if (g < 0) return null;
+    groups[i] = g;
+  }
+  const tailStart = ipv4Groups !== null ? 6 - tail.length : 8 - tail.length;
+  for (let i = 0; i < tail.length; i++) {
+    const g = parseHexGroup(tail[i]);
+    if (g < 0) return null;
+    groups[tailStart + i] = g;
+  }
+  if (ipv4Groups !== null) {
+    groups[6] = ipv4Groups[0];
+    groups[7] = ipv4Groups[1];
+  }
+  return groups;
+}
+function parseIPv4Embedded(s) {
+  const octets = s.split(".");
+  if (octets.length !== 4) return null;
+  const vals = [];
+  for (const o of octets) {
+    if (!/^(0|[1-9]\d{0,2})$/.test(o) || Number(o) > 255) return null;
+    vals.push(Number(o));
+  }
+  return [vals[0] << 8 | vals[1], vals[2] << 8 | vals[3]];
+}
+function parseHexGroup(s) {
+  if (!/^[0-9a-fA-F]{1,4}$/.test(s)) return -1;
+  return parseInt(s, 16);
+}
+function normalizeListenPort(port) {
+  if (isDecimalPort(port)) {
+    return String(Number(port));
+  }
+  return port;
+}
+function isDecimalPort(port) {
+  return port === "" || /^[ \t\n\r\f\v]*[+-]?\d+$/.test(port);
+}
+function listenerRebindFailedFor(warnings, listenerKey) {
+  const prefix = "apply " + listenerKey + " ";
+  return warnings.some((w) => w.startsWith(prefix));
+}
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  const writeWarnings = resp.result.warnings ?? [];
+  const applyWarnings = resp.warnings ?? [];
+  const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => {
+    if (applyWarnings.includes(w)) {
+      return false;
+    }
+    if (isListenerExposureWarning(w)) {
+      const id = listenerExposureIdentity(w);
+      const wKey = id.indexOf(" ") >= 0 ? id.slice(0, id.indexOf(" ")) : "";
+      const rebindSucceeded = resp.apply_outcome === "applied" && !listenerRebindFailedFor(applyWarnings, wKey);
+      const rebindAttempted = resp.result.key === wKey;
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded, rebindAttempted))) {
+        return false;
+      }
+    }
+    return true;
+  })] : writeWarnings;
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
