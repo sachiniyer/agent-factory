@@ -10777,8 +10777,8 @@ var AttachTerminal = class {
       } catch {
         return false;
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    this.sendResize(this.term.rows, this.term.cols, false);
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
     return true;
@@ -10847,9 +10847,17 @@ var AttachTerminal = class {
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A hidden page never writes the shared grid at all: its fit still runs so
+   *  xterm's DOM stays honest, but with no user present a resize cannot be an
+   *  activation — and a scheduled attempt reaching it via the timer twin must
+   *  never steal a live visible peer's grid. lastRows/lastCols stay stale on a
+   *  suppressed send; that divergence is what the first visible fit converges. */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {

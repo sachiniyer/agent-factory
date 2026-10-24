@@ -19,9 +19,11 @@ function stage() {
   };
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
-    pendingViewport: null,
+    pendingViewport: null, lastRows: 0, lastCols: 0,
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0,
-    sendResize: () => calls.push("resize"),
+    // The real sendResize runs so its dedupe and hidden-page write guard are
+    // exercised; only the socket write is stubbed.
+    send: () => (calls.push("resize"), true),
     connect: () => calls.push("connect"),
   }) as {
     fitVisibleHost(): void;
@@ -31,8 +33,10 @@ function stage() {
     visibleFitFrame: number | null;
     visibleFitTimer: number | null;
     visibleFitAttempts: number;
+    lastRows: number;
+    lastCols: number;
   };
-  return { terminal, host, fit, calls };
+  return { terminal, host, term, fit, calls };
 }
 
 /** A fake `window` for the scheduled-fit path: its rAF queues callbacks for
@@ -120,6 +124,62 @@ test("a scheduled fit that cannot yet measure retries instead of stranding", () 
     assert.deepEqual(calls, ["fit", "resize"]);
   } finally {
     win.restore();
+  }
+});
+
+// The timer twin delivers a scheduled fit even on a document-hidden page — but
+// a hidden page must never write the shared PTY grid: with no user present its
+// resize cannot be an activation, and it must never steal a live visible peer's
+// grid. The fit still runs locally so xterm's DOM is honest when the page next
+// shows; the suppressed write stays owed via lastRows/lastCols divergence.
+test("a hidden page's scheduled fit reclaims locally but never writes the grid", async () => {
+  const win = stubWindow();
+  const prior = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { visibilityState: "hidden" };
+  try {
+    const { terminal, term, calls } = stage();
+    // A peer's 300x50 echo owns the grid: term follows it, and lastRows/lastCols
+    // record that the daemon's size came from the peer — this client is inactive.
+    Object.assign(term, { rows: 300, cols: 50 });
+    terminal.lastRows = 300;
+    terminal.lastCols = 50;
+    terminal.scheduleVisibleFit();
+    win.runTimer(); // rAF is dead on a hidden page; only the timer delivers
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect"]);
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+    // Nothing was written: the daemon's grid is still the peer's.
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [300, 50]);
+  } finally {
+    win.restore();
+    (globalThis as { document?: unknown }).document = prior;
+  }
+});
+
+test("the first fit after the page shows again flushes the resize a hidden fit owed", async () => {
+  const win = stubWindow();
+  const doc = { visibilityState: "hidden" };
+  const prior = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = doc;
+  try {
+    const { terminal, term, calls } = stage();
+    Object.assign(term, { rows: 300, cols: 50 });
+    terminal.lastRows = 300;
+    terminal.lastCols = 50;
+    terminal.scheduleVisibleFit();
+    win.runTimer();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "connect"]);
+    doc.visibilityState = "visible";
+    terminal.scheduleVisibleFit();
+    win.runFrame();
+    await Promise.resolve();
+    // xterm needed no refit — the send is purely the owed convergence flush.
+    assert.deepEqual(calls, ["fit", "connect", "resize"]);
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+  } finally {
+    win.restore();
+    (globalThis as { document?: unknown }).document = prior;
   }
 });
 

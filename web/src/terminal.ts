@@ -1601,8 +1601,13 @@ export class AttachTerminal {
       } catch {
         return false; // detached between proposal and fit
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    // Deduped internally: a no-op when the PTY already knows this grid. The
+    // important case is a grid that diverged while this page was hidden — a
+    // hidden fit is local-only (sendResize refuses the wire write), so the
+    // first fit after this page shows again must flush the owed resize even
+    // when xterm itself needed no refit.
+    this.sendResize(this.term.rows, this.term.cols, false);
     // A second peer can already have returned xterm to this host's local grid. No
     // fit is needed in that case, but its reflow still displaced the saved line.
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
@@ -1680,9 +1685,17 @@ export class AttachTerminal {
   }
 
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A hidden page never writes the shared grid at all: its fit still runs so
+   *  xterm's DOM stays honest, but with no user present a resize cannot be an
+   *  activation — and a scheduled attempt reaching it via the timer twin must
+   *  never steal a live visible peer's grid. lastRows/lastCols stay stale on a
+   *  suppressed send; that divergence is what the first visible fit converges. */
   private sendResize(rows: number, cols: number, force: boolean): void {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
