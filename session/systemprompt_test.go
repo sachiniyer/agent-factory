@@ -1,12 +1,15 @@
 package session
 
 import (
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -364,6 +367,133 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	if got := injectSystemPrompt(arg, skillTarget{}); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
+}
+
+// TestInjectSystemPrompt_OpencodeRespectsExportedConfigEnv pins the env channel
+// of the user-supplied-config guard — the second of the two channels
+// opencodeCarriesConfigEnv does NOT cover, because that helper inspects only the
+// resolved command string and the env channel travels out-of-band.
+//
+// A user who exports OPENCODE_CONFIG in their shell has that value delivered to
+// the pane by the opencode allowlist (internal/sessionenv). Despite that, before
+// this fix af unconditionally prepended its own `OPENCODE_CONFIG=<af-config>` to
+// the resolved command, and a POSIX command-prefix assignment SHADOWS an
+// already-exported variable of the same name — so opencode silently saw only af's
+// path and the user's config file was never read, with no log on either side.
+// (This is the case the guard's doc says it prevents: af must "say the guidance
+// did not land rather than leaving that silent".)
+//
+// The fix: in the opencode branch, also treat a non-empty os.Getenv("OPENCODE_CONFIG")
+// as "user already provided config" and skip injection, mirroring the in-command
+// case. SandboxHome (session's TestMain) unsets OPENCODE_CONFIG, so the env channel
+// is unreachable by default; this test re-sets it explicitly.
+func TestInjectSystemPrompt_OpencodeRespectsExportedConfigEnv(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	userCfg := "/home/me/mine.jsonc"
+	t.Setenv("OPENCODE_CONFIG", userCfg)
+
+	// Capture the INFO log so the "af says the guidance did not land" half of
+	// the contract is locked alongside the behavioral suppression. The other
+	// half — that the user's value is what reaches opencode — is the pane
+	// env seam (internal/sessionenv), covered by exec_unix_test.go's allowlist
+	// assertions; here we only assert af does not shadow it.
+	info := captureOpencodeInfoLog(t)
+
+	// Every resolved shape must come back VERBATIM: with OPENCODE_CONFIG
+	// exported, af must not prepend its own. The case set is intentionally
+	// larger than TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv's
+	// command-string cases, because the env channel must short-circuit the
+	// argument-mention case too (a user's export shadows whatever the prompt
+	// says).
+	for _, resolved := range []string{
+		"opencode",
+		"/home/me/.opencode/bin/opencode",
+		"/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5",
+		// A bare mention is NOT an in-command assignment, but the env channel
+		// already says the user named their own config — af must not shadow it.
+		"opencode --prompt 'set OPENCODE_CONFIG=x'",
+		// Both channels set: the redundant-but-harmless shape (env AND in-command
+		// assignment) must also short-circuit on either trigger.
+		"OPENCODE_CONFIG=/home/me/other.jsonc opencode",
+		"env OPENCODE_CONFIG=/home/me/other.jsonc opencode",
+	} {
+		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+			t.Errorf("with OPENCODE_CONFIG=%q exported, expected %q returned unchanged (env channel); af shadowed it to %q",
+				userCfg, resolved, got)
+		}
+	}
+
+	// af must SAY it skipped — the bug it was masking was silent on both sides.
+	// Strict prefix-match the long-lived phrasing so a wording tweak does not
+	// silently drop the "already has / leaving it alone" contract.
+	out := info.String()
+	if !strings.Contains(out, "opencode already has OPENCODE_CONFIG") {
+		t.Errorf("expected an INFO log noting OPENCODE_CONFIG was left alone; got %q", out)
+	}
+	if !strings.Contains(out, "not injected for opencode") {
+		t.Errorf("expected the INFO log to say the af guidance was not injected; got %q", out)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents pins
+// that the env-channel guard fires ONLY in the opencode branch: a non-empty
+// OPENCODE_CONFIG in the environment is irrelevant to every other agent (af
+// injects only the OPENCODE_CONFIG name; it does not touch claude/aider/etc.'s
+// flags), so those branches must not notice it. Without this guard, narrowing
+// future refactor could accidentally hoist `os.Getenv("OPENCODE_CONFIG")` up to
+// the switch dispatch and drop af's flag from every agent when the user exports
+// OPENCODE_CONFIG for their opencode sessions.
+func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCODE_CONFIG", "/home/me/mine.jsonc")
+
+	tests := []struct {
+		name     string
+		resolved string
+		wantSub  string
+	}{
+		{"claude still gets --plugin-dir", "claude", "--plugin-dir"},
+		{"aider still gets --read", "aider", "--read"},
+		// File-seam agents come back unchanged, but injection must still RUN
+		// (i.e. the seam must execute): capture that by giving them a HOME so
+		// their file write lands, and asserting the resolved command is
+		// preserved verbatim — the file is the seam, not the command.
+		{"codex unchanged (file seam)", "codex", ""},
+		{"gemini unchanged (file seam)", "gemini", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectSystemPrompt(tt.resolved, skillTarget{})
+			if tt.wantSub == "" {
+				if got != tt.resolved {
+					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantSub) {
+				t.Errorf("expected %q in the %q injection (env guard must NOT fire for non-opencode agents); got %q",
+					tt.wantSub, tt.resolved, got)
+			}
+			if strings.Contains(got, "OPENCODE_CONFIG=") {
+				t.Errorf("OPENCODE_CONFIG leaked into a non-opencode (%q) injection: %q",
+					tt.resolved, got)
+			}
+		})
+	}
+}
+
+// captureOpencodeInfoLog redirects log.InfoLog to a buffer for the duration of
+// the test and returns the buffer. Restoration happens via t.Cleanup. It mirrors
+// captureWarningLog in backend_test.go.
+func captureOpencodeInfoLog(t *testing.T) *logtest.Buffer {
+	t.Helper()
+	var buf logtest.Buffer
+	orig := log.InfoLog
+	log.InfoLog = stdlog.New(&buf, "INFO: ", 0)
+	t.Cleanup(func() { log.InfoLog = orig })
+	return &buf
 }
 
 // TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles keeps the marker guard
