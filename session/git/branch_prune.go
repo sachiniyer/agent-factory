@@ -106,8 +106,16 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	if bareProbe {
 		// repositoryPathEnvironment stripped any inherited GIT_DIR; pin Git to
 		// repoRoot so the bare fall-through probes exactly this directory and
-		// cannot discover an enclosing repo.
-		repoEnv = append(repoEnv, "GIT_DIR="+repoRoot)
+		// cannot discover an enclosing repo. Pin to an ABSOLUTE path: a relative
+		// repoRoot (the relative-path handling in worktree_git.go supports one)
+		// combined with `git -C repoRoot` would resolve a relative GIT_DIR under
+		// the -C directory, looking up `<repoRoot>/<repoRoot>` and failing the
+		// probe for a branch that verifiably exists.
+		absRepoRoot, err := filepath.Abs(repoRoot)
+		if err != nil {
+			return false, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+		}
+		repoEnv = append(repoEnv, "GIT_DIR="+absRepoRoot)
 	}
 	check := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	check.Env = repoEnv
@@ -190,16 +198,24 @@ func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 	if !exists {
 		return false, nil
 	}
-	// Sanitize the delete's environment to match the probe above: an ambient
-	// GIT_DIR/GIT_COMMON_DIR inherited from a hook would override `-C` and
-	// redirect this destructive command at a foreign repository whose
-	// same-named branch the probe never inspected — silently deleting a branch
-	// AF never created while the intended branch survives and (true, nil) is
-	// still reported (cf. worktree_remove_bounded.go). The probe's
-	// sanitized-env verdict is only meaningful if the delete runs under the
-	// same environment that produced it.
+	// The deletion must run with the same sanitized environment as the
+	// existence probe above: repositoryPathEnvironment strips an inherited
+	// GIT_DIR (a hook-launched daemon could otherwise redirect `git branch -D`
+	// at a foreign repo and delete a same-named branch there while the intended
+	// branch sits untouched), and a bare root pins GIT_DIR (absolute, matching
+	// the probe) so the deletion acts on the bare root and not an enclosing
+	// repo. A bare root has no .git child, so `git -C repoRoot branch -D`
+	// without the pin would discover an enclosing repo and delete there.
+	delEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	if _, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr != nil && os.IsNotExist(statErr) && bareMetadataDirectory(repoRoot) {
+		absRepoRoot, err := filepath.Abs(repoRoot)
+		if err != nil {
+			return false, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+		}
+		delEnv = append(delEnv, "GIT_DIR="+absRepoRoot)
+	}
 	del := exec.Command("git", "-C", repoRoot, "branch", "-D", branch)
-	del.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	del.Env = delEnv
 	if out, err := del.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, string(out))
 	}

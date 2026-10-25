@@ -490,6 +490,56 @@ func TestDeleteLocalBranch_BareCloneExistingBranchIsDeleted(t *testing.T) {
 	assert.False(t, refExists(t, bare, "af-bare"))
 }
 
+// refExistsGitDir asks git directly (bypassing the code under test and any
+// ambient GIT_DIR inherited via t.Setenv) whether a branch resolves in the repo
+// whose git dir is `gitDir` (a bare root, or a non-bare repo's `.git`).
+func refExistsGitDir(t *testing.T, gitDir, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir", gitDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+// TestDeleteLocalBranch_BareCloneIgnoresAmbientGitDir pins the deletion-side
+// counterpart of TestLocalBranchExists_IgnoresAmbientGitDir: a GIT_DIR inherited
+// by the daemon (a process launched inside a hook, say) must not redirect
+// `git branch -D` at a foreign repository that coincidentally holds the branch
+// name. The existence probe already strips and re-pins GIT_DIR; the deletion
+// must run with the same sanitized environment, or a same-named branch in the
+// foreign repo is deleted while the intended bare branch survives and the reset
+// reports success.
+func TestDeleteLocalBranch_BareCloneIgnoresAmbientGitDir(t *testing.T) {
+	bare := bareCloneRepo(t, "af-shared-name")
+	foreign := branchRepo(t, "af-shared-name")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	deleted, err := DeleteLocalBranch(bare, "af-shared-name")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExistsGitDir(t, bare, "af-shared-name"),
+		"the bare origin's branch must be the one deleted")
+	assert.True(t, refExistsGitDir(t, filepath.Join(foreign, ".git"), "af-shared-name"),
+		"the ambient GIT_DIR repo's branch must never be touched by the deletion")
+}
+
+// TestDeleteLocalBranch_NestedBareRootNeverDeletesEnclosingRepo pins the
+// deletion-side counterpart of TestLocalBranchExists_DeGittedNestedRootNeverProbesEnclosingBareRepo:
+// a bare root nested inside another repo must not let `git branch -D` discover
+// the enclosing repo and delete its same-named branch. The bare pin (GIT_DIR
+// pinned to the bare root) keeps the deletion scoped to the recorded root.
+func TestDeleteLocalBranch_NestedBareRootNeverDeletesEnclosingRepo(t *testing.T) {
+	parent := branchRepo(t, "af-shared-name")
+	bare := filepath.Join(parent, "bare.git")
+	runGit(t, parent, "clone", "-q", "--bare", parent, bare)
+
+	deleted, err := DeleteLocalBranch(bare, "af-shared-name")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExistsGitDir(t, bare, "af-shared-name"),
+		"the bare root's branch must be deleted")
+	assert.True(t, refExists(t, parent, "af-shared-name"),
+		"the enclosing repo's branch must never be deleted through a nested bare root")
+}
+
 // TestLocalBranchExists_DeGittedNonBareRootIsDeterminateAbsence pins the arm
 // the bare-aware change MUST NOT regress: a non-bare root whose .git was
 // removed is STILL determinate absence. The bare layout check is required to
