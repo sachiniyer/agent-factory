@@ -762,8 +762,17 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "cat", "/proc/self/mountinfo")
 	if err != nil {
-		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %s: %w", strings.TrimSpace(string(out)), err))
-	} else if targets, perr := parseMountinfoTargets(out); perr != nil {
+		// Creating the exec's state is a daemon-side data-root write, so
+		// this failure can be capacity — carry a write-capable class so the
+		// provision boundary can join the fs verdict, unlike the local
+		// refusals around it (#5382 review). Returning early mirrors the
+		// unreadable-source rule above: a check that could not see has
+		// nothing to add, and a real refusal re-surfaces on the next
+		// attempt.
+		return dockerStepErr(fmt.Errorf("cannot read the container's resolved mount table: %s: %w",
+			strings.TrimSpace(string(out)), err), dockerOpRootExec)
+	}
+	if targets, perr := parseMountinfoTargets(out); perr != nil {
 		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %w", perr))
 	} else {
 		findings = append(findings, verifyResolvedAccountBoundary(targets, configured, source))

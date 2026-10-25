@@ -720,6 +720,12 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 		args = append(args, p.containerID, "cat", dockerBannerPath)
 		out, err := p.docker(dockerShortStepTimeout, args...)
 		if err == nil {
+			// A successful exec is the latest poll outcome even when the
+			// banner content is not JSON yet — only the most recent
+			// attempt may classify the timeout, so a stale exec error from
+			// an early race cannot lend the verdict to a later structural
+			// timeout (#5382 review).
+			lastExecErr = nil
 			var b dockerBanner
 			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
@@ -735,15 +741,18 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 			bannerErr := fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
 			if lastExecErr == nil {
-				// Every banner read ran fine and the answer still never
-				// arrived — a server-side startup problem, not a data-root
-				// write. Keep the fs verdict off it.
+				// The latest banner read ran fine and the answer still
+				// never arrived — a server-side startup problem, not a
+				// data-root write. Keep the fs verdict off it.
 				return dockerBanner{}, dockerStepErr(bannerErr, dockerOpLocal)
 			}
-			// The reads themselves were failing — `docker exec` records
-			// state under the data root, so a full engine breaks exactly
-			// this call. Classify with the daemon's own write privilege.
-			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpDaemonWrite)
+			// The reads themselves were failing. The failure can be the
+			// daemon's own exec-state write, but it can also be the session
+			// user's banner/log redirects hitting a full fs (the banner is
+			// never created, so cat keeps failing) — classify with the
+			// session writer's privilege so the Bavail window is seen too
+			// (#5382 review).
+			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpSessionExec)
 		}
 		// The poll interval bounds how long we can outrun the deadline; use a
 		// non-wall-clock sleep so it is deterministic under test time control.
