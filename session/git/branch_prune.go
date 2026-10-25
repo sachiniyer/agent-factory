@@ -59,15 +59,32 @@ import (
 // consistent with absence (no loose file; the reftable stub makes refs/heads
 // itself a file); a present file, a failed stat, or a failed common-dir
 // resolution returns the error.
+// LocalBranchExists reports whether `branch` exists as a local ref in the repo
+// at `repoRoot`. See localBranchExists for the determinate-absence contract; this
+// wrapper drops the bare-layout flag the destructive path (DeleteLocalBranch)
+// reuses to keep its `git branch -D` pinned to the same repo the probe verified.
 func LocalBranchExists(repoRoot, branch string) (bool, error) {
+	exists, _, err := localBranchExists(repoRoot, branch)
+	return exists, err
+}
+
+// localBranchExists is the probe LocalBranchExists wraps. It returns the
+// existence verdict, the bare-layout flag the probe computed (`bare` is true only
+// when the repoRoot had no .git child and bareMetadataDirectory recognized the
+// bare layout, so the probe pinned GIT_DIR to repoRoot), and any error. The
+// `bare` flag is preserved for DeleteLocalBranch so the deletion runs against the
+// same repo the probe verified instead of recomputing the layout — a recompute
+// is fail-open (a bare root that loses HEAD/objects/refs between probe and
+// delete would read as non-bare and let `git -C` discover an enclosing repo).
+func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 	if repoRoot == "" || branch == "" {
-		return false, nil
+		return false, false, nil
 	}
 	if _, err := os.Stat(repoRoot); err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, fmt.Errorf("stat repo %s: %w", repoRoot, err)
+		return false, false, fmt.Errorf("stat repo %s: %w", repoRoot, err)
 	}
 	// .git is a directory in a main worktree and a file in a linked one; Stat
 	// accepts either. A bare repository has NO .git child — its metadata lives
@@ -86,16 +103,15 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	// not accept as bare then errors (a failed probe, never absence) instead of
 	// reaching a parent.
 	gitPath := filepath.Join(repoRoot, ".git")
-	bareProbe := false
 	if _, err := os.Stat(gitPath); err != nil {
 		if !os.IsNotExist(err) {
-			return false, fmt.Errorf("stat %s: %w", gitPath, err)
+			return false, false, fmt.Errorf("stat %s: %w", gitPath, err)
 		}
 		if !bareMetadataDirectory(repoRoot) {
-			return false, nil
+			return false, false, nil
 		}
 		// Bare origin: refs live at the root; fall through to show-ref.
-		bareProbe = true
+		bare = true
 	}
 	// Repository-selector variables (GIT_DIR, GIT_WORK_TREE, …) inherited from
 	// a daemon launched inside a hook would redirect the probe at a foreign
@@ -103,7 +119,7 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	// (worktree_remove_bounded.go). A foreign repo coincidentally holding the
 	// branch would fabricate a recovery handle that does not exist here.
 	repoEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
-	if bareProbe {
+	if bare {
 		// repositoryPathEnvironment stripped any inherited GIT_DIR; pin Git to
 		// repoRoot so the bare fall-through probes exactly this directory and
 		// cannot discover an enclosing repo. Pin to an ABSOLUTE path: a relative
@@ -113,7 +129,7 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		// probe for a branch that verifiably exists.
 		absRepoRoot, err := filepath.Abs(repoRoot)
 		if err != nil {
-			return false, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+			return false, bare, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
 		}
 		repoEnv = append(repoEnv, "GIT_DIR="+absRepoRoot)
 	}
@@ -121,9 +137,9 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	check.Env = repoEnv
 	var stderr bytes.Buffer
 	check.Stderr = &stderr
-	err := check.Run()
+	err = check.Run()
 	if err == nil {
-		return true, nil
+		return true, bare, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
@@ -140,7 +156,7 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		common.Stdout = &commonOut
 		common.Stderr = &commonErr
 		if err := common.Run(); err != nil {
-			return false, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
+			return false, bare, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
 				repoRoot, err, strings.TrimSpace(commonErr.String()))
 		}
 		// Strip ONLY the terminating newline: a --separate-git-dir path may
@@ -156,16 +172,16 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		fi, statErr := os.Lstat(loose)
 		switch {
 		case statErr == nil && fi.IsDir():
-			return false, nil
+			return false, bare, nil
 		case statErr == nil:
-			return false, fmt.Errorf("git reports no ref refs/heads/%s in %s, but a loose ref file is present at %s and could not be read as a ref", branch, repoRoot, loose)
+			return false, bare, fmt.Errorf("git reports no ref refs/heads/%s in %s, but a loose ref file is present at %s and could not be read as a ref", branch, repoRoot, loose)
 		case os.IsNotExist(statErr) || errors.Is(statErr, syscall.ENOTDIR):
-			return false, nil
+			return false, bare, nil
 		default:
-			return false, fmt.Errorf("stat %s: %w", loose, statErr)
+			return false, bare, fmt.Errorf("stat %s: %w", loose, statErr)
 		}
 	}
-	return false, fmt.Errorf("git show-ref refs/heads/%s in %s: %w: %s",
+	return false, bare, fmt.Errorf("git show-ref refs/heads/%s in %s: %w: %s",
 		branch, repoRoot, err, strings.TrimSpace(stderr.String()))
 }
 
@@ -191,7 +207,15 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 // of merge state, which is intended: AF session branches may be unmerged work
 // the reset is deliberately discarding.
 func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
-	exists, err := LocalBranchExists(repoRoot, branch)
+	// Reuse the probe's bare-layout determination rather than recomputing it
+	// here: a second `os.Stat(<repoRoot>/.git)` + `bareMetadataDirectory` pass
+	// is fail-open if the bare metadata is lost between the probe and the
+	// delete (HEAD/objects/refs renamed or removed), which would drop the
+	// GIT_DIR pin and let `git -C repoRoot branch -D` discover an enclosing
+	// repo and force-delete a same-named parent branch while the intended bare
+	// ref survives. The probe already established the repo's layout; preserve
+	// that identity for the deletion.
+	exists, bare, err := localBranchExists(repoRoot, branch)
 	if err != nil {
 		return false, fmt.Errorf("cannot establish whether branch %s exists in %s: %w", branch, repoRoot, err)
 	}
@@ -207,7 +231,7 @@ func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 	// repo. A bare root has no .git child, so `git -C repoRoot branch -D`
 	// without the pin would discover an enclosing repo and delete there.
 	delEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
-	if _, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr != nil && os.IsNotExist(statErr) && bareMetadataDirectory(repoRoot) {
+	if bare {
 		absRepoRoot, err := filepath.Abs(repoRoot)
 		if err != nil {
 			return false, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
