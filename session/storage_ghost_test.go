@@ -702,6 +702,45 @@ func TestSaveInstances_CorruptInstancesJsonStillOverwritten_RealState(t *testing
 	assert.Equal(t, "alive", data[0].Title)
 }
 
+// TestSaveInstances_NewerSchemaInstancesJsonRefusedNotOverwritten is the
+// version-skewed companion to the corrupt-file carve-out. A newer af's
+// instances.json carries a schema_version this binary cannot read, and
+// config.GetInstances returns *config.UnsupportedSchemaVersionError. The raw
+// file remains readable, so without an explicit refusal the corrupt-but-
+// readable overwrite branch would clobber it with this binary's older
+// snapshot — discarding fields and ghost rows the newer af wrote and
+// regressing the previous archive-reconciliation path, which propagated every
+// read error (#4783). The checkpoint must propagate the error and leave the
+// file untouched; the remedy is to upgrade, not to repair.
+func TestSaveInstances_NewerSchemaInstancesJsonRefusedNotOverwritten(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	repoID := config.RepoIDFromRoot(repoPath)
+
+	// Plant a newer-schema instances.json on the real filesystem. The
+	// envelope carries a schema_version this binary does not understand, so
+	// config.LoadRepoInstances returns *config.UnsupportedSchemaVersionError
+	// while the raw bytes remain perfectly readable.
+	path, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	newerSchema := []byte(`{"schema_version": 99, "instances": []}`)
+	require.NoError(t, os.WriteFile(path, newerSchema, 0o644))
+
+	alive := makeAliveInstance("alive", repoPath)
+	storage, err := NewStorage(config.LoadState(), "")
+	require.NoError(t, err)
+	err = storage.SaveInstances([]*Instance{alive})
+	require.Error(t, err, "SaveInstances must refuse to overwrite a newer-schema "+
+		"instances.json rather than clobbering it with this binary's older snapshot (#4783)")
+
+	// The newer-schema file must survive the refused checkpoint verbatim.
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr, "the newer-schema file must not have been touched")
+	assert.JSONEq(t, string(newerSchema), string(got),
+		"the newer-schema file must be left untouched when the checkpoint refuses it")
+}
+
 // TestSaveInstances_GhostInSeparateRepoLeftUntouched verifies cross-repo
 // isolation: a ghost in a repo the daemon holds no in-memory instance for is
 // left untouched (the repo is absent from grouped and never iterated), while a

@@ -1,5 +1,12 @@
 package session
 
+import (
+	"errors"
+	"os"
+
+	"github.com/sachiniyer/agent-factory/config"
+)
+
 // isLegacyTransientGhostRow identifies disposable projections, not sessions.
 // Older binaries could strand Loading/Deleting rows on disk and every create
 // path deliberately treats them as overwritable (#551): backfilling through
@@ -90,4 +97,30 @@ func preserveUnmaterializedGhostRows(
 		group = append(group, d)
 	}
 	return group
+}
+
+// checkpointReadError classifies the error from a checkpoint's on-disk read of
+// a repo's instances.json. It returns the error to propagate, or nil when the
+// checkpoint may proceed by overwriting the file from authoritative memory.
+//
+// A newer-schema instances.json is a hard refusal, not a repair candidate:
+// this binary cannot read it, so overwriting would discard fields and ghost
+// rows a newer af wrote (#4783). The remedy is to upgrade, not to clobber, and
+// the previous archive-reconciliation path propagated every read error —
+// preserve that refusal for the version-skewed handoff rather than routing it
+// through the corrupt-but-readable overwrite below.
+//
+// A corrupt-but-readable file falls back to overwrite (#938 sole-writer
+// contract): the daemon repairs it from the authoritative in-memory snapshot.
+// A genuine I/O/read failure propagates so the checkpoint does not clobber
+// ghosts it cannot read (#766).
+func checkpointReadError(readErr error, path string) error {
+	var newer *config.UnsupportedSchemaVersionError
+	if errors.As(readErr, &newer) {
+		return readErr
+	}
+	if _, ioErr := os.ReadFile(path); ioErr == nil {
+		return nil
+	}
+	return readErr
 }
