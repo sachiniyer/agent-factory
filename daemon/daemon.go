@@ -347,6 +347,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return err
 	}
 
+	// The task-delivery shutdown classifier (#5503) needs this daemon's drain
+	// state; install it as soon as the lifecycle exists so a run already in
+	// flight when drainDaemon marks quiescing classifies its transport error
+	// as aborted rather than errored. Restored on return so a later in-process
+	// caller (tests) sees the inert default again.
+	daemonDrainingFn = func() bool { return manager.lifecycle.isQuiescing() }
+	defer func() { daemonDrainingFn = func() bool { return false } }()
+
 	// Stop every daemon-spawned VS Code editor on the way out. Without this a
 	// shutdown would strand a code-server per session, still holding its loopback
 	// port and now reachable by nothing — the leak class this feature must not
@@ -538,6 +546,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if taskArmErr != nil {
 		log.WarningLog.Printf("task automation not armed: %v", taskArmErr)
 	}
+
+	// Replay cron fires a previous daemon recorded intent for but never
+	// completed (#5503). Async rather than synchronous: a targeted task's
+	// deferred delivery can park until its target detaches (#1586), and boot
+	// must not wait on that. RunTask's per-task flock serializes each replay
+	// against a due-now cron entry of the same task — the loser coalesces, which
+	// is the existing same-task overlap semantics.
+	go replayPendingTaskFires()
 	scheduler.Start()
 	defer scheduler.Stop()
 

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -215,14 +216,25 @@ func repoHasSessionTitle(repoID, title string) (bool, error) {
 
 // RunTask executes a cron task by delivering its prompt (create a session,
 // or send into TargetSession) and recording the run status. It is the single
-// firing path for cron tasks: the in-daemon scheduler and the `af tasks
-// trigger` CLI both land here. Watch tasks are refused — they fire from
-// their watch command's stdout, and a manual trigger has no event line to
-// render the prompt with.
+// firing path for cron tasks: the in-daemon scheduler, the boot replay of an
+// interrupted fire, and the `af tasks trigger` CLI all land here. Watch tasks
+// are refused — they fire from their watch command's stdout, and a manual
+// trigger has no event line to render the prompt with.
 // expect optionally asserts that the task is still bound to the project the
 // caller authorized it against; the in-daemon scheduler passes the zero value,
 // having no project context to assert.
 func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
+	return runTaskDelivery(taskID, expect, false)
+}
+
+// runTaskDelivery is RunTask with one extra input: replaying marks a boot-time
+// re-entry of an already-intended fire (#5503). It changes exactly one
+// outcome — a pending marker whose residue proves the interrupted attempt
+// completed is discharged rather than treated as this run's own occurrence —
+// because a replay exists to satisfy the old intent, while a fresh cron fire
+// or manual trigger landing on the same stale marker is a NEW occurrence that
+// must still deliver.
+func runTaskDelivery(taskID string, expect task.ProjectExpectation, replaying bool) (err error) {
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
 	// protects every caller.
@@ -297,6 +309,17 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// the right behavior. (Watch events, which carry distinct per-event {{line}}
 	// payloads, are NOT coalesced: they each queue durably and replay in order.)
 
+	// Record the fire's intent BEFORE anything that can be interrupted (#5503).
+	// The marker is what makes a daemon killed mid-delivery replayable: it names
+	// the task and the instant the run owned the occurrence, and the create path
+	// binds the committed title and instance id into it as they mint. A write
+	// failure degrades this run to pre-fix behavior — the delivery still
+	// proceeds; the ledger exists to rescue fires, never to block them.
+	fire, pendingFire, fireErr := ensureTaskFireMarker(taskID)
+	if fireErr != nil {
+		log.WarningLog.Printf("could not record cron fire marker for task %s; an interrupted run will not be replayed: %v", taskID, fireErr)
+	}
+
 	// Once this fire holds the lock it owns the task's run status: every
 	// failure from here on — git missing, project path not a repo, or a
 	// delivery error — must be recorded so a cron task's LastRunStatus
@@ -306,13 +329,31 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// The success path writes its own status below; this defer fires only when
 	// err is non-nil, so the status is never double-written. The "errored:"
 	// prefix matches the watcher convention the TUI keys on (#797).
+	//
+	// One exception (#5503): an error that lands while the daemon is draining
+	// is the shutdown interrupting the delivery, not the delivery failing. It
+	// records "aborted: daemon shutting down" and KEEPS the fire marker — the
+	// replacement daemon replays the owed occurrence on boot. Every other
+	// error still discharges the marker: the occurrence concluded, badly.
 	defer func() {
 		if err == nil {
 			return
 		}
 		now := time.Now()
-		if _, uerr := task.UpdateTaskStatus(taskID, &now, "errored: "+err.Error()); uerr != nil {
-			log.ErrorLog.Printf("failed to record errored status for task %s: %v", taskID, uerr)
+		status := "errored: " + err.Error()
+		// A reconcile failure is not a completed run either — the marker stays
+		// so the next boot retries the reconcile rather than silently dropping
+		// an occurrence whose outcome could not be established.
+		keepFire := errors.Is(err, errTaskFireReconcile)
+		if daemonDrainingFn() && isShutdownAbortErr(err) {
+			status = taskStatusAbortedShutdown
+			keepFire = true
+		}
+		if _, uerr := task.UpdateTaskStatus(taskID, &now, status); uerr != nil {
+			log.ErrorLog.Printf("failed to record run status for task %s: %v", taskID, uerr)
+		}
+		if !keepFire {
+			clearTaskFire(taskID)
 		}
 	}()
 
@@ -330,6 +371,36 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
+	// A pending marker means a prior attempt died before its outcome landed
+	// (#5503). Residue proves it already completed (the discharge was lost, not
+	// the run): a replay discharges it, while a NEW fire rewrites a fresh
+	// marker and delivers — the new occurrence is still owed its own run.
+	// Otherwise reconcile adopts the persisted row, or reaps/quarantines the
+	// provable leftovers, before the still-owed fire delivers again.
+	if fire != nil && pendingFire {
+		if taskFireResidue(t, fire) {
+			clearTaskFire(taskID)
+			if replaying {
+				return nil
+			}
+			pendingFire = false
+			if fresh, _, ferr := ensureTaskFireMarker(taskID); ferr == nil {
+				fire = fresh
+			} else {
+				fire = nil
+			}
+		}
+		if fire != nil && pendingFire {
+			done, recErr := reconcilePendingTaskFire(t, fire)
+			if recErr != nil {
+				return recErr
+			}
+			if done {
+				return nil
+			}
+		}
+	}
+
 	status, err := deliverCronTaskPrompt(t, t.Prompt)
 	if err != nil {
 		return err
@@ -342,5 +413,10 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
+	// The delivery completed — the occurrence is consumed whether or not the
+	// status write above landed. Keeping the marker on a failed status write
+	// would replay a delivered prompt; a surviving adopted row is reconcile's
+	// own safety net for the reverse direction.
+	clearTaskFire(taskID)
 	return nil
 }
