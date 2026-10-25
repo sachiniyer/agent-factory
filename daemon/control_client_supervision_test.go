@@ -1350,16 +1350,18 @@ func TestClassifyUnitStartFailureBothArms(t *testing.T) {
 // its unmanaged-home escape hatch (#4475 review).
 func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 	uid := strconv.Itoa(os.Getuid())
-	// The dangling-link escape hatch names the manual disable command by unit
+	// The dangling-link escape hatch names the manual stop command by unit
 	// name (platform-specific), since af daemon uninstall follows the broken
-	// link to ENOENT and does nothing — the prefix pins the command and the
-	// disable substring so a darwin/linux regression cannot silently swap them.
+	// link to ENOENT and does nothing, and `systemctl --user disable --now`
+	// fails before stopping on a unit file it cannot read (systemd 255) — the
+	// prefix pins the command and the stop substring so a darwin/linux
+	// regression cannot silently swap them.
 	danglingUninstallRemedyLead := map[string]string{
-		"linux":  "if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now " + autostartUnitName + "`",
+		"linux":  "if this home should be unmanaged, stop the loaded service by name with `systemctl --user stop " + autostartUnitName + "`",
 		"darwin": "if this home should be unmanaged, unload the loaded service by name with `launchctl bootout " + launchdServiceTarget() + "`",
 	}
-	danglingDisableCmd := map[string]string{
-		"linux":  "systemctl --user disable --now " + autostartUnitName,
+	danglingStopCmd := map[string]string{
+		"linux":  "systemctl --user stop " + autostartUnitName,
 		"darwin": "launchctl bootout " + launchdServiceTarget(),
 	}
 	for _, goos := range []string{"linux", "darwin"} {
@@ -1457,16 +1459,17 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 
 			// A dangling unit symlink defeats af daemon uninstall (UninstallAutostart
 			// stats the broken link as ENOENT and reports the home uninstalled without
-			// disabling the loaded job), so the escape hatch names the manual disable
-			// and link cleanup by unit name instead of the no-op uninstall. The
-			// remedy stops at the unload and link cleanup: reinstalling with
-			// `af daemon install` would re-create the unit file and re-enable the
-			// job, undoing the unmanaged exit the operator followed this remedy to
-			// reach (Codex on #5528).
+			// disabling the loaded job), and `systemctl --user disable --now` fails
+			// before stopping on a unit file it cannot read, so the escape hatch
+			// names the manual stop and link cleanup by unit name instead of the
+			// no-op uninstall. The remedy stops at the unload and link cleanup:
+			// reinstalling with `af daemon install` would re-create the unit file
+			// and re-enable the job, undoing the unmanaged exit the operator followed
+			// this remedy to reach (Codex on #5528).
 			danglingOrder := unknownOwnerRemedies(goos, fmt.Errorf("dangling link: %w", errDanglingUnitLink))
 			assertRemedyOrder(t, danglingOrder, remedyOwnerResolveLead, remedyAdoptWontHelp, danglingUninstallRemedyLead[goos])
-			if !strings.Contains(danglingOrder[2], danglingDisableCmd[goos]) {
-				t.Fatalf("%s dangling escape %q must name the manual disable command %q", goos, danglingOrder[2], danglingDisableCmd[goos])
+			if !strings.Contains(danglingOrder[2], danglingStopCmd[goos]) {
+				t.Fatalf("%s dangling escape %q must name the manual stop command %q", goos, danglingOrder[2], danglingStopCmd[goos])
 			}
 			if strings.Contains(danglingOrder[2], uninstallRemedy) {
 				t.Fatalf("%s dangling escape must not name the no-op `af daemon uninstall`: %q", goos, danglingOrder[2])

@@ -147,7 +147,31 @@ func unitLoadedByManager(goos string, deadline time.Time) bool {
 		}
 		ctx, cancel := context.WithDeadline(context.Background(), admissionBoundedDeadline(deadline, ensureUnitStartTimeout))
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "systemctl", "--user", "show", autostartUnitName, "--property=LoadState", "--value").CombinedOutput()
+		// The probe must not outlive the admission budget even when a
+		// systemctl wrapper or helper leaves a descendant holding the pipes
+		// open: CommandContext kills only the immediate process, while
+		// CombinedOutput waits for the inherited pipes to close without a
+		// WaitDelay. The process-group cancellation and bounded pipe cleanup
+		// mirror runEnsureManagerCommand so a stalled helper cannot hold
+		// ensureDaemonMu past the deadline (Codex on #5528).
+		cmd := exec.CommandContext(ctx, "systemctl", "--user", "show", autostartUnitName, "--property=LoadState", "--value")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil {
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+					if errors.Is(err, syscall.ESRCH) {
+						return os.ErrProcessDone
+					}
+					return err
+				}
+			}
+			return nil
+		}
+		cmd.WaitDelay = ensureUnitStartWaitDelay
+		out, err := cmd.CombinedOutput()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		if err != nil {
 			return false
 		}
@@ -162,7 +186,28 @@ func unitLoadedByManager(goos string, deadline time.Time) bool {
 		}
 		ctx, cancel := context.WithDeadline(context.Background(), admissionBoundedDeadline(deadline, ensureUnitStartTimeout))
 		defer cancel()
-		return exec.CommandContext(ctx, "launchctl", "print", launchdServiceTarget()).Run() == nil
+		// The same pipe-inheritance concern as the linux arm: a launchctl
+		// helper holding stdout/stderr open can keep Run blocked past the
+		// deadline without a process-group kill and WaitDelay.
+		cmd := exec.CommandContext(ctx, "launchctl", "print", launchdServiceTarget())
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil {
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+					if errors.Is(err, syscall.ESRCH) {
+						return os.ErrProcessDone
+					}
+					return err
+				}
+			}
+			return nil
+		}
+		cmd.WaitDelay = ensureUnitStartWaitDelay
+		err := cmd.Run()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return err == nil
 	default:
 		return false
 	}
@@ -603,15 +648,21 @@ func unknownOwnerRemedies(goos string, ownerErr error) []string {
 // broken link with os.Stat, reads ENOENT, and reports the home uninstalled
 // without disabling or removing the loaded job (UninstallAutostart in
 // daemon/autostart.go), so the operator must unload the service by name and
-// clear the broken link by hand. It stops there: reinstalling with `af daemon
-// install` would recreate and start the unit (`enable --now` on linux,
-// `bootstrap` on darwin), undoing the unload the operator followed this
-// remedy to perform (Codex on #5528).
+// clear the broken link by hand. On linux the stop is by name and independent
+// of disable: `systemctl --user disable --now` only stops after the disable
+// succeeds, and disable returns exit 1 for a unit file it cannot read through
+// the broken link (systemd 255), so the loaded job stays running and the
+// `--now` stop never runs — `systemctl --user stop` unloads the loaded job by
+// name regardless of the on-disk file, then removing the link and running
+// daemon-reload clears the stale entry (Codex on #5528). It stops there:
+// reinstalling with `af daemon install` would recreate and start the unit
+// (`enable --now` on linux, `bootstrap` on darwin), undoing the unload the
+// operator followed this remedy to perform.
 func danglingUninstallRemedy(goos string) string {
 	if goos == "darwin" {
 		return fmt.Sprintf("if this home should be unmanaged, unload the loaded service by name with `launchctl bootout %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link", launchdServiceTarget())
 	}
-	return fmt.Sprintf("if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link", autostartUnitName)
+	return fmt.Sprintf("if this home should be unmanaged, stop the loaded service by name with `systemctl --user stop %s` (the unit path is a dangling symlink, so `systemctl --user disable --now` fails before stopping and `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link and run `systemctl --user daemon-reload`", autostartUnitName)
 }
 
 // loadedAbsentUnloadRemedy is the unmanaged-home escape hatch when the
@@ -619,15 +670,20 @@ func danglingUninstallRemedy(goos string) string {
 // job loaded: af daemon uninstall follows the missing file to ENOENT with
 // os.Stat and reports the home uninstalled without unloading the loaded job
 // (UninstallAutostart in daemon/autostart.go), so the operator must stop the
-// loaded service by name. There is no link to remove (the file is simply
-// absent, not a broken symlink), and like the dangling case this remedy stops
-// at the unload — reinstalling would re-create the unit file and re-enable the
-// job, undoing the unmanaged exit (Codex on #5528).
+// loaded service by name. On linux the stop is independent of disable for the
+// same reason as the dangling case: `systemctl --user disable --now` only
+// stops after a disable that returns exit 1 for a unit file it cannot read, so
+// the loaded job stays running and the `--now` stop never runs — `systemctl
+// --user stop` unloads the job by name, and `daemon-reload` then drops the
+// stale entry the missing file no longer describes (Codex on #5528). There is
+// no link to remove (the file is simply absent, not a broken symlink), and
+// like the dangling case this remedy stops at the unload — reinstalling would
+// re-create the unit file and re-enable the job, undoing the unmanaged exit.
 func loadedAbsentUnloadRemedy(goos string) string {
 	if goos == "darwin" {
 		return fmt.Sprintf("if this home should be unmanaged, unload the loaded service by name with `launchctl bootout %s` (the unit file is absent but the service manager still has the job loaded, so `af daemon uninstall` reads it as absent and leaves the loaded job in place)", launchdServiceTarget())
 	}
-	return fmt.Sprintf("if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now %s` (the unit file is absent but the service manager still has the job loaded, so `af daemon uninstall` reads it as absent and leaves the loaded job in place)", autostartUnitName)
+	return fmt.Sprintf("if this home should be unmanaged, stop the loaded service by name with `systemctl --user stop %s` (the unit file is absent but the service manager still has the job loaded, so `systemctl --user disable --now` fails before stopping and `af daemon uninstall` reads it as absent and leaves the loaded job in place), then run `systemctl --user daemon-reload`", autostartUnitName)
 }
 
 func unitStartRefusal(goos string, startErr error) error {

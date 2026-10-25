@@ -72,10 +72,12 @@ func TestEnsureDaemonDanglingUnitLinkRefusesAdHoc(t *testing.T) {
 		if !strings.Contains(err.Error(), "ownership of this home could not be determined") {
 			t.Fatalf("refusal must name the ownership failure, got: %v", err)
 		}
-		// The escape hatch for a dangling link is the manual disable and link
+		// The escape hatch for a dangling link is the manual stop and link
 		// cleanup: af daemon uninstall follows the broken link with os.Stat, reads
 		// ENOENT, and reports the home uninstalled without disabling the loaded
-		// job, so the standard uninstallRemedy would mislead the operator.
+		// job, and `systemctl --user disable --now` fails before stopping on a
+		// unit file it cannot read, so the standard uninstallRemedy would
+		// mislead the operator.
 		assertRemedyOrder(t, renderedRemedies(t, err), remedyOwnerResolveLead, remedyAdoptWontHelp, danglingUninstallRemedy(autostartGOOS))
 		if !strings.Contains(err.Error(), "dangling symlink") {
 			t.Fatalf("refusal must name the dangling symlink in its cause, got: %v", err)

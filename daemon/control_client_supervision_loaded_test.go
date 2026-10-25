@@ -173,28 +173,29 @@ func TestEnsureDaemonLoadedUnitFileAbsentRefusesAdHoc(t *testing.T) {
 // TestLoadedAbsentUnloadRemedyOrder pins the unmanaged-home escape hatch the
 // loaded-but-file-absent case carries: af daemon uninstall follows the missing
 // file to ENOENT with os.Stat and reports the home uninstalled without
-// unloading the loaded job (the same shape a dangling link takes), so the
-// standard uninstallRemedy would mislead the operator (Codex on #5528). The
-// escape names the manual disable/stop by unit name instead, never the no-op
-// uninstall, and never `af daemon install` (reinstalling would re-create the
-// unit file and re-enable the job, undoing the unmanaged exit the operator
-// followed this remedy to reach). Both platform arms are pinned so a
+// unloading the loaded job (the same shape a dangling link takes), and
+// `systemctl --user disable --now` fails before stopping on a unit file it
+// cannot read, so the standard uninstallRemedy would mislead the operator
+// (Codex on #5528). The escape names the manual stop by unit name instead,
+// never the no-op uninstall, and never `af daemon install` (reinstalling would
+// re-create the unit file and re-enable the job, undoing the unmanaged exit the
+// operator followed this remedy to reach). Both platform arms are pinned so a
 // linux/darwin regression cannot silently swap them.
 func TestLoadedAbsentUnloadRemedyOrder(t *testing.T) {
 	loadedAbsentUnloadLead := map[string]string{
-		"linux":  "if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now " + autostartUnitName + "`",
+		"linux":  "if this home should be unmanaged, stop the loaded service by name with `systemctl --user stop " + autostartUnitName + "`",
 		"darwin": "if this home should be unmanaged, unload the loaded service by name with `launchctl bootout " + launchdServiceTarget() + "`",
 	}
-	loadedAbsentDisableCmd := map[string]string{
-		"linux":  "systemctl --user disable --now " + autostartUnitName,
+	loadedAbsentStopCmd := map[string]string{
+		"linux":  "systemctl --user stop " + autostartUnitName,
 		"darwin": "launchctl bootout " + launchdServiceTarget(),
 	}
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			order := unknownOwnerRemedies(goos, fmt.Errorf("loaded but absent: %w", errLoadedUnitAbsent))
 			assertRemedyOrder(t, order, remedyOwnerResolveLead, remedyAdoptWontHelp, loadedAbsentUnloadLead[goos])
-			if !strings.Contains(order[2], loadedAbsentDisableCmd[goos]) {
-				t.Fatalf("%s loaded-but-absent escape %q must name the manual disable command %q", goos, order[2], loadedAbsentDisableCmd[goos])
+			if !strings.Contains(order[2], loadedAbsentStopCmd[goos]) {
+				t.Fatalf("%s loaded-but-absent escape %q must name the manual stop command %q", goos, order[2], loadedAbsentStopCmd[goos])
 			}
 			if strings.Contains(order[2], uninstallRemedy) {
 				t.Fatalf("%s loaded-but-absent escape must not name the no-op `af daemon uninstall`: %q", goos, order[2])
