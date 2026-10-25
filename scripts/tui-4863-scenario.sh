@@ -118,10 +118,12 @@ drive_validate_contract() {
 # gates. With `quit = ["shift+a"]` in config.toml, af must now REACH the TUI
 # first frame: the load warned and skipped the dead override (instead of
 # refusing to start, the old reject policy's failure mode over an inert
-# binding). And the dead binding is skipped, not installed: pressing Shift+A
-# — which Bubble Tea emits as the rune "A", never "shift+a" — must NOT quit,
-# while the default `q` (restored when the dead override was dropped) still
-# does.
+# binding). The dead binding is skipped, not installed: pressing Shift+A
+# — which Bubble Tea emits as the rune "A", never "shift+a" — must NOT quit.
+# The action is explicitly disabled (an empty key list after the dead binding
+# is dropped), so the default `q` is NOT restored: pressing `q` must NOT quit
+# either — the warn-and-skip preserves the disabled state the dead binding
+# created, instead of silently re-enabling the default on upgrade.
 drive_boot_warns_and_skips_dead_keys() {
     export AF_DRIVER_COLS=100 AF_DRIVER_ROWS=30
     export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
@@ -166,16 +168,18 @@ TOML
     af_wait_for 'Agent Factory' 5 \
         'Shift+A does not quit (dead shift+a override was skipped, not installed)' || return 1
 
-    # THE second assertion: the default `q` is restored — the dead override was
-    # dropped, reverting quit to its default — so `q` still quits and af exits
-    # back to the shell.
+    # THE second assertion: the action is disabled, not restored to its default.
+    # The dead override was the only binding for quit, so the warn-and-skip
+    # leaves quit with no active keys (an empty key list suppresses the default).
+    # `q` must NOT quit — the default is not restored when the only binding was
+    # a dead spec.
     af_send q
-    af_wait_gone 'Agent Factory' "$AF_DRIVER_TIMEOUT" \
-        'q still quits after the dead shift+a override was dropped (default restored)' || return 1
+    af_wait_for 'Agent Factory' 5 \
+        'q does not quit (the dead shift+a override disabled quit, the default is not restored)' || return 1
 
     # Cleanup the tmux session so the box is reusable.
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
-    echo "PASS: #4863 af boots with a dead shift+a override (warned and skipped); Shift+A does not quit, q still does"
+    echo "PASS: #4863 af boots with a dead shift+a override (warned and skipped); Shift+A does not quit, q does not either (quit is disabled)"
 }
 
 # drive_reachable_alt_rune_dispatches — the no-regression leg, mirroring the

@@ -71,15 +71,25 @@ func discardDeadShiftRuneOverrides(raw map[string]any, overrides map[string][]st
 			// the original entry for an UNKNOWN action so the validator can
 			// still reject it (its unknown-action check runs before any key
 			// validation, so the dead spec never reaches normalizeKeySpec). A
-			// KNOWN action whose only bindings were dead warns, drops them
-			// all, and resolves to its default keys — the upgrade case
-			// (`quit = ["shift+a"]`) the warn-and-skip exists for — so it is
-			// left out of cleaned as before, and dropped from raw so the
-			// editor does not pre-fill the dead spec.
+			// KNOWN action whose only bindings were dead warns and drops them,
+			// but it must not fall back to its default keys: an existing
+			// [keys] table that bound a known action to a dead spec (e.g.
+			// `kill = "shift+x"`) was effectively disabling the action (the
+			// dead binding never fired and displaced the default), and
+			// silently re-enabling the default on upgrade would be a behaviour
+			// change the user did not make. Preserve an explicit
+			// no-active-keys state instead: an empty key list marks the action
+			// as overridden with no keys, so buildMaps suppresses its defaults
+			// and the action stays disabled. The raw [keys] table is updated
+			// to match, so the editor (CurrentValue) shows the disabled state
+			// and an unchanged save round-trips through SetGlobalConfigValue.
 			if !keys.IsRebindableAction(action) {
 				cleaned[action] = keyList
-			} else if raw != nil {
-				delete(raw, action)
+			} else {
+				cleaned[action] = []string{}
+				if raw != nil {
+					raw[action] = []any{}
+				}
 			}
 		}
 	}

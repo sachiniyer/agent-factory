@@ -731,9 +731,14 @@ func normalizeOverrides(overrides map[string][]string, byConfigKey map[string]sp
 		if _, ok := byConfigKey[action]; !ok {
 			return nil, fmt.Errorf("keys: unknown action %q (rebindable actions: %s)", action, strings.Join(RebindableActions(), ", "))
 		}
-		if len(keyList) == 0 {
-			return nil, fmt.Errorf("keys: action %q has no keys; give it a key string or a list of key strings", action)
-		}
+		// An empty key list for a KNOWN action is the explicit "disable this
+		// action" state: buildMaps treats it as overridden with no keys, so the
+		// action's defaults are suppressed and it dispatches on nothing. The
+		// loader's dead-shift-rune warn-and-skip uses it to preserve the
+		// disabled state of an action whose every binding was a dead
+		// shift+<rune> spec, instead of silently restoring its defaults on
+		// upgrade. An empty list for an UNKNOWN action never reaches this
+		// point — the byConfigKey check above rejects it first.
 		normalizedList := make([]string, 0, len(keyList))
 		for _, k := range keyList {
 			normalizedKey, ok := normalizeKeySpec(k)

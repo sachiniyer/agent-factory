@@ -303,7 +303,7 @@ func TestValidateOverridesErrors(t *testing.T) {
 		wantErr   string
 	}{
 		{"unknown action", map[string][]string{"warp": {"z"}}, "unknown action"},
-		{"empty key list", map[string][]string{"quit": {}}, "no keys"},
+		{"unknown action with empty key list", map[string][]string{"warp": {}}, "unknown action"},
 		{"invalid key string", map[string][]string{"quit": {"space bar"}}, "not a valid key"},
 		{"reserved enter", map[string][]string{"quit": {"enter"}}, "reserved"},
 		{"reserved tab-jump digit", map[string][]string{"quit": {"3"}}, "reserved"},
@@ -334,6 +334,37 @@ func TestValidateOverridesErrors(t *testing.T) {
 	}
 	if err := ValidateOverrides(map[string][]string{"pane_prev": {"h"}, "pane_next": {"l"}}); err != nil {
 		t.Fatalf("pane switch keys may share tree-horizontal keys by context, got: %v", err)
+	}
+
+	// An empty key list for a KNOWN action is the explicit "disable this action"
+	// state: the action is overridden with no keys, so buildMaps suppresses its
+	// defaults and it dispatches on nothing. This is how the loader's dead-shift-rune
+	// warn-and-skip preserves the disabled state of an action whose every binding
+	// was a dead shift+<rune> spec, instead of silently restoring its defaults on
+	// upgrade. An empty list for an UNKNOWN action is still rejected (the unknown
+	// action check fires before the key list is inspected).
+	if err := ValidateOverrides(map[string][]string{"quit": {}}); err != nil {
+		t.Fatalf("an empty key list for a known action must be valid (disable the action), got: %v", err)
+	}
+	built, err := buildMaps(map[string][]string{"quit": {}})
+	if err != nil {
+		t.Fatalf("buildMaps with an empty key list for a known action must not error, got: %v", err)
+	}
+	if _, ok := built.strings["q"]; ok {
+		t.Fatal("the default q must be suppressed when quit is overridden with no keys; the action is disabled")
+	}
+	if binding, ok := built.bindings[KeyQuit]; !ok || len(binding.Keys()) != 0 {
+		t.Fatalf("quit binding must have no keys when overridden with an empty list, got %v", binding)
+	}
+	for _, info := range built.infos {
+		if info.Action == "quit" {
+			if !info.Rebound {
+				t.Fatal("quit must be marked as rebound when overridden with an empty list")
+			}
+			if len(info.Keys) != 0 {
+				t.Fatalf("quit effective keys must be empty when overridden with an empty list, got %v", info.Keys)
+			}
+		}
 	}
 }
 

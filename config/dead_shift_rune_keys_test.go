@@ -101,15 +101,16 @@ func TestDeadShiftRuneOverrideAllDeadKeepsUnknownActionVisible(t *testing.T) {
 		require.Contains(t, warnings.String(), "will never fire")
 	})
 
-	t.Run("known action whose only binding is dead still loads and resolves to default", func(t *testing.T) {
+	t.Run("known action whose only binding is dead still loads and is disabled, not restored to default", func(t *testing.T) {
 		warnings := captureLog(t, &aflog.WarningLog)
 		source := t.TempDir() + "/config.toml"
 		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 		cfg, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\"]\n"), source)
 		require.NoError(t, err, "a known action whose only binding is a dead shift+<rune> must still load (warn-and-skip)")
-		require.Empty(t, cfg.KeymapOverrides()["quit"], "the dead binding is dropped; quit resolves to its default")
+		require.Equal(t, []string{}, cfg.KeymapOverrides()["quit"], "the dead binding is dropped; quit is explicitly disabled (no active keys), not restored to its default")
 		require.NoError(t, keys.ApplyOverrides(cfg.KeymapOverrides()), "the cleaned overrides must apply")
-		require.Equal(t, keys.KeyQuit, keys.GlobalKeyStringsMap["q"], "quit's default q is restored")
+		_, hasQ := keys.GlobalKeyStringsMap["q"]
+		require.False(t, hasQ, "quit's default q must be suppressed — the action is disabled, not restored to its default")
 		require.NotContains(t, keys.GlobalKeyStringsMap, "shift+a", "the dead spelling must not be installed")
 		require.Contains(t, warnings.String(), "shift+a", "the dead-key warning names the spec")
 		require.Contains(t, warnings.String(), "will never fire")
@@ -167,7 +168,7 @@ func TestDeadShiftRuneOverrideEditableValueReflectsCleaned(t *testing.T) {
 		}
 	})
 
-	t.Run("known action whose only binding is dead resolves to default in the editor", func(t *testing.T) {
+	t.Run("known action whose only binding is dead is disabled in the editor", func(t *testing.T) {
 		_ = captureLog(t, &aflog.WarningLog)
 		source := filepath.Join(t.TempDir(), "config.toml")
 		cfg, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\"]\n"), source)
@@ -175,7 +176,15 @@ func TestDeadShiftRuneOverrideEditableValueReflectsCleaned(t *testing.T) {
 
 		value, ok := CurrentValue(cfg, "keys")
 		require.True(t, ok)
-		require.Equal(t, "{}", value, "the all-dead known action is dropped from the raw table; the editor shows no override, so quit resolves to its default")
+		require.NotContains(t, value, "shift+a", "the editable value must not pre-fill the dead spec the loader warned and skipped")
+		require.Contains(t, value, "quit", "the all-dead known action must stay in the editor with its disabled state (empty), not be dropped to its default")
+		// The empty key list round-trips through SetGlobalConfigValue: an
+		// unchanged save must not reject the disabled state the loader
+		// produced.
+		writeTempConfig(t, "")
+		if _, err := SetGlobalConfigValue("keys", value); err != nil {
+			t.Fatalf("an unchanged save of the disabled-state keys value must round-trip, got: %v", err)
+		}
 	})
 }
 
