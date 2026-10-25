@@ -974,6 +974,28 @@ func TestPreserveUnmaterializedGhostRows_Unit(t *testing.T) {
 	require.Len(t, got, 1, "the version-skewed ghost must be preserved")
 	assert.JSONEq(t, string(verbatim), string(got[0]),
 		"the preserved ghost must carry its original bytes verbatim, including additive fields this binary does not know (#6)")
+
+	// A transient row with an unrecognized field fails closed: a Loading/Deleting
+	// row whose raw form carries a field this binary's InstanceData does not decode
+	// (a newer same-schema durable marker) is preserved, not reaped, because the
+	// decode dropped the marker and isLegacyTransientGhostRow saw none of its known
+	// markers. The raw form the checkpoint preserves still carries the field (#9f7).
+	for _, status := range []Status{Loading, Deleting} {
+		onDisk = []InstanceData{
+			{Title: "loading-unknown-marker", Status: status},
+		}
+		rawWithUnknown := rawFor(onDisk)
+		var probed2 map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rawWithUnknown[0], &probed2))
+		probed2["future_durable_marker"] = json.RawMessage(`"owed"`)
+		unknownRaw, err := json.Marshal(probed2)
+		require.NoError(t, err)
+		rawWithUnknown[0] = unknownRaw
+		got = preserveUnmaterializedGhostRows(onDisk, rawWithUnknown, map[string]struct{}{"alive": {}})
+		require.Len(t, got, 1, "a %s row with an unrecognized field must be preserved, not reaped: the field may be a newer binary's durable marker", statusName(status))
+		assert.JSONEq(t, string(unknownRaw), string(got[0]),
+			"the preserved row must carry its unrecognized field verbatim so a newer binary can read it")
+	}
 }
 
 // statusName returns a human-readable name for a Status, used in subtests and
@@ -1159,6 +1181,74 @@ func TestSaveInstances_LegacyTransientGhostWithEmptyArchiveReportReaped(t *testi
 				"a %s row with an EMPTY archive report must be reaped, not preserved: it has no "+
 					"retained trees to protect and a Deleting variant would block recreating its "+
 					"title across every checkpoint (#7)", statusName(status))
+		})
+	}
+}
+
+// TestSaveInstances_TransientRowWithUnrecognizedFieldPreserved is the
+// version-skew carve-out (#9f7): a Loading/Deleting row whose raw form carries
+// a field this binary's InstanceData does not decode — an additive durable
+// marker a newer same-schema binary wrote — must be preserved across the
+// checkpoint rather than reaped as a disposable transient ghost. The decode
+// drops the unknown field, so isLegacyTransientGhostRow sees none of its known
+// markers and would reap the row, erasing the only recovery record a rollback
+// shutdown had on disk. The save path fails closed by inspecting the raw form:
+// a transient row with an unrecognized field is kept verbatim so the next
+// start's newer binary can read it.
+func TestSaveInstances_TransientRowWithUnrecognizedFieldPreserved(t *testing.T) {
+	for _, status := range []Status{Loading, Deleting} {
+		t.Run(statusName(status), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			repoID := config.RepoIDFromRoot(repoPath)
+			state := newMockStorage()
+
+			// A bare Loading/Deleting row has no known durable markers, so it is a
+			// disposable transient ghost — except that its raw form carries an
+			// unrecognized field this binary's InstanceData does not decode, which
+			// might be a newer binary's durable marker. Plant that field directly on
+			// the raw bytes; seedDisk marshals InstanceData, which drops it.
+			row := InstanceData{
+				ID: "loading-unknown-id", Title: "loading-unknown", Path: repoPath, Program: "claude",
+				Status: status,
+			}
+			require.True(t, isLegacyTransientGhostRow(row),
+				"fixture: the decoded row has no known durable markers and would be reaped")
+			raw, err := json.Marshal([]InstanceData{row})
+			require.NoError(t, err)
+			var arr []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &arr))
+			arr[0]["future_durable_marker"] = json.RawMessage(`"owed-to-the-next-start"`)
+			raw, err = json.Marshal(arr)
+			require.NoError(t, err)
+			state.data[repoID] = raw
+
+			alive := makeAliveInstance("alive", repoPath)
+			storage, err := NewStorage(state, "")
+			require.NoError(t, err)
+			require.NoError(t, storage.SaveInstances([]*Instance{alive}))
+
+			// The row must survive the checkpoint verbatim — the next start's newer
+			// binary can read the marker this one cannot.
+			got := readDisk(t, state, repoPath)
+			var found bool
+			for _, d := range got {
+				if d.Title == "loading-unknown" {
+					found = true
+				}
+			}
+			require.True(t, found, "a %s row with an unrecognized field must be preserved, not reaped: "+
+				"the field may be a newer binary's durable marker and the checkpoint must fail closed (#9f7)", statusName(status))
+			// The unrecognized field must survive verbatim on the raw bytes the
+			// checkpoint wrote.
+			var afterArr []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(state.data[repoID], &afterArr))
+			for _, r := range afterArr {
+				if string(r["title"]) == `"loading-unknown"` {
+					require.Contains(t, r, "future_durable_marker",
+						"the unrecognized field must survive the checkpoint verbatim on the raw bytes (#6/#9f7)")
+				}
+			}
 		})
 	}
 }

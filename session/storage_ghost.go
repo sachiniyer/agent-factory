@@ -5,9 +5,73 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"reflect"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
+
+// knownInstanceDataFields is the set of top-level JSON keys a row this binary
+// writes or reads. It is the struct's json tags plus the two wire names
+// InstanceData.MarshalJSON derives (status_name, liveness_name; see
+// state_names.go) — a row carrying a key outside this set was written by a
+// newer same-schema binary under a field this version's InstanceData does not
+// decode, and decoding the row drops that key. The transient-ghost carve-out
+// (isLegacyTransientGhostRow) checks the decoded form, so a Loading/Deleting row
+// carrying a newer durable marker on such a field looks marker-less and would be
+// reaped; rowHasUnrecognizedInstanceFields lets the save path fail closed and
+// preserve the row verbatim instead.
+var knownInstanceDataFields = func() map[string]struct{} {
+	out := map[string]struct{}{
+		"status_name":   {},
+		"liveness_name": {},
+	}
+	collectInstanceDataJSONFields(reflect.TypeOf(InstanceData{}), out)
+	return out
+}()
+
+func collectInstanceDataJSONFields(t reflect.Type, out map[string]struct{}) {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Anonymous {
+			if f.Type.Kind() == reflect.Pointer {
+				f.Type = f.Type.Elem()
+			}
+			if f.Type.Kind() == reflect.Struct {
+				collectInstanceDataJSONFields(f.Type, out)
+			}
+			continue
+		}
+		if tag := f.Tag.Get("json"); tag != "" {
+			name := strings.SplitN(tag, ",", 2)[0]
+			if name != "-" {
+				out[name] = struct{}{}
+			}
+		}
+	}
+}
+
+// rowHasUnrecognizedInstanceFields reports whether raw carries a top-level JSON
+// key this binary's InstanceData does not decode. Such a key may be an additive
+// field a newer same-schema binary wrote (a durable marker this version does not
+// know); decoding into InstanceData drops it, so the save path must inspect the
+// raw form to fail closed and preserve the row verbatim rather than reap it as a
+// disposable transient ghost.
+func rowHasUnrecognizedInstanceFields(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for k := range fields {
+		if _, known := knownInstanceDataFields[k]; !known {
+			return true
+		}
+	}
+	return false
+}
 
 // isLegacyTransientGhostRow identifies disposable projections, not sessions.
 // Older binaries could strand Loading/Deleting rows on disk and every create
@@ -116,7 +180,18 @@ func preserveUnmaterializedGhostRows(
 			continue
 		}
 		if isLegacyTransientGhostRow(d) {
-			continue
+			// A Loading/Deleting row with no KNOWN durable markers may still carry
+			// a durable marker a newer same-schema binary wrote under a field this
+			// version's InstanceData does not decode. Decoding the row drops that
+			// field so isLegacyTransientGhostRow sees no marker, but the raw form the
+			// checkpoint preserves still has it. Fail closed for a version-skewed
+			// transient row: preserve it verbatim so the next start's newer binary
+			// can read it, rather than reaping the only recovery record.
+			if i < len(onDiskRaw) && rowHasUnrecognizedInstanceFields(onDiskRaw[i]) {
+				// fall through to keep the row.
+			} else {
+				continue
+			}
 		}
 		if prev, ok := keep[d.Title]; ok && !d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
 			continue
@@ -225,7 +300,13 @@ func decodeOnDiskRows(raw json.RawMessage) (onDisk []InstanceData, onDiskRaw []j
 // the same schema version survive the checkpoint (#6).
 func marshalCheckpointInstances(group []InstanceData, ghosts []json.RawMessage) (json.RawMessage, error) {
 	deduped := dedupeInstanceData(group)
-	out := make([]json.RawMessage, 0, len(deduped)+len(ghosts))
+	// Sized from deduped alone, not len(deduped)+len(ghosts). Both operands are
+	// lengths of in-memory slices, so that sum cannot realistically overflow —
+	// but CodeQL's allocation-size-overflow rule reports the unchecked addition
+	// as a high-severity finding and one new high alert fails the required
+	// CodeQL check. Dropping the sum removes the flagged expression; append grows
+	// the slice for the verbatim ghost rows.
+	out := make([]json.RawMessage, 0, len(deduped))
 	for i := range deduped {
 		b, err := json.Marshal(deduped[i])
 		if err != nil {
