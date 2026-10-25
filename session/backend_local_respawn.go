@@ -119,8 +119,24 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// (#5371 review). The flag therefore goes durable while the worktree is
 		// still missing, so the rebuilt directory and the obligation to clear
 		// its predecessor's panes can never be separated by a crash.
+		// Snapshot BEFORE this attempt's arm: an obligation already armed means
+		// a prior attempt reached this block (and may already have rebuilt the
+		// workspace before being re-deleted), so its teardown errors are the
+		// committed-mutation kind. A first-time arm is not — no durable
+		// workspace state has been touched yet this attempt.
+		committedTeardown := i.RebuildTeardownPending()
 		if err := i.SetRebuildTeardownPending(true); err != nil {
 			return fmt.Errorf("recover: could not make the stale-pane teardown obligation durable before rebuilding: %w", err)
+		}
+		// Tear the stale panes down BEFORE the rebuild recreates the checkout —
+		// not after it. A pane surviving from the deleted inode holds absolute
+		// paths, not inode-relative ones, so everything it writes while it is
+		// still alive lands INSIDE the fresh tree, racing git's own checkout and
+		// the new provisioning run (#5371 review). The obligation is already
+		// durable above, so a teardown failure here leaves the row Lost and
+		// retryable without the checkout having been touched.
+		if terr := i.teardownStalePanesForRebuild(workDir, committedTeardown, true); terr != nil {
+			return terr
 		}
 		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
 			if !resume {
@@ -178,156 +194,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// the stale names instead of re-deriving `rebuilt` from the now-present
 	// directory (#5371 review).
 	if teardownPending := i.RebuildTeardownPending(); teardownPending {
-		// Durable state was committed — this attempt's rebuild, or the earlier
-		// one the pending flag survived — so every failure below carries the
-		// committed-rebuild marker, not only the ones on a fresh rebuild.
-		committed := rebuilt || teardownPending
-
-		i.mu.RLock()
-		stopRuntimes := i.rebuildTeardownStopRuntimes
-		i.mu.RUnlock()
-		if stopRuntimes == nil {
-			// The callback is what stops everything a session owns that tmux
-			// cannot see — the supervised editor, hook runners. Reaching the
-			// teardown without it means an entry point skipped an install, so
-			// this is the same fail-closed contract as the persist notify
-			// (#5371 review).
-			return markRecoverRebuilt(committed, fmt.Errorf(
-				"recover: no supervised-runtime stop installed for the rebuild teardown of %q", i.Title))
-		}
-
-		i.mu.RLock()
-		stale := make([]*tmux.TmuxSession, 0, len(i.Tabs))
-		processTabs := make([]*Tab, 0, len(i.Tabs))
-		for _, tab := range i.Tabs {
-			if tab.tmux == nil {
-				continue
-			}
-			if tab.Kind == TabKindProcess {
-				processTabs = append(processTabs, tab)
-				continue
-			}
-			stale = append(stale, tab.tmux)
-		}
-		i.mu.RUnlock()
-
-		// Blindness is AGGREGATED across every close — a conclusive-but-blind
-		// answer ("session already gone") cannot prove nothing the vanished
-		// session spawned survived it, and the marker sweep is vacuous for a
-		// survivor that carries none. The single occupancy check below is what
-		// teardownTabs does for the same shape (#5371 review).
-		anyBlind := false
-
-		// Process tabs keep their recorded outcome: a finished command's pane
-		// is output the row must not lose, and a still-running one is stopped
-		// through the path that says why (#5371 review).
-		for _, tab := range processTabs {
-			if keepFinishedProcessPane(i, tab) {
-				continue
-			}
-			state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
-			anyBlind = anyBlind || blind
-			if err != nil {
-				return markRecoverRebuilt(committed, fmt.Errorf(
-					"recover: could not stop process tab %q surviving in the deleted worktree: %w",
-					tab.Name, err))
-			}
-			// Only an OBSERVED stop earns a stopped reason: a session that was
-			// already gone (blind — vanished with no pane observed) was not
-			// terminated by this recovery, and stamping StoppedBy would invent
-			// an outcome it did not produce. The tab stays inert, which is what
-			// absence means on every other process-tab path (#5371 review).
-			if state == tmux.PaneStateKnown && !blind {
-				stampProcessTabStopped(i, tab, TabStoppedByWorktreeRebuild)
-			}
-		}
-
-		for _, staleSession := range stale {
-			// Wait for the pane's process tree to exit before launching a
-			// replacement: a stale agent can still be flushing provider state
-			// or touching the recreated checkout by absolute path (#5371
-			// review).
-			_, blind, err := staleSession.CloseAndWaitForPaneExitReportingBlindness()
-			anyBlind = anyBlind || blind
-			if err != nil {
-				return markRecoverRebuilt(committed, fmt.Errorf(
-					"recover: could not stop the pane surviving in the deleted worktree: %w", err))
-			}
-		}
-
-		// Tabs already removed from the roster can still own live sessions via
-		// their durable cleanup handles — kill what answers, keep what does
-		// not, and never drop a handle without a confirmed kill AND an observed
-		// process-tree exit: Close's async reaper could otherwise still be
-		// running in the deleted worktree when the replacements below spawn
-		// (#5371 review).
-		if _, remaining, blindHandles := i.RetryPendingTabCleanupAndWait(); remaining > 0 {
-			return markRecoverRebuilt(committed, fmt.Errorf(
-				"recover: %d stale session(s) behind pending tab cleanup could not be confirmed dead in the deleted worktree",
-				remaining))
-		} else {
-			anyBlind = anyBlind || blindHandles
-		}
-
-		// Every bound tmux name is now closed; what remains is what tmux never
-		// owned. The supervised editor holds a cwd inside this checkout with no
-		// tab.tmux and no AF_SESSION marker — the snapshot above cannot see it,
-		// and the supervisor's reuse identity (instance ID + path string) would
-		// happily reattach the stale editor to the rebuilt path (#5371 review).
-		// Stop it before the occupancy gate, the same fence archive runs before
-		// it moves the tree (#2770/#3650): a refusal here leaves the row Lost
-		// and the obligation armed for the next attempt. The post-worktree hook
-		// runner is NOT stopped here — the run in flight is the NEW checkout's
-		// own provisioning, launched by the rebuild that just ran; the occupancy
-		// gate waits it out instead (anyBlind branch).
-		if err := stopRuntimes(i); err != nil {
-			return markRecoverRebuilt(committed, fmt.Errorf(
-				"recover: could not confirm the session's supervised runtimes stopped: %w", err))
-		}
-
-		// ONE occupancy check, after every name is closed — teardownTabs' own
-		// rule (#2998). A blind close means tmux forgot the ancestry and the
-		// marker sweep is the whole evidence; a detached survivor with no
-		// AF_SESSION marker is invisible to it, but a cwd inside the worktree
-		// still shows. Reporting — never killing — is the contract: the match
-		// could be an operator's own shell, so the row stays Lost and retryable
-		// and the decision stays human (#5371 review).
-		//
-		// The rebuilt checkout's OWN provisioning run is the one occupant this
-		// gate must not read as foreign. RebuildFromExistingBranch /
-		// RebuildFreshFromRecordedBase already retire the predecessor run before
-		// touching the tree (stopHooks), then startHooks launches the new
-		// checkout's post-worktree commands with cwd = workDir. Cancelling that
-		// run here would leave the rebuilt tree unprovisioned; waiting for it
-		// (bounded — the refusal retries) keeps an in-flight provisioning run
-		// out of the foreign-occupant verdict below.
-		if anyBlind {
-			if worktree, werr := i.GetGitWorktree(); werr == nil && worktree != nil {
-				if done := worktree.HooksDone(); done != nil {
-					select {
-					case <-done:
-					case <-time.After(rebuildHooksSettleTimeout):
-						return markRecoverRebuilt(committed, fmt.Errorf(
-							"recover: the rebuilt worktree's post-worktree commands are still running; "+
-								"retry when provisioning settles"))
-					}
-				}
-			}
-			if err := CheckWorktreeOccupants(workDir); err != nil {
-				return markRecoverRebuilt(committed, fmt.Errorf(
-					"recover: stale sessions closed blind; %w", err))
-			}
-		}
-
-		// Checkpoint the discharge BEFORE any replacement launches: a daemon
-		// exit between the spawn and the settlement write would reload the
-		// stale `true` and tear down the fresh panes as though they belonged
-		// to the deleted worktree (#5371 review). A failed checkpoint restores
-		// the flag, so the row stays Lost and a retry re-runs the confirmed
-		// teardown instead of spawning on an unrecorded clear.
-		if err := i.SetRebuildTeardownPending(false); err != nil {
-			return markRecoverRebuilt(committed, fmt.Errorf(
-				"recover: could not make the completed stale-pane teardown durable: %w", err))
+		// A prior attempt armed the obligation and left it outstanding — the
+		// rebuild it represents already happened (or a crash separated the arm
+		// from its run), so the teardown the retry owes runs here with the
+		// checkout already recreated (#5371 review).
+		if terr := i.teardownStalePanesForRebuild(workDir, rebuilt || teardownPending, false); terr != nil {
+			return terr
 		}
 	}
 
@@ -379,5 +251,189 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
 	// map) and skips a remote runtime's agent-server (not a localAgentServer).
 	resetAgentBrokerCaptures(i)
+	return nil
+}
+
+// teardownStalePanesForRebuild closes and waits out every runtime still bound
+// to the worktree a rebuild is about to replace — or already replaced — then
+// discharges the durable obligation. It runs twice in the rebuild lifecycle:
+//
+//   - joinPredecessorHooks=true — the fresh rebuild path, while the worktree
+//     path is STILL MISSING. The stale panes must be dead before
+//     RebuildFromExistingBranch / RebuildFreshFromRecordedBase recreates the
+//     checkout: a survivor bound to the deleted inode holds absolute paths, so
+//     anything it writes while alive lands inside the fresh tree, racing git's
+//     own checkout and the new provisioning run (#5371 review). Here
+//     CancelAndJoinHooks is the right call — the only hook run in flight is the
+//     OLD checkout's, holding the deleted inode; joining it early is exactly
+//     what the rebuild's internal stopHooks would otherwise do, and skipping
+//     the join would let a still-exiting hook child read as a worktree occupant
+//     to the blind gate below and refuse the teardown forever.
+//   - joinPredecessorHooks=false — a retry that finds the obligation armed and
+//     the checkout already recreated. The hook run in flight is the NEW
+//     checkout's own provisioning, which must NOT be cancelled — that was the
+//     CancelAndJoinHooks-after-rebuild bug (#5371 review). The occupancy gate
+//     waits it out, bounded, instead.
+//
+// committed marks every error with markRecoverRebuilt when a prior attempt has
+// already mutated durable workspace state (#3236). Returns nil only once every
+// bound name is confirmed dead, no pending cleanup handle survives, and the
+// durable obligation has discharged.
+func (i *Instance) teardownStalePanesForRebuild(workDir string, committed bool, joinPredecessorHooks bool) error {
+	i.mu.RLock()
+	stopRuntimes := i.rebuildTeardownStopRuntimes
+	i.mu.RUnlock()
+	if stopRuntimes == nil {
+		// The callback is what stops everything a session owns that tmux
+		// cannot see — the supervised editor, hook runners. Reaching the
+		// teardown without it means an entry point skipped an install, so
+		// this is the same fail-closed contract as the persist notify
+		// (#5371 review).
+		return markRecoverRebuilt(committed, fmt.Errorf(
+			"recover: no supervised-runtime stop installed for the rebuild teardown of %q", i.Title))
+	}
+
+	i.mu.RLock()
+	stale := make([]*tmux.TmuxSession, 0, len(i.Tabs))
+	processTabs := make([]*Tab, 0, len(i.Tabs))
+	for _, tab := range i.Tabs {
+		if tab.tmux == nil {
+			continue
+		}
+		if tab.Kind == TabKindProcess {
+			processTabs = append(processTabs, tab)
+			continue
+		}
+		stale = append(stale, tab.tmux)
+	}
+	i.mu.RUnlock()
+
+	// Blindness is AGGREGATED across every close — a conclusive-but-blind
+	// answer ("session already gone") cannot prove nothing the vanished
+	// session spawned survived it, and the marker sweep is vacuous for a
+	// survivor that carries none. The single occupancy check below is what
+	// teardownTabs does for the same shape (#5371 review).
+	anyBlind := false
+
+	// Process tabs keep their recorded outcome: a finished command's pane
+	// is output the row must not lose, and a still-running one is stopped
+	// through the path that says why (#5371 review).
+	for _, tab := range processTabs {
+		if keepFinishedProcessPane(i, tab) {
+			continue
+		}
+		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+		anyBlind = anyBlind || blind
+		if err != nil {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: could not stop process tab %q surviving in the deleted worktree: %w",
+				tab.Name, err))
+		}
+		// Only an OBSERVED stop earns a stopped reason: a session that was
+		// already gone (blind — vanished with no pane observed) was not
+		// terminated by this recovery, and stamping StoppedBy would invent
+		// an outcome it did not produce. The tab stays inert, which is what
+		// absence means on every other process-tab path (#5371 review).
+		if state == tmux.PaneStateKnown && !blind {
+			stampProcessTabStopped(i, tab, TabStoppedByWorktreeRebuild)
+		}
+	}
+
+	for _, staleSession := range stale {
+		// Wait for the pane's process tree to exit before launching a
+		// replacement: a stale agent can still be flushing provider state
+		// or touching the recreated checkout by absolute path (#5371
+		// review).
+		_, blind, err := staleSession.CloseAndWaitForPaneExitReportingBlindness()
+		anyBlind = anyBlind || blind
+		if err != nil {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: could not stop the pane surviving in the deleted worktree: %w", err))
+		}
+	}
+
+	// Tabs already removed from the roster can still own live sessions via
+	// their durable cleanup handles — kill what answers, keep what does
+	// not, and never drop a handle without a confirmed kill AND an observed
+	// process-tree exit: Close's async reaper could otherwise still be
+	// running in the deleted worktree when the replacements below spawn
+	// (#5371 review).
+	if _, remaining, blindHandles := i.RetryPendingTabCleanupAndWait(); remaining > 0 {
+		return markRecoverRebuilt(committed, fmt.Errorf(
+			"recover: %d stale session(s) behind pending tab cleanup could not be confirmed dead in the deleted worktree",
+			remaining))
+	} else {
+		anyBlind = anyBlind || blindHandles
+	}
+
+	// Every bound tmux name is now closed; what remains is what tmux never
+	// owned. The supervised editor holds a cwd inside this checkout with no
+	// tab.tmux and no AF_SESSION marker — the snapshot above cannot see it,
+	// and the supervisor's reuse identity (instance ID + path string) would
+	// happily reattach the stale editor to the rebuilt path (#5371 review).
+	// Stop it before the occupancy gate, the same fence archive runs before
+	// it moves the tree (#2770/#3650): a refusal here leaves the row Lost
+	// and the obligation armed for the next attempt.
+	if err := stopRuntimes(i); err != nil {
+		return markRecoverRebuilt(committed, fmt.Errorf(
+			"recover: could not confirm the session's supervised runtimes stopped: %w", err))
+	}
+
+	// The hook run standing between teardown and the occupancy gate differs
+	// by when this runs. Pre-rebuild (joinPredecessorHooks) the only run in
+	// flight is the OLD checkout's — cancelled and joined here, matching what
+	// the rebuild's internal stopHooks would do moments later, so its still-
+	// exiting children cannot register as occupants below. Post-rebuild the
+	// run in flight is the NEW checkout's own provisioning: it must NOT be
+	// cancelled, and the occupancy gate waits it out instead (anyBlind).
+	worktree, werr := i.GetGitWorktree()
+	if joinPredecessorHooks && werr == nil && worktree != nil {
+		worktree.CancelAndJoinHooks()
+	}
+
+	// ONE occupancy check, after every name is closed — teardownTabs' own
+	// rule (#2998). A blind close means tmux forgot the ancestry and the
+	// marker sweep is the whole evidence; a detached survivor with no
+	// AF_SESSION marker is invisible to it, but a cwd inside the worktree
+	// still shows. Reporting — never killing — is the contract: the match
+	// could be an operator's own shell, so the row stays Lost and retryable
+	// and the decision stays human (#5371 review).
+	//
+	// The rebuilt checkout's OWN provisioning run is the one occupant this
+	// gate must not read as foreign. RebuildFromExistingBranch /
+	// RebuildFreshFromRecordedBase already retire the predecessor run before
+	// touching the tree (stopHooks), then startHooks launches the new
+	// checkout's post-worktree commands with cwd = workDir. Cancelling that
+	// run here would leave the rebuilt tree unprovisioned; waiting for it
+	// (bounded — the refusal retries) keeps an in-flight provisioning run
+	// out of the foreign-occupant verdict below.
+	if anyBlind {
+		if werr == nil && worktree != nil {
+			if done := worktree.HooksDone(); done != nil {
+				select {
+				case <-done:
+				case <-time.After(rebuildHooksSettleTimeout):
+					return markRecoverRebuilt(committed, fmt.Errorf(
+						"recover: the rebuilt worktree's post-worktree commands are still running; "+
+							"retry when provisioning settles"))
+				}
+			}
+		}
+		if err := CheckWorktreeOccupants(workDir); err != nil {
+			return markRecoverRebuilt(committed, fmt.Errorf(
+				"recover: stale sessions closed blind; %w", err))
+		}
+	}
+
+	// Checkpoint the discharge BEFORE any replacement launches: a daemon
+	// exit between the spawn and the settlement write would reload the
+	// stale `true` and tear down the fresh panes as though they belonged
+	// to the deleted worktree (#5371 review). A failed checkpoint restores
+	// the flag, so the row stays Lost and a retry re-runs the confirmed
+	// teardown instead of spawning on an unrecorded clear.
+	if err := i.SetRebuildTeardownPending(false); err != nil {
+		return markRecoverRebuilt(committed, fmt.Errorf(
+			"recover: could not make the completed stale-pane teardown durable: %w", err))
+	}
 	return nil
 }

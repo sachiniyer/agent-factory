@@ -438,9 +438,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	//
 	// A rebuild teardown obligation must be durable when it is set and again
 	// when it is discharged — before any replacement launches (#5371 review).
-	instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
-		return m.persistInstanceErr(repoID, i)
-	})
+	instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})

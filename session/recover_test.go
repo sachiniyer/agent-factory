@@ -596,7 +596,10 @@ func TestRecover_BranchGoneWithoutRecordedConversationDoesNotFreshDispatch(t *te
 	}
 
 	var newSessions int
-	tmuxExec := countingExec(map[string]bool{}, &newSessions)
+	// deadPaneAwareExec so the stale-pane teardown — which now runs BEFORE the
+	// rebuild — can confirm the absent sessions dead (blind) instead of
+	// choking on countingExec's unparseable list-panes reply (#5371 review).
+	tmuxExec := deadPaneAwareExec(map[string]bool{}, countingExec(map[string]bool{}, &newSessions))
 	pty := persistPtyFactory{t: t, cmdExec: tmuxExec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -759,12 +762,14 @@ func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
 }
 
 // TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry is the retry half of
-// the #5370 property (#5371 review): when a rebuild commits but a stale-pane
-// teardown fails mid-attempt, the next Recover MUST NOT skip the teardown just
-// because os.Stat now sees the rebuilt directory — the rebuilt gate is
-// re-derived per attempt while a stale survivor still answers has-session.
-// Without a durable indication the second attempt reattaches the stale pane
-// and ConfirmLive binds it as Running — the original defect through a retry.
+// the #5370 property (#5371 review): when a rebuild's stale-pane teardown fails
+// mid-attempt, the next Recover MUST NOT skip it just because the stale name
+// still answers has-session — the durable obligation is re-derived per attempt,
+// and now runs BEFORE the rebuild recreates the checkout, so a wedged kill on
+// attempt 1 leaves the worktree missing rather than half-rebuilt beside a live
+// stale pane. Without the durable indication a later attempt would reattach the
+// stale pane and ConfirmLive would bind it as Running — the original defect
+// through a retry.
 func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -810,7 +815,8 @@ func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 	}
 
 	// The stale agent session survives; kill-session is wedged on attempt 1
-	// only, so the rebuild commits while the teardown fails.
+	// only, so the teardown fails BEFORE the rebuild could commit — the
+	// worktree stays missing and the durable obligation stays armed.
 	var newSessions int
 	var spawns, kills []string
 	inner := deadPaneAwareExec(map[string]bool{agentName: true},
@@ -842,11 +848,15 @@ func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	require.Error(t, restored.Recover(), "attempt 1 must fail — the stale pane refused to die")
-	require.DirExists(t, worktreePath, "the rebuild committed before the teardown failed")
+	_, statErr := os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(statErr),
+		"the teardown failed BEFORE the rebuild — no half-rebuilt checkout may sit beside the live stale pane")
+	assert.True(t, restored.RebuildTeardownPending(), "the durable obligation stays armed for the retry")
 	assert.Equal(t, 0, newSessions, "no replacement may launch while the stale pane survives")
 
-	// Attempt 2: the worktree now EXISTS, so a re-derived rebuild flag would
-	// skip teardown and reattach the stale survivor.
+	// Attempt 2: the armed obligation — not a re-derived rebuild flag — is
+	// what runs the teardown again; without it the retry would rebuild beside
+	// the still-answering stale pane and reattach it.
 	failKills = false
 	require.NoError(t, restored.Recover())
 

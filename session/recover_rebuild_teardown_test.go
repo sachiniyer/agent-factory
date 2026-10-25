@@ -209,14 +209,11 @@ func TestRecover_RebuiltTeardownOccupancyGateBlocksDetachedSurvivor(t *testing.T
 }
 
 // The rebuild's startHooks launches the NEW checkout's provisioning run with
-// cwd inside the rebuilt path (RebuildFromExistingBranch retired the
-// predecessor before touching the tree — session/git/worktree_ops.go). That
-// run must NOT be cancelled by the teardown: killing it leaves the rebuilt
-// checkout half-provisioned while recovery launches the agent beside it.
-// Instead the occupancy gate waits for it — the run is the one legitimate
-// occupant of the fresh path — so a gated run refuses the attempt until it is
-// released, and then the same run completes and the respawn proceeds (#5371
-// review).
+// cwd inside the rebuilt path. The teardown runs BEFORE that rebuild — its
+// hook join retires the OLD checkout's run while the path is still missing —
+// so the provisioning run must start, run exactly once, and complete
+// undisturbed: cancelling it would leave the rebuilt tree half-provisioned
+// while recovery launches the agent beside it (#5371 review).
 func TestRecover_RebuiltTeardownPreservesProvisioningHooks(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the hook run is observed through the /proc cwd occupancy gate")
@@ -306,49 +303,38 @@ func TestRecover_RebuiltTeardownPreservesProvisioningHooks(t *testing.T) {
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
 	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
-	// Attempt 1: the gate is closed, so the new provisioning run is in flight
-	// when the teardown reaches the occupancy gate. The attempt must REFUSE —
-	// the run is waited out, never cancelled — and naming it keeps the retry
-	// honest. Under the old code Recover returns nil here because
-	// CancelAndJoinHooks kills the just-launched run outright.
-	err = restored.Recover()
-	require.Error(t, err,
-		"an in-flight provisioning run must refuse the attempt — it is the new checkout's own, not a stale survivor")
-	assert.Contains(t, err.Error(), "post-worktree",
-		"the refusal must name the provisioning run it is waiting on")
-	assert.Equal(t, Lost, restored.GetStatus())
-	assert.True(t, restored.RebuildTeardownPending(), "the obligation stays armed for the retry")
-	assert.Equal(t, 0, newSessions, "no replacement may spawn while provisioning is in flight")
+	// The teardown now runs BEFORE the rebuild — it joins the predecessor hook
+	// run while the path is still missing — so the new provisioning run is
+	// launched by Rebuild only after every stale pane is dead, and nothing
+	// downstream of the rebuild may cancel it. Attempt 1 proceeds to the spawn
+	// (running the agent beside in-flight provisioning is the normal create
+	// shape); the gated run must then complete undisturbed.
+	require.NoError(t, restored.Recover())
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Equal(t, 1, newSessions)
+	assert.False(t, restored.RebuildTeardownPending())
 
-	// The run must have actually started inside the rebuilt checkout — a refuse
-	// that merely pre-empted it would hide the same unprovisioned outcome.
+	// The run must have actually started inside the rebuilt checkout — a
+	// teardown that silently pre-empted it would hide the same unprovisioned
+	// outcome this test exists to forbid.
 	require.Eventually(t, func() bool {
 		entries, _ := os.ReadDir(startedDir)
 		return len(entries) >= 1
 	}, 10*time.Second, 20*time.Millisecond, "the rebuild's own provisioning run never started")
 
-	// Release the gate: the SAME run must complete, and the retry then proceeds.
+	// Release the gate: the SAME run must complete — no teardown hook pass may
+	// have cancelled it.
 	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0644))
 	require.Eventually(t, func() bool {
 		entries, _ := os.ReadDir(doneDir)
 		return len(entries) >= 1
 	}, 15*time.Second, 20*time.Millisecond,
-		"the rebuilt checkout's provisioning run was cancelled instead of waited out")
+		"the rebuilt checkout's provisioning run was cancelled instead of allowed to finish")
 
-	require.NoError(t, restored.Recover(), "the retry must proceed once provisioning settles")
-	assert.Equal(t, Running, restored.GetStatus())
-	assert.Equal(t, 1, newSessions)
-	assert.False(t, restored.RebuildTeardownPending())
-
-	// The retry skipped the rebuild entirely — the worktree exists, so the
-	// missing-dir branch never re-ran Rebuild* and the SAME provisioning run
-	// the first attempt waited on is the one that completed. A second run here
-	// would mean the retry restarted provisioning from scratch.
-	started, _ := os.ReadDir(startedDir)
-	done, _ := os.ReadDir(doneDir)
-	assert.Equal(t, 1, len(started),
-		"the retry must not launch a second provisioning run — it waits on the one the rebuild already started")
-	assert.Equal(t, 1, len(done))
+	// And it ran exactly once — the teardown's hook join must retire only the
+	// predecessor, never restart or duplicate the new checkout's run.
+	entries, _ := os.ReadDir(startedDir)
+	assert.Len(t, entries, 1, "exactly one provisioning run must exist — no restart")
 }
 
 // While the rebuild teardown is owed, user-facing runtime mutations must
@@ -730,4 +716,151 @@ func TestRecover_RebuiltTeardownKillsEverySurvivingSibling(t *testing.T) {
 			"every bound survivor in the deleted inode must be killed before respawn, not only the agent")
 	}
 	assert.Equal(t, 3, newSessions, "agent + both shells must be freshly spawned inside the rebuilt worktree")
+}
+
+// The stale-pane teardown must run while the worktree path is still MISSING —
+// before RebuildFromExistingBranch recreates the checkout. A pane surviving
+// from the deleted inode holds absolute paths: anything it writes while alive
+// lands inside the fresh tree, racing git's checkout and the new provisioning
+// run (#5371 review). The supervised-runtime stop is the observable edge of
+// that teardown — it must fire while os.Stat(workDir) still fails, not after
+// the rebuild has already recreated the directory.
+func TestRecover_RebuiltTeardownRunsBeforeRebuild(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-order"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_order"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-order")
+
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-order",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-order",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	cmdExec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+
+	// The stop is the teardown's tail end — every bound tmux name and cleanup
+	// handle has already been closed when it fires. If the directory exists at
+	// that instant, the rebuild ran first and stale panes wrote into the fresh
+	// checkout the whole time.
+	var dirPresentAtRuntimeStop bool
+	var runtimeStops int
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error {
+		runtimeStops++
+		_, serr := os.Stat(worktreePath)
+		dirPresentAtRuntimeStop = serr == nil
+		return nil
+	})
+
+	require.NoError(t, restored.Recover())
+	assert.Equal(t, 1, runtimeStops)
+	assert.False(t, dirPresentAtRuntimeStop,
+		"the stale-pane teardown (including its supervised-runtime stop) must finish while the worktree is still missing — running it after the rebuild lets the dead inode's writers race the fresh checkout")
+	assert.Equal(t, 1, newSessions)
+}
+
+// A rebuild-teardown obligation coerces reviving pane observations to
+// LiveLost — but the transaction owner's own restore writes are bookkeeping,
+// not observations: after a refused respawn the limit scheduler can only
+// retry a row still parked at LiveLimitReached, and the committed-swap retry
+// only admits LiveRunning/LiveReady. Coercing those restores strands the row
+// at LiveLost with no owning loop — lost-restore refuses PendingAccountSwap
+// rows outright (#5371 review).
+func TestRebuildTeardownPending_OwnerLivenessRestoresBypassCoercion(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	inst := &Instance{Title: "rebuild-pending-restore", liveness: LiveRunning}
+	inst.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, inst.SetRebuildTeardownPending(true))
+
+	inst.inFlightOp = OpRespawning
+
+	// The owner re-parks its limit window after the refused respawn.
+	require.NoError(t, inst.ReparkLimitUnderResumeFence(time.Now().Add(time.Hour)))
+	assert.Equal(t, LiveLimitReached, inst.GetLiveness(),
+		"the owner's re-park must not be coerced to Lost — LiveLimitReached is what the limit scheduler retries")
+
+	// And a committed manual swap restores the healthy liveness it started
+	// from — the scheduled retry only admits Running/Ready.
+	require.NoError(t, inst.RestoreLivenessUnderResumeFence(LiveReady))
+	assert.Equal(t, LiveReady, inst.GetLiveness(),
+		"the committed swap's healthy restore must not be coerced to Lost — the swap retry owns this row")
+
+	// Outside the respawn fence the bypass refuses: it is the transaction
+	// owner's seam, not a general uncoerced write.
+	inst.inFlightOp = OpNone
+	assert.Error(t, inst.ReparkLimitUnderResumeFence(time.Now().Add(time.Hour)))
+	assert.Error(t, inst.RestoreLivenessUnderResumeFence(LiveRunning))
+}
+
+// While a rebuild teardown obligation is owed, the pane a client types into
+// may still be the stale one bound to the deleted inode — prompt and PTY
+// input are refused on the durable flag itself, because liveness cannot say
+// it: a committed retry restores LiveRunning/LiveReady for its owner (#5371
+// review).
+func TestRebuildTeardownPending_FencesPromptAndInput(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	inst := &Instance{Title: "rebuild-pending-input", liveness: LiveRunning}
+	inst.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, inst.SetRebuildTeardownPending(true))
+
+	s := &localAgentServer{inst: inst}
+
+	_, err := s.SendPromptWithStatus("do work")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still owes the teardown")
+
+	err = s.Input(0, []byte("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still owes the teardown")
+
+	err = s.InputTab("tab-1", []byte("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still owes the teardown")
+
+	// Discharged — the gate lifts.
+	require.NoError(t, inst.SetRebuildTeardownPending(false))
+	require.NoError(t, inst.refuseInputWhileRebuildTeardownPending())
 }

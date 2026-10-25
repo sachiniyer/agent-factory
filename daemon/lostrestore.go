@@ -564,9 +564,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	//
 	// A rebuild teardown obligation must be durable when it is set and again
 	// when it is discharged — before any replacement launches (#5371 review).
-	inst.SetRebuildTeardownNotify(func(i *session.Instance) error {
-		return m.persistInstanceErr(repoID, i)
-	})
+	inst.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
 	// The teardown also owes the runtimes tmux cannot see: the supervised VS
 	// Code editor holds a cwd in the checkout with no tab.tmux (#5371 review).
 	inst.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {

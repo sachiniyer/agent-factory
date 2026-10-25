@@ -717,8 +717,45 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 			i.Title, opLabel(i.inFlightOp))
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.assignLivenessLocked(LiveLimitReached)
+	// Direct write, not assignLivenessLocked: this is the transaction owner
+	// restoring its own parked disposition after a refused respawn, not a pane
+	// observation. While a rebuild teardown is owed, the coerce-to-Lost guard
+	// exists to keep LYING observations from reviving the row — but it must not
+	// strand the owner: a pending row coerced to LiveLost is refused by the
+	// ordinary lost-restore gate when a PendingAccountSwap rides it, and the
+	// limit scheduler admits only a row still parked at LiveLimitReached
+	// (#5371 review). The teardown obligation stays armed on its own flag and
+	// re-runs inside the retry's respawn regardless of what the row reads.
+	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
+
+// RestoreLivenessUnderResumeFence restores the liveness a committed respawn
+// attempt found on entry after that attempt fails — the transaction-owned
+// twin of Transition(ObserveLiveness) for the same reason
+// ReparkLimitUnderResumeFence is the twin of SetLimitReached: it is owner
+// bookkeeping about the attempt's own precondition, not a pane observation,
+// so the rebuild-teardown coerce-to-Lost guard in assignLivenessLocked must
+// not apply to it. Without it a committed manual account swap whose respawn
+// armed the teardown obligation is parked at LiveLost — refused by the
+// ordinary lost-restore gate on PendingAccountSwap, and ineligible for the
+// scheduled-swap retry that only admits LiveRunning/LiveReady — stranded with
+// no owning loop (#5371 review).
+//
+// Refuses unless OpRespawning is actually held, matching
+// ReparkLimitUnderResumeFence, so it cannot become a back door around the
+// observation guard it deliberately steps past.
+func (i *Instance) RestoreLivenessUnderResumeFence(l Liveness) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
+		return fmt.Errorf("restoring liveness for %q requires the resume fence (in-flight op is %s)",
+			i.Title, opLabel(i.inFlightOp))
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = l
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }

@@ -396,7 +396,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
 			// The pending manual transaction is the recovery obligation. A healthy
 			// handoff must never manufacture quota evidence for the selected account.
-			return instance.Transition(session.ObserveLiveness(originalLiveness))
+			// RestoreLivenessUnderResumeFence, not Transition(ObserveLiveness): the
+			// write is this transaction's own bookkeeping after a refused respawn,
+			// not a pane observation — the rebuild-teardown coerce-to-Lost guard the
+			// observation path carries would park the row at LiveLost, where the
+			// lost-restore gate refuses it on PendingAccountSwap and the scheduled
+			// swap retry never admits it (#5371 review).
+			return instance.RestoreLivenessUnderResumeFence(originalLiveness)
 		}
 		return m.reparkLimitUnderResumeFence(instance, resetAt)
 	}
@@ -684,9 +690,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// obligation must be durable at the moment it is armed and again at its
 		// discharge — before any replacement launches (#5371 review). A nil
 		// notify would make SetRebuildTeardownPending refuse the transition.
-		instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
-			return m.persistInstanceErr(repoID, i)
-		})
+		instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
 		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 			return m.stopVSCodeForInstance(key, i.ID)
 		})

@@ -331,9 +331,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// rebuild arms a stale-pane teardown obligation that must be durable at
 	// both its transitions (#5371 review). Install the checkpoint the setter
 	// requires.
-	instance.SetRebuildTeardownNotify(func(i *session.Instance) error {
-		return m.persistInstanceErr(repoID, i)
-	})
+	instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})

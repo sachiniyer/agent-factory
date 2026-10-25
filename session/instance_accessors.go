@@ -572,6 +572,24 @@ func (i *Instance) RebuildTeardownPending() bool {
 	return i.rebuildTeardownPending
 }
 
+// refuseInputWhileRebuildTeardownPending is the input-side twin of the
+// liveness guards: while a rebuild teardown obligation is owed, the pane a
+// client is typing into may still be the STALE one bound to the deleted
+// inode — accepted keystrokes either execute in the void or die with the
+// teardown kill moments later (#5371 review). Liveness alone cannot say this
+// (a committed retry restores LiveRunning/LiveReady for its owner), so the
+// durable flag itself is the fence. The obligation's owner does not type —
+// recover/resume run through their own seams — so nothing legitimate is
+// blocked.
+func (i *Instance) refuseInputWhileRebuildTeardownPending() error {
+	if i.RebuildTeardownPending() {
+		return fmt.Errorf(
+			"session %q still owes the teardown of the runtime its rebuilt worktree replaced; input is refused until its recovery finishes",
+			i.Title)
+	}
+	return nil
+}
+
 // SetRebuildTeardownPending records or clears the stale-pane teardown
 // obligation a worktree rebuild commits. Transitions touch the row so the
 // durable state survives the daemon, not only the attempt that set it.
