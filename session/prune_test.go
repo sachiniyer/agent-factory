@@ -64,6 +64,14 @@ func TestPruneSkipReason_Table(t *testing.T) {
 			d.Status = Dead
 		}, "not archived"},
 		{"op in flight", func(d *InstanceData) { d.InFlightOp = OpArchiving }, "operation in flight"},
+		{"pending handoff mission", func(d *InstanceData) {
+			// An ambiguous verdict deliberately loads without the OpReplacing
+			// fence (see handoff_pending.go), so a serialized archived row reaches
+			// the gate with InFlightOp == OpNone and the mission itself must refuse
+			// it — not a reconstructed op axis.
+			d.PendingHandoffMission = "continue the inherited work"
+			d.HandoffDeliveryStatus = PromptCouldNotConfirm
+		}, "handoff mission undelivered"},
 		{"startup unknown", func(d *InstanceData) { d.StartupStateUnknown = true }, "startup state unknown"},
 		{"external worktree", func(d *InstanceData) { d.Worktree.ExternalWorktree = true }, "user-owned"},
 		{"relocation recovery", func(d *InstanceData) {

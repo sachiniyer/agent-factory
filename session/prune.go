@@ -60,6 +60,30 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 	if data.InFlightOp != OpNone {
 		return fmt.Sprintf("operation in flight (%s)", opLabel(data.InFlightOp))
 	}
+	// A pending handoff mission is the one operation marker that IS durable: an
+	// irreversible runtime swap completed but its takeover brief did not, so the
+	// row still owes an obligation nothing else records (#4429). The op axis
+	// above cannot speak for it — the loader reconstructs the OpReplacing fence
+	// only for the verdicts the daemon itself resolves (PromptNotDelivered/
+	// PromptDelivered); an ambiguous-verdict archived row (PromptSentUnverified/
+	// PromptCouldNotConfirm, or a legacy record with no verdict) loads with
+	// inFlightOp == OpNone while keeping the mission pending, and the daemon's
+	// automatic retry only owns PromptNotDelivered, so ambiguity waits for the
+	// operator indefinitely.
+	//
+	// Reclaiming the row would permanently destroy the brief, and once the row
+	// is archived it cannot be resolved in place: ConfirmPendingHandoffDelivery
+	// refuses it ("has no live runtime to confirm against ...; restore owns this
+	// row"), and ValidateRuntimeAction refuses a new handoff against the marker
+	// ("still owes the mission from its last handoff; resolve it first"). The
+	// only road back is a restore the prune listing would advertise as
+	// unnecessary, so the gate refuses here alongside every other lifecycle path
+	// that treats the mission as blocking (handoff, automatic completion, and
+	// post-archive confirmation). No additional liveness check is needed: the
+	// gate above has already refused any row that is not archived.
+	if data.PendingHandoffMission != "" {
+		return "handoff mission undelivered — resolve the takeover brief before reclaiming (restore owns this row)"
+	}
 	if data.StartupStateUnknown {
 		return "startup state unknown — af could not confirm which runtime owns its workspace"
 	}
