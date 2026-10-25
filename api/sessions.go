@@ -165,11 +165,11 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			// rows); the destructive paths already resolve through findSession.
 			var notice string
 			if !apiclient.IsRemoteTarget() {
-				extra, gaps, err := diskRepoPathsForTitle(title, paths)
+				extra, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
 				if err == nil && len(extra) > 1 {
 					return nil, "", session.AmbiguousTitleError(title, extra)
 				}
-				notice = warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
 			return &matches[0], notice, nil
 		}

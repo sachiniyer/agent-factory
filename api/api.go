@@ -167,17 +167,24 @@ func repoPathsOf(matches []session.InstanceData) []string {
 // A per-repo file that could not be READ, or whose JSON could not be PARSED, is
 // the same kind of gap either way (#3479): either could hold the title, so the
 // widening's exhaustiveness claim must not survive either. Both are reported
-// through the second return rather than silently dropped, so the caller can say
-// the widening was incomplete instead of implying it was exhaustive. Reported
-// rather than refused — this is a best-effort widening of an already-successful
-// lookup, so it must never turn a working read into an error. The daemon's twin
-// of this guard (collectTitleRepoPathsOnDisk) gates the DESTRUCTIVE paths, which
-// resolve through findSession, while this backstops a read where breaking a
-// working lookup costs more than the wrong project name it would prevent.
-func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, error) {
+// through the second and third returns rather than silently dropped, so the
+// caller can say the widening was incomplete instead of implying it was
+// exhaustive. Reported rather than refused — this is a best-effort widening of
+// an already-successful lookup, so it must never turn a working read into an
+// error. The daemon's twin of this guard (collectTitleRepoPathsOnDisk) gates the
+// DESTRUCTIVE paths, which resolve through findSession, while this backstops a
+// read where breaking a working lookup costs more than the wrong project name it
+// would prevent.
+//
+// The two gap classes are returned SEPARATELY because they take different
+// remedies: an unreadable file may be made readable again, but a parse-corrupted
+// instances.json must not be advised to REMOVE — af keeps no backup, so deleting
+// it discards the hidden sessions (#5530 review). The caller merges them for the
+// notice but applies the corruption-safe hint to the corrupted class.
+func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, []config.RepoInstancesSkip, error) {
 	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	paths := append([]string(nil), known...)
 	var corrupted []config.RepoInstancesSkip
@@ -202,15 +209,7 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 			}
 		}
 	}
-	if len(corrupted) == 0 {
-		return session.DedupeSorted(paths), unreadable, nil
-	}
-	// Merge the two gap classes in repoID order so a message built from them
-	// stays stable across runs: `unreadable` already arrives sorted (os.ReadDir),
-	// but `corrupted` is collected in map-iteration order.
-	gaps := append(append([]config.RepoInstancesSkip{}, unreadable...), corrupted...)
-	sort.Slice(gaps, func(i, j int) bool { return gaps[i].RepoID < gaps[j].RepoID })
-	return session.DedupeSorted(paths), gaps, nil
+	return session.DedupeSorted(paths), unreadable, corrupted, nil
 }
 
 // corruptedRepoRepairHint is the one-line remedy appended to every corruption

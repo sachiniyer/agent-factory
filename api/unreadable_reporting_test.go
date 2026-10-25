@@ -302,6 +302,16 @@ func TestGetSessionByTitle_ReportsIncompleteWideningOnCorruptedRepo(t *testing.T
 	if !strings.Contains(notice, path) {
 		t.Errorf("the returned notice must name the corrupted file too; got: %q", notice)
 	}
+	// A parse-corrupted instances.json is a file af can READ but not parse, so
+	// "remove the file(s)" — RepoInstancesSkipRemedy's advice for an unreadable
+	// file — would discard the hidden sessions (af keeps no backup). The notice
+	// must carry the corruption-safe hint instead (#5530 review).
+	if strings.Contains(notice, "remove the file") {
+		t.Errorf("the notice for a corrupted file must not advise removing it (af keeps no backup); got: %q", notice)
+	}
+	if !strings.Contains(notice, "copy the corrupt") {
+		t.Errorf("the notice for a corrupted file must carry the corruption-safe repair hint; got: %q", notice)
+	}
 	if !strings.Contains(warnLog.String(), "corrupt-repo") {
 		t.Errorf("the corrupted repo must be logged while widening; warning log was: %q", warnLog.String())
 	}
