@@ -25,14 +25,23 @@ import (
 //
 //   - empty arguments name no branch to act on;
 //   - the repo root does not exist — no repo, no local branch;
-//   - the root exists but has no .git — the repo was deleted out from under the
-//     record, taking its refs with it. Both are DIRECT filesystem observations,
-//     the same rule repoRegistersNothing applies for worktrees (#2110): "git
-//     errored, so there must be no repo" is exactly the inference this function
-//     exists to remove. Settling the de-git'd case here also keeps `git -C`
-//     from discovering an ENCLOSING repo upward of the recorded root and
-//     answering — or worse, letting the caller's `git branch -D` act — on a
-//     same-named branch AF never created.
+//   - the root exists but has no .git AND is not a bare metadata layout — the
+//     repo was deleted out from under the record, taking its refs with it. A
+//     BARE repository legitimately carries no .git child (its metadata — HEAD,
+//     objects/, refs/ — lives directly at the root), so a missing .git alone is
+//     not absence: the bare layout is recognized by bareMetadataDirectory (the
+//     same structural check resolveRepoMetadataRoot uses on this path) and
+//     falls through to the show-ref probe rather than fabricating absence for
+//     a branch that verifiably exists (#5136: af sessions prune over a
+//     bare-clone origin; a bare root is a first-class project identity — see
+//     config.ResolveMainRepoRoot).
+//
+// Both filesystem observations are DIRECT, the same rule repoRegistersNothing
+// applies for worktrees (#2110): "git errored, so there must be no repo" is
+// exactly the inference this function exists to remove. Settling the de-git'd
+// case here also keeps `git -C` from discovering an ENCLOSING repo upward of the
+// recorded root and answering — or worse, letting the caller's `git branch
+// -D` act — on a same-named branch AF never created.
 //
 // Everything else is probed with `git show-ref --verify --quiet`, whose exit
 // surface git keeps MOSTLY distinct: exit 0 is "exists", a silent exit 1 is
@@ -61,13 +70,20 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		return false, fmt.Errorf("stat repo %s: %w", repoRoot, err)
 	}
 	// .git is a directory in a main worktree and a file in a linked one; Stat
-	// accepts either.
+	// accepts either. A bare repository has NO .git child — its metadata lives
+	// directly at the root (HEAD, objects/, refs/) — so a missing .git is
+	// determinate absence only when the root is not a bare layout; otherwise
+	// fall through to the show-ref probe (bareMetadataDirectory is the same
+	// structural check resolveRepoMetadataRoot uses on this path).
 	gitPath := filepath.Join(repoRoot, ".git")
 	if _, err := os.Stat(gitPath); err != nil {
-		if os.IsNotExist(err) {
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("stat %s: %w", gitPath, err)
+		}
+		if !bareMetadataDirectory(repoRoot) {
 			return false, nil
 		}
-		return false, fmt.Errorf("stat %s: %w", gitPath, err)
+		// Bare origin: refs live at the root; fall through to show-ref.
 	}
 	// Repository-selector variables (GIT_DIR, GIT_WORK_TREE, …) inherited from
 	// a daemon launched inside a hook would redirect the probe at a foreign
