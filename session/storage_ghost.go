@@ -45,6 +45,19 @@ var knownInstanceDataFields = func() knownFields {
 		"pr_info":       nil,
 	}
 	collectKnownFields(reflect.TypeOf(InstanceData{}), out, map[reflect.Type]bool{})
+	// TabData.MarshalJSON derives a `kind_name` wire field on every tab
+	// (state_names.go) that reflection does not see, so a Loading/Deleting row
+	// carrying a tab would otherwise look marker-less to the reap path while its
+	// raw form carries the binary's own kind_name — the recursive detector would
+	// treat it as a future durable marker, bypass the transient-ghost reap, and
+	// keep a deleting row's title reserved indefinitely. Register the derived key
+	// on each tab container (tabs, pending_tabs) so the detector recognizes it
+	// as this binary's own field, not an additive marker.
+	for _, field := range []string{"tabs", "pending_tabs"} {
+		if nested, ok := out[field]; ok && nested != nil {
+			nested["kind_name"] = nil
+		}
+	}
 	return out
 }()
 
@@ -308,9 +321,64 @@ func preserveUnmaterializedGhostRows(
 			// for rows this binary wrote.
 			raw, _ = json.Marshal(d)
 		}
+		// A verbatim-preserved ghost may still carry a wire key this binary
+		// no longer decodes and must not write back. The previous decode/encode
+		// checkpoint dropped these by side effect; the raw path keeps the row
+		// verbatim so additive fields a newer binary wrote survive (#6), and
+		// that verbatim copy would otherwise re-persist a removed key like
+		// pr_info on every shutdown. Strip the known removed keys (a fixed set
+		// this binary explicitly retired) without touching a genuinely unknown
+		// field, which the verbatim copy is here to preserve.
+		raw = stripRemovedInstanceDataWireKeys(raw)
 		ghosts = append(ghosts, raw)
 	}
 	return ghosts
+}
+
+// removedInstanceDataWireKeys is the set of wire keys InstanceData once carried
+// but no longer decodes, so a verbatim-preserved ghost that still carries one
+// must not write it back. The release notes say legacy pr_info is ignored and
+// not written back; the previous decode/encode checkpoint dropped it, and this
+// set keeps that contract for the durable ghosts the verbatim path now carries
+// through (#NYA). A genuinely unknown field — a newer binary's additive marker
+// this version does not know — is NOT in this set and stays verbatim, so the
+// strip does not discard the version-skew recovery data the verbatim path
+// exists to protect.
+var removedInstanceDataWireKeys = map[string]struct{}{
+	"pr_info": {},
+}
+
+// stripRemovedInstanceDataWireKeys returns raw with the removed wire keys above
+// deleted from its top-level object, preserving every other field verbatim. A
+// row that carries none of the removed keys is returned unchanged so additive
+// fields a newer binary wrote are not re-encoded. A removed key is stripped
+// here, not in rowHasUnrecognizedInstanceFields, because the recognized set
+// governs the transient-ghost reap (a disposable Loading/Deleting row carrying
+// only pr_info is still reaped) while this strip governs what a preserved ghost
+// writes back (a durable ghost's pr_info is dropped, not re-persisted).
+func stripRemovedInstanceDataWireKeys(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return raw
+	}
+	var changed bool
+	for k := range removedInstanceDataWireKeys {
+		if _, ok := fields[k]; ok {
+			delete(fields, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // checkpointReadError classifies the error from a checkpoint's on-disk read of
