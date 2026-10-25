@@ -82,7 +82,7 @@ session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --
 Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the transport:
 
 - **Served by the targeted daemon** — `list`, `get`, `watch`, `preview`, `attach` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
-- **Everything else** — `kill`, `archive`, `restore`, `retry-limit`, `send-prompt`, tab create/delete/rename/reorder — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
+- **Everything else (except `prune`, below)** — `kill`, `archive`, `restore`, `retry-limit`, `send-prompt`, tab create/delete/rename/reorder — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
 - **`prune`** — also follows the targeted daemon, but against a remote takes only `--all`: a `--repo` or current-directory scope resolves against *this* machine's checkouts and could name a different project on the remote.
 
 Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
