@@ -7391,6 +7391,7 @@ function viewNavigation(onSelect) {
   }
   return { el: el2, tabs };
 }
+var activeModalTrap = null;
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
   const errorLine = h("div", { class: "af-modal-error", role: "alert" });
@@ -7412,10 +7413,7 @@ function modalChrome(opts) {
   const backdrop = h("div", { class: "af-modal-backdrop" }, card);
   backdrop.addEventListener("click", () => opts.onCancel());
   const trap = (event) => {
-    if (!backdrop.isConnected) {
-      document.removeEventListener("keydown", trap, true);
-      return;
-    }
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll(
       "button, input, select, textarea, a[href], summary, [tabindex]"
@@ -7429,7 +7427,9 @@ function modalChrome(opts) {
       (event.shiftKey ? last : first).focus();
     }
   };
+  if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
   document.addEventListener("keydown", trap, true);
+  activeModalTrap = trap;
   card.addEventListener("click", (e) => e.stopPropagation());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {

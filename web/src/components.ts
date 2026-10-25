@@ -203,6 +203,13 @@ export interface ModalHandle {
   close(): void;
 }
 
+// The single live document-level Tab trap. modalChrome reaps the previous trap
+// when a new modal opens (mountOverlay closes any current modal first, so at
+// most one is live). The trap is NOT removed in close() — a refused RPC remounts
+// the same handle, and a keydown during that detached window must not strand it —
+// so the previous modal's trap is reclaimed here, when the next modal takes over.
+let activeModalTrap: ((event: KeyboardEvent) => void) | null = null;
+
 /** Builds the shared modal chrome: a backdrop, a titled card, a body slot, an
  *  error line, and a footer with a cancel + a primary action button. Returns the
  *  pieces the specific modals wire their behavior onto. Clicking the backdrop or
@@ -255,19 +262,22 @@ export function modalChrome(opts: {
   // A card-level trap cannot observe that event, so its rescue branch
   // (!card.contains(document.activeElement)) was dead exactly when it was needed.
   // The document-level listener sees every keydown while the modal is open, gates
-  // itself on the backdrop still being connected, and self-unregisters once the
-  // backdrop detaches (the guard below). It is NOT removed in close() so a
-  // remounted retained modal — close → openModal re-inserts the same handle —
-  // keeps its Tab containment; the guard handles final disposal lazily. Capture
-  // runs before the browser's default Tab focus shift, so the rescue can
-  // preventDefault and pull focus back inside before it leaves the overlay.
+  // itself on the backdrop still being connected, and is NOT removed in close(): a
+  // refused create/kill/archive RPC closes this modal (close() detaches the
+  // backdrop) and then remounts the same handle (index.ts openModal) once the RPC
+  // settles — the trap must survive that detached window so the reopened error
+  // dialog keeps its Tab containment. The guard below therefore stays registered
+  // and inert while the backdrop is detached; it does NOT self-remove on a
+  // keydown during that window, because that would strand the remount. Final
+  // disposal is the swap in modalChrome below: the next modal to open reaps the
+  // previous active trap, so at most one trap is live at a time and the last
+  // modal's trap lingers inert (its guard skips every event) after close if no
+  // other modal opens. Capture runs before the browser's default Tab focus shift,
+  // so the rescue can preventDefault and pull focus back inside before it leaves.
   const backdrop = h("div", { class: "af-modal-backdrop" }, card);
   backdrop.addEventListener("click", () => opts.onCancel());
   const trap = (event: KeyboardEvent) => {
-    if (!backdrop.isConnected) {
-      document.removeEventListener("keydown", trap, true);
-      return;
-    }
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll<HTMLElement>(
       'button, input, select, textarea, a[href], summary, [tabindex]',
@@ -282,7 +292,13 @@ export function modalChrome(opts: {
       (event.shiftKey ? last! : first).focus();
     }
   };
+  // Reap the previous modal's trap (if any) and install this one. A new modal
+  // always opens through mountOverlay, which closes the current modal first, so
+  // this swap is the disposal point: it bounds the live traps to one and reclaims
+  // a retained handle's trap once a different modal has taken over.
+  if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
   document.addEventListener("keydown", trap, true);
+  activeModalTrap = trap;
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
 
@@ -321,13 +337,14 @@ export function modalChrome(opts: {
       }
     },
     close() {
-      // The backdrop detaches here; the trap self-removes on the next keydown
-      // once its guard above sees the backdrop is gone. We do NOT unregister
-      // the trap eagerly: a refused create/kill/archive RPC closes this modal
-      // and then remounts the same handle (index.ts openModal), and an eager
-      // remove would leave the reopened error dialog with no Tab containment.
-      // The guard's lazy removal handles final disposal; remount re-connects
-      // the backdrop and the trap keeps working.
+      // The backdrop detaches here. The trap is NOT removed: a refused
+      // create/kill/archive RPC closes this modal and then remounts the same
+      // handle (index.ts openModal), and removing it here — or self-removing on
+      // a keydown during the detached RPC window — would leave the reopened
+      // error dialog with no Tab containment. The trap stays registered and is
+      // inert while the backdrop is detached (the guard above skips the event
+      // without removing itself); the next modalChrome reclaims it when a new
+      // modal opens.
       backdrop.remove();
     },
   };

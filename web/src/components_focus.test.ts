@@ -22,9 +22,18 @@ function extractModalChrome(): string {
   const node = ast.statements.find((s) =>
     ts.isFunctionDeclaration(s) && s.name?.text === "modalChrome");
   assert.ok(node, "components.ts must declare modalChrome");
+  // The document-level Tab trap is swapped via a module-level `activeModalTrap`
+  // that modalChrome reaps when a new modal opens. Extract that declaration too,
+  // so the sandbox reproduces the real disposal behavior across modalChrome calls
+  // (a per-call scope would leave every modal's trap live and break the reap).
+  const trapDecl = ast.statements.find((s) =>
+    ts.isVariableStatement(s) && s.declarationList.declarations.some(
+      (d) => ts.isIdentifier(d.name) && d.name.text === "activeModalTrap"));
+  assert.ok(trapDecl, "components.ts must declare the activeModalTrap swap slot");
+  const declText = trapDecl.getText(ast).replace(/^export\s+/, "");
   // Strip `export`: the sandbox runs module=CommonJS-style None, where an
   // `export` token would be a syntax error. The body is unchanged.
-  return node.getText(ast).replace(/^export\s+/, "");
+  return `${declText}\n${node.getText(ast).replace(/^export\s+/, "")}`;
 }
 
 const COMPILED = ts.transpileModule(extractModalChrome(), {
@@ -188,12 +197,20 @@ function h(tag: string, props: Record<string, unknown> & { class?: string } = {}
 function mutationNotice(..._args: unknown[]): FakeElement { return new FakeElement("div"); }
 
 function build(): Built {
+  return buildN(1)[0];
+}
+
+function buildN(count: number): Built[] {
   doc.activeElement = null;
   for (const key of Object.keys(docListeners)) delete docListeners[key];
   const sandbox: Record<string, unknown> = { h, mutationNotice, document: observableDoc };
   runInNewContext(COMPILED, sandbox);
   const modalChrome = sandbox.modalChrome as (o: unknown) => Built;
-  return modalChrome({ title: "Test", confirmLabel: "Confirm", confirmClass: "af-primary", onCancel: () => {} });
+  const built: Built[] = [];
+  for (let i = 0; i < count; i++) {
+    built.push(modalChrome({ title: "Test", confirmLabel: "Confirm", confirmClass: "af-primary", onCancel: () => {} }));
+  }
+  return built;
 }
 
 function dispatchKey(key: string, shift = false): FakeEvent {
@@ -211,17 +228,20 @@ test("the Tab trap is installed at the document level in capture phase, not on t
   assert.equal(cardOf(built).listeners.keydown, undefined, "no card-level trap remains");
 });
 
-test("close() detaches the backdrop; the trap stays registered but inert and self-removes on the next keydown", () => {
+test("close() detaches the backdrop; the trap stays registered and inert while detached (no self-removal)", () => {
   const built = build();
   built.handle.close();
   assert.equal(built.handle.el.isConnected, false, "close removes the backdrop from the DOM");
-  // The trap is NOT eagerly unregistered: a refused create/kill/archive closes
-  // this modal and then remounts the same handle (index.ts openModal), and an
-  // eager remove would leave the reopened error dialog with no Tab containment.
-  // The guard self-removes once it sees the backdrop is gone.
-  assert.equal((docListeners.keydown ?? []).length, 1, "the trap is not eagerly unregistered");
-  dispatchKey("Tab", false);
-  assert.equal((docListeners.keydown ?? []).length, 0, "the trap self-removes after the backdrop detaches");
+  // The trap is NOT unregistered by close, and a keydown while the backdrop is
+  // detached must NOT remove it: a refused create/kill/archive RPC closes this
+  // modal, the RPC is in flight with the backdrop disconnected, and a Tab pressed
+  // in that window used to self-remove the trap — stranding the remounted error
+  // dialog with no Tab containment. The trap stays registered and is inert (it
+  // skips the event without removing itself) until the next modalChrome reaps it.
+  assert.equal((docListeners.keydown ?? []).length, 1, "close does not unregister the trap");
+  const ev = dispatchKey("Tab", false);
+  assert.equal(ev.defaultPrevented, false, "the trap is inert while the backdrop is detached");
+  assert.equal((docListeners.keydown ?? []).length, 1, "a detached-window keydown does not remove the trap");
 });
 
 test("a close → remount cycle keeps the trap installed so Tab stays contained on the reopened modal", () => {
@@ -237,6 +257,39 @@ test("a close → remount cycle keeps the trap installed so Tab stays contained 
   const ev = dispatchKey("Tab", false);
   assert.equal(ev.defaultPrevented, true, "the trap still contains Tab after a remount");
   assert.notEqual(observableDoc.activeElement, docBody, "focus is pulled back inside the reopened dialog");
+});
+
+test("a keydown during the detached RPC window does not strand the trap on remount", () => {
+  // The Codex finding on c32653e2: closeModal() detaches the backdrop while the
+  // RPC is in flight, a Tab reaches the trap's disconnected guard, and the guard
+  // used to self-remove — so the remounted error dialog had no Tab containment.
+  // The trap must survive a keydown pressed during the detached interval.
+  const built = build();
+  built.handle.close();                  // closeModal: backdrop detaches, RPC in flight
+  dispatchKey("Tab", false);             // a Tab during the detached window
+  built.handle.el.isConnected = true;    // openModal(m) re-inserts the same handle on refusal
+  observableDoc.activeElement = docBody;
+  const ev = dispatchKey("Tab", false);
+  assert.equal(ev.defaultPrevented, true, "the trap still contains Tab after a remount that followed a detached-window keydown");
+  assert.notEqual(observableDoc.activeElement, docBody, "focus is pulled back into the reopened dialog");
+});
+
+test("opening a new modal reaps the previous modal's document-level trap", () => {
+  // modalChrome swaps out the previous active trap so the live trap count is
+  // bounded to one and a retained handle's trap is reclaimed once a different
+  // modal takes over (the disposal path now that close() no longer removes it).
+  // Two modalChrome calls in one sandbox share the module-level activeModalTrap,
+  // which a per-build sandbox would not, so buildN(2) keeps them in one context.
+  const [first, second] = buildN(2);
+  assert.equal((docListeners.keydown ?? []).length, 1, "the second modal reaps the first and leaves one trap");
+  // The first modal's trap is gone: with the first backdrop connected but the
+  // second's not, only the second's trap would respond. Flip that — disconnect
+  // the second and connect the first — and the first trap must NOT handle Tab.
+  first.handle.el.isConnected = true;
+  second.handle.el.isConnected = false;
+  observableDoc.activeElement = docBody;
+  const ev = dispatchKey("Tab", false);
+  assert.equal(ev.defaultPrevented, false, "the reaped first trap no longer handles Tab");
 });
 
 test("setBusy(true) moves focus off a focused footer button before disabling it", () => {
