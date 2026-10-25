@@ -246,7 +246,25 @@ export function modalChrome(opts: {
   card.tabIndex = -1;
   // Keep native Tab navigation within the currently enabled, visible controls.
   // Re-query on each keypress: errors, disclosures and busy state can change them.
-  card.addEventListener("keydown", (event) => {
+  //
+  // The trap is attached at the document level (capture phase), not the card, so it
+  // still fires once focus has escaped to <body> — the state setBusy creates when it
+  // disables a footer button that had focus: the browser moves
+  // document.activeElement to <body>, and a Tab keydown there targets <body> and
+  // bubbles body → html → document, never through the card (a descendant of body).
+  // A card-level trap cannot observe that event, so its rescue branch
+  // (!card.contains(document.activeElement)) was dead exactly when it was needed.
+  // The document-level listener sees every keydown while the modal is open, gates
+  // itself on the backdrop still being connected, and unregisters in close().
+  // Capture runs before the browser's default Tab focus shift, so the rescue can
+  // preventDefault and pull focus back inside before it leaves the overlay.
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event: KeyboardEvent) => {
+    if (!backdrop.isConnected) {
+      document.removeEventListener("keydown", trap, true);
+      return;
+    }
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll<HTMLElement>(
       'button, input, select, textarea, a[href], summary, [tabindex]',
@@ -260,18 +278,24 @@ export function modalChrome(opts: {
       event.preventDefault();
       (event.shiftKey ? last! : first).focus();
     }
-  });
+  };
+  document.addEventListener("keydown", trap, true);
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
-
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
 
   cancelBtn.addEventListener("click", () => opts.onCancel());
 
   const handle: ModalHandle = {
     el: backdrop,
     setBusy(busy: boolean) {
+      // Move focus off a footer button BEFORE disabling it: a focused button that
+      // becomes disabled drops document.activeElement to <body>, escaping the
+      // dialog's Tab trap (see the document-level trap above). Only relocate when a
+      // footer button actually has focus, so a user typing into a field mid-RPC
+      // keeps the cursor while the in-flight RPC disables the submit/cancel pair.
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -280,12 +304,21 @@ export function modalChrome(opts: {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        // If focus escaped the dialog (a footer button was disabled while focused,
+        // or some other path left activeElement outside the card), pull it back
+        // inside so Tab stays contained while a refused attempt keeps the modal open
+        // with an error. Leaves in-dialog focus — a field the user is editing —
+        // alone, so a validation error does not yank the cursor out of its input.
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
       }
     },
     close() {
+      document.removeEventListener("keydown", trap, true);
       backdrop.remove();
     },
   };

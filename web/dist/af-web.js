@@ -7409,7 +7409,13 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
-  card.addEventListener("keydown", (event) => {
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event) => {
+    if (!backdrop.isConnected) {
+      document.removeEventListener("keydown", trap, true);
+      return;
+    }
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll(
       "button, input, select, textarea, a[href], summary, [tabindex]"
@@ -7422,14 +7428,16 @@ function modalChrome(opts) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     }
-  });
+  };
+  document.addEventListener("keydown", trap, true);
   card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {
     el: backdrop,
     setBusy(busy) {
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -7438,12 +7446,16 @@ function modalChrome(opts) {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
       }
     },
     close() {
+      document.removeEventListener("keydown", trap, true);
       backdrop.remove();
     }
   };
