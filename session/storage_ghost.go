@@ -6,17 +6,28 @@ package session
 // ForStorage would settle their transient status and turn the ghost into a
 // real title claim. Durable recovery markers are the exception — those rows
 // represent work the daemon still owes — matching the loader-side carve-out
-// (daemon.isLegacyTransientGhost in daemon/refresh_support.go) so the save and
-// load paths reap the same rows.
+// (daemon.isLegacyTransientGhost in daemon/refresh_support.go) for the
+// PendingHandoffMission and RuntimeCleanupStateUnknown markers so the save
+// and load paths reap the same rows for those.
 //
-// The two must agree: the loader skips disposable ghosts out of memory (and
-// expects the next save to reap them), while durable ghosts stay on disk for
-// repair. If the save path preserved rows the loader reaps, every save would
-// resurrect them; if it reaped rows the loader keeps, each save would destroy
-// them. Keep this predicate byte-identical to its daemon-side mirror.
+// The save-side carve-out is STRICTER than the loader-side for the remaining
+// durable-retention markers: an unresolved Worktree.RelocationRecovery or a
+// non-empty ArchiveReport. snapshotInstancesForCheckpoint treats both as
+// durable retention (an in-memory Loading/Deleting row carrying either is kept
+// in the checkpoint), and a stranded/version-skewed ghost carrying either is one
+// of the unloadable row classes this change is meant to preserve (a malformed
+// relocation record is the ghost fixture the e2e test uses). The loader-side
+// isLegacyTransientGhost only gates the legacy ID-backfill reap, not row
+// deletion, so preserving these rows at save time does not resurrect rows the
+// loader reaps — the loader never deletes on-disk rows, it only skips the ID
+// backfill for disposable ghosts. A Loading/Deleting row with a relocation
+// recovery or archive report therefore stays on disk for repair across the
+// checkpoint, matching the in-memory snapshot's durable-retention rule.
 func isLegacyTransientGhostRow(item InstanceData) bool {
 	return (item.Status == Loading || item.Status == Deleting) &&
-		item.PendingHandoffMission == "" && !item.RuntimeCleanupStateUnknown
+		item.PendingHandoffMission == "" && !item.RuntimeCleanupStateUnknown &&
+		item.Worktree.RelocationRecovery == nil &&
+		item.ArchiveReport == nil
 }
 
 // preserveUnmaterializedGhostRows appends on-disk rows that no in-memory

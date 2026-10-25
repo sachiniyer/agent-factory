@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -841,7 +842,14 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			// exists to prevent.
 			raw, readErr := s.state.GetInstances(rid)
 			if readErr != nil {
-				return fmt.Errorf("checkpoint: read disk for repo %s: %w", rid, readErr)
+				// Corrupt-but-readable: overwrite (#938). I/O failure:
+				// propagate so the checkpoint does not clobber ghosts it
+				// cannot read (#766). GetInstances maps a missing file to "[]".
+				if _, ioErr := os.ReadFile(path); ioErr == nil {
+					raw = nil
+				} else {
+					return fmt.Errorf("checkpoint: read disk for repo %s: %w", rid, readErr)
+				}
 			}
 			var onDisk []InstanceData
 			if len(raw) > 0 {
