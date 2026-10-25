@@ -2416,7 +2416,7 @@
           "gap": "session.create.opt.inplace"
         },
         "force_remote": {
-          "gap": "session.create.opt.remote"
+          "ok": "The web reaches the hook backend explicitly via backend='hook' — its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
         }
       },
       "CreateTab": {
