@@ -596,6 +596,183 @@ echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 	}
 }
 
+// TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure pins the #2440/#1955
+// quiesce on the provision_cmd exit-0 + stdout-contract-violation path — the
+// branch the premature p.launchPgid = 0 in runProvisionCmd silently disarmed.
+//
+// runProvisionCmd spends the script's process-group id so a later, minutes-stale
+// failure during the transport phase can never SIGKILL a group the kernel has
+// reissued to an unrelated process. The bug spent it BEFORE the stdout parse, so
+// every stdout-contract-violation branch returned with the id already gone and
+// the quiesceLaunchGroup() call in provisionHostOrReap was a no-op — a
+// backgrounded child the script left mid-provision survived the whole reap path
+// (including delete_cmd), the exact silent-orphan harm quiesceLaunchGroup's own
+// comment says it exists to prevent. The launch path keeps the id set through
+// its own stdout parse for the same reason (TestHookReapKillsAnOrphanedLaunchChildBeforeDeleting
+// is its regression); this is the parity test for provision_cmd.
+//
+// Each subtest is one parse-failure branch, plus a control (non-zero exit) that
+// already quiesced before the fix and must keep quiescing after it — isolating
+// the fix to the exit-0 parse branches rather than a uniform policy change. The
+// child outlives the script by sleeping, so it is alive at the parse boundary
+// iff the bug is present; the assertions prove provisionHostOrReap leaves it
+// dead both by outcome (the orphan's side effect never appears) and by mechanism
+// (a probe signal is never acknowledged).
+func TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		// provisionBody runs after the script has backgrounded the orphan child
+		// and recorded its pid. It is what provision_cmd prints on stdout and
+		// how it exits — the determinant of which branch of runProvisionCmd's
+		// parse discipline fails (or, for the control, the early-exit branch).
+		provisionBody string
+	}{
+		{
+			// The violation branch: stdout carries content that is not the
+			// record. parseHookProvisionRecord returns (nil, false, violation).
+			name:          "garbage on stdout",
+			provisionBody: "echo 'not a host record'\nexit 0\n",
+		},
+		{
+			// The no-JSON branch: stdout is empty. parseHookProvisionRecord
+			// returns (nil, false, nil) — the "printed no host record" error.
+			name:          "empty stdout",
+			provisionBody: "exit 0\n",
+		},
+		{
+			// The wrong-shape branch: stdout is JSON but not a usable record
+			// (no host_key). parseHookProvisionRecord returns (nil, true, nil)
+			// — the "is not a host record" error.
+			name:          "json without host_key",
+			provisionBody: "echo '{\"host\":\"10.0.0.7\"}'\nexit 0\n",
+		},
+		{
+			// Control A: the non-zero-exit branch in runProvisionCmd returns
+			// before the spend (the early `if err != nil` is above it), so it
+			// quiesced before the fix and must keep quiescing after it. This is
+			// the asymmetry the bug was — the function's own non-zero-exit
+			// branch was never subject to it.
+			name:          "non-zero exit control",
+			provisionBody: "echo 'provisioned, then died' >&2\nexit 7\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkHookTimeouts(t, completingLaunchBound, 5*time.Second)
+			requireProvisionCmdQuiescesChild(t, tc.provisionBody)
+		})
+	}
+}
+
+// requireProvisionCmdQuiescesChild wires provision_cmd to a script that
+// backgrounds a long-running child (in the script's own process group, so the
+// quiesce can reach it), prints the given body on stdout, and exits. It then
+// drives provisionHostOrReap and asserts the child is dead by the time it
+// returns — both by the child's side effect never appearing (the outcome) and by
+// the child no longer acknowledging a probe signal (the mechanism, robust
+// against a zombie that still answers kill(pid, 0)).
+func requireProvisionCmdQuiescesChild(t *testing.T, provisionBody string) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	ackFile := filepath.Join(dir, "child.ack")
+	markerFile := filepath.Join(dir, "orphan-finished-here")
+	deleteRanLog := filepath.Join(dir, "delete-ran.log")
+
+	// The orphan child: sleeps long enough to outlive the failing provision,
+	// then writes a marker — the stand-in for "the orphan finished provisioning
+	// a VM after delete_cmd reported success". It traps USR1 so a dead or zombie
+	// child can be distinguished from a running one: only a running child acks.
+	child := writeHookScript(t, filepath.Join(dir, "provision-child.sh"), fmt.Sprintf(`
+trap 'echo alive > %s' USR1
+sleep 0.25
+echo "a VM that bills by the hour" > %s
+`, shellsuggest.Arg(ackFile), shellsuggest.Arg(markerFile)))
+
+	// provision_cmd: backgrounds the orphan child, records its pid for the
+	// assertion, then runs the body under test (print-and-exit) on stdout.
+	provisionCmd := writeHookScript(t, filepath.Join(dir, "provision.sh"), fmt.Sprintf(`
+'%s' &
+echo $! > %s
+%s
+`, shellsuggest.Arg(child), shellsuggest.Arg(pidFile), provisionBody))
+
+	// delete_cmd: logs that it ran (so the test can confirm the reap path was
+	// taken) and tolerates a slug it cannot find — the contract the bug
+	// exploits, since a successful reap latches nil while the orphan is still
+	// alive and no orphanWarning ever fires.
+	deleteCmd := writeHookScript(t, filepath.Join(dir, "delete.sh"), fmt.Sprintf(`
+echo "$name" >> %s
+true
+`, shellsuggest.Arg(deleteRanLog)))
+
+	p := &hookProvisioner{
+		hooks: config.RemoteHooks{ProvisionCmd: provisionCmd, DeleteCmd: deleteCmd},
+		spec:  ProvisionSpec{Title: "orphaned provision child", CloneURL: "https://example.invalid/repo.git"},
+		slug:  Slugify("orphaned provision child"),
+	}
+
+	_, err := p.provisionHostOrReap()
+	require.Error(t, err, "provision_cmd must fail so the reap path runs")
+
+	// The reap path ran: delete_cmd was invoked, so the quiesce-then-reap gate
+	// in provisionHostOrReap was reached — the branch the bug disarmed.
+	_, logErr := os.Stat(deleteRanLog)
+	require.NoError(t, logErr, "delete_cmd must run: provision_cmd started, so it may have provisioned")
+
+	// The child's PID was recorded before the script exited.
+	pidData, readErr := os.ReadFile(pidFile)
+	require.NoError(t, readErr, "provision_cmd must record the background child's pid")
+	var childPID int
+	_, scanErr := fmt.Sscan(strings.TrimSpace(string(pidData)), &childPID)
+	require.NoError(t, scanErr, "provision_cmd wrote an invalid child pid %q", pidData)
+	require.Positive(t, childPID, "the recorded child pid must be a live process id")
+
+	// Own the orphan's lifetime: if the test fails (bug present) the child is
+	// still alive when the assertions fatal, and a backgrounded `sleep` would
+	// outlive the test process. Kill the child's group so no writer survives
+	// into t.TempDir()'s removal (LIFO cleanup runs before that removal). On the
+	// fix the child is already dead and this is a no-op (ESRCH).
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+		if pgid, gerr := syscall.Getpgid(childPID); gerr == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	})
+
+	// THE OUTCOME CLAIM: the child is dead by the time provisionHostOrReap
+	// returns. The marker is what the orphan would write if it finished
+	// provisioning after the reap reported success — a resource that bills
+	// forever with nothing pointing at it. Watch across the whole window in
+	// which it would land: a resource that appears at ANY point after the reap is
+	// the leak, because delete_cmd already reported success and will never run
+	// again.
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(markerFile); statErr == nil {
+			t.Fatalf("a provision_cmd child outlived provisionHostOrReap and created %s: "+
+				"delete_cmd reported success, so this sandbox now bills with nothing pointing at it",
+				markerFile)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// THE MECHANISM CLAIM: a live child acks a USR1 within milliseconds. Send
+	// the probe after provisionHostOrReap has returned and confirm no ack
+	// arrives — proving the child is not a running process. (kill(pid, 0) alone
+	// is not enough: a zombie still answers it, so this is what establishes
+	// "dead" rather than merely "absent from the table", robust against a
+	// non-reaping init on a loaded box.)
+	_ = syscall.Kill(childPID, syscall.SIGUSR1) // best-effort; ESRCH on a reaped child is fine
+	require.Never(t, func() bool {
+		_, statErr := os.Stat(ackFile)
+		return statErr == nil
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"the provision_cmd child acknowledged a post-reap probe, so it was alive when "+
+			"provisionHostOrReap returned — quiesce was a no-op and the reap ran while the orphan was still provisioning")
+}
+
 // TestHookQuiesceNeverSignalsAStalePgid pins the other half of the process-group
 // kill: it may only ever target a group THIS attempt established.
 //
