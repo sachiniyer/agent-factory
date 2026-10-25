@@ -667,6 +667,98 @@ func TestRunTask_TargetedFireSendAttribution(t *testing.T) {
 	}
 }
 
+// TestRunTask_FreshFireAfterAdoptionDelivers pins adopt-then-deliver (#5503
+// review): an interrupted fire whose create persisted is ADOPTED — that
+// discharges the OLD occurrence only. A fresh trigger reaching the marker
+// first is a NEW occurrence and still owes its own delivery: two occurrences,
+// two sessions.
+func TestRunTask_FreshFireAfterAdoptionDelivers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7040", repoPath)
+	creates, _ := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	// The interrupted fire's product: a task-associated row created after the
+	// intent — reconcile adopts it as occurrence one's delivery.
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:        "inst-old",
+		Title:     "adopted-old",
+		Path:      repoPath,
+		Program:   "claude",
+		Status:    session.Running,
+		Liveness:  session.LiveReady,
+		TaskID:    "ab0r7040",
+		CreatedAt: intendedAt.Add(time.Second),
+		UpdatedAt: intendedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("seed adopted row: %v", err)
+	}
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7040", IntendedAt: intendedAt})
+
+	// A FRESH invocation (no replay marker): the adoption discharges the old
+	// occurrence, then this occurrence must mint its own marker and deliver.
+	if err := runTaskDelivery("ab0r7040", task.ProjectExpectation{}, nil); err != nil {
+		t.Fatalf("fresh runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("adoption discharges the old occurrence only — the fresh fire still owes a delivery; creates = %d", len(*creates))
+	}
+	if markerExists(t, "ab0r7040") {
+		t.Fatalf("the fresh fire's marker must clear once its delivery lands")
+	}
+}
+
+// TestRunTask_FreshFireAfterTargetedSendDelivers is the same rule on the
+// targeted path: a send attributed to this task at-or-after the intent is the
+// OLD occurrence's delivery; the fresh trigger owes its own send — two
+// occurrences, two sends.
+func TestRunTask_FreshFireAfterTargetedSendDelivers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	seedTargetedCronTask(t, "ab0r7041", repoPath, "shared-target")
+	_, delivers := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:                       "inst-target",
+		Title:                    "shared-target",
+		Path:                     repoPath,
+		Program:                  "claude",
+		Status:                   session.Running,
+		Liveness:                 session.LiveReady,
+		CreatedAt:                intendedAt.Add(-time.Hour),
+		UpdatedAt:                intendedAt.Add(-time.Hour),
+		LastPromptAttemptAt:      intendedAt.Add(30 * time.Second),
+		LastPromptDeliveryStatus: session.PromptDelivered,
+		LastPromptTaskID:         "ab0r7041",
+	}); err != nil {
+		t.Fatalf("seed target row: %v", err)
+	}
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7041", IntendedAt: intendedAt})
+
+	if err := runTaskDelivery("ab0r7041", task.ProjectExpectation{}, nil); err != nil {
+		t.Fatalf("fresh runTaskDelivery: %v", err)
+	}
+	if len(*delivers) != 1 {
+		t.Fatalf("the attributed send discharged the old occurrence only — the fresh fire still owes its own send; delivers = %d", len(*delivers))
+	}
+	if (*delivers)[0].TaskID != "ab0r7041" {
+		t.Fatalf("the fresh send must carry this fire's task id; TaskID = %q", (*delivers)[0].TaskID)
+	}
+	if markerExists(t, "ab0r7041") {
+		t.Fatalf("the fresh fire's marker must clear once its send lands")
+	}
+}
+
 // TestReplayPendingTaskFires_TaskReadErrorKeepsMarker: a store read or parse
 // failure is not "the task was deleted" — the marker must survive so a later
 // boot, once the store reads cleanly, can still satisfy the owed intent. Only
