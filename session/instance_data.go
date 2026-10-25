@@ -88,6 +88,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
+		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
+		// session whose off-box runtime owes no teardown (runtimeTeardown == nil).
+		// ForStorage publishes it only for a UserKilled tombstone, where it records
+		// that the kill was committed against an inert rebuild and the tombstone
+		// therefore carries no RuntimeCleanup handle on purpose. The marker is the
+		// durable token FromInstanceData reads to admit that "nothing owed" shape —
+		// the sandbox analog of the local branch's worktreeReaped admission (#2691)
+		// — so a handle-less tombstone that survives a daemon restart can still
+		// complete its pending record delete instead of installing a permanent
+		// fail-closed teardown. A local backend never reaches here: it has no
+		// off-box runtime, and its reaped shape is read from its worktree paths.
+		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil {
+			marker := true
+			data.killedWithoutLiveRuntime = &marker
+		}
 	}
 
 	// Persist the usage-limit reset time only while the session is actually
@@ -449,11 +464,26 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		if (data.UserKilled || data.RuntimeCleanupStateUnknown) && liveness != LiveArchived {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
-				// Legacy/malformed retention records fail closed. Keeping the inert backend
-				// preserves classification while this closure makes Kill return the
-				// unknown-state sentinel, so finishUserKill retains the only record
-				// instead of laundering a missing handle into no-op success.
-				instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
+					// Inert-at-kill tombstone: the kill was committed against an inert
+					// rebuild whose off-box runtime owed no teardown (nil runtimeTeardown),
+					// so the tombstone carries no RuntimeCleanup handle on purpose. The
+					// marker written at commit time distinguishes this current-binary
+					// "nothing owed" shape from a legacy/malformed tombstone. Admit it the
+					// way the local branch's worktreeReaped does (#2691): leave the inert
+					// backend and a nil teardown, so finishUserKill's Kill runs the no-op
+					// success path (deadRemoteAgentServer.Kill returns nil for a nil
+					// teardown) and the pending record delete can proceed instead of
+					// installing a permanent fail-closed teardown no retry, re-kill, or
+					// restart can clear.
+					instance.runtimeTeardown = nil
+				} else {
+					// Legacy/malformed retention records fail closed. Keeping the inert backend
+					// preserves classification while this closure makes Kill return the
+					// unknown-state sentinel, so finishUserKill retains the only record
+					// instead of laundering a missing handle into no-op success.
+					instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+				}
 			} else {
 				instance.backend = backend
 				instance.runtimeTeardown = teardown
