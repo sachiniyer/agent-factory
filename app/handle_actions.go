@@ -259,9 +259,21 @@ func (m *home) killInstanceCmd(target sessionActionTarget) tea.Cmd {
 // record). On failure the row flips back to Ready so the user can retry the
 // kill, and the underlying error — the evidence, per #797 — lands in the
 // error box.
+//
+// A kill whose durable tombstone committed but whose post-commit teardown or
+// storage follow-up failed is reported as success-with-warning, matching
+// handleInstanceArchived and the CLI/web (#3252, #4824): the kill landed, so
+// the row is NOT flipped back to a retryable Ready (OpKilling stays, fencing a
+// second kill off as "already being deleted") and is NOT removed locally —
+// the snapshot/reconcile reaps the record once the daemon's finishUserKill
+// retry completes, or adopts its tombstone. Reporting it as a hard failure
+// would invite an immediate retry of a kill that already landed, which
+// daemon-side deletes the scheduled finishUserKill retry record, resets its
+// backoff pacing, and can collide with the in-flight teardown guard.
 func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) {
 	inst := m.resolveSessionActionTarget(msg.target)
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		if inst != nil && inst.GetInFlightOp() == session.OpKilling {
 			// Clear the optimistic kill op: the row reverts to its underlying
 			// daemon liveness so the user can retry the kill.
@@ -285,7 +297,17 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 		}
 		return m, m.showRecovery("Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
-
+	if committedWarning {
+		// The kill landed (tombstone durably committed); only a follow-up failed.
+		// Do NOT revert OpKilling — keeping the row fenced as Deleting blocks the
+		// immediate retry the recovery screen would otherwise invite. Do NOT
+		// remove the row ourselves: the snapshot/reconcile reaps the record once
+		// the daemon's automatic retry completes, or adopts its tombstone.
+		// mutationOutcomeError words the committed framing ("went through, but
+		// the daemon reported a follow-up problem") — see mutation_outcome.go.
+		return m, tea.Batch(m.selectionChanged(), m.handleError(mutationOutcomeError(
+			fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err)))
+	}
 	// A refresh may already have removed the row, or replaced it with a new
 	// same-title session while the RPC was in flight. Remove only the captured
 	// identity; both missing cases are intentional no-ops.
