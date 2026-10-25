@@ -923,13 +923,24 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	// overlay open) targets the captured session, not a drifted selection (#716).
 	repoID := m.repoID
 	target := captureSessionActionTarget(instance, repoID)
+	// Resolve the tab's stable id HERE, at keypress time — the synchronous
+	// bubbletea event-loop step where the selection is provably current — and
+	// capture it in the closure, mirroring captureSessionActionTarget's eager
+	// capture of the session axis (#716/#717). The dial may be deferred past a
+	// first-time-attach help overlay, during which the background snapshot
+	// reconcile (ReconcileTabsFromData, every 750ms in app/sync.go) can mutate
+	// instance.Tabs in place — a drop, a daemon-driven reorder, or an add
+	// combined with the daemon's canonical ordering. Resolving the id inside the
+	// deferred closure (#1738) read a stale ordinal at DIAL time and attached to
+	// whichever tab NOW occupies the captured index, silently misrouting the
+	// user's keystrokes to a different tab of the same session. Eager capture
+	// routes by the id of the tab the user actually pressed on; a tab closed in
+	// the window yields a dead id the daemon rejects (ErrTabGone) instead of
+	// silently binding the shifted-in occupant — the refuse-stale-ids direction
+	// #1805 took. Empty (id-less legacy tabs) keeps the existing ordinal fallback
+	// on the daemon side, since an empty tab_id makes bindTab bind the ordinal.
+	tabID, _ := instance.TabIDAt(tabIdx)
 	attach := func() (chan struct{}, error) {
-		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
-		// misroute the full-screen stream; empty falls back to the ordinal. The
-		// session axis is addressed the same way — by stable id when the record
-		// has one — so a same-title replacement between keypress and dial does
-		// not receive the user's keystrokes.
-		tabID, _ := instance.TabIDAt(tabIdx)
 		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
