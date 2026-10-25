@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // statusPollLease bounds how long a single PauseStatusPoll silences an
@@ -20,6 +22,16 @@ var statusPollLease = 3 * time.Second
 // so lease-expiry tests advance time deterministically instead of racing real
 // sleeps.
 var nowFunc = time.Now
+
+// lastStatusSweepNs is the previous RefreshStatuses walk's duration in
+// nanoseconds — the honest floor for how far apart one session's consecutive
+// captures legitimately land. A fleet large enough (or remotes slow enough)
+// that one serial pass outlasts the poll tick still captures every session on
+// schedule; without this floor each of those captures reads as an observation
+// hole and the quiet/silent streak never matures (#5221 review). Written once
+// per sweep, read per instance — a package var because the daemon runs one
+// Manager, same as nowFunc.
+var lastStatusSweepNs atomic.Int64
 
 // taskRunPollBackstop bounds how long an attached TUI may hide a task run's
 // COMPLETION from the watch-task concurrency cap (#1892).
@@ -254,6 +266,105 @@ func (m *Manager) sweepPausedPollState() {
 	}
 }
 
+// taskRunTurnWatchEntry keys a run's chrome watcher by the evidence it may
+// legitimately observe: the resolved agent (a mid-run handoff swaps the pane's
+// signatures) and the task-prompt boundary (a redelivery discards primed rows
+// that predate it, so an already-running turn cannot release the fresh window
+// as though it were the new prompt's — #5221 review).
+type taskRunTurnWatchEntry struct {
+	agent    string
+	boundary time.Time
+	watch    *task.TurnWatch
+}
+
+// noteTaskRunTurnEvidence feeds this tick's pane capture through the run's
+// chrome watcher and, when the agent's own in-turn chrome is demonstrated,
+// stamps the run's turn boundary (#5219). Boot output, the prompt's own echo,
+// and ACP init all arrive as ordinary churn — only the chrome proves the agent
+// took the turn, so only it (or the fallback's sustained quiet) may release a
+// held idle edge. Returns true when the boundary was newly recorded, so the
+// caller can force the row durable even while the session stays Running.
+//
+// The watcher state lives under pausedMu — the paused-path observation feeds
+// the same map — while the evidence write follows the observation epoch fence,
+// same as RecordPaneChurnCheckpointAtEpoch above.
+func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, obs session.Observation, capturedAt time.Time, epoch uint64) bool {
+	// Only a confirmed frame feeds the watch: an unanswered capture
+	// (obs.Captured false — a local capture-pane failure the backend swallows
+	// into an all-false frame) carries no pane evidence at all. A confirmed
+	// EMPTY frame does feed it — a scoped agent needs an indicator-absent
+	// capture before a present one can prove the turn, and for the timed
+	// agents an empty frame merely clears the row baseline (#5221 review).
+	if !instance.TaskRunActive() || !obs.Captured {
+		return false
+	}
+	content := obs.Content
+	// ResolvedAgent, not Program: the pane runs what the last handoff or
+	// program override installed, and only that agent's chrome proves a turn.
+	// Read under i.mu BEFORE pausedMu — the sweep takes the two separately and
+	// never nests them.
+	agent := instance.ResolvedAgent()
+	boundary := instance.TaskRunPromptAttemptAt()
+	// The frame must predate nothing: if a redelivery stamped a boundary
+	// AFTER this capture started, the pane in `content` never saw the new
+	// prompt — feeding it now would arm a fresh watcher off a pre-boundary
+	// frame (an indicator-absent capture primes the scoped agents' absent→
+	// present contract), after which unrelated pre-boundary chrome can pass
+	// as the redelivery's turn. The epoch fence below guards the write; this
+	// timestamp fence guards the watcher's mutation itself (#5221 review).
+	if boundary.After(capturedAt) {
+		return false
+	}
+	m.pausedMu.Lock()
+	entry, ok := m.taskRunTurnWatches[key]
+	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
+		// A mid-run handoff swaps the signatures the pane can produce, and a
+		// redelivery retires primed state from the previous window — either way
+		// the watcher must be rebuilt rather than read the pane through rules
+		// or a prev frame that no longer belong to this boundary (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
+		m.taskRunTurnWatches[key] = entry
+	}
+	turning := entry.watch.Observe(content, capturedAt)
+	m.pausedMu.Unlock()
+	if !turning {
+		return false
+	}
+	return instance.RecordTaskRunTurnAtEpoch(nowFunc(), epoch)
+}
+
+// sweepTaskRunTurnWatches drops per-run chrome watchers whose run is no longer
+// in flight — the watcher exists only to fence the run's completion edge, so a
+// finished run or a torn-down row never needs it again. The map is keyed by
+// stableSessionKey, so a same-title replacement session cannot inherit the old
+// run's partially-fed watcher either. Called once per poll from
+// RefreshStatuses, beside sweepRemoteLossStates; m.mu and pausedMu are taken
+// separately, never nested, per pausedPolls' lock discipline.
+func (m *Manager) sweepTaskRunTurnWatches() {
+	m.pausedMu.Lock()
+	size := len(m.taskRunTurnWatches)
+	m.pausedMu.Unlock()
+	if size == 0 {
+		return // nothing armed: skip the instance walk in the common case
+	}
+	m.mu.Lock()
+	live := make(map[string]struct{}, size)
+	for key, inst := range m.instances {
+		if inst.TaskRunActive() {
+			repoID, _ := splitDaemonInstanceKey(key)
+			live[stableSessionKey(repoID, inst)] = struct{}{}
+		}
+	}
+	m.mu.Unlock()
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	for key := range m.taskRunTurnWatches {
+		if _, ok := live[key]; !ok {
+			delete(m.taskRunTurnWatches, key)
+		}
+	}
+}
+
 // isPollPaused reports whether an instance's poll is currently paused (#1160).
 // A present-but-expired lease is lazily deleted and reported unpaused, so a
 // crashed TUI that never sent Resume auto-resumes within one lease — the
@@ -338,6 +449,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	}
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// The pane capture happens inside SnapshotAgent — possibly across a remote
+	// transport — so the request's start is the earliest moment the frame could
+	// have been taken. Feeding it to the turn watch keeps the boundary-age
+	// check from being inflated by the round trip's own latency (#5221 review).
+	capturedAt := nowFunc()
 	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
@@ -345,12 +461,42 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		return
 	}
 	if err != nil {
+		// A transport error is the same blind window a failed capture is: the
+		// streak must break here too, not merely fail to extend, or the next
+		// success inside the gap horizon inherits silence nobody watched
+		// (#5221 review).
+		instance.NotePaneCaptureFailed()
 		return
 	}
+	// A probe that cannot answer is dropped whole — the doc above's own rule.
+	// A local capture-pane failure returns inside SnapshotAgent as an
+	// all-false observation with no error; settling it would read the pane
+	// IDLE on no evidence, and with the last confirmed capture's streak still
+	// live the quiet arm could release mid-outage. The streak breaks outright
+	// too: the blind window could hide churn, so the next success must
+	// re-anchor observed silence from its own instant (#5221 review).
+	if !obs.Captured {
+		instance.NotePaneCaptureFailed()
+		return
+	}
+	// Stamped when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review). The declared
+	// cadence is the backstop probe's own floored at the sweep's: captures
+	// arriving one probe period — or one slow serial pass — apart are
+	// scheduled, not a hole (#5221 review). The request-start `capturedAt`
+	// stays the turn-age bound below: that check needs the earliest instant
+	// the frame could exist, this one needs the moment its knowledge actually
+	// landed.
+	instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop))
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
+	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {
+		// The turn boundary is durable evidence: checkpoint it even when nothing
+		// else this tick writes, so a restart cannot reopen a closed window.
+		churnCheckpoint = true
 	}
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
@@ -362,6 +508,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
+	// The run-marker flip is durable on its own: a held gate releasing on a
+	// Ready→Ready observation moves no liveness, and nothing else on this
+	// path writes — a restart would resurrect the finished run into its held
+	// concurrency slot until the fallback matured again (#5221 review).
+	if taskRunWasActive && !instance.TaskRunActive() {
+		churnCheckpoint = true
+	}
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
@@ -376,6 +529,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 // Snapshot. The instance list is snapshotted under m.mu, then each slow probe
 // runs with that lock released so it cannot block unrelated manager RPCs.
 func (m *Manager) RefreshStatuses() {
+	sweepStart := nowFunc()
 	type entry struct {
 		repoID   string
 		instance *session.Instance
@@ -393,13 +547,48 @@ func (m *Manager) RefreshStatuses() {
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
 	// the pass that creates it (#1794), and backstop timers for sessions no longer
-	// paused (#2015) — both maps the poll itself populates.
+	// paused (#2015) — both maps the poll itself populates. Same for the per-run
+	// chrome watchers (#5219): a finished run's watcher answers nothing.
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
+	m.sweepTaskRunTurnWatches()
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
 	}
+	lastStatusSweepNs.Store(int64(nowFunc().Sub(sweepStart)))
+}
+
+// statusSweepFloorCap bounds how much of one serial pass's duration may count
+// as scheduled spacing between a pane's captures. The floor exists because a
+// pass that legitimately overruns the tick still lands every capture on
+// schedule — but only this much of it is scheduling: a pass slower than the
+// shortest completion arm's window is a stall in which panes went genuinely
+// unwatched, and normalizing it as cadence would let a stale streak survive
+// blindness long enough to hide a whole turn (#5221 review). A fleet whose
+// sweeps routinely exceed it is being asked for evidence its cadence cannot
+// produce; capped at the backstop's own scale so that failure is bounded.
+var statusSweepFloorCap = 30 * time.Second
+
+// statusSweepExpectedInterval returns the cadence the pane-observation streak
+// may assume between consecutive captures of the same session: the larger of
+// the caller's scheduled interval and the previous serial sweep's duration,
+// floored at statusSweepFloorCap. The tick bounds captures only when the whole
+// fleet's pass fits inside it — when a sweep overruns, every capture in it
+// lands on schedule anyway, and counting that on-schedule spacing as an
+// observation hole would rebase the quiet/silent streak on every frame (#5221
+// review). The first sweep after daemon start has no predecessor, so the
+// scheduled interval alone applies.
+func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
+	if sweep := time.Duration(lastStatusSweepNs.Load()); sweep > scheduled {
+		// The sweep is the honest spacing only up to the cap — and the cap
+		// itself never goes below the caller's own declared cadence: an
+		// operator-set interval slower than the cap already accepts that much
+		// spacing, so compressing it to the cap would read every on-schedule
+		// capture as a hole (#5221 review).
+		return min(sweep, max(scheduled, statusSweepFloorCap))
+	}
+	return scheduled
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
@@ -564,6 +753,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// that final transport check, while the epoch fences Instance mutations.
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// Same request-start bound as the paused-path feed below: the pane is
+	// captured inside SnapshotAgent, so the boundary-age check measures from
+	// before the round trip, not after it (#5221 review).
+	capturedAt := nowFunc()
 	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
@@ -588,6 +781,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// If both probes are unanswerable, the last-known liveness is deliberately
 		// retained: connectivity alone cannot distinguish a dead sandbox from a
 		// live one holding unpushed work.
+		//
+		// A probe that cannot answer is ALSO a blind window for the
+		// observed-silence streak: the pane may have churned while the
+		// transport was down, so the next success must re-anchor silence from
+		// its own instant — not inherit a streak across the outage (#5221
+		// review).
+		instance.NotePaneCaptureFailed()
 		m.settleRemoteProbeFailure(
 			repoID,
 			key,
@@ -600,6 +800,25 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		)
 		return
 	}
+	// Stamped when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review). The declared
+	// cadence is the configured tick floored at the last serial sweep's
+	// duration: a slower operator-set poll interval — or a fleet pass that
+	// overruns the tick — is scheduled, not a hole, while a stall past that
+	// slack still rebases the observation streak. A snapshot that answered
+	// without capturing (obs.Captured false — the local backend swallows
+	// transient capture-pane failures into an all-false frame) is a blind
+	// window, not a quiet frame: it breaks the streak outright so the next
+	// success re-anchors silence from its own instant (#5221 review).
+	if obs.Captured {
+		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
+		instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval))
+	} else {
+		// A failed capture is not merely absent evidence — it is a blind
+		// window in which churn could hide, so the streak breaks outright
+		// rather than aging out through the gap horizon (#5221 review).
+		instance.NotePaneCaptureFailed()
+	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false
@@ -609,6 +828,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// The first churn after a prompt is checkpointed below even if the row stays
 		// Running; later spinner churn does not create an event/write storm.
 		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
+	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {
+		// Feed the run's chrome watcher BEFORE the idle branch may settle the
+		// liveness: the turn boundary is what lets a held idle edge release, and
+		// it must be recorded while the observation that produced it still owns
+		// the epoch. Checkpoint forces a write — a restart must not reopen a
+		// window the observation already closed.
+		settlementCheckpoint = true
 	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
@@ -678,7 +905,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
-			m.resolveIdleLiveness(instance, content, epoch)
+			// Only a CONFIRMED capture may settle idle: a failed pane probe
+			// proves liveness through Alive() but saw nothing of the pane, and
+			// settling Ready off "" would let the still-live observation streak
+			// release the quiet arm mid-outage (#5221 review). The row simply
+			// keeps its last-known liveness until a real frame lands.
+			if obs.Captured {
+				m.resolveIdleLiveness(instance, content, epoch)
+			}
 		}
 	}
 	if observedAlive {
@@ -691,8 +925,20 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			instance.ClearLostRestoreFailureAtObservation(observationGeneration) {
 			settlementCheckpoint = true
 		}
+		if accepted && instance.GetLiveness() != session.LiveLost &&
+			instance.ClearLostRestoreWaitAtObservation(observationGeneration) {
+			settlementCheckpoint = true
+		}
 	}
 
+	// The run-marker flip is durable on its own: a held gate releasing on a
+	// Ready→Ready observation moves no liveness, and with on_complete=keep
+	// nothing below writes either — a restart would resurrect the finished
+	// run into its held concurrency slot until the fallback matured again
+	// (#5221 review).
+	if taskRunWasActive && !instance.TaskRunActive() {
+		settlementCheckpoint = true
+	}
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, settlementCheckpoint)
 

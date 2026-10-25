@@ -969,6 +969,12 @@ button:disabled,
   min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   justify-content: center;
 }
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+}
 .af-term-menu .af-copy-link-phone {
   display: none;
 }
@@ -2090,6 +2096,9 @@ button:disabled,
   .af-copy-link-desktop {
     display: none;
   }
+  .af-term-zoom {
+    display: none;
+  }
   .af-term-menu .af-copy-link-phone {
     display: inline-flex;
   }
@@ -3003,6 +3012,12 @@ textarea[class] {
     outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
     outline-offset: calc(0 - var(--af-space-1) / 2);
   }
+}
+.af-terminal-keybar.af-keybar-narrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
+  min-width: min(calc(var(--af-space-4) + var(--af-space-3)), calc((100% - 6 * var(--af-space-1)) / 7));
 }
 @media (max-width: 768px) {
   .af-session-first .af-appbar {

@@ -272,6 +272,10 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 
 	sanitizeLimitPatterns(config)
 	config.Appearance = NormalizeAppearance(config.Appearance)
+	config.Web.TerminalFontSizePhone = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_phone", config.Web.TerminalFontSizePhone, defaultWebTerminalFontSizePhone, prettyConfigPath)
+	config.Web.TerminalFontSizeDesktop = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_desktop", config.Web.TerminalFontSizeDesktop, defaultWebTerminalFontSizeDesktop, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 	config.DetachKeys = sanitizeDetachKeys(config.DetachKeys, prettyConfigPath)

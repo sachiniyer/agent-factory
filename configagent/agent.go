@@ -210,6 +210,11 @@ func BuildSpawnRequest(opts Options) (daemon.SpawnConfigAgentRequest, error) {
 	// is returned unchanged.
 	command = tmux.EnsureDevinWorkspaceTrustSuppressed(command)
 
+	// Same launch-time suppression for codex's startup update picker as an
+	// ordinary session (#5238). Scoped to the flag only, via the shared
+	// helper; a non-codex command is returned unchanged.
+	command = tmux.EnsureCodexUpdateCheckDisabled(command)
+
 	return daemon.SpawnConfigAgentRequest{
 		Program: command,
 		Prompt:  BuildBriefing(opts.Mode, globalCfg, configPath),

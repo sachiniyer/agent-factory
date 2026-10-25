@@ -209,12 +209,12 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	view := h.View()
 	assert.Contains(t, view, "beta · Agent · preview",
 		"preview header must reconcile transient target vs original pane")
-	assert.NotContains(t, view, "alpha · Agent — selected: beta · Agent",
+	assert.NotContains(t, view, "alpha · Agent — cursor: beta · Agent",
 		"selected divergence is hidden while preview owns the render binding")
 
 	h.cancelPanePreview(false)
 	view = h.View()
-	assert.Contains(t, view, "alpha · Agent — selected: beta · Agent",
+	assert.Contains(t, view, "alpha · Agent — cursor: beta · Agent",
 		"canceling preview restores the #1289 selected row vs shown content invariant")
 }
 
@@ -654,7 +654,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Nil(t, h.panePreviewTxn, "hiding the split target must not recreate its preview")
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "focus lands on the surviving pane")
 	view := h.View()
-	assert.Contains(t, view, "alpha · Agent — selected: beta ·",
+	assert.Contains(t, view, "alpha · Agent — cursor: beta ·",
 		"the survivor keeps the #1289 selected-vs-shown header")
 	assert.NotContains(t, view, "Preview", "the hidden split pane must not leave a transient preview")
 
@@ -722,7 +722,7 @@ func TestPanePreviewEscCancelsToOwnerPane(t *testing.T) {
 	assert.Equal(t, 0, paneA.Tab())
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
 	view := h.View()
-	assert.Contains(t, view, "alpha · Agent — selected: beta · Agent")
+	assert.Contains(t, view, "alpha · Agent — cursor: beta · Agent")
 	assert.NotContains(t, view, "Preview")
 }
 
@@ -952,7 +952,7 @@ func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 	assert.Equal(t, 1, paneB.Tab(), "focused beta pane jumps to tab 2")
 	assert.Equal(t, 0, h.store.ActiveTab(), "pane-focused jump must not retarget the sidebar selection")
 	view := h.View()
-	assert.Contains(t, view, "beta · › Terminal — selected: beta · Agent",
+	assert.Contains(t, view, "beta · › Terminal — cursor: beta · Agent",
 		"pane header shows the jumped tab and the still-selected tree tab")
 	assert.Contains(t, view, "2 › Terminal · open",
 		"sidebar open marker follows the tab shown in the pane")

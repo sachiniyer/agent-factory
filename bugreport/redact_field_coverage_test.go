@@ -162,6 +162,11 @@ var verbatimInstanceFields = map[string]string{
 	// tmux or git, and blanking it costs triage the reason automatic recovery
 	// stopped (#3588).
 	"LostRestoreFailure.Error": "af-authored restore diagnostic, sanitized by scrubDiagnostic in redactInstanceData (titles, tmux names, path roots, $HOME, username, credentials) rather than blanked, because it is the only record of why recovery gave up — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#3588)",
+	// Same class as the line above: daemon/lostrestore.go stores the
+	// environmental error that armed the wait, and it quotes tmux/git output
+	// the same way — so it gets the identical scrubDiagnostic pass rather than
+	// a blank, and the same end-to-end test proves it (#5295).
+	"LostRestoreWait.Error": "af-authored environmental-wait diagnostic, sanitized by scrubDiagnostic in redactInstanceData alongside LostRestoreFailure.Error — it is the only record of why restore is waiting on the environment — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#5295)",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",

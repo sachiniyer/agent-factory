@@ -178,3 +178,45 @@ func TestAutostartUnitServesHome_NoUnit(t *testing.T) {
 		t.Errorf("no unit file: serves=%v installed=%v, want both false", serves, installed)
 	}
 }
+
+// TestAutostartUnitServesHome_StatPresentButUnreadable pins the read-failure
+// shape collectDaemonStatus's scope-unknown fallback relies on. When the unit
+// file path is stat-able but not readable as a file — a directory at the path
+// (EISDIR), a chmod 0000 file af does not run as root for, or a broken mount
+// that answers stat but not read — AutostartInstalled is true (os.Stat
+// succeeds) while AutostartUnitServesHome returns installed=false with a
+// non-nil, non-IsNotExist error: the read failed before the parser ran.
+//
+// That mismatch is exactly why collectDaemonStatus gates its fallback on the
+// stat-based h.AutostartUnit rather than this read-based installed return: a
+// unit that "exists" by stat but cannot be scoped by reading must stay
+// installed, not be silently downgraded to absent. A directory at the path is
+// the trigger that needs no uid guard — root cannot os.ReadFile a directory as
+// a file either.
+func TestAutostartUnitServesHome_StatPresentButUnreadable(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	// A directory at the unit path: os.Stat succeeds, os.ReadFile fails with
+	// EISDIR, which is not os.IsNotExist.
+	unitPath := filepath.Join(dir, autostartUnitName)
+	if err := os.Mkdir(unitPath, 0o755); err != nil {
+		t.Fatalf("stage directory at unit path: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(unitPath) })
+
+	if !AutostartInstalled() {
+		t.Fatalf("AutostartInstalled() = false; stat succeeds on a directory, so the unit is present")
+	}
+	serves, installed, err := AutostartUnitServesHome(t.TempDir())
+	if err == nil {
+		t.Fatalf("AutostartUnitServesHome: err = nil, want a read failure (EISDIR)")
+	}
+	if os.IsNotExist(err) {
+		t.Errorf("err is os.IsNotExist; a present-but-unreadable file is a read failure, not absence")
+	}
+	if installed {
+		t.Errorf("installed = true; the read failed before parse, so installed must be false (the pre-read shape), not the post-read parse-failure true")
+	}
+	if serves {
+		t.Errorf("serves = true; a unit that cannot be read cannot be proven to serve any home")
+	}
+}

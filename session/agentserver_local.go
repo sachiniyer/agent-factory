@@ -134,6 +134,14 @@ type baselineUpdateBackend interface {
 	HasUpdatedWithBaseline(*Instance) (updated bool, hasPrompt bool, content string, baseline bool)
 }
 
+// captureAwareUpdateBackend additionally reports whether its probe actually
+// captured the pane. Only the tmux implementation can distinguish "unchanged
+// or empty" from "capture-pane failed"; every other backend's narrower
+// contract already asserts the observation ran (#5221 review).
+type captureAwareUpdateBackend interface {
+	HasUpdatedObserved(*Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool)
+}
+
 func (s *localAgentServer) Provision(firstTimeSetup bool) error {
 	return s.inst.currentBackend().Provision(s.inst, firstTimeSetup)
 }
@@ -160,9 +168,16 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	b.CheckAndHandleTrustPrompt(s.inst)
 	var updated, hasPrompt, baseline bool
 	var content string
-	if aware, ok := b.(baselineUpdateBackend); ok {
+	// Capture success defaults to true: a backend without the distinction
+	// reports the narrower contract, which already asserts its observation
+	// ran. Only the tmux path can prove a probe returned nothing.
+	captured := true
+	switch aware := b.(type) {
+	case captureAwareUpdateBackend:
+		updated, hasPrompt, content, baseline, captured = aware.HasUpdatedObserved(s.inst)
+	case baselineUpdateBackend:
 		updated, hasPrompt, content, baseline = aware.HasUpdatedWithBaseline(s.inst)
-	} else {
+	default:
 		updated, hasPrompt, content = b.HasUpdated(s.inst)
 	}
 	return Observation{
@@ -171,6 +186,7 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 		HasPrompt:   hasPrompt,
 		Content:     content,
 		ModelChange: b.AgentModelChange(s.inst),
+		Captured:    captured,
 	}, nil
 }
 

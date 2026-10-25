@@ -323,6 +323,12 @@ type Config struct {
 	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
 	// Appearance is global-only; a cloned repository cannot choose TUI colours.
 	Appearance string `json:"-" toml:"appearance"`
+	// Web holds the browser client's display preferences (#5500): today the
+	// xterm font size per device class, so the web terminal's +/- controls can
+	// persist a different size for the phone breakpoint and for desktop. Global-
+	// only for the same reason as Appearance — a cloned repository must not
+	// choose the operator's display settings.
+	Web WebConfig `json:"web,omitempty" toml:"web,omitempty"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
 	// titled "root" in-place at the repo root (the `af sessions create
@@ -649,7 +655,31 @@ const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 // rather than being concatenated into DefaultProgram, which is restricted to
 // a bare agent enum name.
 func DefaultConfig() *Config {
-	cfg := &Config{
+	cfg := staticDefaultConfig()
+	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
+		cfg.ProgramOverrides = map[string]string{
+			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
+		}
+	}
+
+	return cfg
+}
+
+// staticDefaultConfig returns the compiled-in default configuration without the
+// machine-dependent claude probe. DefaultConfig layers that probe's
+// auto-detected ProgramOverrides on top of this baseline. Callers that only
+// need a provenance baseline for an already-loaded snapshot — notably the
+// daemon-handoff inspection path — must not rerun the probe or reintroduce
+// overrides the operator cleared, so they take this static baseline instead
+// (#5113). The auto-detected claude override is a runtime augmentation of the
+// global layer, not a compiled-in default, so it has no place in this baseline.
+func staticDefaultConfig() *Config {
+	return &Config{
 		SchemaVersion:          GlobalConfigSchemaVersion,
 		DefaultProgram:         defaultProgram,
 		AutoUpdate:             true,
@@ -676,18 +706,9 @@ func DefaultConfig() *Config {
 			return fmt.Sprintf("%s/", strings.ToLower(user.Username))
 		}(),
 		DetachKeys: defaultDetachKeys,
+		Web: WebConfig{
+			TerminalFontSizePhone:   defaultWebTerminalFontSizePhone,
+			TerminalFontSizeDesktop: defaultWebTerminalFontSizeDesktop,
+		},
 	}
-
-	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
-		// An alias can resolve to a full command with flags (e.g. "claude
-		// --model opus"), which is already shell syntax and must not be quoted
-		// wholesale. Quote only a provable executable-path prefix and preserve
-		// the alias-provided argument suffix (#569, #2323).
-		command := shellQuoteDetectedCommand(claudePath)
-		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
-		}
-	}
-
-	return cfg
 }

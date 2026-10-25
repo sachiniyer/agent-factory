@@ -76,13 +76,15 @@ func TestResolveConfigPrecedence(t *testing.T) {
 
 	t.Run("program_overrides merge key-wise", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude", "program_overrides": {"codex": "/opt/codex", "aider": "/opt/aider"}}`)
-		writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "/repo/codex --fast", "gemini": "/repo/gemini"}}`)
+		// In-repo program_overrides may not spell absolute executables (#5265),
+		// so the shared-file leaves use relative spellings.
+		writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "repo/codex --fast", "gemini": "repo/gemini"}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
-		assert.Equal(t, "/repo/codex --fast", res.ProgramOverrides["codex"], "in-repo entry wins per key")
+		assert.Equal(t, "repo/codex --fast", res.ProgramOverrides["codex"], "in-repo entry wins per key")
 		assert.Equal(t, "/opt/aider", res.ProgramOverrides["aider"], "global entry without in-repo counterpart survives")
-		assert.Equal(t, "/repo/gemini", res.ProgramOverrides["gemini"], "in-repo-only entry applies")
+		assert.Equal(t, "repo/gemini", res.ProgramOverrides["gemini"], "in-repo-only entry applies")
 	})
 
 	t.Run("global-only fields always come from global", func(t *testing.T) {
@@ -289,7 +291,7 @@ func TestResolveConfigInRepoLoadLog(t *testing.T) {
 // config that LoadConfig callers see.
 func TestResolveConfigDoesNotMutateGlobal(t *testing.T) {
 	repoRoot := setupResolveTest(t, `{"default_program": "claude", "program_overrides": {"codex": "/opt/codex"}}`)
-	writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "/repo/codex"}}`)
+	writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "repo/codex"}}`)
 
 	_, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)

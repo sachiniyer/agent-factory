@@ -408,6 +408,19 @@ func (i *Instance) IsArchived() bool {
 	return i.liveness == LiveArchived
 }
 
+// IsResting reports whether the row's liveness is one of the inert,
+// restorable states — archived, lost, or dead. It is a liveness-only read:
+// unlike LifecycleAction it does NOT consult the op/startup fences, so a
+// fenced resting row (startup-unknown, restoring in flight) still reports
+// true. Callers that need the "which verb is offered" answer use
+// LifecycleAction; callers that need "owns no live runtime surface" use this
+// (#4755 review).
+func (i *Instance) IsResting() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveArchived || i.liveness == LiveLost || i.liveness == LiveDead
+}
+
 // WebTabServeBlocked is the serve-side analogue of TabSpawnBlocked: "may this
 // session's preserved web tab be resolved and proxied right now?" It answers no
 // for a settled archive AND for the teardown window that precedes one. The
@@ -455,6 +468,36 @@ func (i *Instance) IsTearingDown() bool {
 	return i.inFlightOp == OpKilling || i.inFlightOp == OpArchiving
 }
 
+// teardownExpected reports whether af's own state already accounts for this
+// instance's tmux session going away: the kill tombstone, or an in-flight
+// kill/archive op. The status monitor consults it — through the
+// ExpectingTeardown poll variants — when a poll finds the session gone, so a
+// disappearance inside the window between af recording the teardown and
+// close() landing the generation mark classifies at INFO rather than ERROR
+// (#5138). A vanish with neither set is genuinely unexpected and stays ERROR.
+//
+// A cleared started flag alone is deliberately NOT evidence: teardownTabs
+// only clears it inside the kill/archive fences already listed here, while
+// MarkStartupStateUnknown and the restore-failure CloseAttachOnly path clear
+// it while deliberately retaining the runtime — issuing no kill-session — so
+// a disappearance there is exactly the unexpected loss ERROR exists for.
+// An owed on_complete marker is excluded for the same reason: it is filed
+// before teardown begins and can outlive it through adoption, so it says
+// nothing about whether af is tearing the session down RIGHT NOW — the
+// discharge itself runs through KillSession/ArchiveSession, which raises
+// the op fence and tombstone this predicate does read.
+//
+// It is also deliberately narrower than HasInFlightOp: OpCreating is af
+// BUILDING the session, not tearing it down — a death there is the anomaly
+// ERROR exists for. The runtime-replacement ops (OpRestoring/OpReplacing/
+// OpRespawning) are left out on the same ground; their own close() calls
+// land the generation mark, which is the attribution meant for them.
+func (i *Instance) teardownExpected() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.userKilled || opIsTeardown(i.inFlightOp)
+}
+
 // HasInFlightOp reports whether any client op is in flight (the render/gate
 // replacement for the old Loading||Deleting "is this row transient" check).
 func (i *Instance) HasInFlightOp() bool {
@@ -484,7 +527,7 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // (its worktree was moved away), one with a teardown op in flight — an archive
 // (OpArchiving) or kill (OpKilling) — or one whose durable account replacement
 // has not completed. The archive case is the load-bearing one:
-// ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
+// ArchiveTeardownWithClaim keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
 func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.liveness == LiveArchived {
@@ -550,6 +593,18 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.attributeLimitIdentityLocked()
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return true
+}
+
+// attributeLimitIdentityLocked publishes which runtime's identity produced the
+// recorded limit wall — its agent namespace and account label — so the wall is
+// never observable without its attribution (account-swap admission reads the
+// pair). Each field is written, and the row touched, only when it changes.
+// Caller holds i.mu.
+func (i *Instance) attributeLimitIdentityLocked() {
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -558,9 +613,6 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 		i.limitAccount = i.Account
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
-	i.noteStateChangeLocked(lv, op, prevReset)
-	return true
 }
 
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time) {
