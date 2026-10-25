@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -865,67 +866,114 @@ func TestIsLegacyTransientGhostRow_MatchesDaemonPredicate(t *testing.T) {
 
 // TestPreserveUnmaterializedGhostRows_Unit is a direct unit test for the merge
 // helper, covering the four quadrants of the (represented, disposable) grid
-// plus the empty-on-disk fast path and the dedupe-handoff.
+// plus the empty-on-disk fast path and the dedupe-handoff. It returns the
+// verbatim raw bytes of the ghost rows to preserve (a newer binary's additive
+// fields survive because the helper never re-encodes them, #6); the parallel
+// onDiskRaw is built by marshalling each on-disk row, mirroring what
+// SaveInstances decodes from the read bytes.
 func TestPreserveUnmaterializedGhostRows_Unit(t *testing.T) {
-	// Empty on-disk: passthrough.
-	in := []InstanceData{{Title: "alive"}}
-	got := preserveUnmaterializedGhostRows(in, nil, map[string]struct{}{"alive": {}})
-	require.Equal(t, in, got, "empty on-disk must be a passthrough")
+	rawFor := func(rows []InstanceData) []json.RawMessage {
+		out := make([]json.RawMessage, len(rows))
+		for i := range rows {
+			b, err := json.Marshal(rows[i])
+			require.NoError(t, err)
+			out[i] = b
+		}
+		return out
+	}
+	titlesOf := func(raws []json.RawMessage) map[string]struct{} {
+		out := make(map[string]struct{}, len(raws))
+		for _, r := range raws {
+			var d InstanceData
+			require.NoError(t, json.Unmarshal(r, &d))
+			out[d.Title] = struct{}{}
+		}
+		return out
+	}
 
-	// Represented on-disk row (title in inMemoryTitles): skipped, NOT appended.
-	in = []InstanceData{{Title: "alive"}}
+	// Empty on-disk: no ghosts preserved.
+	in := []InstanceData{{Title: "alive"}}
+	got := preserveUnmaterializedGhostRows(nil, nil, map[string]struct{}{"alive": {}})
+	require.Empty(t, got, "empty on-disk must preserve no ghosts")
+	_ = in
+
+	// Represented on-disk row (title in inMemoryTitles): skipped, NOT preserved.
 	onDisk := []InstanceData{
 		{Title: "alive", ID: "alive-id"}, // same title as in-memory
 		{Title: "ghost"},                 // not represented, not disposable
 	}
-	got = preserveUnmaterializedGhostRows(in, onDisk, map[string]struct{}{"alive": {}})
-	titles := make(map[string]struct{}, len(got))
-	for _, d := range got {
-		titles[d.Title] = struct{}{}
-	}
-	require.Contains(t, titles, "alive")
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Len(t, got, 1, "only the non-represented ghost must be preserved")
+	titles := titlesOf(got)
 	require.Contains(t, titles, "ghost", "a non-represented non-disposable row must be preserved")
-	require.Len(t, got, 2, "the represented disk row must NOT be appended again")
+	_, alivePresent := titles["alive"]
+	require.False(t, alivePresent, "the represented disk row must NOT be preserved again")
 
-	// Disposable legacy ghost (Loading, no markers): skipped, NOT appended.
-	in = []InstanceData{{Title: "alive"}}
+	// Disposable legacy ghost (Loading, no markers): skipped, NOT preserved.
 	onDisk = []InstanceData{
 		{Title: "legacy-ghost", Status: Loading},
 	}
-	got = preserveUnmaterializedGhostRows(in, onDisk, map[string]struct{}{"alive": {}})
-	require.Len(t, got, 1, "a disposable legacy transient ghost must be reaped, not preserved")
-	assert.Equal(t, "alive", got[0].Title)
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Empty(t, got, "a disposable legacy transient ghost must be reaped, not preserved")
 
 	// Disposable-but-durable (Loading + PendingHandoffMission): preserved.
-	in = []InstanceData{{Title: "alive"}}
 	onDisk = []InstanceData{
 		{Title: "loading-owed", Status: Loading, PendingHandoffMission: "owed"},
 	}
-	got = preserveUnmaterializedGhostRows(in, onDisk, map[string]struct{}{"alive": {}})
-	require.Len(t, got, 2, "a Loading row with a durable marker must be preserved, not reaped")
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Len(t, got, 1, "a Loading row with a durable marker must be preserved, not reaped")
 
 	// Disposable-but-durable (Loading + RelocationRecovery): preserved.
 	// A stranded/version-skewed Loading row carrying an unresolved relocation
 	// recovery is one of the unloadable ghost classes this change is meant to
 	// preserve; the carve-out must not reap it.
-	in = []InstanceData{{Title: "alive"}}
 	onDisk = []InstanceData{
 		{Title: "loading-reloc", Status: Loading, Worktree: GitWorktreeData{
 			RelocationRecovery: &GitWorktreeRelocationRecoveryData{},
 		}},
 	}
-	got = preserveUnmaterializedGhostRows(in, onDisk, map[string]struct{}{"alive": {}})
-	require.Len(t, got, 2, "a Loading row with an unresolved relocation recovery must be preserved, not reaped")
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Len(t, got, 1, "a Loading row with an unresolved relocation recovery must be preserved, not reaped")
 
-	// Disposable-but-durable (Loading + ArchiveReport): preserved.
-	in = []InstanceData{{Title: "alive"}}
+	// Disposable-but-durable (Loading + non-empty ArchiveReport): preserved.
 	onDisk = []InstanceData{
 		{Title: "loading-archive", Status: Loading, ArchiveReport: &sessiongit.ArchiveReport{
 			RetainedTrees: []sessiongit.ArchiveRetainedTree{{Path: "/retained"}},
 		}},
 	}
-	got = preserveUnmaterializedGhostRows(in, onDisk, map[string]struct{}{"alive": {}})
-	require.Len(t, got, 2, "a Loading row with a non-empty archive report must be preserved, not reaped")
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Len(t, got, 1, "a Loading row with a non-empty archive report must be preserved, not reaped")
+
+	// Disposable legacy ghost (Loading + EMPTY ArchiveReport): reaped, NOT
+	// preserved. A non-nil but empty report has no retained trees to protect
+	// and matches the in-memory snapshot's archiveReportPending = !Empty()
+	// durable-retention rule, so it is the same disposable transient ghost as
+	// one with no report (#7).
+	onDisk = []InstanceData{
+		{Title: "loading-empty-report", Status: Loading, ArchiveReport: &sessiongit.ArchiveReport{}},
+	}
+	got = preserveUnmaterializedGhostRows(onDisk, rawFor(onDisk), map[string]struct{}{"alive": {}})
+	require.Empty(t, got, "a Loading row with an EMPTY archive report must be reaped, not preserved")
+
+	// Verbatim preservation: an additive field a newer binary wrote under the
+	// same schema version survives the checkpoint because the helper carries
+	// the original bytes through without re-encoding (#6).
+	onDisk = []InstanceData{
+		{Title: "version-skewed-ghost"},
+	}
+	// Plant an additive field this binary's InstanceData does not know on the
+	// raw bytes; the decoded form drops it but the preserved raw form keeps it.
+	decodedRaw := rawFor(onDisk)
+	var probed map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(decodedRaw[0], &probed))
+	probed["future_recovery_handle"] = json.RawMessage(`"abc-123"`)
+	verbatim, err := json.Marshal(probed)
+	require.NoError(t, err)
+	decodedRaw[0] = verbatim
+	got = preserveUnmaterializedGhostRows(onDisk, decodedRaw, map[string]struct{}{"alive": {}})
+	require.Len(t, got, 1, "the version-skewed ghost must be preserved")
+	assert.JSONEq(t, string(verbatim), string(got[0]),
+		"the preserved ghost must carry its original bytes verbatim, including additive fields this binary does not know (#6)")
 }
 
 // statusName returns a human-readable name for a Status, used in subtests and
@@ -948,4 +996,169 @@ func statusName(s Status) string {
 		return "Archived"
 	}
 	return fmt.Sprintf("Status(%d)", int(s))
+}
+
+// ioErrorGetInstancesStorage wraps a config.InstanceStorage and returns a real
+// *fs.PathError from GetInstances for one repo, simulating a transient I/O read
+// failure from the production LoadRepoInstances path. Unlike
+// failOnGetInstancesMockStorage (which returns a plain fmt.Errorf against a
+// mock with no on-disk file), the underlying state here is the real
+// config.LoadState, so the repo's instances.json IS present on disk — an
+// immediate os.ReadFile retry reads it. The checkpoint must still refuse to
+// overwrite from the stale in-memory snapshot when its own GetInstances read
+// failed with an I/O error, so disk-only ghost rows are not erased under the
+// intermittent-read scenario the read-failure contract exists to protect (#4).
+type ioErrorGetInstancesStorage struct {
+	config.InstanceStorage
+	failRepoID string
+}
+
+func (s *ioErrorGetInstancesStorage) GetInstances(repoID string) (json.RawMessage, error) {
+	if repoID == s.failRepoID {
+		// Mirror LoadRepoInstances' wrapping of an os.ReadFile *fs.PathError so
+		// checkpointReadError's I/O classification matches the production path.
+		path, err := config.RepoInstancesPath(repoID)
+		if err != nil {
+			return nil, err
+		}
+		ioErr := &fs.PathError{Op: "read", Path: path, Err: fs.ErrInvalid}
+		return nil, fmt.Errorf("failed to read repo instances: %w", ioErr)
+	}
+	return s.InstanceStorage.GetInstances(repoID)
+}
+
+// TestSaveInstances_TransientReadErrorPropagatedEvenIfFileReadable is the
+// regression for the intermittent-read contract (#4): when GetInstances fails
+// with a genuine I/O error but the file is still readable on an immediate
+// os.ReadFile retry, the checkpoint must NOT proceed to overwrite from the
+// stale in-memory snapshot — doing so would erase disk-only ghost rows the
+// checkpoint never reconciled. The original I/O error must propagate so the
+// file is left for the next start.
+func TestSaveInstances_TransientReadErrorPropagatedEvenIfFileReadable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	repoID := config.RepoIDFromRoot(repoPath)
+
+	// Plant a real on-disk instances.json carrying one unloadable ghost row,
+	// exactly as a prior daemon start left it for repair.
+	ghost := unloadableRelocationRecoveryRow(t, "ghost", repoPath)
+	seed := []InstanceData{ghost}
+	raw, err := json.Marshal(seed)
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(repoID, raw))
+
+	// The retry os.ReadFile inside checkpointReadError will read this file
+	// successfully, so the only thing standing between the ghost and erasure is
+	// checkpointReadError refusing on a genuine I/O error.
+	state := &ioErrorGetInstancesStorage{InstanceStorage: config.LoadState(), failRepoID: repoID}
+
+	alive := makeAliveInstance("alive", repoPath)
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	err = storage.SaveInstances([]*Instance{alive})
+	require.Error(t, err, "SaveInstances must propagate the transient I/O read failure rather "+
+		"than overwrite disk-only ghost rows from the stale in-memory snapshot (#4)")
+
+	// The ghost must survive untouched: the checkpoint refused to clobber a
+	// file it failed to read.
+	scoped, err := NewStorage(config.LoadState(), repoID)
+	require.NoError(t, err)
+	after, err := scoped.LoadInstanceData()
+	require.NoError(t, err)
+	byTitle := make(map[string]InstanceData, len(after))
+	for _, d := range after {
+		byTitle[d.Title] = d
+	}
+	require.Contains(t, byTitle, "ghost",
+		"the unloadable ghost must survive a transient read failure: the checkpoint must not "+
+			"erase rows it could not reconcile")
+	require.NotContains(t, byTitle, "alive",
+		"the checkpoint must not have written the in-memory snapshot over the unread file")
+}
+
+// TestSaveInstances_UninterpretableSchemaVersionRefusedNotOverwritten is the
+// companion to TestSaveInstances_NewerSchemaInstancesJsonRefusedNotOverwritten
+// for the present-but-UNINTERPRETABLE case (#5): a readable envelope whose
+// schema_version field is present but cannot be parsed as a version integer
+// (null, a string, a negative, an overflowing number) is NOT returned as
+// *config.UnsupportedSchemaVersionError by LoadRepoInstances — it surfaces as
+// a generic schema-content error — so without an explicit refusal the
+// corrupt-but-readable overwrite branch would clobber a possibly-newer file
+// this binary cannot read. The checkpoint must refuse to overwrite it and
+// leave the file untouched, mirroring refuseStateDowngrade's
+// present-but-uninterpretable rule.
+func TestSaveInstances_UninterpretableSchemaVersionRefusedNotOverwritten(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"null", `{"schema_version": null, "instances": []}`},
+		{"string", `{"schema_version": "2", "instances": []}`},
+		{"negative", `{"schema_version": -1, "instances": []}`},
+		{"overflow", `{"schema_version": 99999999999999999999, "instances": []}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			repoID := config.RepoIDFromRoot(repoPath)
+
+			path, err := config.RepoInstancesPath(repoID)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(t, os.WriteFile(path, []byte(tc.content), 0o644))
+
+			alive := makeAliveInstance("alive", repoPath)
+			storage, err := NewStorage(config.LoadState(), "")
+			require.NoError(t, err)
+			err = storage.SaveInstances([]*Instance{alive})
+			require.Error(t, err, "SaveInstances must refuse to overwrite an instances.json with "+
+				"a present-but-uninterpretable schema_version rather than clobbering a possibly-newer "+
+				"file this binary cannot read (#5)")
+
+			got, readErr := os.ReadFile(path)
+			require.NoError(t, readErr, "the uninterpretable-schema file must not have been touched")
+			assert.JSONEq(t, tc.content, string(got),
+				"the file must be left untouched when the checkpoint refuses it")
+		})
+	}
+}
+
+// TestSaveInstances_LegacyTransientGhostWithEmptyArchiveReportReaped pins the
+// empty-ArchiveReport carve-out (#7): a Loading/Deleting row whose archive
+// report is a non-nil but EMPTY pointer (no RetainedTrees) has no retained
+// source trees to protect, so it is the same disposable transient ghost as one
+// with no report at all and must be reaped by the checkpoint. A Deleting
+// variant that survives would otherwise keep reserving its title in
+// findTitleConflictLocked across every checkpoint, blocking recreation of
+// that session indefinitely.
+func TestSaveInstances_LegacyTransientGhostWithEmptyArchiveReportReaped(t *testing.T) {
+	for _, status := range []Status{Loading, Deleting} {
+		t.Run(statusName(status), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			emptyReportGhost := InstanceData{
+				ID: "empty-report-id", Title: "empty-report", Path: repoPath, Program: "claude",
+				Status:        status,
+				ArchiveReport: &sessiongit.ArchiveReport{}, // non-nil but EMPTY
+			}
+			require.True(t, isLegacyTransientGhostRow(emptyReportGhost),
+				"fixture: a %s row with an EMPTY archive report must be a disposable legacy ghost", statusName(status))
+
+			seedDisk(t, state, repoPath, []InstanceData{emptyReportGhost})
+			alive := makeAliveInstance("alive", repoPath)
+			storage, err := NewStorage(state, "")
+			require.NoError(t, err)
+			require.NoError(t, storage.SaveInstances([]*Instance{alive}))
+
+			got := rowsByTitle(t, state, repoPath)
+			require.Contains(t, got, "alive")
+			require.NotContains(t, got, "empty-report",
+				"a %s row with an EMPTY archive report must be reaped, not preserved: it has no "+
+					"retained trees to protect and a Deleting variant would block recreating its "+
+					"title across every checkpoint (#7)", statusName(status))
+		})
+	}
 }

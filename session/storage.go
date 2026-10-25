@@ -851,21 +851,19 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				}
 				raw = nil
 			}
-			var onDisk []InstanceData
-			if len(raw) > 0 {
-				if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr != nil {
-					// Corrupt: the daemon is the sole writer and overwrites
-					// rather than aborts (#938). No resolvable rows means no
-					// ghosts to preserve and no archive rows to reconcile.
-					onDisk = nil
-				}
-			}
+			// onDisk is the decoded form used for matching (title), the
+			// disposable-ghost carve-out, and archive reconciliation. onDiskRaw
+			// is the parallel raw form preserved verbatim so additive fields a
+			// newer binary wrote under the same schema version — which this
+			// binary's InstanceData does not know and would silently drop on a
+			// decode/encode round trip — survive the checkpoint (#6).
+			onDisk, onDiskRaw := decodeOnDiskRows(raw)
 			if checkpoint.needsArchiveReconcile() {
 				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
 				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
 			}
-			group = preserveUnmaterializedGhostRows(group, onDisk, inMemoryTitles)
-			jsonData, err := json.Marshal(dedupeInstanceData(group))
+			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}

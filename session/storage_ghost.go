@@ -1,7 +1,9 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -30,16 +32,26 @@ import (
 // backfill for disposable ghosts. A Loading/Deleting row with a relocation
 // recovery or archive report therefore stays on disk for repair across the
 // checkpoint, matching the in-memory snapshot's durable-retention rule.
+//
+// An empty ArchiveReport (a non-nil pointer with no RetainedTrees) is treated
+// as disposable, matching the in-memory snapshot: snapshotInstancesForCheckpoint
+// gates durable retention on archiveReportPending, which ProjectionSnapshot
+// sets only when !ArchiveReport.Empty(), and ForStorage writes a nil
+// ArchiveReport for an empty report. A Loading/Deleting row carrying an empty
+// report therefore has no retained source trees to protect and is the same
+// disposable transient ghost as one with no report at all — a Deleting variant
+// would otherwise keep reserving its title in findTitleConflictLocked across
+// every checkpoint, blocking recreation of that session indefinitely.
 func isLegacyTransientGhostRow(item InstanceData) bool {
 	return (item.Status == Loading || item.Status == Deleting) &&
 		item.PendingHandoffMission == "" && !item.RuntimeCleanupStateUnknown &&
 		item.Worktree.RelocationRecovery == nil &&
-		item.ArchiveReport == nil
+		(item.ArchiveReport == nil || item.ArchiveReport.Empty())
 }
 
-// preserveUnmaterializedGhostRows appends on-disk rows that no in-memory
-// instance represents, so the wholesale per-repo checkpoint rewrite does not
-// silently erase them.
+// preserveUnmaterializedGhostRows returns the on-disk rows that no in-memory
+// instance represents, in their original raw form, so the wholesale per-repo
+// checkpoint rewrite preserves them verbatim instead of silently erasing them.
 //
 // refreshDaemonInstances deliberately leaves on disk any row
 // fromInstanceDataForRefresh cannot materialize: it logs the failure, keeps the
@@ -75,28 +87,63 @@ func isLegacyTransientGhostRow(item InstanceData) bool {
 // TestRepoSaveReapsLegacyLoadingGhost / TestDaemonSaveReapsLegacyLoadingGhost
 // contracts.
 //
-// dedupeInstanceData (run after this by SaveInstances) collapses any
-// same-title duplicate; because represented rows are skipped here, ghosts
-// appended below never share a title with an in-memory row, so dedupe leaves
-// the appended ghost rows untouched.
+// The rows are returned in their original json.RawMessage form so additive
+// fields a newer binary wrote under the same schema version — which this
+// binary's InstanceData does not know and would silently drop on an
+// Unmarshal/Marshal round trip — survive the checkpoint verbatim (#6). onDisk
+// and onDiskRaw are parallel slices: onDisk[i] is the decoded form used for
+// matching (title) and the disposable-ghost carve-out, and onDiskRaw[i] is the
+// original bytes preserved verbatim. Only the fields needed for matching and
+// filtering are decoded; the rest of each retained row is carried through
+// untouched.
+//
+// Duplicate ghost titles collapse to one entry keeping the latest UpdatedAt
+// (ties keep the earliest occurrence), matching dedupeInstanceData, so an
+// on-disk duplicate a prior write left behind does not survive as two rows.
 func preserveUnmaterializedGhostRows(
-	group []InstanceData,
 	onDisk []InstanceData,
+	onDiskRaw []json.RawMessage,
 	inMemoryTitles map[string]struct{},
-) []InstanceData {
+) []json.RawMessage {
 	if len(onDisk) == 0 {
-		return group
+		return nil
 	}
-	for _, d := range onDisk {
+	// Pick one row per title (latest UpdatedAt, ties keep the earliest
+	// occurrence, matching dedupeInstanceData).
+	keep := make(map[string]int)
+	for i, d := range onDisk {
 		if _, represented := inMemoryTitles[d.Title]; represented {
 			continue
 		}
 		if isLegacyTransientGhostRow(d) {
 			continue
 		}
-		group = append(group, d)
+		if prev, ok := keep[d.Title]; ok && !d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
+			continue
+		}
+		keep[d.Title] = i
 	}
-	return group
+	if len(keep) == 0 {
+		return nil
+	}
+	ghosts := make([]json.RawMessage, 0, len(keep))
+	for i, d := range onDisk {
+		idx, ok := keep[d.Title]
+		if !ok || idx != i {
+			continue
+		}
+		var raw json.RawMessage
+		if i < len(onDiskRaw) {
+			raw = onDiskRaw[i]
+		} else {
+			// A caller that decoded without keeping the parallel raw bytes
+			// (tests) falls back to the decoded form, which is byte-identical
+			// for rows this binary wrote.
+			raw, _ = json.Marshal(d)
+		}
+		ghosts = append(ghosts, raw)
+	}
+	return ghosts
 }
 
 // checkpointReadError classifies the error from a checkpoint's on-disk read of
@@ -110,17 +157,82 @@ func preserveUnmaterializedGhostRows(
 // preserve that refusal for the version-skewed handoff rather than routing it
 // through the corrupt-but-readable overwrite below.
 //
-// A corrupt-but-readable file falls back to overwrite (#938 sole-writer
-// contract): the daemon repairs it from the authoritative in-memory snapshot.
-// A genuine I/O/read failure propagates so the checkpoint does not clobber
-// ghosts it cannot read (#766).
+// A genuine I/O/read failure must not clobber rows the checkpoint could not
+// read, even if an immediate retry reads the file (#766/#4). The original read
+// the checkpoint used failed, so overwriting from the stale in-memory snapshot
+// would erase disk-only ghost rows under precisely the intermittent-read
+// scenario the read-failure contract exists to protect; the safe action is to
+// abort and leave the file for the next start rather than to overwrite from
+// memory. An I/O error here is the os.ReadFile *fs.PathError LoadRepoInstances
+// wraps when its own read fails — distinct from the content/schema errors
+// below, which come from parsing a file that was readable.
+//
+// A readable file with a present-but-uninterpretable schema_version (null, a
+// string, a negative, or an overflowing value that DetectJSONSchemaVersion
+// rejects without returning UnsupportedSchemaVersionError) is a possibly-newer
+// file this binary cannot read. Refuse to clobber it, mirroring
+// refuseStateDowngrade's present-but-uninterpretable rule: the value might come
+// from a newer af, so the remedy is to upgrade rather than to repair from
+// memory (#5). A corrupt-but-readable file (truncated JSON, an unparseable
+// envelope, or a structurally invalid array) falls back to overwrite (#938
+// sole-writer contract): the daemon is the sole writer and repairs it from the
+// authoritative in-memory snapshot.
 func checkpointReadError(readErr error, path string) error {
 	var newer *config.UnsupportedSchemaVersionError
 	if errors.As(readErr, &newer) {
 		return readErr
 	}
-	if _, ioErr := os.ReadFile(path); ioErr == nil {
-		return nil
+	var pathErr *fs.PathError
+	if errors.As(readErr, &pathErr) {
+		return readErr
 	}
-	return readErr
+	raw, ioErr := os.ReadFile(path)
+	if ioErr != nil {
+		return readErr
+	}
+	if present, _, verr := config.OnDiskSchemaVersion(raw); present && verr != nil {
+		return readErr
+	}
+	return nil
+}
+
+// decodeOnDiskRows decodes a checkpoint's raw on-disk instances array into both
+// the decoded form (onDisk) used for matching, the disposable-ghost carve-out,
+// and archive reconciliation, and the parallel raw form (onDiskRaw) preserved
+// verbatim so additive fields a newer binary wrote under the same schema version
+// survive the checkpoint (#6). A corrupt array yields no rows and no verbatim
+// ghosts: the daemon is the sole writer and overwrites rather than aborts
+// (#938), so there is nothing to reconcile and nothing to preserve.
+func decodeOnDiskRows(raw json.RawMessage) (onDisk []InstanceData, onDiskRaw []json.RawMessage) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if json.Unmarshal(raw, &onDiskRaw) != nil {
+		onDiskRaw = nil
+	}
+	if json.Unmarshal(raw, &onDisk) != nil {
+		onDisk = nil
+	}
+	return onDisk, onDiskRaw
+}
+
+// marshalCheckpointInstances serializes a repo's checkpoint: the in-memory +
+// archive-reconciled rows (deduped by title) followed by the verbatim raw ghost
+// rows preserveUnmaterializedGhostRows selected. Ghost titles are disjoint from
+// the in-memory set, so dedupeInstanceData has already settled the in-memory
+// rows and the ghosts append without collision. The ghosts are appended as
+// their original json.RawMessage so additive fields a newer binary wrote under
+// the same schema version survive the checkpoint (#6).
+func marshalCheckpointInstances(group []InstanceData, ghosts []json.RawMessage) (json.RawMessage, error) {
+	deduped := dedupeInstanceData(group)
+	out := make([]json.RawMessage, 0, len(deduped)+len(ghosts))
+	for i := range deduped {
+		b, err := json.Marshal(deduped[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	out = append(out, ghosts...)
+	return json.Marshal(out)
 }
