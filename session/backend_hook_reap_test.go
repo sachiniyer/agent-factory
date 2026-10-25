@@ -696,7 +696,7 @@ echo "a VM that bills by the hour" > %s
 	// provision_cmd: backgrounds the orphan child, records its pid for the
 	// assertion, then runs the body under test (print-and-exit) on stdout.
 	provisionCmd := writeHookScript(t, filepath.Join(dir, "provision.sh"), fmt.Sprintf(`
-'%s' &
+%s &
 echo $! > %s
 %s
 `, shellsuggest.Arg(child), shellsuggest.Arg(pidFile), provisionBody))
