@@ -271,6 +271,12 @@ type SendPromptRequest struct {
 	// manual send-prompt leaves it false because an operator may need to answer a
 	// limit or credits picker in that pane.
 	TaskOrigin bool `json:"-"`
+	// TaskID attributes the send's attempt evidence to a specific task fire
+	// (#5503). Stamped atomically with LastPromptAttemptAt so a boot-time
+	// reconcile can distinguish "this task's interrupted delivery landed" from
+	// another task's or an interactive send to the same shared target — only a
+	// positively attributed send may discharge a pending fire marker.
+	TaskID string `json:"-"`
 }
 
 type SendPromptResponse struct {

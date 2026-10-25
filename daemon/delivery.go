@@ -283,6 +283,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		}
 		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+			TaskID: req.TaskID,
 		})
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
@@ -333,6 +334,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
 				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+				TaskID: req.TaskID,
 			})
 			if serr != nil {
 				if errors.Is(serr, errTargetLimitReached) {

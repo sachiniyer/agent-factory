@@ -311,10 +311,16 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		// at-or-after the intent with a landed status means the occurrence was
 		// already satisfied, and replaying it would deliver the same prompt
 		// twice.
+		//
+		// The attempt must be attributed to THIS task: targets can be shared,
+		// so another task's send — or an interactive one — must never satisfy
+		// this fire (#5503 review). An unattributed attempt cannot prove which
+		// send it was, so the fire stays owed rather than discharged.
 		if target := task.CanonicalTargetSession(t.TargetSession); target != "" {
 			for i := range rows {
 				data := &rows[i]
-				if data.Title != target || data.LastPromptAttemptAt.Before(fire.IntendedAt) ||
+				if data.Title != target || data.LastPromptTaskID != t.ID ||
+					data.LastPromptAttemptAt.Before(fire.IntendedAt) ||
 					data.LastPromptAttemptAt.IsZero() {
 					continue
 				}
@@ -563,10 +569,15 @@ func replayPendingTaskFires() {
 		}
 		t, err := task.GetTask(taskID)
 		if err != nil {
-			// The task is gone or unreadable: RunTask would fail the same way,
-			// so the marker can never be satisfied — discharge it rather than
-			// replay a permanent error once per boot.
-			clearTaskFire(taskID)
+			// Only a positively-established deletion discharges the marker. A
+			// store read or parse failure is not "the task is gone" — the intent
+			// stays owed so a later boot, once the store reads cleanly again,
+			// can still satisfy it (#5503 review).
+			if task.IsNotFound(err, taskID) {
+				clearTaskFire(taskID)
+			} else {
+				log.WarningLog.Printf("could not read task %s for a pending cron fire; keeping the marker: %v", taskID, err)
+			}
 			continue
 		}
 		if !t.Enabled || t.IsWatch() {

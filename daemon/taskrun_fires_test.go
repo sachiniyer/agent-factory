@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -582,5 +583,141 @@ func TestRunTask_ReconcileErrorIsNotResidue(t *testing.T) {
 	}
 	if len(*creates) != 1 {
 		t.Fatalf("a reconcile failure is not an outcome; the owed fire must deliver, creates = %d", len(*creates))
+	}
+}
+
+func seedTargetedCronTask(t *testing.T, id, repoPath, target string) {
+	t.Helper()
+	if err := task.AddTask(task.Task{
+		ID:            id,
+		Name:          "targeted",
+		Prompt:        "do it",
+		CronExpr:      "0 3 * * *",
+		ProjectPath:   repoPath,
+		TargetSession: target,
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+}
+
+// TestRunTask_TargetedFireSendAttribution pins the shared-target rule (#5503
+// review): a send landing on the SAME target after the marker's intent only
+// discharges the fire when the attempt is positively attributed to this task.
+// Another task's send, or an interactive (unattributed) send, cannot prove
+// this fire's delivery ever happened — the occurrence stays owed.
+func TestRunTask_TargetedFireSendAttribution(t *testing.T) {
+	for name, tc := range map[string]struct {
+		attribution  string
+		wantDelivers int
+		wantMarker   bool
+	}{
+		"own send discharges":     {attribution: "task", wantDelivers: 0, wantMarker: false},
+		"another task stays owed": {attribution: "ot4r9999", wantDelivers: 1, wantMarker: false},
+		"unattributed stays owed": {attribution: "", wantDelivers: 1, wantMarker: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			repoPath := setupTaskRepo(t)
+			seedTargetedCronTask(t, "ab0r7020", repoPath, "shared-target")
+			_, delivers := stubTaskDelivery(t)
+
+			intendedAt := time.Now().Add(-time.Minute)
+			repo, err := config.RepoFromPath(repoPath)
+			if err != nil {
+				t.Fatalf("RepoFromPath: %v", err)
+			}
+			attribution := tc.attribution
+			if attribution == "task" {
+				attribution = "ab0r7020"
+			}
+			if err := appendInstanceData(repo.ID, session.InstanceData{
+				ID:        "inst-target",
+				Title:     "shared-target",
+				Path:      repoPath,
+				Program:   "claude",
+				Status:    session.Running,
+				Liveness:  session.LiveReady,
+				CreatedAt: intendedAt.Add(-time.Hour),
+				UpdatedAt: intendedAt.Add(-time.Hour),
+				// A send landed on the shared target after the intent — but
+				// attribution is what decides whose send it was.
+				LastPromptAttemptAt:      intendedAt.Add(30 * time.Second),
+				LastPromptDeliveryStatus: session.PromptDelivered,
+				LastPromptTaskID:         attribution,
+			}); err != nil {
+				t.Fatalf("seed target row: %v", err)
+			}
+			seedPendingFire(t, taskFireMarker{TaskID: "ab0r7020", IntendedAt: intendedAt})
+
+			if err := runTaskDelivery("ab0r7020", task.ProjectExpectation{}, replayMarker("ab0r7020", intendedAt)); err != nil {
+				t.Fatalf("replay runTaskDelivery: %v", err)
+			}
+			if len(*delivers) != tc.wantDelivers {
+				t.Fatalf("delivers = %d, want %d", len(*delivers), tc.wantDelivers)
+			}
+			if tc.wantDelivers == 1 && (*delivers)[0].TaskID != "ab0r7020" {
+				t.Fatalf("the replayed send must carry this fire's task id; TaskID = %q", (*delivers)[0].TaskID)
+			}
+			if got := markerExists(t, "ab0r7020"); got != tc.wantMarker {
+				t.Fatalf("marker exists = %v, want %v", got, tc.wantMarker)
+			}
+		})
+	}
+}
+
+// TestReplayPendingTaskFires_TaskReadErrorKeepsMarker: a store read or parse
+// failure is not "the task was deleted" — the marker must survive so a later
+// boot, once the store reads cleanly, can still satisfy the owed intent. Only
+// a positively-established not-found discharges it.
+func TestReplayPendingTaskFires_TaskReadErrorKeepsMarker(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7030", repoPath)
+	creates, _ := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7030", IntendedAt: intendedAt})
+	// A second marker names a task that provably does not exist.
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7031", IntendedAt: intendedAt})
+
+	tasksPath := filepath.Join(home, "tasks.json")
+	orig, err := os.ReadFile(tasksPath)
+	if err != nil {
+		t.Fatalf("read tasks.json: %v", err)
+	}
+	if err := os.WriteFile(tasksPath, []byte(`{"tasks": [`), 0o600); err != nil {
+		t.Fatalf("corrupt tasks.json: %v", err)
+	}
+
+	replayPendingTaskFires()
+
+	// Neither marker may be discharged: the store never answered, so neither
+	// task's existence was positively established either way.
+	for _, id := range []string{"ab0r7030", "ab0r7031"} {
+		if !markerExists(t, id) {
+			t.Fatalf("marker %s was discharged on a read error — intent lost", id)
+		}
+	}
+	if len(*creates) != 0 {
+		t.Fatalf("no delivery may run while the store is unreadable; creates = %d", len(*creates))
+	}
+
+	// Once the store reads cleanly again the next boot settles both markers:
+	// the live task replays, the deleted one discharges.
+	if err := os.WriteFile(tasksPath, orig, 0o600); err != nil {
+		t.Fatalf("restore tasks.json: %v", err)
+	}
+	replayPendingTaskFires()
+
+	if len(*creates) != 1 {
+		t.Fatalf("the live task's owed fire must replay once the store heals; creates = %d", len(*creates))
+	}
+	for _, id := range []string{"ab0r7030", "ab0r7031"} {
+		if markerExists(t, id) {
+			t.Fatalf("marker %s survived a clean reconcile — replay must settle it", id)
+		}
 	}
 }

@@ -125,6 +125,13 @@ type InstanceData struct {
 	// path. sent-unverified and could-not-confirm remain uncertainty (#3162), never
 	// failed delivery.
 	LastPromptDeliveryStatus PromptDeliveryStatus `json:"last_prompt_delivery_status,omitempty"`
+	// LastPromptTaskID attributes the send at LastPromptAttemptAt to the task
+	// whose fire it satisfied; "" when that send carried no task provenance
+	// (#5503). Always restated with the attempt, so a later manual or other-task
+	// send to a shared target replaces rather than inherits the attribution —
+	// a boot-time reconcile may only discharge a pending fire on evidence naming
+	// THIS task.
+	LastPromptTaskID string `json:"last_prompt_task_id,omitempty"`
 	// LastPaneChurnAt is when the daemon most recently observed Observation.Updated.
 	// It proves bytes changed, not who produced them or what they meant.
 	LastPaneChurnAt time.Time `json:"last_pane_churn_at,omitzero"`

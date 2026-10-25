@@ -109,6 +109,19 @@ func (i *Instance) AgentObservationCurrent(generation AgentObservationGeneration
 // snapshot already in flight has completed, then records the delivery verdict
 // before another snapshot can begin.
 func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (PromptDeliveryStatus, error) {
+	return i.sendPromptWithEvidence(prompt, now, "")
+}
+
+// SendPromptWithTaskEvidence is SendPromptWithEvidence for a task-attributed
+// send (#5503): taskID is stamped with the attempt in the same lock hold, so a
+// boot-time reconcile can tell "this task's interrupted delivery landed" from
+// an unrelated later send to a shared target. taskID == "" is an unattributed
+// send and REPLACES any stale attribution.
+func (i *Instance) SendPromptWithTaskEvidence(prompt string, now func() time.Time, taskID string) (PromptDeliveryStatus, error) {
+	return i.sendPromptWithEvidence(prompt, now, taskID)
+}
+
+func (i *Instance) sendPromptWithEvidence(prompt string, now func() time.Time, taskID string) (PromptDeliveryStatus, error) {
 	for {
 		target := i.agentObservationTarget()
 		target.runtime.mu.Lock()
@@ -121,7 +134,7 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 		}
 		attemptedAt := now()
 		status, err := SendPromptWithStatus(target.server, prompt)
-		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime)
+		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime, taskID)
 		target.runtime.mu.Unlock()
 		return status, err
 	}
