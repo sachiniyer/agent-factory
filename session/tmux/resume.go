@@ -414,6 +414,11 @@ func CodexResumeRunsRemote(command string) bool {
 	for idx := agentIdx + 1; idx < len(tokens); idx++ {
 		tok := tokens[idx]
 		switch {
+		case tok == "--":
+			// The option terminator ends flag parsing: everything after it is
+			// positional, so `-- --remote` is a prompt word, never the flag
+			// (#5486 review).
+			return false
 		case tok == "--remote" || strings.HasPrefix(tok, "--remote="):
 			return true
 		case codexGlobalOptionTakesValue(tok):

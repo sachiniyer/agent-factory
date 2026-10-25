@@ -749,7 +749,11 @@ func TestTrackCodexReceiptPool_ConfirmsOnlyAppendedBytes(t *testing.T) {
 		"type":    "event_msg",
 		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
 	})
-	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+	// The first check recorded the pool file as quiet, so its next stat
+	// lands on the slow cadence rather than the next poll tick — allow the
+	// wait a little longer than that interval (#5486 review).
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing",
+		2*codexReceiptQuietStatInterval+time.Second),
 		"bytes appended past a pool offset are this launch's receipt")
 }
 
@@ -796,6 +800,79 @@ func TestCodexRolloutWorkingDir_ObjectSourceKeepsCwd(t *testing.T) {
 	cwd, ok := codexRolloutWorkingDir(subagent)
 	require.True(t, ok, "an object-shaped source must not discard a valid cwd")
 	require.Equal(t, workDir, cwd)
+}
+
+// A tracked pool file whose size has not passed its boundary is never opened,
+// and a quiet file is only re-statted on the slow cadence — poll cost must not
+// scale as pool size x the 50ms tick (#5486 review). Once the file grows past
+// the boundary it promotes to the fast path and its appended turn is found.
+func TestCodexReceiptScan_QuietPoolFileStatsOnSlowCadence(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	path := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	offset := info.Size()
+
+	state := newCodexReceiptState()
+	matched, err := state.scanPrompt(path, "config briefing", offset)
+	require.NoError(t, err)
+	require.False(t, matched, "a file at its boundary holds no post-boundary bytes")
+
+	// Bytes land within the quiet window: the throttled re-check must answer
+	// from the last stat without noticing — that is the slow cadence working.
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	matched, err = state.scanPrompt(path, "config briefing", offset)
+	require.NoError(t, err)
+	require.False(t, matched, "a quiet file is not re-statted inside the slow cadence")
+
+	// After the cadence elapses the stat promotes the file to the fast path
+	// and the appended turn confirms.
+	scan := state.scans[path]
+	scan.checked = time.Now().Add(-2 * codexReceiptQuietStatInterval)
+	state.scans[path] = scan
+	matched, err = state.scanPrompt(path, "config briefing", offset)
+	require.NoError(t, err)
+	require.True(t, matched, "a grown file must be re-statted and read after the quiet cadence")
+}
+
+// An unpinned pool member that cannot be opened is unobservable, not fatal:
+// the other pool members still get their chance to confirm, and a pool where
+// every file fails still reports clean absence rather than an aborted check —
+// the verdict layer maps unpinned absence to indeterminate (#5486 review).
+func TestWaitForPromptReceipt_PoolFileReadErrorDoesNotAbort(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not constrain root")
+	}
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	dead := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	resumed := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
+
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+
+	// Grow the dead file past its boundary so the check actually tries to
+	// open it, then make it unreadable.
+	appendCodexRolloutEvent(t, dead, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	require.NoError(t, os.Chmod(dead, 0))
+	t.Cleanup(func() { _ = os.Chmod(dead, 0644) })
+
+	appendCodexRolloutEvent(t, resumed, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"an unreadable pool member must not deny the file that did record the briefing")
 }
 
 // A store that cannot be enumerated is not an empty store: the late re-check's

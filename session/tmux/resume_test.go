@@ -848,6 +848,11 @@ func TestCodexResumeRunsRemote(t *testing.T) {
 		},
 		{"the flag is caught before its value is walked", "codex --remote --last resume", true},
 		{"exec remote resume", "codex exec --remote ws://host resume --last", true},
+		{
+			"-- terminator makes --remote a prompt, not the flag",
+			"codex resume --last -- --remote", false,
+		},
+		{"remote-looking word after -- is positional", "codex -- --remote resume --last", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, CodexResumeRunsRemote(tc.command))

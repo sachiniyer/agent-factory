@@ -58,6 +58,14 @@ var errCodexCaptureUndecided = errors.New("codex conversation capture undecided"
 
 const promptReceiptPollInterval = 50 * time.Millisecond
 
+// codexReceiptQuietStatInterval is the re-stat cadence for tracked rollouts
+// whose size has not passed their receipt boundary. An unpinned resume pool
+// can cover the whole rollout store; statting quiet files once a second keeps
+// poll cost at pool-size stats per second instead of per 50ms tick, while
+// files that DO grow stay on the fast poll path for receipt latency (#5486
+// review).
+const codexReceiptQuietStatInterval = time.Second
+
 // codexSessionMetaSettleTimeout bounds how much longer capture keeps polling
 // past its base timeout when a new rollout file exists but its session_meta
 // header is not yet classifiable. The base timeout answers "did a rollout
@@ -113,6 +121,13 @@ type codexReceiptScan struct {
 	size    int64
 	modTime time.Time
 	matched bool
+	// checked records when the file was last statted; hot marks a file whose
+	// size has advanced past its tracked boundary. A file that is not hot is
+	// re-statted only once per codexReceiptQuietStatInterval, so an unpinned
+	// resume pool's poll cost stays proportional to pool size per second —
+	// not pool size per 50ms tick (#5486 review).
+	checked time.Time
+	hot     bool
 }
 
 // trackedReceiptPath is a rollout the receipt check watches despite it not
@@ -124,6 +139,14 @@ type codexReceiptScan struct {
 type trackedReceiptPath struct {
 	path   string
 	offset int64
+	// unpinned marks pool members (TrackCodexReceiptPool): a file the resume
+	// MIGHT have appended to. Its read failure makes that file unobservable —
+	// it can never produce a match, and an unpinned absence stays
+	// indeterminate anyway — so the error must not abort the receipt check
+	// the surviving pool members still deserve (#5486 review). A pinned
+	// explicit-id target keeps the hard error because it retains negative
+	// verdicts.
+	unpinned bool
 }
 
 func newCodexReceiptState() *codexReceiptState {
@@ -132,23 +155,54 @@ func newCodexReceiptState() *codexReceiptState {
 
 // scanPrompt returns whether path records prompt after fromOffset, reusing
 // the previous result whenever the file has not changed since the last scan.
+// A file whose last observed size has not passed its boundary cannot hold
+// post-boundary bytes, so it is re-statted on the slow quiet cadence instead
+// of on every poll; once it grows it stays on the fast path (#5486 review).
 func (s *codexReceiptState) scanPrompt(path, prompt string, fromOffset int64) (bool, error) {
+	s.mu.Lock()
+	prev, seen := s.scans[path]
+	s.mu.Unlock()
+	if seen && !prev.hot && time.Since(prev.checked) < codexReceiptQuietStatInterval {
+		return prev.matched, nil
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("inspect Codex rollout %s: %w", path, err)
 	}
-	s.mu.Lock()
-	if scan, ok := s.scans[path]; ok && scan.size == info.Size() && scan.modTime.Equal(info.ModTime()) {
+	if seen && prev.size == info.Size() && prev.modTime.Equal(info.ModTime()) {
+		s.mu.Lock()
+		prev.checked = time.Now()
+		s.scans[path] = prev
 		s.mu.Unlock()
-		return scan.matched, nil
+		return prev.matched, nil
 	}
-	s.mu.Unlock()
+	if info.Size() <= fromOffset && info.Mode().IsRegular() {
+		// Nothing appended past the boundary — skip the open entirely
+		// (#5486 review). A shrunken file also lands here; when it grows
+		// back past the offset the fast path reads from the boundary.
+		// Non-regular files (a fifo named like a rollout) still take the
+		// open path so openCodexRollout can reject them explicitly.
+		s.mu.Lock()
+		s.scans[path] = codexReceiptScan{
+			size:    info.Size(),
+			modTime: info.ModTime(),
+			checked: time.Now(),
+		}
+		s.mu.Unlock()
+		return false, nil
+	}
 	matched, err := codexRolloutHasPrompt(path, prompt, fromOffset)
 	if err != nil {
 		return false, err
 	}
 	s.mu.Lock()
-	s.scans[path] = codexReceiptScan{size: info.Size(), modTime: info.ModTime(), matched: matched}
+	s.scans[path] = codexReceiptScan{
+		size:    info.Size(),
+		modTime: info.ModTime(),
+		matched: matched,
+		checked: time.Now(),
+		hot:     true,
+	}
 	s.mu.Unlock()
 	return matched, nil
 }
@@ -197,7 +251,13 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 				continue
 			}
 		}
-		s.TrackCodexReceiptRollout(path)
+		if info, err := os.Stat(path); err == nil {
+			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
+				path:     path,
+				offset:   info.Size(),
+				unpinned: true,
+			})
+		}
 	}
 }
 
@@ -573,6 +633,14 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	}
 	for _, tracked := range snap.receiptPaths {
 		if err := scan(tracked.path, tracked.offset); err != nil {
+			if tracked.unpinned {
+				// A pool member that cannot be statted or read is
+				// unobservable this round: it can never produce a match, and
+				// an unpinned absence stays indeterminate at the verdict
+				// layer regardless — so the failure must not deny the other
+				// pool members their chance to confirm (#5486 review).
+				continue
+			}
 			return false, false, err
 		}
 	}
