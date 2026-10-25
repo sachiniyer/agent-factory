@@ -400,10 +400,17 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 			switch {
 			case tmux.CodexResumeRunsRemote(req.Program):
 				// A --remote resume writes its rollout on the remote
-				// app-server endpoint, never into the local CODEX_HOME —
-				// tracking a local file could only misattribute (#5486
-				// review). Checked before the unmodelled-selector branch so a
-				// remote flag keeps resolving nothing locally either way.
+				// app-server endpoint, never into the local CODEX_HOME, so
+				// local scanning is disabled entirely: a concurrent local
+				// agent recording the same deterministic briefing in a NEW
+				// local rollout would otherwise confirm a receipt the remote
+				// endpoint may never have received (#5486 review). The zeroed
+				// snapshot sees no local files — new or tracked — and
+				// resumePositiveOnly keeps the unverifiable outcome
+				// indeterminate. Checked before the unmodelled-selector
+				// branch so a remote flag keeps resolving nothing locally
+				// either way.
+				promptReceipt = session.ConversationCaptureSnapshot{}
 			case !ok:
 				// A selector af cannot model could still launch a resumable
 				// session: bound the whole store so post-launch appends can

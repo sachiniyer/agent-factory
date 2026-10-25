@@ -894,6 +894,27 @@ func TestConfigAgentResumeRemoteIgnoresLocalRollout(t *testing.T) {
 	}, 3*time.Second, 25*time.Millisecond,
 		"the fixture itself must still record the turn locally")
 
+	// A concurrent LOCAL agent landing the same deterministic briefing in a
+	// brand-new rollout is the false-positive shape from the finding: local
+	// scanning is disabled for remote launches, so this candidate must be
+	// invisible to the remote session's receipt check (#5486 review).
+	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
+		"sessions", "2026", "07", "21",
+		"rollout-2026-07-21T00-00-01-049f386f-7206-7fc2-803b-f7045e07a245.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0755))
+	siblingMeta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": pathutil.ResolveForCompare(os.Getenv("AGENT_FACTORY_HOME"))},
+	})
+	require.NoError(t, err)
+	siblingTurn, err := json.Marshal(map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": prompt},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sibling,
+		append(append(siblingMeta, '\n'), append(siblingTurn, '\n')...), 0600))
+
 	require.Eventually(t, func() bool {
 		return strings.Contains(warnings.String(),
 			"briefing receipt could not be verified; the resumed rollout is not pinned to an identifiable file")
