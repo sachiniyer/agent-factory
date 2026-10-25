@@ -81,6 +81,16 @@ func literalArgvWord(word *syntax.Word) (string, bool) {
 	// tilde in expansion position.
 	prev, prevInert := byte(0), false
 	for i, part := range word.Parts {
+		if dq, ok := part.(*syntax.DblQuoted); ok {
+			before := value.Len()
+			if !appendLiteralDblQuoted(&value, dq) {
+				return "", false
+			}
+			if value.Len() > before {
+				prev, prevInert = value.String()[value.Len()-1], false
+			}
+			continue
+		}
 		lit, ok := part.(*syntax.Lit)
 		if !ok {
 			before := value.Len()
@@ -135,6 +145,43 @@ func literalArgvWord(word *syntax.Word) (string, bool) {
 		return "", false
 	}
 	return value.String(), true
+}
+
+// appendLiteralDblQuoted renders the text inside "…" with the POSIX
+// double-quote decode: backslash escapes only $ ` " \ and newline, and before
+// any other character it is literal. A nested Lit's raw Value therefore
+// cannot be copied verbatim — "a\$b" and 'a\$b' pass different bytes to exec
+// (Codex review round 3). A part that is not a Lit is an expansion — $x,
+// $(…), `…`, or an arithmetic form — and makes the whole word non-literal.
+// Escaped and quoted characters inside here never reach the caller's unquoted
+// skeleton, so they stay inert for the glob, tilde, and brace scans.
+func appendLiteralDblQuoted(b *strings.Builder, dq *syntax.DblQuoted) bool {
+	if dq == nil || dq.Dollar {
+		return false
+	}
+	for _, part := range dq.Parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok {
+			return false
+		}
+		raw := lit.Value
+		for j := 0; j < len(raw); j++ {
+			c := raw[j]
+			if c == '\\' && j+1 < len(raw) {
+				switch raw[j+1] {
+				case '$', '`', '"', '\\':
+					b.WriteByte(raw[j+1])
+					j++
+					continue
+				case '\n':
+					j++
+					continue
+				}
+			}
+			b.WriteByte(c)
+		}
+	}
+	return true
 }
 
 func isQuotedWordPart(part syntax.WordPart) bool {

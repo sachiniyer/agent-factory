@@ -170,6 +170,26 @@ func TestBuiltInProgramOverride_ApostrophePathRoundTrips(t *testing.T) {
 	}
 }
 
+// Codex review round 3: an escape inside "…" decodes per POSIX — \x emits x
+// only for $ ` " \ and newline — so \" in a detected path survives decode and
+// the same word spelled '…' matches. A backslash before any other character
+// is literal text inside "…", so a raw-copy compare would lie.
+func TestBuiltInProgramOverride_DoubleQuotedEscapeDecode(t *testing.T) {
+	const detected = `'/opt/af"detected"/claude' --dangerously-skip-permissions`
+	resolved := overrideResolution("claude",
+		`"/opt/af\"detected\"/claude" --dangerously-skip-permissions`, detected)
+	require.True(t, builtInProgramOverride(resolved, "claude",
+		`"/opt/af\"detected\"/claude" --dangerously-skip-permissions`),
+		`\" decodes to " inside "…" — the same word the '…' spelling spells`)
+
+	const refuseDetected = `'/opt/af-detected/claude' --dangerously-skip-permissions`
+	resolved = overrideResolution("claude",
+		`"/opt/af-detected/claude\x" --dangerously-skip-permissions`, refuseDetected)
+	require.False(t, builtInProgramOverride(resolved, "claude",
+		`"/opt/af-detected/claude\x" --dangerously-skip-permissions`),
+		`\x is not an escapable pair inside "…" — the decoded word keeps the backslash`)
+}
+
 // The end-to-end repro from #5487: a config written by an older af carries the
 // unquoted detected override, while the built-in candidate in the same
 // resolution is the quoted form detection now produces. The instance resolver

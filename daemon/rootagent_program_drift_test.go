@@ -947,6 +947,9 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 		{"nested brace expansion is real drift",
 			`claude '{a{b},c}'`, `claude {a{b},c}`, true,
 			"command text differs"},
+		{"double-quoted escape differs from single-quoted",
+			`claude "a\$b"`, `claude 'a\$b'`, true,
+			"word 1 differs"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, warnings, repo, st, profile, root :=
