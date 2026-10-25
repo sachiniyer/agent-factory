@@ -494,7 +494,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// populated worktree remains unknown/corrupt and must not be treated as
 		// proof that no worktree exists.
 		worktreeReaped = data.UserKilled && data.Worktree.RepoPath == "" && data.Worktree.WorktreePath == ""
-		if !worktreeReaped {
+		// A startup-state-unknown record may carry only title/branch/name
+		// evidence — a leftover whose worktree never registered. Its worktree
+		// path is then legitimately empty, and failing here would make the row
+		// unloadable: skipped with a warning on every refresh tick instead of
+		// resting inert for inspection. Other row shapes keep the strict check —
+		// a live or corrupt record's empty path must still fail loudly.
+		if !worktreeReaped && !(data.StartupStateUnknown && data.Worktree.WorktreePath == "") {
 			gw, err := git.NewGitWorktreeFromStorage(
 				data.Worktree.RepoPath,
 				data.Worktree.WorktreePath,

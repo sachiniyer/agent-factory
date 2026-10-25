@@ -135,6 +135,10 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
+		// TaskID carries the fire identity through targeted delivery (#5503): an
+		// auto-create binds the durable marker's title and instance id so the
+		// replacement daemon can adopt a half-made target instead of resending.
+		TaskID: t.ID,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.
@@ -224,17 +228,20 @@ func repoHasSessionTitle(repoID, title string) (bool, error) {
 // caller authorized it against; the in-daemon scheduler passes the zero value,
 // having no project context to assert.
 func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
-	return runTaskDelivery(taskID, expect, false)
+	return runTaskDelivery(taskID, expect, nil)
 }
 
-// runTaskDelivery is RunTask with one extra input: replaying marks a boot-time
-// re-entry of an already-intended fire (#5503). It changes exactly one
-// outcome — a pending marker whose residue proves the interrupted attempt
-// completed is discharged rather than treated as this run's own occurrence —
-// because a replay exists to satisfy the old intent, while a fresh cron fire
-// or manual trigger landing on the same stale marker is a NEW occurrence that
-// must still deliver.
-func runTaskDelivery(taskID string, expect task.ProjectExpectation, replaying bool) (err error) {
+// runTaskDelivery is RunTask with one extra input: replay is non-nil for a
+// boot-time re-entry of an already-intended fire (#5503), carrying the marker
+// snapshot the boot scan read. It changes two outcomes — the replay only ever
+// satisfies THAT marker's occurrence (a pending marker that was meanwhile
+// consumed or replaced belongs to a different run, and this call must not
+// deliver for it), and a pending marker whose residue proves the interrupted
+// attempt completed is discharged rather than treated as this run's own
+// occurrence — because a replay exists to satisfy the old intent, while a
+// fresh cron fire or manual trigger landing on the same stale marker is a NEW
+// occurrence that must still deliver.
+func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *taskFireMarker) (err error) {
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
 	// protects every caller.
@@ -315,9 +322,28 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replaying bo
 	// binds the committed title and instance id into it as they mint. A write
 	// failure degrades this run to pre-fix behavior — the delivery still
 	// proceeds; the ledger exists to rescue fires, never to block them.
-	fire, pendingFire, fireErr := ensureTaskFireMarker(taskID)
-	if fireErr != nil {
-		log.WarningLog.Printf("could not record cron fire marker for task %s; an interrupted run will not be replayed: %v", taskID, fireErr)
+	var fire *taskFireMarker
+	pendingFire := false
+	if replay != nil {
+		// A replay owes the occurrence the boot scan snapshot recorded — under
+		// this task's flock, that exact marker. A scheduled or manual fire that
+		// landed first may have discharged it (marker gone), or crashed and been
+		// re-marked (different IntendedAt); either way this run is nobody's
+		// deliverer and must not mint a marker of its own.
+		m, rerr := readTaskFireMarker(taskID)
+		if rerr != nil {
+			return rerr
+		}
+		if m == nil || !m.IntendedAt.Equal(replay.IntendedAt) {
+			return nil
+		}
+		fire, pendingFire = m, true
+	} else {
+		var fireErr error
+		fire, pendingFire, fireErr = ensureTaskFireMarker(taskID)
+		if fireErr != nil {
+			log.WarningLog.Printf("could not record cron fire marker for task %s; an interrupted run will not be replayed: %v", taskID, fireErr)
+		}
 	}
 
 	// Once this fire holds the lock it owns the task's run status: every
@@ -380,7 +406,7 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replaying bo
 	if fire != nil && pendingFire {
 		if taskFireResidue(t, fire) {
 			clearTaskFire(taskID)
-			if replaying {
+			if replay != nil {
 				return nil
 			}
 			pendingFire = false

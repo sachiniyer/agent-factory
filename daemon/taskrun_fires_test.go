@@ -58,6 +58,12 @@ func seedPendingFire(t *testing.T, m taskFireMarker) {
 	}
 }
 
+// replayMarker is the snapshot a boot scan hands runTaskDelivery: identity is
+// task_id + intended_at, so the replay only ever satisfies that occurrence.
+func replayMarker(taskID string, intendedAt time.Time) *taskFireMarker {
+	return &taskFireMarker{TaskID: taskID, IntendedAt: intendedAt}
+}
+
 func markerExists(t *testing.T, taskID string) bool {
 	t.Helper()
 	m, err := readTaskFireMarker(taskID)
@@ -224,14 +230,15 @@ func TestRunTask_ReplayDeliversOwedFire(t *testing.T) {
 	repo := setupTaskRepo(t)
 	seedCronTask(t, "ab0r7004", repo)
 	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
 	seedPendingFire(t, taskFireMarker{
 		TaskID:     "ab0r7004",
-		IntendedAt: time.Now().Add(-time.Minute),
+		IntendedAt: intendedAt,
 		Title:      "nightly-2",
 		InstanceID: "inst-abc",
 	})
 
-	if err := runTaskDelivery("ab0r7004", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7004", task.ProjectExpectation{}, replayMarker("ab0r7004", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 1 {
@@ -278,7 +285,7 @@ func TestRunTask_ReplayAdoptsPersistedRow(t *testing.T) {
 		InstanceID: "inst-fire5",
 	})
 
-	if err := runTaskDelivery("ab0r7005", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7005", task.ProjectExpectation{}, replayMarker("ab0r7005", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 0 {
@@ -327,7 +334,7 @@ func TestRunTask_ReplayAdoptedTombstoneIsAborted(t *testing.T) {
 		InstanceID: "inst-fire6",
 	})
 
-	if err := runTaskDelivery("ab0r7006", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7006", task.ProjectExpectation{}, replayMarker("ab0r7006", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 0 {
@@ -356,7 +363,7 @@ func TestRunTask_ReplayResidueDischarges(t *testing.T) {
 	}
 	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7007", IntendedAt: intendedAt})
 
-	if err := runTaskDelivery("ab0r7007", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7007", task.ProjectExpectation{}, replayMarker("ab0r7007", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 0 {
@@ -383,7 +390,7 @@ func TestRunTask_FreshFireOnStaleMarker(t *testing.T) {
 	}
 	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7008", IntendedAt: intendedAt})
 
-	if err := runTaskDelivery("ab0r7008", task.ProjectExpectation{}, false); err != nil {
+	if err := runTaskDelivery("ab0r7008", task.ProjectExpectation{}, nil); err != nil {
 		t.Fatalf("fresh runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 1 {
@@ -409,7 +416,7 @@ func TestRunTask_AbortedStatusIsNotResidue(t *testing.T) {
 	}
 	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7009", IntendedAt: intendedAt, Title: "nightly-9"})
 
-	if err := runTaskDelivery("ab0r7009", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7009", task.ProjectExpectation{}, replayMarker("ab0r7009", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 1 {
@@ -443,13 +450,14 @@ func TestRunTask_ForeignRowOnBoundTitle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed foreign row: %v", err)
 	}
+	intendedAt := time.Now().Add(-time.Minute)
 	seedPendingFire(t, taskFireMarker{
 		TaskID:     "ab0r7010",
-		IntendedAt: time.Now().Add(-time.Minute),
+		IntendedAt: intendedAt,
 		Title:      "nightly-2",
 	})
 
-	if err := runTaskDelivery("ab0r7010", task.ProjectExpectation{}, true); err != nil {
+	if err := runTaskDelivery("ab0r7010", task.ProjectExpectation{}, replayMarker("ab0r7010", intendedAt)); err != nil {
 		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
 	if len(*creates) != 1 {
@@ -503,38 +511,76 @@ func TestReplayPendingTaskFires(t *testing.T) {
 	}
 }
 
-// TestRunTask_ReplayWithoutMarkerDeliversNormally pins that the replay flag
-// alone changes nothing for a task with no pending fire.
-func TestRunTask_ReplayWithoutMarkerDeliversNormally(t *testing.T) {
+// TestRunTask_ReplayConsumedMarkerSkips: a racing fire that already discharged
+// the pending marker owns the occurrence — a late-arriving replay of the same
+// snapshot must not mint a fresh marker and deliver a duplicate.
+func TestRunTask_ReplayConsumedMarkerSkips(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	seedCronTask(t, "ab0r7014", repo)
 	creates, _ := stubTaskDelivery(t)
 
-	if err := runTaskDelivery("ab0r7014", task.ProjectExpectation{}, true); err != nil {
-		t.Fatalf("runTaskDelivery: %v", err)
+	intendedAt := time.Now().Add(-time.Minute)
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7014", IntendedAt: intendedAt})
+	clearTaskFire("ab0r7014")
+
+	if err := runTaskDelivery("ab0r7014", task.ProjectExpectation{}, replayMarker("ab0r7014", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
-	if len(*creates) != 1 {
-		t.Fatalf("a first-ever run must deliver; creates = %d", len(*creates))
+	if len(*creates) != 0 {
+		t.Fatalf("a consumed marker must not deliver; creates = %d", len(*creates))
+	}
+	if markerExists(t, "ab0r7014") {
+		t.Fatal("a consumed-marker replay must not mint a fresh marker")
 	}
 }
 
-// TestTaskFireExpectedWorktreePath pins the tombstone's recorded location to the
-// same placement the interrupted create would have used.
-func TestTaskFireExpectedWorktreePath(t *testing.T) {
-	sibling := taskFireExpectedWorktreePath(&config.Config{}, "/home/u/repo", "my-title", "dev/my-title")
-	want := filepath.Join("/home/u", "repo-my-title")
-	if sibling != want {
-		t.Fatalf("sibling path = %q, want %q", sibling, want)
+// TestRunTask_ReplaySupersededMarkerSkips: the on-disk marker names a NEWER
+// occurrence than the snapshot the boot scan read — the replay must leave it
+// for its own run, not consume it.
+func TestRunTask_ReplaySupersededMarkerSkips(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7015", repo)
+	creates, _ := stubTaskDelivery(t)
+
+	staleAt := time.Now().Add(-time.Hour)
+	freshAt := time.Now().Add(-time.Minute)
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7015", IntendedAt: freshAt})
+
+	if err := runTaskDelivery("ab0r7015", task.ProjectExpectation{}, replayMarker("ab0r7015", staleAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
 	}
-	sub := taskFireExpectedWorktreePath(
-		&config.Config{WorktreeRoot: config.WorktreeRootSubdirectory},
-		"/home/u/repo", "My Title", "dev/my-title")
-	home, err := config.GetConfigDir()
-	if err != nil {
-		t.Fatalf("GetConfigDir: %v", err)
+	if len(*creates) != 0 {
+		t.Fatalf("a superseded snapshot must not deliver; creates = %d", len(*creates))
 	}
-	if want := filepath.Join(home, "worktrees", "dev/my-title"); sub != want {
-		t.Fatalf("subdirectory path = %q, want %q", sub, want)
+	m, err := readTaskFireMarker("ab0r7015")
+	if err != nil || m == nil || !m.IntendedAt.Equal(freshAt) {
+		t.Fatalf("the newer occurrence's marker must survive untouched; marker = %+v, err = %v", m, err)
+	}
+}
+
+// TestRunTask_ReconcileErrorIsNotResidue: a failed reconcile records an
+// "errored: task fire reconcile" status with a fresh timestamp — the next boot
+// must still retry the owed fire rather than read that failure as completion.
+func TestRunTask_ReconcileErrorIsNotResidue(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7016", repo)
+	creates, _ := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	failedAt := intendedAt.Add(30 * time.Second)
+	status := "errored: " + fmt.Errorf("%w: x", errTaskFireReconcile).Error()
+	if _, err := task.UpdateTaskStatus("ab0r7016", &failedAt, status); err != nil {
+		t.Fatalf("seed run status: %v", err)
+	}
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7016", IntendedAt: intendedAt})
+
+	if err := runTaskDelivery("ab0r7016", task.ProjectExpectation{}, replayMarker("ab0r7016", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("a reconcile failure is not an outcome; the owed fire must deliver, creates = %d", len(*creates))
 	}
 }

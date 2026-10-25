@@ -374,6 +374,11 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
 		TaskOrigin: req.TaskOrigin,
+		// FireTaskID, not TaskID: the auto-created target is this task's ongoing
+		// delivery address, so it must not stamp task_id/run-active or enter the
+		// task's concurrency accounting — but the reservation still binds the
+		// durable fire marker so an interrupted create is adoptable (#5503).
+		FireTaskID: req.TaskID,
 	})
 }
 

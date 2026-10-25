@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -231,12 +232,14 @@ func isShutdownAbortErr(err error) bool {
 // at-or-after the marker's intent — the proof that a surviving marker is stale,
 // which happens when a run completed but its marker removal was lost (or, on a
 // fresh fire, when an older aborted run's discharge never made it onto disk).
-// An "aborted:" status is deliberately NOT residue: it is the marker's own
-// interrupted signal, so the intent is still owed.
+// Two statuses are deliberately NOT residue: an "aborted:" status is the
+// marker's own interrupted signal, and a reconcile failure records that the
+// outcome could not be established — the intent is still owed in both cases.
 func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 	return t.LastRunAt != nil &&
 		!t.LastRunAt.Before(fire.IntendedAt) &&
-		!strings.HasPrefix(t.LastRunStatus, taskStatusAbortedPrefix)
+		!strings.HasPrefix(t.LastRunStatus, taskStatusAbortedPrefix) &&
+		!strings.Contains(t.LastRunStatus, errTaskFireReconcile.Error())
 }
 
 // reconcilePendingTaskFire decides what a surviving marker still owes.
@@ -271,7 +274,12 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 	for i := range rows {
 		data := &rows[i]
 		matched := fire.InstanceID != "" && data.ID == fire.InstanceID
-		if !matched && data.TaskID == t.ID && !data.CreatedAt.Before(fire.IntendedAt) {
+		// CreatedAt must be STRICTLY after the intent: a real create stamps its
+		// own time at reservation, which lands after the marker was written.
+		// Equality names reconcile's own leftover record — it deliberately
+		// carries the marker's IntendedAt as its CreatedAt and a fresh id — and
+		// adopting it would consume a fire whose delivery never happened.
+		if !matched && data.TaskID == t.ID && data.CreatedAt.After(fire.IntendedAt) {
 			matched = true
 		}
 		if !matched {
@@ -296,6 +304,33 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 	}
 
 	if fire.Title == "" {
+		// A targeted delivery can land its prompt without ever binding the
+		// marker: sends into an existing target create nothing, and only the
+		// auto-create reservation carries the fire identity. The target row's
+		// own send evidence is the residue — a prompt attempt recorded
+		// at-or-after the intent with a landed status means the occurrence was
+		// already satisfied, and replaying it would deliver the same prompt
+		// twice.
+		if target := task.CanonicalTargetSession(t.TargetSession); target != "" {
+			for i := range rows {
+				data := &rows[i]
+				if data.Title != target || data.LastPromptAttemptAt.Before(fire.IntendedAt) ||
+					data.LastPromptAttemptAt.IsZero() {
+					continue
+				}
+				if data.LastPromptDeliveryStatus != session.PromptDelivered &&
+					data.LastPromptDeliveryStatus != session.PromptSentUnverified {
+					continue
+				}
+				now := time.Now()
+				if _, uerr := task.UpdateTaskStatus(t.ID, &now, "sent"); uerr != nil {
+					return false, fmt.Errorf("%w: recording targeted run status: %v", errTaskFireReconcile, uerr)
+				}
+				clearTaskFire(t.ID)
+				log.InfoLog.Printf("task %s: interrupted cron fire already delivered to target %q", t.ID, target)
+				return true, nil
+			}
+		}
 		// Killed before the reservation committed a title: no runtime identity
 		// can be attributed, and the create died too early to leave one to probe.
 		return false, nil
@@ -408,25 +443,27 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
 	}
 	reap := proven && clean
-	var createdByUs *bool
-	if reap {
-		created := true
-		createdByUs = &created
+	if reap && wtPath == "" {
+		// A proven tmux-only leftover has no worktree to reap through a
+		// tombstone record — and a record without a worktree path cannot
+		// materialize a teardown handle anyway — so kill it inline. A kill
+		// failure degrades to the quarantine record below rather than losing
+		// the residue.
+		if _, kerr := tmux.NewTmuxSessionFromSanitizedName(sanitized, program).Close(); kerr == nil {
+			log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q from an interrupted cron fire", t.ID, sanitized)
+			return nil, nil
+		}
+		reap = false
 	}
+	// BranchCreatedByUs stays nil: the worktree-registration evidence proves
+	// the WORKTREE is this attempt's, but a create may have reused a
+	// pre-existing branch, and unknown provenance must never authorize
+	// `git branch -D` (#1953's keep-unknown rule).
+	var createdByUs *bool
 	// The record's own identity is fresh: the interrupted attempt's bound id
 	// stays in the marker, not on this row — a still-draining create writing
 	// its own persisted row matches by title+stable-id, and reusing that id
 	// here would let a straggler write overwrite the leftover record.
-	recordPath := wtPath
-	if recordPath == "" {
-		// No worktree survived the branch-holder scan, so the leftover's
-		// worktree was never registered (or never created). Still record the
-		// path this attempt's placement would have used — the local backend
-		// refuses to materialize a row with an empty worktree path, and an
-		// unloadable record is skipped (with a warning) on every refresh tick
-		// instead of resting inert for inspection.
-		recordPath = taskFireExpectedWorktreePath(cfg, identityRoot, fire.Title, branch)
-	}
 	now := time.Now()
 	return &session.InstanceData{
 		ID:         session.NewInstanceID(),
@@ -447,38 +484,12 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		StartupStateUnknown: !reap,
 		Worktree: session.GitWorktreeData{
 			RepoPath:          identityRoot,
-			WorktreePath:      recordPath,
+			WorktreePath:      wtPath,
 			SessionName:       sanitized,
 			BranchName:        branch,
 			BranchCreatedByUs: createdByUs,
 		},
 	}, nil
-}
-
-// taskFireExpectedWorktreePath derives where an interrupted create's worktree
-// would have been placed for the bound title, mirroring the placement rules in
-// session/git.resolveWorktreePlacement without its free-path suffixing — a
-// leftover record names the base location, not the next allocation.
-func taskFireExpectedWorktreePath(cfg *config.Config, repoRoot, title, branch string) string {
-	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
-		leaf := branch
-		if leaf == "" {
-			leaf = git.DerivedWorktreeSubdirectoryTitleSegment(title)
-		}
-		if leaf == "" {
-			leaf = "session"
-		}
-		configDir, err := config.GetConfigDir()
-		if err != nil {
-			return ""
-		}
-		return filepath.Join(configDir, "worktrees", leaf)
-	}
-	segment := git.DerivedWorktreePathTitleSegment(repoRoot, title)
-	if segment == "" {
-		segment = "session"
-	}
-	return filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+"-"+segment)
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to
@@ -527,6 +538,7 @@ func taskFireWorktreeEvidence(wtPath, identityRoot, branch string, fire *taskFir
 // if one does. Each marker re-enters the normal firing path, which reconciles
 // residue, adoption, and leftovers before deciding the fire is still owed.
 func replayPendingTaskFires() {
+	var wg sync.WaitGroup
 	dir, err := taskFireDir()
 	if err != nil {
 		log.WarningLog.Printf("could not resolve cron fire directory: %v", err)
@@ -563,8 +575,21 @@ func replayPendingTaskFires() {
 			clearTaskFire(taskID)
 			continue
 		}
-		if err := runTaskDelivery(taskID, task.ProjectExpectation{}, true); err != nil {
-			log.WarningLog.Printf("replay of interrupted cron fire for task %s failed: %v", taskID, err)
+		marker, err := readTaskFireMarker(taskID)
+		if err != nil || marker == nil {
+			// Unreadable or already consumed between the scan and here.
+			continue
 		}
+		// Each marker replays on its own goroutine: a delivery parked behind an
+		// attached target must not starve every other task's owed fire, and the
+		// per-task flock already serializes them against live fires.
+		wg.Add(1)
+		go func(m *taskFireMarker) {
+			defer wg.Done()
+			if err := runTaskDelivery(m.TaskID, task.ProjectExpectation{}, m); err != nil {
+				log.WarningLog.Printf("replay of interrupted cron fire for task %s failed: %v", m.TaskID, err)
+			}
+		}(marker)
 	}
+	wg.Wait()
 }
