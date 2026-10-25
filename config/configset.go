@@ -54,6 +54,10 @@ const (
 	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
 	// hand-edited.
 	cfgStringList
+	// cfgFloat is a fractional scalar — today the [web] terminal font sizes
+	// (#5500), whose 6.5 phone pitch no integer kind can carry. It is written as a
+	// real TOML float (8 → "8.0") so the file stays unambiguous about the type.
+	cfgFloat
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -214,6 +218,14 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
 		"enabled": {kind: cfgBool},
 		"program": {kind: cfgString},
+	}},
+	// The browser client's display preferences (#5500). The leaf form —
+	// `af config set web.terminal_font_size_phone 8` — is what the web terminal's
+	// +/- controls write through SetConfigValue, and the compact-JSON whole-table
+	// form is what the config panes post back.
+	"web": {structured: true, subkeys: map[string]settableLeafSpec{
+		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
+		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
 	"keys": {structured: true},
 }

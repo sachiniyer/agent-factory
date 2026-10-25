@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/watchlifeline"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -17,11 +18,16 @@ var (
 	// stable releases also commit the new number here so dev builds report
 	// the latest stable base. Preview releases (vX.Y.Z-preview-N, #1041)
 	// never rewrite this value.
-	version     = "1.0.316"
+	version     = "1.0.326"
 	rootCommand = commands.NewRootCommand
 )
 
 func main() {
+	// The watch lifeline (#5329) runs first: the daemon execs this binary as
+	// `af __watch-lifeline …` for every watch command, so it must reach the
+	// shell with the daemon's environment untouched and without any of the
+	// setup below.
+	watchlifeline.HandleExec()
 	// Installed BEFORE HandleInternalExec, which is the only consumer: the pane
 	// shim resolves an account name against this machine's AF home, and
 	// internal/agentaccount cannot be reached from internal/sessionenv because the

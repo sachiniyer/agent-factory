@@ -157,7 +157,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// ownership refusal created nothing and must not be widened into Kill's
 				// explicit-session deletion authority.
 				if cleanupErr := i.CleanupFailedCreate(setupErr); cleanupErr != nil {
-					setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+					setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 				}
 			} else {
 				// Restore: the server-side tmux session may already be live
@@ -189,7 +189,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				i.mu.Unlock()
 				if ts != nil && !preserveAgentHandle {
 					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-						setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+						setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 					}
 				}
 			}
@@ -348,7 +348,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// instead of releasing the title on top of it.
 			cleanupState, cleanupErr := gw.Cleanup()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
 			if cleanupState != git.CleanupSettled {
@@ -518,7 +518,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}

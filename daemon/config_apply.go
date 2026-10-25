@@ -134,6 +134,10 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	// debug_pprof: the pprof mount is decided when startHTTPServer builds the unix
 	// listener's handler, so a change is reported pending rather than applied.
 	"debug_pprof": func(a, b *config.Config) bool { return a.DebugPprof != b.DebugPprof },
+	// GetConfig re-reads config.toml on every RPC, so a [web] save is what the
+	// running daemon serves on the next read — applied live in the only sense the
+	// key has (#5500).
+	"web": func(a, b *config.Config) bool { return a.Web != b.Web },
 }
 
 // ApplyConfig re-reads the global config from disk and applies it to the running

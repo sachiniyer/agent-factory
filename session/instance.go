@@ -71,6 +71,10 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// lostRestoreWait is the durable non-terminal counterpart: the loop's last
+	// failure was environmental, so an automatic retry is still armed behind a
+	// capped backoff instead of the terminal budget being spent (#5295).
+	lostRestoreWait LostRestoreWait
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT
@@ -156,6 +160,14 @@ type Instance struct {
 	owedOnCompleteNotify func(*Instance) error
 	owedDrainActive      bool
 	discharge            *adoptionDischarge
+	// relocationSettleNotify is the daemon-installed persist callback the
+	// respawn fires after SettleWorktreeRelocationClaim resolves a single-
+	// candidate recovery record but BEFORE the spawn proceeds — the settle is
+	// in-memory only, and a daemon exit between it and the later boundary
+	// write would reload the stale record and strand the session inert
+	// (#5295 review). In-memory only; each daemon generation re-installs it
+	// at its recover/respawn entry points.
+	relocationSettleNotify func(*Instance) error
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read
@@ -360,6 +372,15 @@ type Instance struct {
 	// uncertainty into permission to delete its workspace (#2207, #3340).
 	// Persisted so a daemon restart cannot re-arm the destructive path.
 	startupStateUnknown bool
+
+	// archivedAt records when this session's archive committed — the moment the
+	// worktree move and teardown were declared done, local or remote (#5136).
+	// It is the timestamp `af sessions prune --older-than` measures age from:
+	// UpdatedAt cannot serve because it also advances on unrelated mutations
+	// after the archive. Persisted; records archived before the field existed
+	// carry no value and the prune cutoff falls back to UpdatedAt, which for an
+	// untouched archived row still approximates its archive time. Guarded by mu.
+	archivedAt time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend

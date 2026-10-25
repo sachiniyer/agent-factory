@@ -323,6 +323,12 @@ type Config struct {
 	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
 	// Appearance is global-only; a cloned repository cannot choose TUI colours.
 	Appearance string `json:"-" toml:"appearance"`
+	// Web holds the browser client's display preferences (#5500): today the
+	// xterm font size per device class, so the web terminal's +/- controls can
+	// persist a different size for the phone breakpoint and for desktop. Global-
+	// only for the same reason as Appearance — a cloned repository must not
+	// choose the operator's display settings.
+	Web WebConfig `json:"web,omitempty" toml:"web,omitempty"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
 	// titled "root" in-place at the repo root (the `af sessions create
@@ -723,5 +729,9 @@ func staticDefaultConfig() *Config {
 			return fmt.Sprintf("%s/", strings.ToLower(user.Username))
 		}(),
 		DetachKeys: defaultDetachKeys,
+		Web: WebConfig{
+			TerminalFontSizePhone:   defaultWebTerminalFontSizePhone,
+			TerminalFontSizeDesktop: defaultWebTerminalFontSizeDesktop,
+		},
 	}
 }
