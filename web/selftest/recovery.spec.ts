@@ -142,6 +142,11 @@ for (const theme of ["light", "dark"] as const) {
           await page.locator(".af-modal-card button[type=submit]").click();
           await expect(page.locator(".af-modal-error")).toBeVisible();
           await expect(page.getByRole("textbox", { name: "Session title", exact: true })).toHaveValue("Retained draft");
+          // The reopened-after-refusal dialog must host focus inside itself: per
+          // components.ts, every modal that opens with a text field focuses that
+          // field, so the Tab trap engages and the keyboard never lands on the
+          // controls behind the overlay (the appbar and rail "New" button).
+          await expect(page.getByRole("textbox", { name: "Session title", exact: true })).toBeFocused();
         } else if (operation === "task save") {
           await page.route("**/v1/AddTask", route => route.fulfill(refusal));
           await page.getByRole("tab", { name: "Tasks", exact: true }).click();

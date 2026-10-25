@@ -117,10 +117,10 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 
 // redactRawAccessTokenValue scans raw — a raw, pre-decode URI component or
 // query pair that net/url re-emits verbatim (RawQuery/RawPath/RawFragment,
-// Opaque) — for case-insensitive literal access_token= substrings and redacts
-// the value span following each one. The value ends at the first byte in
-// terminators, or at the end of raw when terminators is empty or none of its
-// bytes occurs after the '='.
+// Opaque) — for a case-insensitive access_token= key and redacts the value
+// span following each one. The value ends at the first byte in terminators,
+// or at the end of raw when terminators is empty or none of its bytes occurs
+// after the '='.
 //
 // This is the raw-bytes mirror of accessTokenURIValueSpans. The decode-based
 // matcher in redactPercentEncodedAccessTokenText needs a literal access_token=
@@ -135,31 +135,19 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 // code-path gate) keeps this from reprocessing a span the structured pass
 // already redacted.
 //
+// Each needle character may also be spelled as a percent escape, nested or
+// not (%5F, %255F, %25%35%46 for '_'; %3D for '='), because the overlap and an
+// in-needle escape combine: in %access%5Ftoken=SECRET the %ac hides the key
+// from the decoded view and the %5F hides it from a literal raw match (#4690).
+// scanRawAccessTokenValues says how that stays linear.
+//
 // terminators is the component's structural separator set (/ ; ? # for path,
 // fragment, and opaque; empty for a query pair, whose separator was already
 // split out), so a value never claims a neighbouring field. The function is
 // iterative so the same component can carry more than one access_token field.
 func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
-	needle := AccessTokenQueryParam + "="
-	found := false
-	for cursor := 0; cursor < len(raw); {
-		i := indexFoldASCII(raw[cursor:], needle)
-		if i < 0 {
-			return raw, found
-		}
-		i += cursor
-		valueStart := i + len(needle)
-		valueEnd := len(raw)
-		if terminators != "" {
-			if pos := strings.IndexAny(raw[valueStart:], terminators); pos >= 0 {
-				valueEnd = valueStart + pos
-			}
-		}
-		raw = raw[:valueStart] + accessTokenRedaction + raw[valueEnd:]
-		found = true
-		cursor = valueStart + len(accessTokenRedaction)
-	}
-	return raw, found
+	redacted, found, _ := scanRawAccessTokenValues(raw, terminators)
+	return redacted, found
 }
 
 // accessTokenURIValueSpans consumes the rest of the parser-proven URI field.

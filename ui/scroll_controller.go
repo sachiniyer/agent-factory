@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/charmbracelet/bubbles/viewport"
+import (
+	"math"
+
+	"github.com/charmbracelet/bubbles/viewport"
+)
 
 // ScrollOwner identifies the subsystem that can truthfully satisfy a scroll
 // request for a pane. HostHistory is the captured-preview implementation; the
@@ -14,16 +18,23 @@ const (
 	ScrollOwnerChildApplication
 )
 
-// ScrollIntent is a semantic vertical displacement. Negative lines move toward
-// older content; positive lines move toward newer content. Mouse and keyboard
-// input are normalized to this type before the controller sees them.
+// ScrollIntent is a semantic vertical displacement. Negative values move
+// toward older content; positive values move toward newer content. Lines is an
+// absolute row count. Pages is a viewport-height-relative displacement —
+// ctrl+u/ctrl+d are the conventional half-page keys (#4173) — resolved against
+// the viewport where the intent applies, so a gesture queued across the
+// asynchronous fill or a resize keeps its intended magnitude. Mouse and
+// keyboard input are normalized to this type before the controller sees them.
 type ScrollIntent struct {
 	Lines int
+	Pages float64
 }
 
 var (
-	scrollOneLineUp   = ScrollIntent{Lines: -1}
-	scrollOneLineDown = ScrollIntent{Lines: 1}
+	scrollOneLineUp    = ScrollIntent{Lines: -1}
+	scrollOneLineDown  = ScrollIntent{Lines: 1}
+	scrollHalfPageUp   = ScrollIntent{Pages: -0.5}
+	scrollHalfPageDown = ScrollIntent{Pages: 0.5}
 )
 
 // ScrollController is the pane-level ownership and transition contract. It is
@@ -189,7 +200,7 @@ func (c *captureHistoryScrollController) FillIsCurrent(token scrollFillToken) bo
 // request is recorded before the viewport is emptied: entering the mode is not
 // a substitute for performing the requested scroll.
 func (c *captureHistoryScrollController) Scroll(v *viewport.Model, intent ScrollIntent) {
-	if intent.Lines == 0 {
+	if intent.Lines == 0 && intent.Pages == 0 {
 		return
 	}
 	switch c.phase {
@@ -273,12 +284,29 @@ func (c *captureHistoryScrollController) Reset(v *viewport.Model) {
 }
 
 func applyScrollIntent(v *viewport.Model, intent ScrollIntent) {
-	switch {
-	case intent.Lines < 0:
-		v.LineUp(-intent.Lines)
-	case intent.Lines > 0:
-		v.LineDown(intent.Lines)
+	switch lines := resolveScrollLines(v, intent); {
+	case lines < 0:
+		v.LineUp(-lines)
+	case lines > 0:
+		v.LineDown(lines)
 	}
+}
+
+// resolveScrollLines converts an intent to a signed row count against the
+// viewport's current geometry. A Pages displacement rounds to the nearest row
+// and floors at one — half of a one-row viewport still moves.
+func resolveScrollLines(v *viewport.Model, intent ScrollIntent) int {
+	if intent.Pages == 0 {
+		return intent.Lines
+	}
+	lines := int(math.Round(math.Abs(intent.Pages) * float64(v.Height)))
+	if lines < 1 {
+		lines = 1
+	}
+	if intent.Pages < 0 {
+		return -lines
+	}
+	return lines
 }
 
 func viewportBottomOffset(v *viewport.Model) int {

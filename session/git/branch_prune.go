@@ -69,7 +69,14 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		}
 		return false, fmt.Errorf("stat %s: %w", gitPath, err)
 	}
+	// Repository-selector variables (GIT_DIR, GIT_WORK_TREE, …) inherited from
+	// a daemon launched inside a hook would redirect the probe at a foreign
+	// repository — the same reason the bounded runner sanitizes its env
+	// (worktree_remove_bounded.go). A foreign repo coincidentally holding the
+	// branch would fabricate a recovery handle that does not exist here.
+	repoEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	check := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	check.Env = repoEnv
 	var stderr bytes.Buffer
 	check.Stderr = &stderr
 	err := check.Run()
@@ -86,6 +93,7 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 		// "confirm" any silent exit 1 as absence. Let git resolve the indirection;
 		// a failed resolution is itself a failed probe, never absence.
 		common := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-common-dir")
+		common.Env = repoEnv
 		var commonOut, commonErr bytes.Buffer
 		common.Stdout = &commonOut
 		common.Stderr = &commonErr

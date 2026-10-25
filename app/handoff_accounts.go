@@ -172,6 +172,7 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	}
 	m.handoffWarnings = warnings
 	m.handoffChoices, m.handoffAccounts = agents, accounts
+	m.handoffResolvedAgents = msg.response.ResolvedAgents
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", labels)
 	m.selectionOverlay.SetWidth(64)
 	m.selectionOverlay.SetSelectedIndex(preselected)

@@ -71,6 +71,10 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// lostRestoreWait is the durable non-terminal counterpart: the loop's last
+	// failure was environmental, so an automatic retry is still armed behind a
+	// capped backoff instead of the terminal budget being spent (#5295).
+	lostRestoreWait LostRestoreWait
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT
@@ -103,14 +107,27 @@ type Instance struct {
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
 	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while a
-	// handoff mission was still owed, so the run was kept open rather than ended
-	// (#4429). The edge is spent once it is held — the pane stays Ready, and every
-	// later idle poll is Ready → Ready — so without this the run would never end
-	// after the operator resolves the mission without making the agent work again
-	// (Mark delivered). With it, the first idle observation after the obligation
-	// clears ends the run, as the held edge would have. Meaningful only while
-	// taskRunActive; persisted with it, because the edge is not re-derivable.
+	// handoff mission was still owed (#4429), so the run was kept open rather
+	// than ended. The edge is spent once it is held — the pane stays Ready, and
+	// every later idle poll is Ready → Ready — so without this the run would
+	// never end after the blocker cleared without a fresh edge (Mark delivered,
+	// or churn folded in while the row stays Ready). With it, the first idle
+	// observation after the blocker clears ends the run, as the held edge would
+	// have. Meaningful only while taskRunActive; persisted with it, because the
+	// edge is not re-derivable.
+	//
+	// This field keeps its ORIGINAL meaning deliberately: a daemon rolled back
+	// to a release that knows only the mission hold reads this bit exactly as
+	// it wrote it. The turn-gate hold (#5219) persists separately in
+	// taskRunTurnGateHeld so the older binary cannot mistake it for a resolved
+	// mission hold and end a run whose agent never took the turn (#5221 review).
 	taskRunIdleEdgeHeld bool
+	// taskRunTurnGateHeld is the #5219 twin of taskRunIdleEdgeHeld: an idle edge
+	// arrived while the run's prompt had been attempted without turn evidence,
+	// so the run stayed open. Kept as a separate persisted field so a rollback
+	// to the previous release — which knows only the mission hold — drops the
+	// marker instead of releasing it as a retired mission edge.
+	taskRunTurnGateHeld bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -118,16 +135,39 @@ type Instance struct {
 	// owedOnComplete is the in-memory form of InstanceData.PendingOnComplete
 	// (#4162): set when the daemon files the obligation, cleared when a decision
 	// discharges it. owedOnCompleteNotify is the daemon-installed persist
-	// callback a delivery fires after clearing it — adoption evidence must
-	// become durable immediately or a restart resurrects a teardown the user
-	// already vetoed. owedDrainActive claims the obligation's lifecycle worker,
-	// so a refresh that re-arms the marker mid-wait cannot launch a second
-	// teardown beside the one already parked on the hook channel. All guarded
-	// by mu; the claim is in-memory only, which is correct — a new daemon
-	// generation has no workers in flight.
+	// callback a delivery fires after clearing it, and it returns any persist
+	// error so NoteAdoptionDelivery can propagate it and refuse the PTY write
+	// rather than proceed on top of a discharge that did not land — adoption
+	// evidence must become durable immediately or a restart resurrects a teardown
+	// the user already vetoed. owedDrainActive claims the obligation's lifecycle
+	// worker, so a refresh that re-arms the marker mid-wait cannot launch a
+	// second teardown beside the one already parked on the hook channel. All
+	// guarded by mu; the claim is in-memory only, which is correct — a new
+	// daemon generation has no workers in flight.
+	//
+	// discharge is the in-flight durable discharge of owedOnComplete the first
+	// concurrent NoteAdoptionDelivery caller installs under mu before it
+	// releases mu for the notify to run. A second caller arriving while the
+	// notify is in flight finds owedOnComplete already nil (the first cleared
+	// it) and discharge set; it waits on the discharge's future so its PTY
+	// write is gated on the same durable clear, instead of bypassing the
+	// in-flight clear to a PTY write the durable marker would survive. The
+	// discharging caller clears this field under mu right before it returns,
+	// closing the future once the notify's persist result is known. See
+	// adoption_fence.go for the full contract; in-memory only because every
+	// delivery installs a fresh one.
 	owedOnComplete       *PendingOnCompleteData
-	owedOnCompleteNotify func(*Instance)
+	owedOnCompleteNotify func(*Instance) error
 	owedDrainActive      bool
+	discharge            *adoptionDischarge
+	// relocationSettleNotify is the daemon-installed persist callback the
+	// respawn fires after SettleWorktreeRelocationClaim resolves a single-
+	// candidate recovery record but BEFORE the spawn proceeds — the settle is
+	// in-memory only, and a daemon exit between it and the later boundary
+	// write would reload the stale record and strand the session inert
+	// (#5295 review). In-memory only; each daemon generation re-installs it
+	// at its recover/respawn entry points.
+	relocationSettleNotify func(*Instance) error
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read
@@ -155,7 +195,41 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	loadRuntimeReplaced      bool
+	// taskRunPromptAttemptAt is the task run's OWN prompt boundary (#5219),
+	// scoped apart from lastPromptAttemptAt: a manual send while the run is
+	// active must not re-arm a delivery window the agent already satisfied.
+	// The boundary updates on the first send after the run begins and on any
+	// later send only while the window stays unsatisfied — a redelivery is
+	// how a pending window starts fresh. Once the turn is taken the boundary
+	// freezes; the run's remaining life cannot be reshaped by prompts the
+	// session receives afterwards.
+	taskRunPromptAttemptAt time.Time
+	// taskRunTurnObservedAt records when the agent's own in-turn chrome was
+	// observed for the run in flight — the positive "the prompt's turn began"
+	// boundary that boot output and the send's own echo cannot produce (#5219).
+	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
+	// starts a new window the stale record cannot release.
+	taskRunTurnObservedAt time.Time
+	// paneObservationStreakAt is the START of the current uninterrupted
+	// observation streak: the first successful capture, or the first capture
+	// after a hole (failed snapshots, a stalled serial walk) in which churn
+	// could hide. Both release arms measure their silence from it — the
+	// quiet arm from the later of the durable churn stamp and the streak,
+	// the silent arm from the later of the attempt and the streak — because
+	// an unobserved interval is never silence (#5221 review). Zero until
+	// this process has actually seen the pane.
+	paneObservationStreakAt time.Time
+	// paneObservationExpiresAt is when the streak goes stale: the last
+	// successful capture plus the gap slack its caller declared. A release
+	// arm evaluated past it has no current observation to release on — a
+	// run of failed captures cannot inherit a satisfied window the way a
+	// never-rebased streak would (#5221 review).
+	paneObservationExpiresAt time.Time
+	// lastPaneCaptureAt is the completion stamp of the latest successful
+	// capture, used to detect the observation holes that rebase
+	// paneObservationStreakAt.
+	lastPaneCaptureAt   time.Time
+	loadRuntimeReplaced bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;
@@ -181,6 +255,14 @@ type Instance struct {
 	// system-prompt arguments. Unlike Program (the requested agent label), this is
 	// durable evidence about the process being adopted after a daemon restart.
 	runtimeProgram string
+	// runtimePID and runtimeStartID pin runtimeProgram to the concrete pane-root
+	// process af launched: a surviving tmux NAME cannot prove it still names that
+	// process, but the name's pane root carrying the recorded (pid, kernel
+	// start-time) pair can — that is what lets a daemon restart's reattach keep
+	// the launch claim instead of retiring it (#5066). Zero on records written
+	// before this evidence existed and everywhere runtimeProgram is cleared.
+	runtimePID     int
+	runtimeStartID uint64
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.
@@ -290,6 +372,15 @@ type Instance struct {
 	// uncertainty into permission to delete its workspace (#2207, #3340).
 	// Persisted so a daemon restart cannot re-arm the destructive path.
 	startupStateUnknown bool
+
+	// archivedAt records when this session's archive committed — the moment the
+	// worktree move and teardown were declared done, local or remote (#5136).
+	// It is the timestamp `af sessions prune --older-than` measures age from:
+	// UpdatedAt cannot serve because it also advances on unrelated mutations
+	// after the archive. Persisted; records archived before the field existed
+	// carry no value and the prune cutoff falls back to UpdatedAt, which for an
+	// untouched archived row still approximates its archive time. Guarded by mu.
+	archivedAt time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend

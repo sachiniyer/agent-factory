@@ -178,7 +178,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
 		Backend: &sandboxBackend{
-			provisioner: p,
+			// The command the sandbox's agent-server was bound to launch
+			// (#5108) — recorded as runtime evidence when the launch RPC
+			// returns.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			provisioner:        p,
 			cleanup: &SandboxRuntimeCleanupData{
 				SSHCommand: p.sshCmd,
 				SessionDir: p.sessionDir,
@@ -312,7 +316,7 @@ func (p *sandboxProvisioner) verifyCopiedBinary() error {
 		return fmt.Errorf("backend=%s: cannot stat the local af binary %q: %w", p.label(), p.afBin, err)
 	}
 	remotePath := p.sessionDir + "/" + sshAfBinaryName
-	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuoteSandbox(remotePath), nil, false)
+	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuote(remotePath), nil, false)
 	if err != nil {
 		return fmt.Errorf("backend=%s: cannot verify the streamed af binary on the sandbox: %w", p.label(), err)
 	}
@@ -377,6 +381,9 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 func sandboxTransportConfigKey(label string) string {
 	if label == string(BackendSSH) {
 		return "ssh.host"
+	}
+	if label == string(BackendHook) {
+		return "remote_hooks.provision_cmd"
 	}
 	return "sandbox.ssh"
 }
@@ -552,10 +559,10 @@ func sandboxReapChallenge(nonce string) (send, expect string) {
 // facts and lets reap's `default:` branch latch.
 func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	send, expect := sandboxReapChallenge(nonce)
-	rm := "rm -rf " + shellQuoteSandbox(p.sessionDir)
+	rm := "rm -rf " + shellQuote(p.sessionDir)
 	// The remote shell must TRANSFORM the challenge, so the answer never appears
 	// in the text a logging wrapper would echo.
-	respond := "printf '%s' " + shellQuoteSandbox(send) + " | tr 'a-z' 'A-Z'"
+	respond := "printf '%s' " + shellQuote(send) + " | tr 'a-z' 'A-Z'"
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
 	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
@@ -609,11 +616,6 @@ func (p *sandboxProvisioner) stopTunnel() {
 		_ = p.tunnelLn.Close()
 		p.tunnelLn = nil
 	}
-}
-
-// shellQuoteSandbox single-quotes a path for the remote shell.
-func shellQuoteSandbox(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 type sandboxBackend struct {

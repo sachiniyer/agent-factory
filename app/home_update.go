@@ -111,13 +111,22 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		// A save since the last poll dropped a draft whose task was deleted;
-		// say so once (#4798).
-		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
-			cmds = append(cmds, m.showTransientMessage(notice))
-		}
-		// A reload showed a kept, unconfirmed edit did land (#4824).
-		if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
-			cmds = append(cmds, m.showTransientMessage(notice))
+		// say so once (#4798). Do not consume the notice while the recovery
+		// screen shadows the notice bar: the save that drops a draft can
+		// itself raise that screen (a sibling edit's generic failure), and
+		// Take clears the only durable copy, so an unguarded poll would
+		// swallow the very notice it is the fallback for. Hold it for a
+		// frame whose bar is actually painted.
+		if m.recovery == nil {
+			if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
+				cmds = append(cmds, m.showTransientMessage(notice))
+			}
+			// A reload showed a kept, unconfirmed edit did land (#4824); held
+			// by the same recovery-shadows-the-bar guard, since its Take
+			// clears the durable settledDrafts copy just as lossily.
+			if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
+				cmds = append(cmds, m.showTransientMessage(notice))
+			}
 		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
@@ -209,6 +218,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case killLossCheckedMsg:
+		// The kill confirmation's git checks finished off the event loop (#4848);
+		// complete the dialog they were started for, if it is still open.
+		return m.handleKillLossChecked(msg)
 	case daemonRestartRequestedMsg:
 		// The restart confirm was accepted; run it off the event loop (it stops a
 		// daemon and respawns one), mirroring the kill/archive async dispatch.

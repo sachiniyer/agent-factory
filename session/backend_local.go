@@ -157,7 +157,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// ownership refusal created nothing and must not be widened into Kill's
 				// explicit-session deletion authority.
 				if cleanupErr := i.CleanupFailedCreate(setupErr); cleanupErr != nil {
-					setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+					setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 				}
 			} else {
 				// Restore: the server-side tmux session may already be live
@@ -189,7 +189,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				i.mu.Unlock()
 				if ts != nil && !preserveAgentHandle {
 					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-						setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+						setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 					}
 				}
 			}
@@ -254,13 +254,17 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
-			preserveAgentHandle = retainsInertInstance(err)
+			// A spawn-dir refusal likewise keeps the handle: nothing was ever
+			// spawned under it, and FromInstanceData loads the row Lost so the
+			// lost-restore loop can Recover it — which needs this exact
+			// persisted binding to respawn the same name (#5172).
+			preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
 			if strings.TrimSpace(runtimeProgram) != "" {
-				i.setRuntimeProgram(runtimeProgram)
+				i.setRuntimeLaunch(runtimeProgram, tmuxSession)
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
@@ -273,9 +277,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
-			// the session under the same sanitized name. Keep the live pane, but retire
-			// its persisted launch-command claim and checkpoint that loss of evidence.
-			if i.clearRuntimeProgramForUnverifiedReattach() {
+			// the session under the same sanitized name. The pane root's (pid,
+			// start-time) identity is the proof — a match keeps the recorded launch
+			// command across the restart, and only a mismatch or an unanswerable
+			// probe retires the claim.
+			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
 				i.markLoadRuntimeReplaced()
 			}
 		}
@@ -342,7 +348,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// instead of releasing the title on top of it.
 			cleanupState, cleanupErr := gw.Cleanup()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
 			if cleanupState != git.CleanupSettled {
@@ -350,7 +356,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			return setupErr
 		}
-		i.setRuntimeProgram(runtimeProgram)
+		i.setRuntimeLaunch(runtimeProgram, tmuxSession)
 	}
 
 	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
@@ -366,7 +372,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	if err := b.setupTabs(i); err != nil {
 		// A retained failure leaves the agent RUNNING, so keep the handle that
 		// names it: nilling the ref here would orphan the pane. See the predicate.
-		preserveAgentHandle = retainsInertInstance(err)
+		// A sibling spawn-dir refusal keeps it too — the binding (live or
+		// never-spawned) is what Recover reattaches or re-spawns (#5172).
+		preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
@@ -510,11 +518,11 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
-	i.setRuntimeProgram(plan.baseProgram)
+	i.setRuntimeLaunch(plan.baseProgram, ts)
 
 	resetAgentBrokerCaptures(i)
 	return nil
@@ -813,7 +821,7 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, co
 	if !s || ts == nil {
 		return false, false, ""
 	}
-	return ts.HasUpdated()
+	return ts.HasUpdatedExpectingTeardown(i.teardownExpected)
 }
 
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
