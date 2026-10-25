@@ -237,9 +237,23 @@ func parseCommandProbeOutput(output string) string {
 		// Capture everything after the alias marker so paths containing
 		// spaces (e.g. "/Applications/Claude Code.app/.../claude") are
 		// preserved. bash's `type` wraps the alias value in `...' (or, in
-		// some locales, Unicode ‘...’) quotes — strip those.
+		// some locales, ‘...’) quotes — strip exactly ONE such wrapper
+		// pair. A cutset trim (strings.Trim with "`'‘’\"") was used here,
+		// but it strips ANY leading/trailing character in the set
+		// repeatedly on both sides, so when the alias VALUE itself begins
+		// or ends with a quote — e.g. `alias claude="claude --prompt
+		// 'hi'"`, which bash re-quotes and emits as
+		// `claude is aliased to `claude --prompt "'hi'"' — the cutset eats
+		// the value's own boundary quotes as if they were the shell's
+		// wrapper, leaving an unbalanced quote (here `claude --prompt
+		// "'hi`) in the persisted ProgramOverrides entry. That override is
+		// then executed verbatim via /bin/sh -c in every claude session
+		// pane and dies with `Syntax error: Unterminated quoted string`,
+		// making sessions unlaunchable with no fallback to the bare
+		// program name. Removing only the shell's wrapper pair preserves
+		// quote characters that belong to the value itself.
 		if matches := aliasOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
-			return strings.TrimSpace(strings.Trim(strings.TrimSpace(matches[1]), "`'‘’\""))
+			return strings.TrimSpace(stripAliasValueWrapper(matches[1]))
 		}
 		if matches := bashTypeOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
 			return matches[1]
@@ -249,4 +263,43 @@ func parseCommandProbeOutput(output string) string {
 		}
 	}
 	return ""
+}
+
+// stripAliasValueWrapper removes a single shell-probe wrapper pair that the
+// `type`/`which` builtin puts around an alias value, without touching quote
+// characters that belong to the value itself.
+//
+// bash's `type` emits the alias value wrapped as `...' — a leading backtick
+// and a trailing apostrophe — re-quoting embedded single quotes as `"'...'"
+// (e.g. `alias claude="claude --prompt 'hi'"` is reported as
+// `claude is aliased to `claude --prompt "'hi'"'`). Some locales render the
+// wrapper as curly ‘...’ quotes. zsh's `which` adds no wrapper of its own.
+//
+// A two-sided cutset trim (`strings.Trim` with "`'‘’\"") was used here
+// historically, but it eats ANY leading/trailing character in the set
+// repeatedly on both sides, so when the alias value itself begins or ends
+// with a quote it also strips the value's own boundary quotes, leaving an
+// unbalanced quote. Stripping exactly one recognized wrapper pair preserves
+// them.
+func stripAliasValueWrapper(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 {
+		return v
+	}
+	// bash `type`: leading backtick + trailing apostrophe (ASCII), or
+	// trailing right single quote in some locales.
+	if v[0] == '`' {
+		switch {
+		case strings.HasSuffix(v, "'"):
+			return v[1 : len(v)-1]
+		case strings.HasSuffix(v, "’"):
+			return v[1 : len(v)-len("’")]
+		}
+		return v
+	}
+	// Curly wrapper: leading ‘ + trailing ’ (some locales).
+	if strings.HasPrefix(v, "‘") && strings.HasSuffix(v, "’") {
+		return v[len("‘") : len(v)-len("’")]
+	}
+	return v
 }

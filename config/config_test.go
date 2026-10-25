@@ -270,6 +270,22 @@ func TestGetClaudeCommand(t *testing.T) {
 			{"bash type function", "claude is a function\nclaude () \n{ \n    echo hi\n}", ""},
 			{"bash type builtin", "claude is a shell builtin", ""},
 			{"empty output", "\n\n", ""},
+			// Quote characters that belong to the alias VALUE itself must not
+			// be stripped as if they were the shell's `...' wrapper. bash's
+			// `type` re-quotes embedded single quotes and wraps the value in
+			// `...', so a value whose own boundary is a quote (e.g. `alias
+			// claude="claude --prompt 'hi'"`) must parse with balanced
+			// quotes — the cutset trim formerly used here ate the value's
+			// own boundary quotes and left an unbalanced quote in the
+			// persisted ProgramOverrides entry.
+			{"bash alias value ending in double-quoted arg", "claude is aliased to `claude --model \"opusplan\"'", "claude --model \"opusplan\""},
+			{"bash alias value with re-quoted apostrophes", "claude is aliased to `claude --prompt \"'hi'\"'", "claude --prompt \"'hi'\""},
+			{"bash alias value with adjacent apostrophes", "claude is aliased to `claude --prompt 'hi''", "claude --prompt 'hi'"},
+			{"bash alias value starting with double-quoted path", "claude is aliased to `\"/opt/my claude/claude\" --flag'", "\"/opt/my claude/claude\" --flag"},
+			{"bash alias value starting with single-quoted path", "claude is aliased to `'/opt/my claude/claude' --flag'", "'/opt/my claude/claude' --flag"},
+			// The curly-quote wrapper some locales render must also strip
+			// exactly one pair, preserving a value boundary quote.
+			{"bash alias unicode wrapper with value quote", "claude is aliased to ‘claude --model \"opus\"’", "claude --model \"opus\""},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
