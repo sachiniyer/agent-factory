@@ -231,6 +231,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// from a pre-#3650 record, which is what makes absence mean today's
 			// behaviour for both.
 			HookScopeUnitPrefix: i.gitWorktree.HookScopeUnitPrefix(),
+			// Durable record state, not a projection: the poll that maintains it
+			// runs only in the daemon, so a restart must come back still knowing
+			// the worktree was deleted outside af until a probe proves otherwise
+			// (#5102).
+			Missing:       i.worktreeMissing,
+			MissingReason: i.worktreeMissingReason,
 		}
 		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
@@ -263,6 +269,11 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recoveryClone := *recovery
 	data.Worktree.RelocationRecovery = &recoveryClone
 	recovery = &recoveryClone
+	// First, so the shape check below never mistakes a real stall projected
+	// through the worktree-missing fence for the bare fence itself.
+	if err := restoreMissingFencedState(recovery); err != nil {
+		return InstanceData{}, err
+	}
 	state, err := runtimeRelocationRecoveryState(recovery)
 	if err != nil {
 		return InstanceData{}, err
@@ -294,6 +305,17 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recovery.CleanupOriginalExternalWorktree = nil
 	recovery.CleanupOriginalBranchCreatedByUs = nil
 	recovery.CleanupOriginalStartupStateUnknown = nil
+	// The worktree-missing rollback projection is not a relocation record; with
+	// the ownership values restored above, it reads back as the flag it stands
+	// for (#5102). An older binary that rewrote the row dropped the flag and its
+	// reason but kept this record, which is why the shape, not Missing, decides.
+	if isWorktreeMissingRollbackFence(recovery) {
+		data.Worktree.RelocationRecovery = nil
+		data.Worktree.Missing = true
+		if data.Worktree.MissingReason == "" {
+			data.Worktree.MissingReason = WorktreeMissingDeletedReason(data.Worktree.WorktreePath)
+		}
+	}
 	return data, nil
 }
 
@@ -569,6 +591,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
+			instance.worktreeMissing = data.Worktree.Missing
+			instance.worktreeMissingReason = data.Worktree.MissingReason
 		}
 
 		// Rebuild the instance's tab list from disk so every tab (agent + shell)
