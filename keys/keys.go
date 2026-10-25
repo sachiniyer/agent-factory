@@ -503,6 +503,15 @@ func RebindableActions() []string {
 // stay visible so keys.ValidateOverrides can still reject it, instead of being
 // silently hidden behind the dead-key warning.
 func IsRebindableAction(name string) bool {
+	// The legal empty quoted action name ("" = "shift+a" under [keys]) is not a
+	// rebindable action — fixed specs carry configKey == "" — so without this
+	// guard the empty name would match the first fixed binding and read as
+	// "known", letting discardDeadShiftRuneOverrides delete its only binding and
+	// hide the malformed entry from keys.ValidateOverrides. RebindableActions
+	// skips empty configKeys for the same reason; mirror that filter here.
+	if name == "" {
+		return false
+	}
 	for _, sp := range specs {
 		if sp.configKey == name {
 			return true

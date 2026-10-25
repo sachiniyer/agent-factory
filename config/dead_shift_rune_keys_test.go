@@ -115,6 +115,23 @@ func TestDeadShiftRuneOverrideAllDeadKeepsUnknownActionVisible(t *testing.T) {
 		require.Contains(t, warnings.String(), "will never fire")
 		require.Equal(t, 1, strings.Count(warnings.String(), "will never fire"), "warn once per dead key per source")
 	})
+
+	// The legal empty quoted action name ("" = "shift+a" under [keys]) is NOT a
+	// rebindable action — fixed specs carry configKey == "" — so without the
+	// empty-name guard in keys.IsRebindableAction it would match the first fixed
+	// binding, read as "known", and discardDeadShiftRuneOverrides would delete
+	// its only binding, hiding the malformed entry from keys.ValidateOverrides
+	// (the empty name is unknown). The dead binding must not rescue a typo'd
+	// (here, empty) action name; the unknown-action error must still surface.
+	t.Run("empty quoted action name whose only binding is dead is rejected, not hidden", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		source := t.TempDir() + "/config.toml"
+		_, err := parseConfigTOML([]byte("[keys]\n\"\" = \"shift+a\"\n"), source)
+		require.Error(t, err, "an empty action name with a dead shift+<rune> binding must not load")
+		require.Contains(t, err.Error(), "unknown action", "the unknown-action error must surface, not be hidden behind the dead-key warning")
+		require.Contains(t, warnings.String(), "shift+a", "the dead-key warning still fires for the spec")
+		require.Contains(t, warnings.String(), "will never fire")
+	})
 }
 
 // TestDeadShiftRuneOverrideEditableValueReflectsCleaned pins the Codex finding on

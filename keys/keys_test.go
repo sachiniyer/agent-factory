@@ -479,6 +479,15 @@ func TestRebindableActionsSortedAndComplete(t *testing.T) {
 			t.Fatalf("action %q must not be rebindable", a)
 		}
 	}
+	// The empty quoted action name is legal TOML but is not a rebindable
+	// action — fixed specs carry configKey == "" — so IsRebindableAction must
+	// read it as unknown. Otherwise discardDeadShiftRuneOverrides treats the
+	// empty name as a known action, deletes its only (dead) binding, and the
+	// malformed entry loads instead of surfacing keys.ValidateOverrides'
+	// unknown-action error.
+	if IsRebindableAction("") {
+		t.Fatal(`IsRebindableAction("") must be false; the empty action name is not rebindable (fixed specs carry configKey == "")`)
+	}
 }
 
 // Audit every named key against real Bubble Tea v1 Key.String values. Alt is
