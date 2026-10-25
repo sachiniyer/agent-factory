@@ -4391,6 +4391,154 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   }
 });
 
+test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The checkbox sibling of the same-key Enter-save test above. A bool row commits
+  // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole
+  // pane, so the focused checkbox is destroyed and replaced. The restoration
+  // ladder only knew about `editingInput` (text rows), `advancedToggle`, and the
+  // account fields, so a checkbox save dropped focus to <body>: the app's
+  // document-level keydown gate then ran, and in config view the user's next
+  // `[`/`]` cycled the top-level view (other keystrokes were silently swallowed) —
+  // the exact body-focus hazard rerenderKeepingUserState's own comments describe.
+  // The fix captures the focused checkbox's `aria-label` (the config key) before
+  // the rebuild and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // auto_update is a core-tier bool row, visible without expanding advanced.
+    // Clicking it focuses it and fires `change` → save.
+    const box = pane.locator('.af-config-row[data-key="auto_update"] input');
+    await box.click();
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt checkbox replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(box).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The select sibling of the checkbox test above. An enumerated row commits on
+  // `change` and the save round-trip rebuilds the pane, so the focused select is
+  // destroyed and replaced. The restoration ladder had a branch for the
+  // account-agent select but none for a per-key config select, so a select save
+  // dropped focus to <body> and the user's next `[`/`]` cycled the view. The fix
+  // captures the focused select's `aria-label` (the config key) before the rebuild
+  // and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // update_channel is a core-tier enum row (stable | preview). Pick the option
+    // the select does not already hold so `change` actually fires.
+    const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+    const current = await channel.evaluate((sel: HTMLSelectElement) => sel.value);
+    const target = current === "stable" ? "preview" : "stable";
+    // Focus the select first, mirroring the real gesture the bug report
+    // reproduced ("clicking a config-row <select>, changing the option"): a mouse
+    // click on the select focuses it and opens the dropdown, and Tabbing to it
+    // focuses it the same way. Playwright's `selectOption` from a NON-focused
+    // state dispatches the change event without transferring focus to the
+    // select, so the element never holds DOM focus and the bug's "rebuild
+    // destroys the focused select" scenario never materializes. Focus() first
+    // makes the select genuinely hold focus at change time, exactly as a user's
+    // own click-to-open or Tab would — so the assertion below proves the fix
+    // catches the same focus loss the bug report observed.
+    await channel.focus();
+    await channel.selectOption(target);
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran).
+    await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt select replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(channel).toBeFocused();
+
+    // Downstream contract: with focus on a native SELECT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
   // The third case in this family, and the only one that moves focus to the WRONG
   // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
