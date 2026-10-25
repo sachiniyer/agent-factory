@@ -241,11 +241,14 @@ func TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes(t *
 			composed := parsed + " " + DetectedClaudePermissionsFlag
 			assert.True(t, sessionenv.CommandIsSingleSimpleCall(composed),
 				"composed override %q must parse as a single simple shell call (no unbalanced quote)", composed)
-			// And it must be executable under the real /bin/sh the pane uses.
+			// And it must parse under the real /bin/sh the pane uses. Use
+			// syntax-only validation (-n) so a real `claude` on PATH is never
+			// launched (and cannot hang or run with --dangerously-skip-
+			// permissions); the property under test is shell PARSEability.
 			if _, err := os.Stat("/bin/sh"); err == nil {
-				out, err := exec.Command("/bin/sh", "-c", composed+" ; exit 0").CombinedOutput()
+				out, err := exec.Command("/bin/sh", "-n", "-c", composed).CombinedOutput()
 				assert.NoError(t, err,
-					"/bin/sh -c rejected the composed override (unbalanced quote?): %s", out)
+					"/bin/sh -n rejected the composed override (unbalanced quote?): %s", out)
 			}
 		})
 	}
@@ -279,9 +282,9 @@ func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
 			assert.True(t, sessionenv.CommandIsSingleSimpleCall(composed),
 				"composed override %q must parse as a single simple shell call", composed)
 			if _, err := os.Stat("/bin/sh"); err == nil {
-				out, err := exec.Command("/bin/sh", "-c", composed+" ; exit 0").CombinedOutput()
+				out, err := exec.Command("/bin/sh", "-n", "-c", composed).CombinedOutput()
 				assert.NoError(t, err,
-					"/bin/sh -c rejected the composed override (wrapper not stripped?): %s", out)
+					"/bin/sh -n rejected the composed override (wrapper not stripped?): %s", out)
 			}
 		})
 	}
@@ -368,15 +371,14 @@ func TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd(t *testing.T) {
 			assert.True(t, sessionenv.CommandIsSingleSimpleCall(override),
 				"override %q must parse as a single simple shell call", override)
 			if _, err := os.Stat("/bin/sh"); err == nil {
-				out, runErr := exec.Command("/bin/sh", "-c", "exit 0").CombinedOutput()
-				require.NoError(t, runErr, "sanity /bin/sh: %s", out)
-				// Run the override under /bin/sh -c with `; exit 0` appended
-				// so the claude binary's absence (it is not installed here)
-				// does not mask a shell PARSE error — the property under test
-				// is shell parseability, not claude's exit code.
-				out, runErr = exec.Command("/bin/sh", "-c", override+"; exit 0").CombinedOutput()
+				// Syntax-only validation (-n): the property under test is
+				// shell parseability, not claude's exit code. -n never
+				// executes the command, so a real `claude` on PATH cannot
+				// be launched (with --dangerously-skip-permissions) or hang
+				// the test suite.
+				out, runErr := exec.Command("/bin/sh", "-n", "-c", override).CombinedOutput()
 				assert.NoError(t, runErr,
-					"/bin/sh -c rejected the override (unbalanced quote — the cutset-trim bug): %s", out)
+					"/bin/sh -n rejected the override (unbalanced quote — the cutset-trim bug): %s", out)
 			}
 
 			// Account-scoped launch admission: wire the override through the
