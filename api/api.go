@@ -163,13 +163,15 @@ func repoPathsOf(matches []session.InstanceData) []string {
 // It backstops the daemon-snapshot read path: the snapshot only mirrors the
 // daemon's in-memory instances, and refresh skips rows it cannot restore, so a
 // lone snapshot match can hide a second repo that also holds the title.
-// Corrupted per-repo files are skipped — this is a best-effort widening of an
-// already-successful lookup, so it must never turn a working read into an error.
 //
-// The second return names repos whose file could not be READ, so the caller can
-// say the widening was incomplete instead of implying it was exhaustive (#3479).
-// Reported rather than refused, unlike the daemon's twin of this guard
-// (collectTitleRepoPathsOnDisk): that one gates the DESTRUCTIVE paths, which
+// A per-repo file that could not be READ, or whose JSON could not be PARSED, is
+// the same kind of gap either way (#3479): either could hold the title, so the
+// widening's exhaustiveness claim must not survive either. Both are reported
+// through the second return rather than silently dropped, so the caller can say
+// the widening was incomplete instead of implying it was exhaustive. Reported
+// rather than refused — this is a best-effort widening of an already-successful
+// lookup, so it must never turn a working read into an error. The daemon's twin
+// of this guard (collectTitleRepoPathsOnDisk) gates the DESTRUCTIVE paths, which
 // resolve through findSession, while this backstops a read where breaking a
 // working lookup costs more than the wrong project name it would prevent.
 func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, error) {
@@ -178,9 +180,20 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 		return nil, nil, err
 	}
 	paths := append([]string(nil), known...)
-	for _, raw := range allInstances {
+	var corrupted []config.RepoInstancesSkip
+	for repoID, raw := range allInstances {
 		var rows []session.InstanceData
 		if err := json.Unmarshal(raw, &rows); err != nil {
+			// A repo whose instances.json could not be PARSED is the same kind
+			// of gap as one whose file could not be READ (#3479): either could
+			// hold this title, so silently skipping it let the widening claim
+			// exhaustiveness it did not have. Report it through the skip
+			// channel rather than dropping it, mirroring findInstanceByTitle,
+			// so warnIncompleteTitleWidening can caveat the result. The
+			// widening stays best-effort: this adds a NOTICE, never an error.
+			log.WarningLog.Printf("skipping repo %s while widening title: corrupted instances.json: %v", repoID, err)
+			path, _ := config.RepoInstancesPath(repoID)
+			corrupted = append(corrupted, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
 		for i := range rows {
@@ -189,7 +202,15 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 			}
 		}
 	}
-	return session.DedupeSorted(paths), unreadable, nil
+	if len(corrupted) == 0 {
+		return session.DedupeSorted(paths), unreadable, nil
+	}
+	// Merge the two gap classes in repoID order so a message built from them
+	// stays stable across runs: `unreadable` already arrives sorted (os.ReadDir),
+	// but `corrupted` is collected in map-iteration order.
+	gaps := append(append([]config.RepoInstancesSkip{}, unreadable...), corrupted...)
+	sort.Slice(gaps, func(i, j int) bool { return gaps[i].RepoID < gaps[j].RepoID })
+	return session.DedupeSorted(paths), gaps, nil
 }
 
 // corruptedRepoRepairHint is the one-line remedy appended to every corruption
