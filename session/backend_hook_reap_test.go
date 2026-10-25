@@ -729,15 +729,31 @@ true
 	require.NoError(t, scanErr, "provision_cmd wrote an invalid child pid %q", pidData)
 	require.Positive(t, childPID, "the recorded child pid must be a live process id")
 
-	// Own the orphan's lifetime: if the test fails (bug present) the child is
-	// still alive when the assertions fatal, and a backgrounded `sleep` would
-	// outlive the test process. Kill the child's group so no writer survives
-	// into t.TempDir()'s removal (LIFO cleanup runs before that removal). On the
-	// fix the child is already dead and this is a no-op (ESRCH).
+	// Capture the child's process group NOW, at the earliest point after
+	// provisionHostOrReap returns, while the child is freshly dead (the fix
+	// path) or still alive (the bug path). Re-deriving it at cleanup time — after
+	// the 1.7s of assertion windows below — would hand cleanup a numeric PID the
+	// kernel may have recycled. The individual PID is never signalled in cleanup:
+	// a bare kill(childPID) on a recycled PID hits an unrelated single process,
+	// and the group kill subsumes it anyway (the child is in the script's
+	// process group, the same group quiesceLaunchGroup targets in production).
+	// This matches the established cleanup pattern in
+	// TestHookLaunchDoesNotKillBackgroundedChildren, which signals the captured
+	// group only.
+	childPgid, childPgidErr := syscall.Getpgid(childPID)
+	// childConfirmedDead is set after the assertions below prove the child is
+	// dead. On the fix path the child is dead, so cleanup has nothing to signal;
+	// on the bug path t.Fatalf fires before it is set, so cleanup still runs
+	// and tears the (still-live) group down. This avoids signalling a PID whose
+	// group the kernel has already recycled — the fix-path child is gone, and
+	// the bug-path child is alive so its group is still ours.
+	childConfirmedDead := false
 	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		if pgid, gerr := syscall.Getpgid(childPID); gerr == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		if childConfirmedDead {
+			return
+		}
+		if childPgidErr == nil {
+			_ = syscall.Kill(-childPgid, syscall.SIGKILL)
 		}
 	})
 
@@ -771,6 +787,10 @@ true
 	}, 500*time.Millisecond, 10*time.Millisecond,
 		"the provision_cmd child acknowledged a post-reap probe, so it was alive when "+
 			"provisionHostOrReap returned — quiesce was a no-op and the reap ran while the orphan was still provisioning")
+	// Both assertions passed: the child is dead by outcome (no marker) and by
+	// mechanism (no USR1 ack). Cleanup has nothing to signal — skip it rather than
+	// risk kill(-childPgid, SIGKILL) on a PID the kernel may have recycled by now.
+	childConfirmedDead = true
 }
 
 // TestHookQuiesceNeverSignalsAStalePgid pins the other half of the process-group
