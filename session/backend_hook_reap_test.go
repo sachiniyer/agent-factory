@@ -615,9 +615,11 @@ echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 // already quiesced before the fix and must keep quiescing after it — isolating
 // the fix to the exit-0 parse branches rather than a uniform policy change. The
 // child outlives the script by sleeping, so it is alive at the parse boundary
-// iff the bug is present; the assertions prove provisionHostOrReap leaves it
-// dead both by outcome (the orphan's side effect never appears) and by mechanism
-// (a probe signal is never acknowledged).
+// iff the bug is present; the assertion proves provisionHostOrReap leaves it
+// dead by outcome — the orphan's side effect (the marker) never appears, and a
+// child that was merely reaped to a zombie still never runs the sleep that
+// writes it, so the outcome is a non-signaling proof that does not probe a PID
+// the kernel may have recycled.
 func TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -669,26 +671,27 @@ func TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure(t *testing.T) {
 // backgrounds a long-running child (in the script's own process group, so the
 // quiesce can reach it), prints the given body on stdout, and exits. It then
 // drives provisionHostOrReap and asserts the child is dead by the time it
-// returns — both by the child's side effect never appearing (the outcome) and by
-// the child no longer acknowledging a probe signal (the mechanism, robust
-// against a zombie that still answers kill(pid, 0)).
+// returns — by the child's side effect never appearing (the outcome). The
+// assertion is non-signaling: it never sends a signal to the child's numeric
+// PID, which on a reaping host may have been recycled to an unrelated process
+// after the quiesce, so a probe that signaled it could terminate that process.
 func requireProvisionCmdQuiescesChild(t *testing.T, provisionBody string) {
 	t.Helper()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	ackFile := filepath.Join(dir, "child.ack")
 	markerFile := filepath.Join(dir, "orphan-finished-here")
 	deleteRanLog := filepath.Join(dir, "delete-ran.log")
 
 	// The orphan child: sleeps long enough to outlive the failing provision,
 	// then writes a marker — the stand-in for "the orphan finished provisioning
-	// a VM after delete_cmd reported success". It traps USR1 so a dead or zombie
-	// child can be distinguished from a running one: only a running child acks.
+	// a VM after delete_cmd reported success". The marker is the only thing the
+	// test watches for: a child the quiesce killed never writes it, and a child
+	// the quiesce missed does, so its absence is a non-signaling proof of death
+	// that never touches the (possibly recycled) numeric PID.
 	child := writeHookScript(t, filepath.Join(dir, "provision-child.sh"), fmt.Sprintf(`
-trap 'echo alive > %s' USR1
 sleep 0.25
 echo "a VM that bills by the hour" > %s
-`, shellsuggest.Arg(ackFile), shellsuggest.Arg(markerFile)))
+`, shellsuggest.Arg(markerFile)))
 
 	// provision_cmd: backgrounds the orphan child, records its pid for the
 	// assertion, then runs the body under test (print-and-exit) on stdout.
@@ -732,16 +735,16 @@ true
 	// Capture the child's process group NOW, at the earliest point after
 	// provisionHostOrReap returns, while the child is freshly dead (the fix
 	// path) or still alive (the bug path). Re-deriving it at cleanup time — after
-	// the 1.7s of assertion windows below — would hand cleanup a numeric PID the
-	// kernel may have recycled. The individual PID is never signalled in cleanup:
-	// a bare kill(childPID) on a recycled PID hits an unrelated single process,
-	// and the group kill subsumes it anyway (the child is in the script's
-	// process group, the same group quiesceLaunchGroup targets in production).
-	// This matches the established cleanup pattern in
+	// the 1.2s of assertion window below — would hand cleanup a numeric PID the
+	// kernel may have recycled. The individual PID is never signalled in cleanup
+	// or in the assertion: a bare kill(childPID) on a recycled PID hits an
+	// unrelated single process, and the group kill subsumes it anyway (the child
+	// is in the script's process group, the same group quiesceLaunchGroup
+	// targets in production). This matches the established cleanup pattern in
 	// TestHookLaunchDoesNotKillBackgroundedChildren, which signals the captured
 	// group only.
 	childPgid, childPgidErr := syscall.Getpgid(childPID)
-	// childConfirmedDead is set after the assertions below prove the child is
+	// childConfirmedDead is set after the assertion below proves the child is
 	// dead. On the fix path the child is dead, so cleanup has nothing to signal;
 	// on the bug path t.Fatalf fires before it is set, so cleanup still runs
 	// and tears the (still-live) group down. This avoids signalling a PID whose
@@ -761,9 +764,14 @@ true
 	// returns. The marker is what the orphan would write if it finished
 	// provisioning after the reap reported success — a resource that bills
 	// forever with nothing pointing at it. Watch across the whole window in
-	// which it would land: a resource that appears at ANY point after the reap is
-	// the leak, because delete_cmd already reported success and will never run
-	// again.
+	// which it would land: the child sleeps 0.25s before writing it, so a child
+	// the quiesce killed never writes it and a child the quiesce missed does
+	// within that 0.25s — well inside the 1.2s window. A resource that appears
+	// at ANY point after the reap is the leak, because delete_cmd already
+	// reported success and will never run again. This is a non-signaling proof:
+	// it never sends a signal to the numeric PID, so a host that has already
+	// reaped the child and recycled its PID to an unrelated process is not
+	// disturbed by the assertion.
 	deadline := time.Now().Add(1200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if _, statErr := os.Stat(markerFile); statErr == nil {
@@ -774,22 +782,12 @@ true
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// THE MECHANISM CLAIM: a live child acks a USR1 within milliseconds. Send
-	// the probe after provisionHostOrReap has returned and confirm no ack
-	// arrives — proving the child is not a running process. (kill(pid, 0) alone
-	// is not enough: a zombie still answers it, so this is what establishes
-	// "dead" rather than merely "absent from the table", robust against a
-	// non-reaping init on a loaded box.)
-	_ = syscall.Kill(childPID, syscall.SIGUSR1) // best-effort; ESRCH on a reaped child is fine
-	require.Never(t, func() bool {
-		_, statErr := os.Stat(ackFile)
-		return statErr == nil
-	}, 500*time.Millisecond, 10*time.Millisecond,
-		"the provision_cmd child acknowledged a post-reap probe, so it was alive when "+
-			"provisionHostOrReap returned — quiesce was a no-op and the reap ran while the orphan was still provisioning")
-	// Both assertions passed: the child is dead by outcome (no marker) and by
-	// mechanism (no USR1 ack). Cleanup has nothing to signal — skip it rather than
-	// risk kill(-childPgid, SIGKILL) on a PID the kernel may have recycled by now.
+	// The outcome claim passed: the child never wrote the marker across the full
+	// 1.2s window, so it was killed before it could — quiesce did its work. A
+	// zombie (a reaping init leaves one briefly) does not run the sleep or write
+	// the file either, so the absence of the marker is enough and no probe signal
+	// is needed. Cleanup has nothing to signal — skip it rather than risk
+	// kill(-childPgid, SIGKILL) on a PID the kernel may have recycled by now.
 	childConfirmedDead = true
 }
 
