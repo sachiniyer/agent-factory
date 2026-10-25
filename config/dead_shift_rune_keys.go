@@ -48,10 +48,29 @@ func discardDeadShiftRuneOverrides(raw map[string]any, overrides map[string][]st
 	}
 	cleaned := make(map[string][]string, len(overrides))
 	for action, keyList := range overrides {
+		// allDeadKnown is true only for a KNOWN action whose EVERY binding is a
+		// dead shift+<rune> spec. For such an action the loader keeps an empty
+		// key list (the disabled state) instead of falling back to the default,
+		// so the warning's remediation must NOT tell the user to remove the
+		// override — removing it would make buildMaps restore the default on the
+		// next load, undoing the disabled state this change preserves. Tell the
+		// user to replace it with a reachable binding (or [] to keep it
+		// disabled) instead. A PARTIAL-dead action (some reachable bindings
+		// remain) and an UNKNOWN action both still say "remove it": the partial
+		// case keeps its live bindings either way, and the unknown case is
+		// rejected by ValidateOverrides (the dead binding is not the load's
+		// reason for keeping it).
+		deadCount := 0
+		for _, k := range keyList {
+			if keys.IsDeadShiftRuneSpec(k) {
+				deadCount++
+			}
+		}
+		allDeadKnown := deadCount > 0 && deadCount == len(keyList) && keys.IsRebindableAction(action)
 		kept := make([]string, 0, len(keyList))
 		for _, k := range keyList {
 			if keys.IsDeadShiftRuneSpec(k) {
-				warnDeadShiftRuneBinding(prettyConfigPath, action, k)
+				warnDeadShiftRuneBinding(prettyConfigPath, action, k, allDeadKnown)
 				continue
 			}
 			kept = append(kept, k)
@@ -136,12 +155,23 @@ func cleanRawKeysTableEntry(raw map[string]any, action string, kept []string) {
 // shared project logger (log.WarningLog), which the daemon log shows as
 // WARNING and af doctor surfaces, and the interactive writer, which a CLI
 // command mirrors to stderr. Mirrors warnUnknownTableLeaf.
-func warnDeadShiftRuneBinding(prettyConfigPath, action, key string) {
+//
+// allDeadKnown is true when this dead binding is the ONLY binding for a KNOWN
+// action: the loader keeps that action with an empty key list so buildMaps
+// suppresses its default (the disabled state), and the warning must NOT tell
+// the user to remove the override — removing it would restore the default on
+// the next load, undoing the disabled state. Tell the user to replace it with
+// a reachable binding (or [] to keep the action disabled) instead.
+func warnDeadShiftRuneBinding(prettyConfigPath, action, key string, allDeadKnown bool) {
 	source := prettyConfigPath + ":" + action + ":" + key
 	if _, seen := deadShiftRuneWarned.LoadOrStore(source, struct{}{}); seen {
 		return
 	}
-	msg := fmt.Sprintf("config %s: keys.%q = %q will never fire — Bubble Tea has no Shift field for a plain rune (Shift+A is emitted as the rune \"A\", never a \"shift+\" spelling); ignoring this binding. Remove it from [keys] to silence this warning.", prettyConfigPath, action, key)
+	remediation := "Remove it from [keys] to silence this warning."
+	if allDeadKnown {
+		remediation = "Replace it with a reachable binding, or set the action to an empty list ([]) to keep it disabled, to silence this warning. Removing the entry would restore its default key, undoing the disabled state."
+	}
+	msg := fmt.Sprintf("config %s: keys.%q = %q will never fire — Bubble Tea has no Shift field for a plain rune (Shift+A is emitted as the rune \"A\", never a \"shift+\" spelling); ignoring this binding. %s", prettyConfigPath, action, key, remediation)
 	log.WarningLog.Print(msg)
 	writeInteractiveWarning(msg)
 }

@@ -32,6 +32,29 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source /src/scripts/tui-driver.sh
 
+# _af_assert_stays <regex> <seconds> <label> — for a NEGATIVE key check, assert
+# the screen keeps matching <regex> for the FULL <seconds> window. This is the
+# complement of af_wait_for the #4863 boot/quit assertions need: af_wait_for
+# returns on the first match, so it would match the 'Agent Factory' marker that
+# is ALREADY on screen from boot before Bubble Tea processes the just-sent key,
+# and a quit moments later would go undetected. Polling for the whole window
+# fails the instant the marker leaves (a real quit drops the frame), so the
+# negative check actually observes a post-input state rather than a pre-existing
+# one.
+_af_assert_stays() {
+    local re="$1" seconds="$2" label="$3" deadline screen
+    deadline=$(( $(_af_now) + seconds ))
+    while [ "$(_af_now)" -lt "$deadline" ]; do
+        screen="$(af_capture)"
+        if ! printf '%s\n' "$screen" | grep -qE -- "$re"; then
+            _af_fail "#4863: $label: the TUI left the expected frame during the ${seconds}s observation window (the key quit when it should not have). out=$screen"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+    _af_log "assert OK: $label (the TUI stayed on the expected frame for ${seconds}s)"
+}
+
 # cheap_config <keys-toml> — write a sandbox config.toml whose instances are
 # bash, then append a [keys] block. The container's validate path is identical
 # to a user's: LoadConfigReadOnly runs discardDeadShiftRuneOverrides ->
@@ -164,17 +187,25 @@ TOML
     # Shift+A — which Bubble Tea emits as the rune "A", never "shift+a" — must
     # NOT quit. tmux send-keys "A" sends the literal uppercase rune, the exact
     # bytes a real Shift+A produces. The TUI stays on the first frame.
+    #
+    # af_wait_for would match the already-present 'Agent Factory' marker and
+    # return before Bubble Tea processes the key, so the assertion could pass
+    # even if the key quit a moment later. Poll for the full observation window
+    # instead, failing the moment 'Agent Factory' leaves the screen — a quit
+    # during the window would drop the frame and break the poll.
     af_send A
-    af_wait_for 'Agent Factory' 5 \
+    _af_assert_stays 'Agent Factory' 5 \
         'Shift+A does not quit (dead shift+a override was skipped, not installed)' || return 1
 
     # THE second assertion: the action is disabled, not restored to its default.
     # The dead override was the only binding for quit, so the warn-and-skip
     # leaves quit with no active keys (an empty key list suppresses the default).
     # `q` must NOT quit — the default is not restored when the only binding was
-    # a dead spec.
+    # a dead spec. Same post-input poll as above: the marker is already on
+    # screen, so af_wait_for would succeed on the first capture before the key
+    # is processed; we instead assert the frame stays up for the whole window.
     af_send q
-    af_wait_for 'Agent Factory' 5 \
+    _af_assert_stays 'Agent Factory' 5 \
         'q does not quit (the dead shift+a override disabled quit, the default is not restored)' || return 1
 
     # Cleanup the tmux session so the box is reusable.

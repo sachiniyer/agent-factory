@@ -188,6 +188,57 @@ func TestDeadShiftRuneOverrideEditableValueReflectsCleaned(t *testing.T) {
 	})
 }
 
+// TestDeadShiftRuneWarningRemediationAllDeadKnown pins the Codex finding on
+// the warning remediation: a KNOWN action whose only bindings are dead is kept
+// with an empty key list so buildMaps suppresses its default (the action stays
+// disabled, the upgrade-compatible behaviour). Telling the user to "Remove it
+// from [keys]" would undo that — removing the entry restores the default on the
+// next load — so the warning for an all-dead KNOWN action must direct the user
+// to replace the binding (or keep it disabled with []), not remove the
+// override. A PARTIAL-dead action (some reachable bindings remain) and an
+// UNKNOWN action (rejected by ValidateOverrides, the dead binding is not its
+// reason for staying) both keep the "Remove it from [keys]" remediation.
+func TestDeadShiftRuneWarningRemediationAllDeadKnown(t *testing.T) {
+	t.Run("all-dead known action: replace or disable, do not remove", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		source := filepath.Join(t.TempDir(), "config.toml")
+		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+		cfg, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\"]\n"), source)
+		require.NoError(t, err, "an all-dead known action must load (warn-and-skip, disabled)")
+		require.Equal(t, []string{}, cfg.KeymapOverrides()["quit"], "the dead binding is dropped; quit is explicitly disabled")
+		require.Contains(t, warnings.String(), "will never fire")
+		require.Contains(t, warnings.String(), "Replace it with a reachable binding",
+			"an all-dead known action must direct the user to replace the binding, not remove it")
+		require.NotContains(t, warnings.String(), "Remove it from [keys]",
+			"an all-dead known action must NOT tell the user to remove the override (that would restore the default on the next load, undoing the disabled state)")
+	})
+
+	t.Run("partial-dead known action: remove the dead binding", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		source := filepath.Join(t.TempDir(), "config.toml")
+		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+		_, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\", \"Q\"]\n"), source)
+		require.NoError(t, err, "a partial-dead action loads with its reachable binding kept")
+		require.Contains(t, warnings.String(), "will never fire")
+		require.Contains(t, warnings.String(), "Remove it from [keys]",
+			"a partial-dead action still tells the user to remove the dead binding (the live one stays)")
+		require.NotContains(t, warnings.String(), "keep it disabled",
+			"the disable-state remediation is for the all-dead case only")
+	})
+
+	t.Run("unknown all-dead action: remove it", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		source := filepath.Join(t.TempDir(), "config.toml")
+		_, err := parseConfigTOML([]byte("[keys]\ntypo = [\"shift+a\"]\n"), source)
+		require.Error(t, err, "an unknown action is rejected by ValidateOverrides")
+		require.Contains(t, warnings.String(), "will never fire")
+		require.Contains(t, warnings.String(), "Remove it from [keys]",
+			"an unknown action is not kept disabled; the warning still says to remove it")
+		require.NotContains(t, warnings.String(), "keep it disabled",
+			"the disable-state remediation is for known actions only")
+	})
+}
+
 // TestDeadShiftRuneWarningQuotesActionName pins the Codex finding on the
 // warning: a quoted TOML action name can carry a terminal control sequence
 // (ESC, \x1b), and the warning runs before keys.ValidateOverrides rejects the
