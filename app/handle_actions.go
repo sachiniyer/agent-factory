@@ -939,9 +939,29 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	// silently binding the shifted-in occupant — the refuse-stale-ids direction
 	// #1805 took. Empty (id-less legacy tabs) keeps the existing ordinal fallback
 	// on the daemon side, since an empty tab_id makes bindTab bind the ordinal.
+	//
+	// The agent tab (index 0) is the exception: ReconcileTabsFromData HEALS its
+	// id in place even over a non-empty local id (session/instance_tab_reconcile.go
+	// agentRow branch), because the agent row is never dropped or re-added so a
+	// diverged id (a legacy restore + daemon restart minted different ids) can
+	// only be corrected by overwriting it. Eager capture would freeze the stale
+	// pre-heal id and the dial would receive ErrTabGone for a tab that is still
+	// there. The agent tab is pinned at index 0 (the reconcile never drops or
+	// moves it), so re-resolving it at dial time cannot drift-bind a different
+	// tab — it only picks up that in-place heal. Shell/process/web tabs (index
+	// >= 1) are the drift-exposed rows, so they keep the eager-captured id.
 	tabID, _ := instance.TabIDAt(tabIdx)
 	attach := func() (chan struct{}, error) {
-		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
+		dialTabID := tabID
+		if tabIdx == 0 {
+			// The agent tab can be id-healed in place between keypress and dial;
+			// read the (possibly healed) id at dial time so the correction
+			// reaches the daemon. Safe because the agent tab is pinned at index 0.
+			if healed, ok := instance.TabIDAt(0); ok {
+				dialTabID = healed
+			}
+		}
+		return attachStreamFn(context.Background(), streamAddress(instance, repoID), dialTabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

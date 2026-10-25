@@ -203,3 +203,92 @@ func TestAttachInstanceTab_DialsKeypressTabIDNoDrift(t *testing.T) {
 	require.Equal(t, shellAID, liveID, "precondition: the roster did not drift")
 	assert.Equal(t, liveID, gotTabID, "with no drift, the dial id equals the live id")
 }
+
+// TestAttachInstanceTab_AgentTabIDHealReachesDial is the regression guard for the
+// agent-tab ID-heal interaction the eager capture opened: ReconcileTabsFromData
+// replaces the agent tab's id even over a NON-EMPTY local id (the agentRow branch
+// in session/instance_tab_reconcile.go), because the agent row is never dropped or
+// re-added so a diverged id (a legacy restore + daemon restart minted different
+// ids) can only be corrected by overwriting it. Capturing that id at keypress time
+// freezes the stale pre-heal id; a first-time attach parked on the help overlay
+// during the heal would then dial the stale id and the daemon would refuse it with
+// ErrTabGone — a regression of the heal the reconcile deliberately performs.
+//
+// The agent tab is pinned at index 0 (the reconcile never drops or moves it), so
+// re-resolving it at dial time cannot drift-bind a different tab — it only picks
+// up the in-place heal. This test drives the heal through the production snapshot
+// path (updateInstanceFromSnapshot) while the help overlay is open and asserts the
+// dial addresses the HEALED id, not the stale keypress-time id.
+func TestAttachInstanceTab_AgentTabIDHealReachesDial(t *testing.T) {
+	resetDetachWatchdog(t)
+
+	h := newTestHome(t)
+	// Do NOT mark helpTypeInstanceAttach seen: the first-time attach help overlay
+	// is the keypress->dial window the heal races.
+	inst := freshLocalInstance(t, "heal") // agent tab only, at index 0
+	require.Equal(t, 1, inst.TabCount(), "precondition: agent tab only")
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	// Capture the agent tab's keypress-time id — the read attachInstanceTab makes
+	// under the fix.
+	pressAgentID, ok := inst.TabIDAt(0)
+	require.True(t, ok)
+	require.NotEmpty(t, pressAgentID, "precondition: the agent tab has a locally-minted id")
+
+	// Observe the WS PTY dial: capture the id the dial addresses the tab by.
+	var gotTabID string
+	var gotTabIdx int
+	var streamCalls int
+	t.Cleanup(SetAttachStreamFnForTest(func(_ context.Context, _ apiclient.StreamSession, tabID string, tabIdx int) (chan struct{}, error) {
+		streamCalls++
+		gotTabID, gotTabIdx = tabID, tabIdx
+		ch := make(chan struct{})
+		close(ch)
+		return ch, nil
+	}))
+	swapRemoteDetachResetWriter(t, &bytes.Buffer{})
+
+	// Keypress: attach on ordinal 0 (the agent tab). The first-time help overlay
+	// shows and defers the dial.
+	_, cmd := h.attachInstanceTab(inst, 0, "agent", "terminal")
+	require.Nil(t, cmd, "the deferred dial must not schedule a cmd while the help overlay is up")
+	require.Equal(t, stateHelp, h.state, "the first-time attach must park on the help overlay")
+
+	// While the overlay is open, the daemon's snapshot reconciles the local roster
+	// and HEALS the agent tab's id — the ordinary legacy/restart divergence, not
+	// an exotic one (mirrors TestSnapshot_AgentIDHealKeepsPaneOpen). The agent row
+	// is never dropped or re-added, so the reconcile overwrites its id in place.
+	staleAgentID := inst.GetTabs()[0].ID
+	require.Equal(t, pressAgentID, staleAgentID)
+	data := inst.ToInstanceData()
+	data.Tabs[0].ID = "daemon-agent-id"
+	h.updateInstanceFromSnapshot(inst, data)
+	healedID, ok := inst.TabIDAt(0)
+	require.True(t, ok)
+	require.Equal(t, "daemon-agent-id", healedID,
+		"precondition: the agent tab healed its id to the daemon's authoritative id")
+	require.NotEqual(t, staleAgentID, healedID,
+		"precondition: the heal changed the id — the keypress-time id is now stale")
+
+	// Dismiss the help overlay with Enter (proceed with the attach). This schedules
+	// the deferred dial.
+	model, dismissCmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*home)
+	require.Equal(t, stateDefault, h.state, "Enter must dismiss the attach help overlay")
+	require.NotNil(t, dismissCmd, "dismissing the overlay must schedule the deferred attach transition")
+
+	// Drive the transition tick and the blocking attach callback to completion.
+	_ = runAttachTransitionCmd(t, h, dismissCmd)
+	endDetachWatchdog()
+
+	require.Equal(t, 1, streamCalls, "the attach must dial the WS PTY stream exactly once")
+	require.Equal(t, 0, gotTabIdx, "the dial must target the agent tab at index 0")
+	// THE FIX: the dial carries the HEALED id, not the stale keypress-time id the
+	// eager capture froze. Before the heal-aware re-resolution the dial read the
+	// stale id and the daemon refused it with ErrTabGone.
+	require.Equal(t, "daemon-agent-id", gotTabID,
+		"the dial must address the agent tab by its healed id, not the stale keypress-time id")
+	require.NotEqual(t, staleAgentID, gotTabID,
+		"the dial must not address the stale pre-heal id the daemon cannot resolve")
+}
