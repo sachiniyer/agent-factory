@@ -286,6 +286,18 @@ func TestGetClaudeCommand(t *testing.T) {
 			// The curly-quote wrapper some locales render must also strip
 			// exactly one pair, preserving a value boundary quote.
 			{"bash alias unicode wrapper with value quote", "claude is aliased to ‘claude --model \"opus\"’", "claude --model \"opus\""},
+			// The "name=value" and "name -> value" alternatives serialize the
+			// value in an ASCII " or ' wrapper pair that is a wrapper, not part
+			// of the value; the wrapper must be stripped so the composed
+			// override does not treat the whole value as one quoted executable
+			// name (#5526).
+			{"equals format double-quoted", `claude="/opt/claude --model opus"`, "/opt/claude --model opus"},
+			{"equals format single-quoted", `claude='/opt/claude --model opus'`, "/opt/claude --model opus"},
+			{"arrow format double-quoted", `claude -> "/opt/claude --model opus"`, "/opt/claude --model opus"},
+			{"arrow format single-quoted", `claude -> '/opt/claude --model opus'`, "/opt/claude --model opus"},
+			// A value whose own boundary quote belongs to it (no serialization
+			// wrapper) is returned unchanged for the assignment form too.
+			{"equals format unquoted with value quotes", `claude=claude --prompt 'hi'`, "claude --prompt 'hi'"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

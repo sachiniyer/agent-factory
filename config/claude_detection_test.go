@@ -179,6 +179,41 @@ func TestStripAliasValueWrapper(t *testing.T) {
 	}
 }
 
+// TestStripAssignmentFormQuotes pins the wrapper-pair stripping the "name=value"
+// and "name -> value" probe alternatives need: their value may be serialized
+// in an ASCII " or ' wrapper pair that is not part of the value, and leaving it
+// intact makes /bin/sh treat the whole value as one quoted executable name. The
+// bash/zsh "aliased to" forms are handled by stripAliasValueWrapper instead —
+// stripAssignmentFormQuotes must not touch the value-boundary quotes those forms
+// preserve.
+func TestStripAssignmentFormQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"one char", `"`, `"`},
+		{"wrapper only double", `""`, ""},
+		{"wrapper only single", "''", ""},
+		{"double-quoted value", `"/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"single-quoted value", `'/opt/claude --model opus'`, "/opt/claude --model opus"},
+		{"double-quoted path with space", `"/Applications/Claude Code.app/Contents/MacOS/claude"`, "/Applications/Claude Code.app/Contents/MacOS/claude"},
+		{"unquoted value unchanged", "/opt/claude --model opus", "/opt/claude --model opus"},
+		// A value whose own boundary is a quote that is NOT a matching pair is
+		// left untouched (no wrapper to strip).
+		{"mismatched quotes", `"/opt/claude'`, `"/opt/claude'`},
+		// Only ONE wrapper pair is stripped; the value's own inner quotes survive.
+		{"one pair only double", `"/opt/claude --prompt 'hi'"`, "/opt/claude --prompt 'hi'"},
+		{"one pair only single", `'/opt/claude --model "opus"'`, `/opt/claude --model "opus"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stripAssignmentFormQuotes(tc.in))
+		})
+	}
+}
+
 // TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes
 // is the regression test for the cutset-trim bug: a probe line whose alias
 // value begins or ends with a quote character must parse to a shell-balanced
@@ -211,6 +246,42 @@ func TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes(t *
 				out, err := exec.Command("/bin/sh", "-c", composed+" ; exit 0").CombinedOutput()
 				assert.NoError(t, err,
 					"/bin/sh -c rejected the composed override (unbalanced quote?): %s", out)
+			}
+		})
+	}
+}
+
+// TestParseCommandProbeOutputStripsAssignmentFormWrapper is the regression
+// test for the "name=value" / "name -> value" serialization-wrapper bug: a
+// probe line whose value is wrapped in an ASCII " or ' pair must have the
+// wrapper stripped so the composed override parses as a single simple shell
+// call. Leaving the wrapper intact made /bin/sh treat the whole value as one
+// quoted executable name, so the override passed the guard but launched a
+// nonexistent command (#5526).
+func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{"equals double-quoted", `claude="/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"equals single-quoted", `claude='/opt/claude --model opus'`, "/opt/claude --model opus"},
+		{"arrow double-quoted", `claude -> "/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"arrow single-quoted", `claude -> '/opt/claude --model opus'`, "/opt/claude --model opus"},
+		// A value with an inner double-quoted arg keeps its inner quotes; only
+		// the outer serialization wrapper is stripped.
+		{"equals with inner quotes", `claude="/opt/claude --prompt 'hi'"`, "/opt/claude --prompt 'hi'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseCommandProbeOutput(tc.line)
+			require.Equal(t, tc.want, parsed, "the serialization wrapper must be stripped, not preserved")
+			composed := parsed + " " + DetectedClaudePermissionsFlag
+			assert.True(t, sessionenv.CommandIsSingleSimpleCall(composed),
+				"composed override %q must parse as a single simple shell call", composed)
+			if _, err := os.Stat("/bin/sh"); err == nil {
+				out, err := exec.Command("/bin/sh", "-c", composed+" ; exit 0").CombinedOutput()
+				assert.NoError(t, err,
+					"/bin/sh -c rejected the composed override (wrapper not stripped?): %s", out)
 			}
 		})
 	}

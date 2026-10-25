@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/programprivacy"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -30,6 +31,15 @@ import (
 //     like "Type help -> for assistance" no longer captures garbage (#1003)
 //   - "^[^/=\s]+\s*= ..." — a "name=value" alias assignment at the line start
 var aliasOutputRegex = regexp.MustCompile(`(?:^\S+:\s*aliased to|^\S+\s+is\s+aliased to|^\S+\s*->|^[^/=\s]+\s*=)\s*(.+)`)
+
+// aliasedToRegex matches the bash `type` ("... is aliased to ...") and zsh
+// `which` ("...: aliased to ...") alternatives of aliasOutputRegex, whose alias
+// value is wrapped in a `...' or ‘...’ re-quoting wrapper handled by
+// stripAliasValueWrapper. The "name=value" and "name -> value" alternatives do
+// not match this (their value is serialized with an ASCII " or ' pair handled
+// by stripAssignmentFormQuotes), so distinguishing the form routes each value
+// to the wrapper stripper that matches its quoting (#5526).
+var aliasedToRegex = regexp.MustCompile(`^(?:\S+:\s*aliased to|\S+\s+is\s+aliased to)`)
 
 // probeWaitDelay bounds how long the claude shell probe's Output() call keeps
 // waiting for stdout/stderr EOF after the probe shell has exited (or the
@@ -171,7 +181,7 @@ func defaultClaudeOverride() (override string, set bool) {
 		log.WarningLog.Printf(
 			"claude probe detected command %q but the composed program_overrides value %q is not valid "+
 				"single shell command syntax; omitting the auto-detected override (claude will resolve via $PATH at launch)",
-			claudePath, composed)
+			programprivacy.Redact(claudePath), programprivacy.Redact(composed))
 	})
 	return cached.override, cached.set
 }
@@ -328,8 +338,23 @@ func parseCommandProbeOutput(output string) string {
 		// making sessions unlaunchable with no fallback to the bare
 		// program name. Removing only the shell's wrapper pair preserves
 		// quote characters that belong to the value itself.
+		//
+		// The wrapper-stripping depends on which aliasOutputRegex alternative
+		// matched: the "aliased to" forms (bash `type`, zsh `which`) wrap the
+		// value in a `...' or ‘...’ re-quoting wrapper, so stripAliasValueWrapper
+		// removes exactly that pair; the "name=value" and "name -> value" forms
+		// serialize the value with an optional ASCII " or ' pair that is also a
+		// wrapper (e.g. claude="/opt/claude --model opus"), so
+		// stripAssignmentFormQuotes removes one matching pair. Applying the
+		// wrong stripper either eats a quote that belongs to the value (the
+		// cutset bug) or leaves a serialization wrapper that makes /bin/sh
+		// treat the whole value as one quoted executable name (#5526).
 		if matches := aliasOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
-			return strings.TrimSpace(stripAliasValueWrapper(matches[1]))
+			value := strings.TrimSpace(matches[1])
+			if aliasedToRegex.MatchString(line) {
+				return stripAliasValueWrapper(value)
+			}
+			return stripAssignmentFormQuotes(value)
 		}
 		if matches := bashTypeOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
 			return matches[1]
@@ -376,6 +401,35 @@ func stripAliasValueWrapper(v string) string {
 	// Curly wrapper: leading ‘ + trailing ’ (some locales).
 	if strings.HasPrefix(v, "‘") && strings.HasSuffix(v, "’") {
 		return v[len("‘") : len(v)-len("’")]
+	}
+	return v
+}
+
+// stripAssignmentFormQuotes removes a single ASCII double- or single-quote
+// wrapper pair that the "name=value" and "name -> value" alias-probe
+// alternatives serialize an alias value in (e.g. claude="/opt/claude
+// --model opus" or claude -> '/opt/claude'). These quotes are a serialization
+// wrapper, not part of the value: leaving them intact makes /bin/sh treat the
+// whole value as one quoted executable name, so the composed override passes
+// the single-simple-call guard but launches a nonexistent command. Strip
+// exactly one matching pair; a value that does not begin and end with the same
+// quote character (or is too short to be a wrapper) is returned unchanged and
+// falls through to the guard. This restores the wrapper decoding the cutset
+// trim performed for these forms without touching the bash/zsh "aliased to"
+// value-boundary quotes stripAliasValueWrapper preserves.
+func stripAssignmentFormQuotes(v string) string {
+	if len(v) < 2 {
+		return v
+	}
+	switch v[0] {
+	case '"':
+		if v[len(v)-1] == '"' {
+			return v[1 : len(v)-1]
+		}
+	case '\'':
+		if v[len(v)-1] == '\'' {
+			return v[1 : len(v)-1]
+		}
 	}
 	return v
 }
