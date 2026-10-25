@@ -14,12 +14,19 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/watchlifeline"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestMain(m *testing.M) {
+	// This test binary stands in for af as the watch lifeline (#5329): every
+	// watcherSupervisor resolves its own binary as the lifeline executable, so
+	// a test's watch command starts under `<daemon.test> __watch-lifeline …`
+	// exactly as production starts it under af. First, like main: the shell
+	// must inherit the environment the test set, untouched.
+	watchlifeline.HandleExec()
 	sessionenv.HandleInternalExec()
 	sessiontmux.HandleDedicatedServerExec()
 	// A re-exec of this test binary standing in for code-server (see

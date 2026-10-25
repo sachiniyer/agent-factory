@@ -197,10 +197,14 @@ type InstanceData struct {
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
-	// survive a restart, and so PR3's auto-resume scheduler can read it. omitempty
-	// drops it for every normal session; additive + rollforward, mirroring the
-	// Liveness precedent.
-	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// survive a restart, and so PR3's auto-resume scheduler can read it. omitzero
+	// drops it for every normal session (and for a limit row whose banner carried
+	// no parseable reset time): omitempty never omits a struct, and a zero
+	// time.Time would otherwise serialize as "0001-01-01T00:00:00Z" on every row,
+	// inventing a reset date the web would render (#4506 review, mirroring the
+	// TabExitData.At precedent); additive + rollforward, mirroring the Liveness
+	// precedent.
+	LimitResetAt time.Time `json:"limit_reset_at,omitzero"`
 	// LimitAgent is the provider namespace for LimitAccount. It is always a
 	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
 	// pending cross-agent replacement must retain both values.
@@ -218,7 +222,16 @@ type InstanceData struct {
 	CreatedAt                time.Time                     `json:"created_at"`
 	// UpdatedAt is the last session state mutation, preserved across saves and loads.
 	UpdatedAt time.Time `json:"updated_at"`
-	Prompt    string    `json:"prompt,omitempty"`
+	// ArchivedAt is when this session's archive committed — the durable anchor
+	// `af sessions prune --older-than` measures from (#5136). It is a separate
+	// field rather than UpdatedAt reused, because a record can keep mutating
+	// after it is shelved (prune itself is one such mutation). omitempty +
+	// additive: rows archived before this field existed carry no value and the
+	// prune cutoff falls back to UpdatedAt, which only ever moves FORWARD —
+	// never to a time before the real archive — so the fallback can only make a
+	// legacy row look younger and therefore under-delete, never over-delete.
+	ArchivedAt time.Time `json:"archived_at,omitzero"`
+	Prompt     string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is cleared only after the exact mission lands (or is
@@ -367,6 +380,30 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// KilledWithoutLiveRuntime is the inert-at-kill admission marker for a
+	// sandbox kill tombstone (docker/ssh/hook/remote) whose commit found no live
+	// off-box runtime to reap: the kill ran against an inert rebuild (nil
+	// runtimeTeardown), so the tombstone carries no RuntimeCleanup handle on
+	// purpose — "nothing on-box to reap", the sandbox analog of the local
+	// branch's worktreeReaped admission (#2691).
+	//
+	// A current-binary inert-at-kill tombstone and a legacy pre-#2265 tombstone
+	// are indistinguishable on disk without this marker: both persist a nil
+	// RuntimeCleanup, and the load path could not tell "the kill owed nothing"
+	// from "the binary could not store the handle it owed". The distinction is
+	// therefore WRITTEN at commit time — toInstanceDataLocked sets the private
+	// marker below when a sandbox backend owes no teardown — and READ at load
+	// time by FromInstanceData, which admits the marker the way worktreeReaped
+	// does and lets the pending record delete proceed instead of installing a
+	// permanent fail-closed teardown no retry, re-kill, or restart can clear.
+	//
+	// Additive + omitempty + rollforward on the same precedent as UserKilled: a
+	// record written before this field simply has no marker and fails closed,
+	// which is the safe legacy direction (a wedge an older binary already
+	// cannot unwedge). Published only for UserKilled tombstones by ForStorage,
+	// so it never reaches an ordinary snapshot or disk row.
+	KilledWithoutLiveRuntime bool `json:"killed_without_live_runtime,omitempty"`
+	killedWithoutLiveRuntime *bool
 	// archivePushCompleted is process-local evidence that the push belonging to
 	// the CURRENT OpArchiving generation returned successfully. Branch cannot be
 	// that evidence: restore deliberately preserves the previous archive branch.
@@ -430,8 +467,22 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
 // unavailable.
+//
+// It replays FromInstanceData's full fence-restoration order — archive, then
+// relocation recovery, then handoff and account-swap — so the rollback-safe
+// ownership projection ForStorage writes for any row carrying an unresolved
+// worktree relocation recovery cannot survive into the disk-fallback client
+// view. A recovery row whose safety metadata is missing or undecodable is
+// corrupt; ForClientRead cannot drop the row, so it leaves the ForStorage
+// projection in place and the row reads as the conservative unknown-ownership
+// verdict rather than fabricating confidence — the same fail-closed direction
+// every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	restored, err := d.RestoreRelocationRecoveryOriginals()
+	if err == nil {
+		d = restored
+	}
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
@@ -571,17 +622,38 @@ func (d InstanceData) ForStorage() InstanceData {
 		// identity here would only preserve unused credentials until row deletion.
 		d.RuntimeCleanupStateUnknown = false
 		d.RuntimeCleanup = nil
+		d.KilledWithoutLiveRuntime = false
 	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
 		// Cleanup credentials/identities have no reason to live in ordinary session
 		// records. Kill intent and an unknown teardown outcome are the two durable
 		// retention boundaries.
 		d.RuntimeCleanup = nil
-	case d.runtimeCleanup != nil:
-		d.RuntimeCleanup = d.runtimeCleanup.clone()
+		d.KilledWithoutLiveRuntime = false
+	default:
+		// A kill tombstone or an unknown-cleanup retention row. Publish the staged
+		// cleanup handle only when one was staged on a fresh snapshot; a reloaded
+		// row carries only the public field, and the nil-private guard preserves it
+		// exactly as the previous three-way switch did.
+		if d.runtimeCleanup != nil {
+			d.RuntimeCleanup = d.runtimeCleanup.clone()
+		}
+		// The inert-at-kill marker rides only a UserKilled tombstone. An
+		// unknown-cleanup row never carries it: its unknown cleanup is armed only
+		// when a teardown handle exists, so there is no "nothing owed" shape to
+		// admit. Publish a freshly-staged marker; otherwise preserve a marker
+		// reloaded from disk (the private field is lost on JSON unmarshal) so the
+		// next load still reads it.
+		switch {
+		case d.killedWithoutLiveRuntime != nil:
+			d.KilledWithoutLiveRuntime = *d.killedWithoutLiveRuntime
+		case !d.UserKilled:
+			d.KilledWithoutLiveRuntime = false
+		}
 	}
 	// Never let the private staging pointer escape a storage projection. Loaded
 	// tombstones have only RuntimeCleanup set and therefore preserve it above.
 	d.runtimeCleanup = nil
+	d.killedWithoutLiveRuntime = nil
 	d.archiveReportSource = nil
 	d.archiveReportPending = false
 	return d
