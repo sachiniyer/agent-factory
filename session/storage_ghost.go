@@ -11,53 +11,124 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// knownInstanceDataFields is the set of top-level JSON keys a row this binary
-// writes or reads. It is the struct's json tags plus the two wire names
-// InstanceData.MarshalJSON derives (status_name, liveness_name; see
-// state_names.go) — a row carrying a key outside this set was written by a
-// newer same-schema binary under a field this version's InstanceData does not
-// decode, and decoding the row drops that key. The transient-ghost carve-out
-// (isLegacyTransientGhostRow) checks the decoded form, so a Loading/Deleting row
-// carrying a newer durable marker on such a field looks marker-less and would be
-// reaped; rowHasUnrecognizedInstanceFields lets the save path fail closed and
-// preserve the row verbatim instead.
-var knownInstanceDataFields = func() map[string]struct{} {
-	out := map[string]struct{}{
-		"status_name":   {},
-		"liveness_name": {},
+// knownFields is the recursive set of JSON keys a struct type this binary
+// decodes. A leaf entry (value nil) is a scalar field. A non-nil entry maps a
+// struct-valued (or slice/array-of-struct) field to the known keys its nested
+// object decodes, so the save path can detect an additive field a newer
+// same-schema binary wrote INSIDE a recognized container (e.g.
+// archive_report.future_recovery or worktree.relocation_recovery) rather than
+// only at the top level. A key absent from the map is one this binary does not
+// decode; a row carrying it may be a newer binary's additive durable marker, so
+// the save path fails closed and preserves the row verbatim rather than reaping
+// it as a disposable transient ghost.
+type knownFields map[string]knownFields
+
+// knownInstanceDataFields is the recognized field set for InstanceData: the
+// struct's json tags plus the two wire names InstanceData.MarshalJSON derives
+// (status_name, liveness_name; see state_names.go). The transient-ghost
+// carve-out (isLegacyTransientGhostRow) checks the decoded form, so a
+// Loading/Deleting row carrying a newer durable marker on a field this version's
+// InstanceData does not decode looks marker-less and would be reaped;
+// rowHasUnrecognizedInstanceFields lets the save path fail closed and preserve
+// the row verbatim instead.
+//
+// pr_info is a removed wire key (see the InstanceData.BackendType comment) that
+// old records may still carry. encoding/json ignores it on read and the release
+// notes say it must not be written back, so it is not a newer binary's additive
+// marker: a historical Loading/Deleting row that still carries it must follow
+// the transient-ghost reap contract, not be preserved indefinitely as if it were
+// a newer durable marker.
+var knownInstanceDataFields = func() knownFields {
+	out := knownFields{
+		"status_name":   nil,
+		"liveness_name": nil,
+		"pr_info":       nil,
 	}
-	collectInstanceDataJSONFields(reflect.TypeOf(InstanceData{}), out)
+	collectKnownFields(reflect.TypeOf(InstanceData{}), out, map[reflect.Type]bool{})
 	return out
 }()
 
-func collectInstanceDataJSONFields(t reflect.Type, out map[string]struct{}) {
+// knownFieldsCopy copies seen so each recursion tracks only its own path —
+// sibling fields that reference the same struct type are all walked, while a
+// self-referential type still terminates the descent.
+func knownFieldsCopy(seen map[reflect.Type]bool) map[reflect.Type]bool {
+	c := make(map[reflect.Type]bool, len(seen)+1)
+	for t, v := range seen {
+		c[t] = v
+	}
+	return c
+}
+
+// collectKnownFields walks t's exported json-tagged fields into out. For a struct
+// or slice/array-of-struct field it records a nested knownFields so an additive
+// field a newer binary wrote inside a recognized container (archive_report,
+// worktree, runtime_cleanup, …) is still detected by the save path. Anonymous
+// embedded structs are flattened, mirroring encoding/json's own field
+// promotion. seen tracks the recursion path to keep a self-referential struct
+// type from looping the collector.
+func collectKnownFields(t reflect.Type, out knownFields, seen map[reflect.Type]bool) {
+	if t.Kind() != reflect.Struct || seen[t] {
+		return
+	}
+	next := knownFieldsCopy(seen)
+	next[t] = true
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.Anonymous {
-			if f.Type.Kind() == reflect.Pointer {
-				f.Type = f.Type.Elem()
+			ft := f.Type
+			if ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
 			}
-			if f.Type.Kind() == reflect.Struct {
-				collectInstanceDataJSONFields(f.Type, out)
-			}
+			collectKnownFields(ft, out, next)
 			continue
 		}
-		if tag := f.Tag.Get("json"); tag != "" {
-			name := strings.SplitN(tag, ",", 2)[0]
-			if name != "-" {
-				out[name] = struct{}{}
-			}
+		tag := f.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.SplitN(tag, ",", 2)[0]
+		if name == "" {
+			continue
+		}
+		// Drill pointers and slices/arrays to the element type so an additive
+		// field inside any struct an InstanceData transitively decodes is
+		// detected. A map element is not inspected: InstanceData has no
+		// map-valued JSON field, so a map entry is always a leaf here.
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Slice || ft.Kind() == reflect.Array {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct {
+			nested := knownFields{}
+			collectKnownFields(ft, nested, next)
+			out[name] = nested
+		} else {
+			out[name] = nil
 		}
 	}
 }
 
-// rowHasUnrecognizedInstanceFields reports whether raw carries a top-level JSON
-// key this binary's InstanceData does not decode. Such a key may be an additive
-// field a newer same-schema binary wrote (a durable marker this version does not
-// know); decoding into InstanceData drops it, so the save path must inspect the
-// raw form to fail closed and preserve the row verbatim rather than reap it as a
-// disposable transient ghost.
+// rowHasUnrecognizedInstanceFields reports whether raw carries a JSON key this
+// binary's InstanceData does not decode, at the top level OR inside a recognized
+// nested object/array of objects it decodes. Such a key may be an additive field
+// a newer same-schema binary wrote (a durable marker this version does not know);
+// decoding into InstanceData drops it, so the save path inspects the raw form to
+// fail closed and preserve the row verbatim rather than reap it as a disposable
+// transient ghost. Recognized containers (archive_report, worktree, …) are
+// walked recursively so a marker nested under an existing object — e.g.
+// archive_report.future_recovery or worktree.relocation_recovery's future field
+// — is detected just like a top-level additive field.
 func rowHasUnrecognizedInstanceFields(raw json.RawMessage) bool {
+	return rawHasUnrecognizedFields(raw, knownInstanceDataFields)
+}
+
+// rawHasUnrecognizedFields is the recursive core of
+// rowHasUnrecognizedInstanceFields. It walks raw against the known field set for
+// one struct level. A key outside the set is unrecognized. A key whose value is
+// a known object (or array of objects) is recursed into so an additive field a
+// newer binary wrote inside a recognized container is still detected; a key
+// whose value is a scalar (known leaf) is accepted.
+func rawHasUnrecognizedFields(raw json.RawMessage, known knownFields) bool {
 	if len(raw) == 0 {
 		return false
 	}
@@ -65,8 +136,29 @@ func rowHasUnrecognizedInstanceFields(raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &fields) != nil {
 		return false
 	}
-	for k := range fields {
-		if _, known := knownInstanceDataFields[k]; !known {
+	for k, v := range fields {
+		nested, ok := known[k]
+		if !ok {
+			return true
+		}
+		if len(nested) == 0 {
+			continue
+		}
+		// k is a struct-valued (or slice/array-of-struct) field an InstanceData
+		// transitively decodes. A newer same-schema binary may have added a
+		// field inside it that this version does not decode, so inspect the
+		// nested object(s) for unrecognized keys too.
+		if len(v) > 0 && v[0] == '[' {
+			var arr []json.RawMessage
+			if json.Unmarshal(v, &arr) != nil {
+				continue
+			}
+			for _, elem := range arr {
+				if rawHasUnrecognizedFields(elem, nested) {
+					return true
+				}
+			}
+		} else if rawHasUnrecognizedFields(v, nested) {
 			return true
 		}
 	}

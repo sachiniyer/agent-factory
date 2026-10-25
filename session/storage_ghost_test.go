@@ -1252,3 +1252,161 @@ func TestSaveInstances_TransientRowWithUnrecognizedFieldPreserved(t *testing.T) 
 		})
 	}
 }
+
+// TestSaveInstances_LegacyTransientGhostWithRemovedPrInfoKeyReaped pins the
+// removed-wire-key carve-out for the unrecognized-field detector (#El8): pr_info
+// was removed (see the InstanceData.BackendType comment) and old records may still
+// carry it. encoding/json ignores it on read, and the release notes say it must
+// not be written back, so it is not a newer binary's additive durable marker.
+// rowHasUnrecognizedInstanceFields treats it as known, so a Loading/Deleting row
+// whose only "extra" field is the legacy pr_info is still the disposable
+// transient ghost it always was and is reaped by the checkpoint — it does not
+// get preserved indefinitely as if pr_info were a newer marker. For a Deleting
+// variant, preserving it would also keep its title reserved in
+// findTitleConflictLocked across every checkpoint, blocking recreation.
+func TestSaveInstances_LegacyTransientGhostWithRemovedPrInfoKeyReaped(t *testing.T) {
+	for _, status := range []Status{Loading, Deleting} {
+		t.Run(statusName(status), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			repoID := config.RepoIDFromRoot(repoPath)
+			state := newMockStorage()
+
+			// A bare Loading/Deleting row has no known durable markers, so it is a
+			// disposable transient ghost — except that its raw form carries the
+			// REMOVED wire key pr_info, which is in the recognized set (a
+			// historical field this binary no longer decodes, not a newer binary's
+			// additive marker). Plant pr_info directly on the raw bytes; seedDisk
+			// marshals InstanceData, which drops it.
+			row := InstanceData{
+				ID: "loading-pr-info-id", Title: "loading-pr-info", Path: repoPath, Program: "claude",
+				Status: status,
+			}
+			require.True(t, isLegacyTransientGhostRow(row),
+				"fixture: the decoded row has no known durable markers and would be reaped")
+			raw, err := json.Marshal([]InstanceData{row})
+			require.NoError(t, err)
+			var arr []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &arr))
+			arr[0]["pr_info"] = json.RawMessage(`"removed-legacy-key"`)
+			raw, err = json.Marshal(arr)
+			require.NoError(t, err)
+			state.data[repoID] = raw
+
+			// The detector must not treat the removed key as an unrecognized
+			// durable marker; it is in the recognized set (a historical field
+			// this binary no longer decodes, not a newer binary's additive one).
+			rowBytes, mErr := json.Marshal(arr[0])
+			require.NoError(t, mErr)
+			require.False(t, rowHasUnrecognizedInstanceFields(rowBytes),
+				"pr_info is a removed wire key in the recognized set; the row must not be flagged as carrying a newer marker")
+
+			alive := makeAliveInstance("alive", repoPath)
+			storage, err := NewStorage(state, "")
+			require.NoError(t, err)
+			require.NoError(t, storage.SaveInstances([]*Instance{alive}))
+
+			got := rowsByTitle(t, state, repoPath)
+			require.NotContains(t, got, "loading-pr-info",
+				"a %s row whose only extra field is the removed pr_info key must be reaped, "+
+					"not preserved as if it were a newer binary's durable marker (#El8)", statusName(status))
+		})
+	}
+}
+
+// TestSaveInstances_TransientRowWithNestedUnrecognizedFieldPreserved is the
+// nested-field carve-out (#El9): an additive durable marker a newer same-schema
+// binary writes INSIDE a recognized object (archive_report, worktree) is dropped
+// by decoding into this binary's InstanceData, so isLegacyTransientGhostRow sees
+// no known marker and would reap a Loading/Deleting row carrying it. The
+// top-level-only detector misses it because the nested object's key is known
+// (archive_report/worktree); the detector walks the nested object so the save
+// path fails closed and preserves the row verbatim for the next start's newer
+// binary to read.
+func TestSaveInstances_TransientRowWithNestedUnrecognizedFieldPreserved(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string // the top-level recognized container key
+		plant func(obj map[string]json.RawMessage)
+	}{
+		{
+			name:  "archive_report",
+			field: "archive_report",
+			plant: func(obj map[string]json.RawMessage) {
+				obj["archive_report"] = json.RawMessage(`{"retained_trees":[],"future_recovery":"owed-to-the-next-start"}`)
+			},
+		},
+		{
+			name:  "worktree",
+			field: "worktree",
+			plant: func(obj map[string]json.RawMessage) {
+				obj["worktree"] = json.RawMessage(`{"repo_path":"p","worktree_path":"p/w","session_name":"s","branch_name":"af/s","base_commit_sha":"","future_recovery":"owed-to-the-next-start"}`)
+			},
+		},
+	}
+	for _, status := range []Status{Loading, Deleting} {
+		for _, tc := range cases {
+			t.Run(statusName(status)+"/"+tc.name, func(t *testing.T) {
+				t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+				repoPath := t.TempDir()
+				repoID := config.RepoIDFromRoot(repoPath)
+				state := newMockStorage()
+
+				// A bare Loading/Deleting row has no known durable markers, so it
+				// is a disposable transient ghost — except that a newer binary
+				// wrote an additive marker inside a recognized container object
+				// this binary still decodes. isLegacyTransientGhostRow sees no
+				// known marker (the nested field is dropped on decode), so the
+				// detector must walk the nested object and preserve the row.
+				row := InstanceData{
+					ID: "loading-nested-id", Title: "loading-nested", Path: repoPath, Program: "claude",
+					Status: status,
+				}
+				require.True(t, isLegacyTransientGhostRow(row),
+					"fixture: the decoded row has no known durable markers and would be reaped")
+				raw, err := json.Marshal([]InstanceData{row})
+				require.NoError(t, err)
+				var arr []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(raw, &arr))
+				tc.plant(arr[0])
+				raw, err = json.Marshal(arr)
+				require.NoError(t, err)
+				state.data[repoID] = raw
+
+				// The detector must flag the nested additive field.
+				var selfObj map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(arr[0][tc.field], &selfObj))
+				require.Contains(t, selfObj, "future_recovery",
+					"fixture: the additive nested field must be present")
+				// Re-marshal the whole row to feed the detector.
+				rowBytes, mErr := json.Marshal(arr[0])
+				require.NoError(t, mErr)
+				require.True(t, rowHasUnrecognizedInstanceFields(rowBytes),
+					"a nested additive field inside %s must be detected as unrecognized", tc.field)
+
+				alive := makeAliveInstance("alive", repoPath)
+				storage, err := NewStorage(state, "")
+				require.NoError(t, err)
+				require.NoError(t, storage.SaveInstances([]*Instance{alive}))
+
+				got := rowsByTitle(t, state, repoPath)
+				require.Contains(t, got, "loading-nested",
+					"a %s row with a newer binary's additive marker inside %s must be preserved, "+
+						"not reaped: the marker is dropped on decode and isLegacyTransientGhostRow sees no marker",
+					statusName(status), tc.field)
+				// The nested additive field must survive the checkpoint verbatim
+				// on the raw bytes the checkpoint wrote.
+				var afterArr []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(state.data[repoID], &afterArr))
+				for _, r := range afterArr {
+					if string(r["title"]) == `"loading-nested"` {
+						var nested map[string]json.RawMessage
+						require.NoError(t, json.Unmarshal(r[tc.field], &nested))
+						require.Contains(t, nested, "future_recovery",
+							"the nested additive field must survive the checkpoint verbatim so a newer binary can read it (#6/#El9)")
+					}
+				}
+			})
+		}
+	}
+}
