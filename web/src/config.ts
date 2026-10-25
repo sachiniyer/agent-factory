@@ -515,7 +515,11 @@ export class ConfigPane {
     row.append(this.renderControl(e));
 
     const status = this.status;
-    if (status && status.key === e.key) {
+    // A status for a dotted LEAF (web.terminal_font_size_desktop, written by the
+    // A−/A+ controls rather than this form) renders under its table's row — the
+    // only row the manifest offers for it. Without the prefix match the leaf's
+    // save outcome is invisible in this view entirely.
+    if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
         // The validator's message, verbatim — never reworded here.
         row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));

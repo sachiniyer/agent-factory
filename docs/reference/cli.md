@@ -864,6 +864,9 @@ Settable keys:
   root_agent.enabled         true | false
   root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
+  web                        compact JSON object of browser-terminal display preferences
+  web.terminal_font_size_phone   number in [4, 32] — xterm font size at the phone breakpoint (default 6.5)
+  web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -931,6 +934,8 @@ Examples:
   af config set root_agent.enabled true --project .
   af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
+  af config set web.terminal_font_size_phone 8
+  af config set web.terminal_font_size_desktop 14
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config set default_accounts.codex work --project ~/work/myrepo
