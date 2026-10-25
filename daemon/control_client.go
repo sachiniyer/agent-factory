@@ -170,7 +170,22 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 			owner, ownerErr := ResolveSupervisionOwner(configDir)
 			switch {
 			case ownerErr != nil:
-				log.WarningLog.Printf("could not determine daemon supervision owner; using ad-hoc launch: %v", ownerErr)
+				// Uncertain ownership on a possibly-claimed home: only a
+				// provably-absent supervisor leaves no supervision to escape
+				// (#2373), so consult the probe before falling back. Every
+				// other outcome could race a unit that claims this home, so
+				// it fails closed — the shape #4470 closed everywhere else
+				// but here, and the sibling adopt path enforces for
+				// OwnerUnknown (TestAdopt_OwnerUnknown_FailsClosed). The old
+				// failure-open fall-through was the residual escape #4475
+				// missed: it spawned an unsupervised daemon that won the
+				// home's socket before probeUnitSupervisor was ever asked.
+				presence, probeErr := probeUnitSupervisor(autostartGOOS)
+				if presence != supervisorAbsent {
+					log.WarningLog.Printf("could not determine daemon supervision owner; refusing to launch an unsupervised daemon: %v", ownerErr)
+					return unknownOwnerRefusal(autostartGOOS, ownerErr, probeErr)
+				}
+				log.WarningLog.Printf("could not determine daemon supervision owner and no service manager is present; falling back to an ad-hoc daemon: %v", ownerErr)
 			case owner == OwnerUnit:
 				return ensureDaemonThroughUnitUntil(launch, deadline)
 			}

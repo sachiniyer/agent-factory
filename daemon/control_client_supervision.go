@@ -377,6 +377,44 @@ func unreachableSupervisorRefusal(goos string, probeErr error) error {
 	return fmt.Errorf("the installed daemon service supervises this home but its service manager cannot be invoked from this environment (%v); refusing to launch an unsupervised daemon — %s", probeErr, formatRemedies(unreachableSupervisorRemedies(goos, probeErr)))
 }
 
+// unknownOwnerRefusal is the fail-closed answer when ownership of the home is
+// uncertain — ResolveSupervisionOwner returned an error (the unit file is
+// unreadable, its baked AGENT_FACTORY_HOME is unresolvable, or the unit
+// directory itself cannot be located) — and the service manager is not
+// provably absent: a unit that claims this home may still be live, so an
+// ad-hoc spawn is the unsupervised escapee #4470 closed everywhere else but
+// here. Mirrors unreachableSupervisorRefusal: the cause is formatted (not
+// wrapped) so a stat errno cannot read as a merely-absent daemon through
+// isDaemonAbsentErr. The probe error, when the supervisor is unreachable
+// rather than absent, is folded into the cause so the operator sees both why
+// ownership could not be determined and why absence could not be confirmed.
+func unknownOwnerRefusal(goos string, ownerErr, probeErr error) error {
+	cause := ownerErr
+	if probeErr != nil {
+		cause = fmt.Errorf("%v; service manager could not be confirmed absent: %v", ownerErr, probeErr)
+	}
+	return fmt.Errorf("the installed daemon service's ownership of this home could not be determined (%v); refusing to launch an unsupervised daemon — %s", cause, formatRemedies(unknownOwnerRemedies(goos)))
+}
+
+// unknownOwnerRemedies orders the remedies for a home whose supervision owner
+// could not be determined. The ownership failure is the thing the operator
+// must investigate first; adopt is never named because it fails closed on the
+// same OwnerUnknown (TestAdopt_OwnerUnknown_FailsClosed), so it cannot repair
+// the resolution it cannot perform; and the unmanaged-home escape hatch is
+// always last. The directory hint is platform-specific so the operator looks
+// where this platform actually installs the autostart unit.
+func unknownOwnerRemedies(goos string) []string {
+	dirHint := "ensure HOME or an absolute XDG_CONFIG_HOME names the directory the installed unit lives under"
+	if goos == "darwin" {
+		dirHint = "ensure HOME names the directory the installed launch agent lives under (~/Library/LaunchAgents)"
+	}
+	return []string{
+		fmt.Sprintf("resolve the ownership failure described above and retry: clear any filesystem problem on the autostart unit path (an unreadable file, a directory at the path, or a broken symlink) and reinstall with `af daemon install`, or %s", dirHint),
+		"do not expect `af daemon adopt` to help from here (it cannot resolve the owner either and refuses the same way)",
+		uninstallRemedy,
+	}
+}
+
 func unitStartRefusal(goos string, startErr error) error {
 	return fmt.Errorf("the installed daemon service supervises this home but could not be started (%w); refusing to launch an unsupervised daemon — %s", startErr, formatRemedies(unitStartRemedies(goos, classifyUnitStartFailure(goos, startErr))))
 }

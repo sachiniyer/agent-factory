@@ -330,6 +330,161 @@ func TestEnsureDaemonUnreachableSupervisorRefusesAdHoc(t *testing.T) {
 	}
 }
 
+// TestEnsureDaemonUnknownOwnerRefusesAdHoc closes the supervision-escape path
+// that #4470/#4475 left open in the ensure cold-start: when
+// ResolveSupervisionOwner returns an error and the service manager is not
+// provably absent, an ad-hoc spawn is the unsupervised escapee this gate
+// exists to refuse. The sibling adopt path fails closed on the same
+// OwnerUnknown (TestAdopt_OwnerUnknown_FailsClosed); the ensure path failed
+// open here, and the only trace was a warning line detach-spawned clients
+// never saw. The first row reproduces the report's end-to-end escape: a
+// home-claiming unit (verified to resolve to OwnerUnit when readable) is made
+// unreadable (a directory at the unit path — EISDIR, the same injection
+// TestAutostartUnitServesHome_StatPresentButUnreadable uses) under a live
+// service manager, the impostor-wins-the-socket scenario #4470 describes.
+// Every non-absent supervisor state refuses; only a provably-absent one keeps
+// the #2373 ad-hoc fallback.
+func TestEnsureDaemonUnknownOwnerRefusesAdHoc(t *testing.T) {
+	t.Run("unreadable unit, supervisor present", func(t *testing.T) {
+		marker, home := installEnsureTestUnitAndManager(t, false) // booted + systemctl, home-claiming unit
+		// Sanity: the unit claims this home when it can be read, so the
+		// unreadable failure below is a real "claimed home" escape, not the
+		// benign no-claim case the old `unknown` subtest pinned.
+		owner, ownerErr := ResolveSupervisionOwner(home)
+		if owner != OwnerUnit || ownerErr != nil {
+			t.Fatalf("prereq: readable unit must resolve to OwnerUnit, got owner=%v err=%v", owner, ownerErr)
+		}
+		unitPath, err := autostartUnitFilePath()
+		if err != nil {
+			t.Fatalf("resolve unit path: %v", err)
+		}
+		if err := os.Remove(unitPath); err != nil {
+			t.Fatalf("remove unit file: %v", err)
+		}
+		// A directory at the unit path: os.Stat succeeds (AutostartInstalled
+		// is true) while os.ReadFile fails with EISDIR — a read failure, not
+		// absence, the production shape that must fail closed.
+		if err := os.Mkdir(unitPath, 0o755); err != nil {
+			t.Fatalf("stage directory at unit path (EISDIR): %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(unitPath) })
+
+		warnBuf := captureWarnings(t)
+		startServer, _ := ensureTestServerStarter(t)
+		adHocLaunched := false
+		err = ensureDaemonWithLauncher(func() error {
+			adHocLaunched = true
+			return startServer()
+		})
+		if err == nil {
+			t.Fatal("an unreadable home-claiming unit under a live supervisor produced an ad-hoc daemon — the #4470 escape")
+		}
+		if !strings.Contains(err.Error(), "ownership of this home could not be determined") {
+			t.Fatalf("refusal must name the ownership failure, got: %v", err)
+		}
+		assertRemedyOrder(t, renderedRemedies(t, err), remedyOwnerResolveLead, remedyAdoptWontHelp, uninstallRemedy)
+		if adHocLaunched {
+			t.Fatal("uncertain ownership spawned an unsupervised daemon")
+		}
+		if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("an uncertain-ownership cold start invoked the service manager; marker stat = %v", statErr)
+		}
+		if !strings.Contains(warnBuf.String(), "could not determine daemon supervision owner") {
+			t.Fatalf("fallback must warn about the ownership failure; log = %q", warnBuf.String())
+		}
+		if strings.Contains(warnBuf.String(), "using ad-hoc launch") {
+			t.Fatalf("the old fail-open warning survived; the uncertain-owner branch must not announce an ad-hoc launch it did not take: %q", warnBuf.String())
+		}
+	})
+
+	t.Run("unresolvable unit directory, supervisor unreachable", func(t *testing.T) {
+		// boot marker present, no systemctl in PATH — the Codex #4470 shape
+		// closed for the OwnerUnit path (TestEnsureDaemonUnreachableSupervisorRefusesAdHoc),
+		// mirrored here for the ownerErr path. The probe fails closed with
+		// supervisorUnreachable; the manager may be real, so an ad-hoc spawn
+		// is still an escapee.
+		home := testguard.SocketTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		withAutostartTestEnv(t, "linux")
+		autostartSystemdUserDir = func() (string, error) { return "", errors.New("unit directory unavailable") }
+		prevBooted := systemdBootedDir
+		t.Cleanup(func() { systemdBootedDir = prevBooted })
+		systemdBootedDir = t.TempDir() // booted marker present
+		t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+		t.Setenv("XDG_RUNTIME_DIR", "")
+		prevBusBase := systemdUserBusBase
+		t.Cleanup(func() { systemdUserBusBase = prevBusBase })
+		systemdUserBusBase = testguard.SocketTempDir(t)
+		t.Setenv("PATH", t.TempDir()) // no systemctl anywhere
+
+		silenceWarnings(t)
+		startServer, _ := ensureTestServerStarter(t)
+		adHocLaunched := false
+		err := ensureDaemonWithLauncher(func() error {
+			adHocLaunched = true
+			return startServer()
+		})
+		if err == nil {
+			t.Fatal("an unresolvable owner under an unreachable supervisor produced an ad-hoc daemon — the #4470 escape")
+		}
+		if !strings.Contains(err.Error(), "ownership of this home could not be determined") {
+			t.Fatalf("refusal must name the ownership failure, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "service manager could not be confirmed absent") {
+			t.Fatalf("refusal must fold the supervisor-probe failure into the cause, got: %v", err)
+		}
+		if adHocLaunched {
+			t.Fatal("uncertain ownership spawned an unsupervised daemon")
+		}
+	})
+
+	t.Run("unresolvable unit directory, supervisor absent", func(t *testing.T) {
+		// #2373 preserved: when the manager provably cannot exist in this
+		// environment, an uncertain owner hides no live unit, so there is no
+		// supervision to escape and the ad-hoc fallback remains the only
+		// working path — mirroring ensureDaemonThroughUnitUntil's
+		// supervisorAbsent arm (TestEnsureDaemonSupervisorAbsentFallsBackToAdHoc).
+		home := testguard.SocketTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		withAutostartTestEnv(t, "linux")
+		autostartSystemdUserDir = func() (string, error) { return "", errors.New("unit directory unavailable") }
+		prevBooted := systemdBootedDir
+		t.Cleanup(func() { systemdBootedDir = prevBooted })
+		// A nonexistent path: os.Stat returns ENOENT, the only proven-absent
+		// marker — and the user-bus side is sandboxed so a real
+		// /run/user/<uid>/systemd/private cannot smuggle a manager in.
+		systemdBootedDir = filepath.Join(t.TempDir(), "no-such-dir")
+		t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+		t.Setenv("XDG_RUNTIME_DIR", "")
+		prevBusBase := systemdUserBusBase
+		t.Cleanup(func() { systemdUserBusBase = prevBusBase })
+		systemdUserBusBase = testguard.SocketTempDir(t)
+
+		warnBuf := captureWarnings(t)
+		startServer, serverErr := ensureTestServerStarter(t)
+		adHocLaunched := false
+		err := ensureDaemonWithLauncher(func() error {
+			adHocLaunched = true
+			return startServer()
+		})
+		if err != nil {
+			t.Fatalf("supervisor-absent uncertain owner must return a reachable daemon: %v", err)
+		}
+		if err := serverErr(); err != nil {
+			t.Fatalf("start fake ad-hoc daemon: %v", err)
+		}
+		if !adHocLaunched {
+			t.Fatal("a host with no supervisor skipped the only launch path that can work")
+		}
+		if err := pingDaemon(); err != nil {
+			t.Fatalf("fallback returned nil but the daemon is not reachable: %v", err)
+		}
+		if !strings.Contains(warnBuf.String(), "falling back to an ad-hoc daemon") {
+			t.Fatalf("supervisor-absent uncertain owner must warn about the ad-hoc fallback; log = %q", warnBuf.String())
+		}
+	})
+}
+
 // TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass: the refusal's remedy
 // order depends on WHY the start failed. Where the manager could not be
 // reached at all — no session bus configured (a user cron job, a system
@@ -876,7 +1031,7 @@ func TestEnsureDaemonFromPathBypassesUnitPreference(t *testing.T) {
 	}
 }
 
-func TestEnsureDaemonForeignAbsentOrUnknownUnitKeepsAdHocPath(t *testing.T) {
+func TestEnsureDaemonForeignOrAbsentUnitKeepsAdHocPath(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		configure func(t *testing.T, unitDir, home string)
@@ -889,15 +1044,6 @@ func TestEnsureDaemonForeignAbsentOrUnknownUnitKeepsAdHocPath(t *testing.T) {
 				unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", t.TempDir())
 				if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
 					t.Fatalf("write foreign unit: %v", err)
-				}
-			},
-		},
-		{
-			name: "unknown",
-			configure: func(t *testing.T, _ string, _ string) {
-				t.Helper()
-				autostartSystemdUserDir = func() (string, error) {
-					return "", errors.New("unit directory unavailable")
 				}
 			},
 		},
@@ -1077,14 +1223,15 @@ func startServerWhenMarked(marker string, startServer func() error) func() {
 // reader acts in rather than whether a phrase appears somewhere (#4475
 // review).
 const (
-	remedyAdoptLead      = "run `af daemon adopt` ("
-	remedyAdoptFailsSame = "if adopt fails the same way, run this from a session with a service manager"
-	remedyAdoptHangsToo  = "if adopt hangs too, the service manager itself is not answering: interrupt adopt, then run this from a session with a service manager"
-	remedySessionLead    = "run this from a session with a service manager"
-	remedyAdoptWontHelp  = "do not expect `af daemon adopt` to help"
-	remedyUnmaskLead     = "lift the mask with `systemctl --user unmask " + autostartUnitName + "`, then restore the unit with `af daemon install`"
-	remedyReinstallLead  = "re-bootstrap the unit with `af daemon install`"
-	remedyPathLead       = "add the directory holding `"
+	remedyAdoptLead        = "run `af daemon adopt` ("
+	remedyAdoptFailsSame   = "if adopt fails the same way, run this from a session with a service manager"
+	remedyAdoptHangsToo    = "if adopt hangs too, the service manager itself is not answering: interrupt adopt, then run this from a session with a service manager"
+	remedySessionLead      = "run this from a session with a service manager"
+	remedyAdoptWontHelp    = "do not expect `af daemon adopt` to help"
+	remedyUnmaskLead       = "lift the mask with `systemctl --user unmask " + autostartUnitName + "`, then restore the unit with `af daemon install`"
+	remedyReinstallLead    = "re-bootstrap the unit with `af daemon install`"
+	remedyPathLead         = "add the directory holding `"
+	remedyOwnerResolveLead = "resolve the ownership failure described above and retry: clear any filesystem problem on the autostart unit path"
 )
 
 var renderedRemedyRE = regexp.MustCompile(`(?:^|;) \((\d+)\) `)
@@ -1267,6 +1414,21 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			// Accepted but silent: waiting and adopt stay the working verbs.
 			assertRemedyOrder(t, unitReadinessRemedies(goos),
 				"retry shortly", "check `"+unitStatusDiagnostic(goos)+"`", "reclaim the unit's daemon with `af daemon adopt`", uninstallRemedy)
+
+			// Uncertain ownership: the operator resolves the cause first, adopt
+			// is never named (it fails closed on the same OwnerUnknown), and the
+			// unmanaged-home escape hatch is last. The directory hint is
+			// platform-specific so the operator looks where this platform
+			// actually installs the autostart unit.
+			unknownOrder := unknownOwnerRemedies(goos)
+			assertRemedyOrder(t, unknownOrder, remedyOwnerResolveLead, remedyAdoptWontHelp, uninstallRemedy)
+			dirHint := "ensure HOME or an absolute XDG_CONFIG_HOME names the directory the installed unit lives under"
+			if goos == "darwin" {
+				dirHint = "ensure HOME names the directory the installed launch agent lives under (~/Library/LaunchAgents)"
+			}
+			if !strings.Contains(unknownOrder[0], dirHint) {
+				t.Fatalf("%s unknownOwner lead %q must name the directory hint %q", goos, unknownOrder[0], dirHint)
+			}
 		})
 	}
 }
