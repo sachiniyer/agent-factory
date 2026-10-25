@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -657,33 +656,9 @@ const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := staticDefaultConfig()
-	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
-		// An alias can resolve to a full command with flags (e.g. "claude
-		// --model opus"), which is already shell syntax and must not be quoted
-		// wholesale. Quote only a provable executable-path prefix and preserve
-		// the alias-provided argument suffix (#569, #2323).
-		command := shellQuoteDetectedCommand(claudePath)
-		override := command + " " + DetectedClaudePermissionsFlag
-		// Defense in depth: the auto-detected override is persisted verbatim
-		// (it is materialized as config.toml on first run) and then executed
-		// through /bin/sh -c in every claude session pane, and account-scoped
-		// launch admission parses it with the same predicate. Refuse to
-		// persist a value that is not even valid single-simple-call shell
-		// syntax — e.g. a probe result whose alias-value boundary quote was
-		// corrupted into an unbalanced quote — rather than making every
-		// session die on launch with `Syntax error: Unterminated quoted
-		// string` and no fallback to the bare program name. Omitting the
-		// override falls back to a $PATH lookup of "claude" at exec time,
-		// the same posture as a probe that found nothing.
-		if sessionenv.CommandIsSingleSimpleCall(override) {
-			cfg.ProgramOverrides = map[string]string{
-				tmux.ProgramClaude: override,
-			}
-		} else {
-			log.WarningLog.Printf(
-				"claude probe detected command %q but the composed program_overrides value %q is not valid "+
-					"single shell command syntax; omitting the auto-detected override (claude will resolve via $PATH at launch)",
-				claudePath, override)
+	if override, set := defaultClaudeOverride(); set {
+		cfg.ProgramOverrides = map[string]string{
+			tmux.ProgramClaude: override,
 		}
 	}
 

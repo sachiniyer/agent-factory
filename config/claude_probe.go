@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -98,6 +99,81 @@ func GetClaudeCommand() (string, error) {
 		}
 	})
 	return cached.path, cached.err
+}
+
+// claudeOverrideResult coalesces the composed, validated program_overrides
+// value for the auto-detected claude command for one probe environment, mirroring
+// GetClaudeCommand's per-key Once. DefaultConfig rebuilds up to four times per
+// TUI startup (main's ResolveConfig, newHome's LoadConfig, the remote hook
+// import's ResolveConfig, and newHome's hooks ResolveConfig) and later
+// LoadConfig calls can add more; without this cache each rebuild would re-run
+// the compose→validate path on the same probe result and, when the composed
+// override is not valid single-simple-call shell syntax, re-emit the same
+// "omitting the auto-detected override" warning. Caching the outcome collapses
+// the repeats into one validation and one warning per environment, the same
+// posture as the missing-command warning coalesced in GetClaudeCommand.
+type claudeOverrideResult struct {
+	once     sync.Once
+	override string
+	set      bool
+}
+
+var (
+	claudeOverrideMu    sync.Mutex
+	claudeOverrideCache = map[string]*claudeOverrideResult{}
+)
+
+// defaultClaudeOverride returns the auto-detected claude program_overrides
+// value for the current probe environment, composed from the cached probe
+// result (GetClaudeCommand) plus af's permissions flag and validated as a
+// single simple shell call. The composition, validation, and any "omitted"
+// warning are memoized per environment so repeated DefaultConfig rebuilds do
+// not duplicate them. set is false (and override empty) when the probe found
+// no claude or the composed override is not valid single-simple-call syntax;
+// in the latter case the warning is emitted exactly once per environment.
+func defaultClaudeOverride() (override string, set bool) {
+	key := os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+	claudeOverrideMu.Lock()
+	cached, ok := claudeOverrideCache[key]
+	if !ok {
+		cached = &claudeOverrideResult{}
+		claudeOverrideCache[key] = cached
+	}
+	claudeOverrideMu.Unlock()
+
+	cached.once.Do(func() {
+		claudePath, err := GetClaudeCommand()
+		if err != nil || claudePath == "" {
+			return
+		}
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
+		composed := command + " " + DetectedClaudePermissionsFlag
+		// Defense in depth: the auto-detected override is persisted verbatim
+		// (it is materialized as config.toml on first run) and then executed
+		// through /bin/sh -c in every claude session pane, and account-scoped
+		// launch admission parses it with the same predicate. Refuse to
+		// persist a value that is not even valid single-simple-call shell
+		// syntax — e.g. a probe result whose alias-value boundary quote was
+		// corrupted into an unbalanced quote — rather than making every
+		// session die on launch with `Syntax error: Unterminated quoted
+		// string` and no fallback to the bare program name. Omitting the
+		// override falls back to a $PATH lookup of "claude" at exec time,
+		// the same posture as a probe that found nothing.
+		if sessionenv.CommandIsSingleSimpleCall(composed) {
+			cached.override = composed
+			cached.set = true
+			return
+		}
+		log.WarningLog.Printf(
+			"claude probe detected command %q but the composed program_overrides value %q is not valid "+
+				"single shell command syntax; omitting the auto-detected override (claude will resolve via $PATH at launch)",
+			claudePath, composed)
+	})
+	return cached.override, cached.set
 }
 
 // shellQuoteDetectedCommand quotes the filesystem-backed executable at the

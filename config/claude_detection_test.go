@@ -383,3 +383,37 @@ func TestDefaultConfigOmitsPersistingUnprovableAliasEndToEnd(t *testing.T) {
 	assert.Contains(t, warnings.String(), "omitting the auto-detected override",
 		"omission must be audible: a silent fall-back hides a probe bug from the operator")
 }
+
+// TestDefaultConfigOmitsInvalidOverrideWarnsOnce pins the coalescing of the
+// "omitting the auto-detected override" warning: a normal TUI startup rebuilds
+// DefaultConfig up to four times and later LoadConfig calls can add more, but
+// the warning must fire exactly once per probe environment — the same posture
+// as the missing-command warning (TestDefaultConfigLogsMissingClaudeOnce).
+// Without coalescing, each rebuild re-validated the cached probe result and
+// re-emitted the same warning (#5526 review).
+func TestDefaultConfigOmitsInvalidOverrideWarnsOnce(t *testing.T) {
+	// A fake shell that ignores its args and prints a zsh `which`-form alias
+	// line whose value has an unbalanced trailing apostrophe. The parser does
+	// not strip a wrapper here (zsh form, no backtick), so the value reaches
+	// the guard with its unbalanced quote intact and the composed override is
+	// omitted — the same shape TestDefaultConfigOmitsOverrideWithUnbalancedQuote
+	// uses, but deterministic and bash-free.
+	fakeShell := filepath.Join(t.TempDir(), "probe-shell")
+	shellScript := "#!/bin/sh\necho \"claude: aliased to claude --prompt 'hi\"\nexit 0\n"
+	require.NoError(t, os.WriteFile(fakeShell, []byte(shellScript), 0755))
+
+	t.Setenv("SHELL", fakeShell)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
+
+	warnings := captureLog(t, &log.WarningLog)
+	for range 5 {
+		cfg := DefaultConfig()
+		require.NotNil(t, cfg)
+		assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude],
+			"every rebuild must keep omitting the shell-invalid override")
+	}
+	assert.Equal(t, 1, strings.Count(warnings.String(), "\n"),
+		"five config reads of one invalid-override probe should emit the warning exactly once")
+	assert.Contains(t, warnings.String(), "omitting the auto-detected override")
+}
