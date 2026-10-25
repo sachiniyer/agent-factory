@@ -1058,7 +1058,18 @@ func TestEnsureDaemonForeignOrAbsentUnitKeepsAdHocPath(t *testing.T) {
 
 			managerDir := t.TempDir()
 			marker := filepath.Join(managerDir, "unexpected-manager-call")
-			script := "#!/bin/sh\nprintf 'called\\n' > " + shellQuote(marker) + "\n"
+			// systemctl --user show LoadState is a read-only probe
+			// ResolveSupervisionOwner uses to detect a unit the manager still
+			// has loaded after its on-disk file was removed; it is not a manager
+			// action, so the "unexpected-manager-call" marker must stay absent for
+			// it. An absent or foreign unit is not loaded, so the probe answers
+			// "not-found" and the home stays ad-hoc.
+			script := "#!/bin/sh\n" +
+				"if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"show\" ] && [ \"$4\" = \"--property=LoadState\" ]; then\n" +
+				"  printf 'not-found\\n'\n" +
+				"  exit 0\n" +
+				"fi\n" +
+				"printf 'called\\n' > " + shellQuote(marker) + "\n"
 			if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
 				t.Fatalf("write fake systemctl: %v", err)
 			}
@@ -1339,6 +1350,18 @@ func TestClassifyUnitStartFailureBothArms(t *testing.T) {
 // its unmanaged-home escape hatch (#4475 review).
 func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 	uid := strconv.Itoa(os.Getuid())
+	// The dangling-link escape hatch names the manual disable command by unit
+	// name (platform-specific), since af daemon uninstall follows the broken
+	// link to ENOENT and does nothing — the prefix pins the command and the
+	// disable substring so a darwin/linux regression cannot silently swap them.
+	danglingUninstallRemedyLead := map[string]string{
+		"linux":  "if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now " + autostartUnitName + "`",
+		"darwin": "if this home should be unmanaged, unload the loaded service by name with `launchctl bootout " + launchdServiceTarget() + "`",
+	}
+	danglingDisableCmd := map[string]string{
+		"linux":  "systemctl --user disable --now " + autostartUnitName,
+		"darwin": "launchctl bootout " + launchdServiceTarget(),
+	}
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			for _, tc := range []struct {
@@ -1419,8 +1442,10 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			// is never named (it fails closed on the same OwnerUnknown), and the
 			// unmanaged-home escape hatch is last. The directory hint is
 			// platform-specific so the operator looks where this platform
-			// actually installs the autostart unit.
-			unknownOrder := unknownOwnerRemedies(goos)
+			// actually installs the autostart unit. A generic ownership failure
+			// (an unreadable unit, an unresolvable home) names the standard
+			// uninstall escape hatch.
+			unknownOrder := unknownOwnerRemedies(goos, nil)
 			assertRemedyOrder(t, unknownOrder, remedyOwnerResolveLead, remedyAdoptWontHelp, uninstallRemedy)
 			dirHint := "ensure HOME or an absolute XDG_CONFIG_HOME names the directory the installed unit lives under"
 			if goos == "darwin" {
@@ -1428,6 +1453,19 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			}
 			if !strings.Contains(unknownOrder[0], dirHint) {
 				t.Fatalf("%s unknownOwner lead %q must name the directory hint %q", goos, unknownOrder[0], dirHint)
+			}
+
+			// A dangling unit symlink defeats af daemon uninstall (UninstallAutostart
+			// stats the broken link as ENOENT and reports the home uninstalled without
+			// disabling the loaded job), so the escape hatch names the manual disable
+			// and link cleanup by unit name instead of the no-op uninstall.
+			danglingOrder := unknownOwnerRemedies(goos, fmt.Errorf("dangling link: %w", errDanglingUnitLink))
+			assertRemedyOrder(t, danglingOrder, remedyOwnerResolveLead, remedyAdoptWontHelp, danglingUninstallRemedyLead[goos])
+			if !strings.Contains(danglingOrder[2], danglingDisableCmd[goos]) {
+				t.Fatalf("%s dangling escape %q must name the manual disable command %q", goos, danglingOrder[2], danglingDisableCmd[goos])
+			}
+			if strings.Contains(danglingOrder[2], uninstallRemedy) {
+				t.Fatalf("%s dangling escape must not name the no-op `af daemon uninstall`: %q", goos, danglingOrder[2])
 			}
 		})
 	}
