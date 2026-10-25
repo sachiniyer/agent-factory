@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -84,6 +85,15 @@ func TestLiteralCommandArgv(t *testing.T) {
 		{"escaped backtick inside double quotes", "claude \"a\\`b\"", []string{"claude", "a`b"}, true, ""},
 		{"inert backslash inside double quotes", `claude "a\tb"`, []string{"claude", `a\tb`}, true,
 			"\\t is not an escapable pair inside \"…\", so both bytes are literal"},
+		{"keyword as an argument stays literal", "claude time", []string{"claude", "time"}, true,
+			"keywords are quote-sensitive only in command position; mid-argv time is a word"},
+		{"quoted keyword spelling is a normal word", "'time' claude", []string{"time", "claude"}, true,
+			"quoted time is executable lookup — a different command than unquoted time"},
+		{"escaped keyword spelling is a normal word", `ti\me claude`, []string{"time", "claude"}, true,
+			"escaping any letter defeats keyword recognition, so ti\\me runs the time binary"},
+		{"nested braces without separator", "claude " + strings.Repeat("{", 400) + "a" + strings.Repeat("}", 400),
+			[]string{"claude", strings.Repeat("{", 400) + "a" + strings.Repeat("}", 400)}, true,
+			"400 open/close pairs and no separator is literal — and must not trip the cubic scan (review round 4)"},
 
 		{"command substitution", "claude $(id)", nil, false,
 			"the text on disk is not the word that runs"},
@@ -114,6 +124,13 @@ func TestLiteralCommandArgv(t *testing.T) {
 			"bash pairs braces: the outer { matches the LAST }, so {a{b},c} expands (review round 2)"},
 		{"nested brace range", "claude {a{1..3},x}", nil, false, ""},
 		{"brace comma after a nested group", "claude {{a,b},c}", nil, false, ""},
+		{"continuation before tilde expands", "claude \\\n~", nil, false,
+			"the \\<newline> vanishes before tilde-prefix evaluation, leaving an expanding ~ (review round 4)"},
+		{"unquoted keyword in command position", "time claude", nil, false,
+			"unquoted time is bash pipeline syntax, not the time binary"},
+		{"unquoted coproc in command position", "coproc claude", nil, false, ""},
+		{"unquoted conditional-test syntax", "[[ claude ]]", nil, false,
+			"[[ parses as a plain word under POSIX but is a bash keyword"},
 		{"ansi-c quoting", `claude $'x'`, nil, false,
 			"$'..' is literal $x to a POSIX sh but decoded x to bash — ambiguous, refuse"},
 		{"localized dollar quoting", `claude $"x"`, nil, false,
@@ -192,6 +209,10 @@ func TestLiteralCommandsEqual(t *testing.T) {
 		{"tilde-equals against quoted", "claude a=~", "claude 'a=~'", false, ""},
 		{"double-quoted escape against single-quoted", `claude "a\$b"`, `claude 'a\$b'`, false,
 			"the \"…\" side decodes to a$b while the '…' side stays a\\$b — different argv"},
+		{"continuation-tilde against quoted", "claude \\\n~", "claude '~'", false,
+			"the continued word still expands under bash while '~' is literal"},
+		{"unquoted keyword against quoted", "time claude", "'time' claude", false,
+			"unquoted time is syntax and quoted time is a binary — not the same command"},
 
 		{"escaped space equals quoted", `claude a\ b`, "claude 'a b'", true,
 			`POSIX decode: \  emits a literal space — both spell the word "a b"`},
@@ -202,6 +223,8 @@ func TestLiteralCommandsEqual(t *testing.T) {
 			"escaped braces are literal text; they cannot open a brace expansion"},
 		{"escaped dollar before quote", `claude a\$'x'`, "claude 'a$x'", true,
 			"the escaped $ is literal text; only a BARE $ adjacent to a quote is ambiguous"},
+		{"escaped keyword spelling equals quoted", `ti\me claude`, "'time' claude", true,
+			"escaping defeats keyword recognition — both spellings run the time binary"},
 		{"apostrophe idiom equals double-quoted", `claude '/o'\''b'`, `claude "/o'b"`, true,
 			"the ShellQuotePath spelling of /o'b round-trips"},
 		{"escaped dollar in quotes equals its decode", `claude "a\$b"`, "claude 'a$b'", true,

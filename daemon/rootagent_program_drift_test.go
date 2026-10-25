@@ -950,6 +950,11 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 		{"double-quoted escape differs from single-quoted",
 			`claude "a\$b"`, `claude 'a\$b'`, true,
 			"word 1 differs"},
+		{"unquoted keyword is real drift",
+			"time claude", "'time' claude", true,
+			"command text differs"},
+		{"escaped keyword spelling stays quiet",
+			`ti\me claude`, "'time' claude", false, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, warnings, repo, st, profile, root :=
