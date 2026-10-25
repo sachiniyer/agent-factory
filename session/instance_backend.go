@@ -638,6 +638,22 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
+	// Retire any worktree-missing probe that is out while this rename runs
+	// (#5102). The move below empties the recorded path, so a probe whose lstat
+	// lands inside it reads ENOENT for af's own move. When the title reuse that
+	// called this cannot persist, it calls back in to move the worktree home, and
+	// that ABA leaves the gw pointer, the recorded path and OpNone matching the
+	// probe's snapshot again over a directory that is present — and a rename moves
+	// neither lifecycle axis, so nothing else bumps the epoch the probe's
+	// re-qualification compares. Without this bump that stale absence is accepted
+	// and stamps a sticky Missing=true on a live archive. One bump per call is
+	// enough: i.mu is held for the whole body, so a probe re-qualifies either
+	// before this starts (and its lstat preceded the move) or after it ends (and
+	// sees the epoch moved). It is bumped before the first step that can touch
+	// the worktree rather than after a successful move, because a move that fails
+	// partway still had the path empty for a while.
+	i.stateEpoch++
+	i.touchLocked()
 	// Decide how the record follows the rename BEFORE renaming the branch, so a
 	// refusal leaves the branch and any checkout of it exactly as they were.
 	//
