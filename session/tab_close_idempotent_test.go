@@ -85,7 +85,7 @@ func TestCloseTab_StaleSessionAlreadyDead(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		"/tmp/stale-close-"+agentName, filepath.Join(t.TempDir(), "wt"),
+		"/tmp/stale-close-"+agentName, existingDir(t, filepath.Join(t.TempDir(), "wt")),
 		agentName, agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

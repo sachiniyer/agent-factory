@@ -106,7 +106,7 @@ func cleanupInstanceData(t *testing.T, agentName, shellName string) InstanceData
 		},
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"),
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")),
 			SessionName:  "tab-cleanup",
 			BranchName:   "tab-cleanup-branch",
 		},

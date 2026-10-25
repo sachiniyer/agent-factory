@@ -300,13 +300,6 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	return true
 }
 
-// SelectTab sets the pane's tab to idx, clamped into range. Used after a tab
-// close to land on a neighbor.
-func (w *TabbedWindow) SelectTab(idx int) {
-	w.setActiveTab(idx)
-	w.ClampActiveTab()
-}
-
 // tabLabels returns the labels for the bound instance's tabs. The label
 // derivation lives in tree.TabLabels (#1024 PR 3), shared with the sidebar tree
 // and the 1-9 jump keys. Never empty.
@@ -601,7 +594,7 @@ func (w *TabbedWindow) BeginScrollFill() {
 // tree selection, scroll mode — is set off with "—", and only the fragments
 // INSIDE each identity are joined with " · " (#2579). All three used to pick a
 // different mark for the same relationship, and with two sessions whose tab
-// labels match, `alpha · ◆ Agent · selected: beta · ◆ Agent` flattened into four
+// labels match, `alpha · ◆ Agent · cursor: beta · ◆ Agent` flattened into four
 // indistinguishable fragments. That clause is the only signal that the
 // workspace is not showing the row under the cursor, so it has to read at a
 // glance.
@@ -615,7 +608,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
+			text = fmt.Sprintf(" %s · %s — cursor: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
 		text = " Select a session "

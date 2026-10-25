@@ -20,7 +20,7 @@ func TestKillSessionRPCLogNamesResolvedTargetAndControlSocket(t *testing.T) {
 	info := captureDestructiveRPCInfoLog(t)
 
 	var resp KillSessionResponse
-	if err := (&controlServer{manager: manager}).KillSession(KillSessionRequest{
+	if err := (&controlServer{manager: manager}).KillSession(&KillSessionRequest{
 		ID: dataB.ID, Title: "stale-display-title",
 	}, &resp); err != nil {
 		t.Fatalf("KillSession: %v", err)

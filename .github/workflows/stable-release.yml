@@ -5,14 +5,16 @@ name: Stable Release
 # as vX.Y.(Z+1)-preview-N. See docs/dev/release-process.md (#1041).
 #
 # Job order is deliberate: validate and build are read-only, and every
-# mutation (main.go bump commit, tag push, release publish) happens in the
-# final job only after all four artifacts exist — a failed preflight or
-# build must never leave a dangling commit or tag on master. All jobs pin
-# github.sha so a master push racing the workflow cannot desync what was
-# validated, what was built, and what gets tagged. The artifacts are built
-# from github.sha while the tag points at the bump commit one ahead; the
-# binaries are identical in behavior because their version comes from
-# -ldflags, and the bump commit only rewrites the main.go fallback string.
+# mutation (the main.go bump commit, then tag + release, which are created
+# together) happens in the final job only after all four artifacts exist — a
+# failed preflight or build must never leave a dangling commit or tag on
+# master, and a failure mid-publish must never leave a tag with no release
+# (#5159). All jobs pin github.sha so a master push racing the workflow cannot
+# desync what was validated, what was built, and what gets tagged. The
+# artifacts are built from github.sha while the tag points at the bump commit
+# one ahead; the binaries are identical in behavior because their version
+# comes from -ldflags, and the bump commit only rewrites the main.go fallback
+# string.
 
 on:
   workflow_dispatch:
@@ -21,6 +23,12 @@ on:
         description: 'Stable version to release, no leading v (e.g. 1.1.0)'
         required: true
         type: string
+
+# One run at a time, never cancelled: two dispatches can share a version, and
+# cancelling mid-publish is exactly how drafts and tags get stranded (#5159).
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -33,7 +41,6 @@ jobs:
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
-        fetch-depth: 0
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -41,10 +48,18 @@ jobs:
         go-version: '1.25'
         cache: true
 
+    # Validate against tags that have a PUBLISHED release, not every ref on
+    # origin (#5159): a tag stranded without its release must neither count
+    # as the latest stable baseline nor block re-cutting the same version —
+    # re-running it is how the stranded state gets healed.
     - name: Validate requested version
       env:
         NEW_VERSION: ${{ inputs.version }}
-      run: git tag | .github/scripts/validate-stable-version.sh "$NEW_VERSION"
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh api "repos/${{ github.repository }}/releases?per_page=100" \
+          --paginate --jq '.[] | select(.draft == false) | .tag_name' | \
+          .github/scripts/validate-stable-version.sh "$NEW_VERSION"
 
     # The preflight runs the full suite, and internal/shellsuggest FAILS rather
     # than skips when a shell it claims (sh/bash/zsh) is absent (#1978/#1988).
@@ -114,10 +129,13 @@ jobs:
         retention-days: 1
 
   publish:
-    name: Tag and publish
+    name: Bump and publish
     needs: [validate, build]
     runs-on: ubuntu-latest
     steps:
+    # Full history is required: release-bump.sh rebases the bump commit onto
+    # whatever master became during the build (#1927), and a rebase has no
+    # merge-base to find in a one-commit checkout.
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
@@ -135,25 +153,47 @@ jobs:
     - name: Generate checksum manifest
       run: .github/scripts/write-sha256sums.sh dist
 
-    - name: Bump version, commit, and tag
+    # Lands the bump commit on master and reports the sha that actually
+    # landed (the rebase-retry may rewrite it) — that sha is what the release
+    # tags. Failure here leaves at most an untagged bump commit.
+    - name: Bump version and push to master
+      id: bump
       env:
         NEW_VERSION: ${{ inputs.version }}
-      run: .github/scripts/release-bump-and-tag.sh "$NEW_VERSION"
+      run: |
+        .github/scripts/release-bump.sh "$NEW_VERSION"
+        echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
     # Immutable releases require all assets to be attached before the release
-    # is published: create as draft, upload assets into the draft, then publish.
-    # Stable releases are marked --latest so the releases/latest redirect
-    # (install.sh, fresh installs, the stable update channel) serves them.
+    # is published: create as draft, upload assets into the draft, then
+    # publish. A draft creates no git ref; publishing creates the tag at the
+    # landed bump commit atomically with the release (#5159). Stable releases
+    # are marked --latest so the releases/latest redirect (install.sh, fresh
+    # installs, the stable update channel) serves them.
     - name: Publish release
       env:
         GH_TOKEN: ${{ github.token }}
         VERSION: ${{ inputs.version }}
         GH_REPO: ${{ github.repository }}
+        TARGET: ${{ steps.bump.outputs.sha }}
       run: |
+        .github/scripts/release-forget-version.sh "$VERSION"
         gh release create "v${VERSION}" \
           --title "v${VERSION}" \
+          --target "$TARGET" \
           --generate-notes \
           --draft \
           dist/*.tar.gz \
           dist/sha256sums.txt
         gh release edit "v${VERSION}" --draft=false --latest
+
+    # A cancelled job runs no cleanup, so self-healing lives in the pre-create
+    # forget above; this step covers an ordinary failure mid-publish leaving
+    # a draft behind.
+    - name: Forget the version on failure
+      if: failure()
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+        GH_REPO: ${{ github.repository }}
+      run: .github/scripts/release-forget-version.sh "$VERSION"

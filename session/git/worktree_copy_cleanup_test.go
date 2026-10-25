@@ -365,3 +365,61 @@ func TestCopyTree_RejectsExcessiveDepth(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "maximum supported depth")
 }
+
+// TestMoveDirCrossDevice_LinkIdentityFailureCleansStagingTree is the end-to-end
+// consequence through production code paths. A source tree with two hard-linked
+// regular files forces linkCopiedFile on the second BFS sighting; the
+// copyTreeAfterLinkCreate seam removes the freshly-linked node between Linkat
+// and identityAt, manufacturing the ENOENT racer subcase. The fixed
+// linkCopiedFile omits the entry, so the manifest matches the on-disk staging
+// tree, removeOpenedDirectory removes the staging root, and moveDirCrossDevice
+// returns the copy error without a cleanup failure and without stranding a
+// .af-copy-* directory in the destination parent.
+func TestMoveDirCrossDevice_LinkIdentityFailureCleansStagingTree(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "first.txt"), []byte("shared"), 0644))
+	// A hard link to first.txt so the BFS walk sights the same inode twice and
+	// the second sighting takes the linkCopiedFile branch.
+	require.NoError(t, os.Link(filepath.Join(src, "first.txt"), filepath.Join(src, "second.txt")))
+
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+
+	// Force the EXDEV fallback path so the cross-device tree copier runs.
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	// The copyTreeAfterLinkCreate seam (the only pre-identity seam in the
+	// suite) removes the freshly-linked node between Linkat and the following
+	// identityAt, simulating a racer that unlinks it inside the microsecond
+	// window.
+	originalHook := copyTreeAfterLinkCreate
+	copyTreeAfterLinkCreate = func(path string) error {
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { copyTreeAfterLinkCreate = originalHook })
+
+	err := moveDirCrossDevice(src, dest, "move")
+	require.Error(t, err, "the copy must fail when identityAt cannot find the linked node")
+	assert.Contains(t, err.Error(), "failed to identify hard link",
+		"the error must originate from the identity-failure branch")
+	assert.NotContains(t, err.Error(), "refusing to remove",
+		"the staging root must be cleaned up, not refused as unverified")
+	assert.NotContains(t, err.Error(), "failed to clean",
+		"cleanup must succeed so no stranded staging tree is reported")
+
+	// After the fix, no .af-copy-* staging directory should survive in the
+	// destination parent. Before the fix, exactly one would be stranded.
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	var orphans []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".af-copy-") {
+			orphans = append(orphans, e.Name())
+		}
+	}
+	assert.Empty(t, orphans,
+		"a failed cross-device move must not strand a .af-copy-* staging tree")
+}
