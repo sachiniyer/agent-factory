@@ -7427,9 +7427,12 @@ function modalChrome(opts) {
       (event.shiftKey ? last : first).focus();
     }
   };
-  if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
-  document.addEventListener("keydown", trap, true);
-  activeModalTrap = trap;
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   card.addEventListener("click", (e) => e.stopPropagation());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {
@@ -7456,6 +7459,9 @@ function modalChrome(opts) {
     },
     close() {
       backdrop.remove();
+    },
+    reactivate() {
+      installTrap();
     }
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
@@ -19042,6 +19048,7 @@ function openModal(m, focusCard = false, explicitInvoker) {
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    m.reactivate?.();
     if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
   });
 }

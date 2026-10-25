@@ -195,12 +195,16 @@ export function viewNavigation(onSelect: (view: View) => void): {
 }
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
- *  around the async submit. close() removes it from the DOM. */
+ *  around the async submit. close() removes it from the DOM. reactivate() reinstalls
+ *  the document-level Tab trap after a retained handle is remounted by openModal
+ *  without rebuilding it — an intervening modalChrome reaped this handle's trap, so
+ *  the reopened error dialog would otherwise have no Tab containment. */
 export interface ModalHandle {
   el: HTMLElement;
   setBusy(busy: boolean): void;
   setError(msg: string | null): void;
   close(): void;
+  reactivate(): void;
 }
 
 // The single live document-level Tab trap. modalChrome reaps the previous trap
@@ -296,9 +300,12 @@ export function modalChrome(opts: {
   // always opens through mountOverlay, which closes the current modal first, so
   // this swap is the disposal point: it bounds the live traps to one and reclaims
   // a retained handle's trap once a different modal has taken over.
-  if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
-  document.addEventListener("keydown", trap, true);
-  activeModalTrap = trap;
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
 
@@ -346,6 +353,19 @@ export function modalChrome(opts: {
       // without removing itself); the next modalChrome reclaims it when a new
       // modal opens.
       backdrop.remove();
+    },
+    reactivate() {
+      // Reinstall this handle's trap after a retained handle is remounted by
+      // openModal WITHOUT rebuilding it. modalChrome reaped this trap when an
+      // intervening modal opened (it swaps the single live trap to bound the
+      // count), so a refused RPC that closes modal A, lets the user open and
+      // close modal B in between, and then remounts A would otherwise leave A's
+      // reopened error dialog with no Tab containment: A's backdrop is
+      // reconnected but its trap was removed by modalChrome(B) and never
+      // reinstalled. openModal calls this on every (re)mount; for a fresh modal
+      // modalChrome already installed this trap, so this reaps and re-adds the
+      // same listener (a no-op), and for a remount it reclaims the live slot.
+      installTrap();
     },
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };

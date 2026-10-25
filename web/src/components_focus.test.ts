@@ -160,7 +160,7 @@ class FakeElement {
 }
 
 interface Built {
-  handle: { el: FakeElement; setBusy(busy: boolean): void; setError(msg: string | null): void; close(): void };
+  handle: { el: FakeElement; setBusy(busy: boolean): void; setError(msg: string | null): void; close(): void; reactivate(): void };
   body: FakeElement;
   confirmBtn: FakeElement;
   cancelBtn: FakeElement;
@@ -290,6 +290,36 @@ test("opening a new modal reaps the previous modal's document-level trap", () =>
   observableDoc.activeElement = docBody;
   const ev = dispatchKey("Tab", false);
   assert.equal(ev.defaultPrevented, false, "the reaped first trap no longer handles Tab");
+});
+
+test("reactivate reinstalls the trap after an intervening modal opened and closed", () => {
+  // The Codex finding on 1b68319a: modal A is optimistically closed while its RPC
+  // is pending, the user opens and closes modal B in between, and A is then
+  // definitively refused. modalChrome(B) reaped A's trap, and close(B) left B's
+  // inert trap as the live one. index.ts openModal re-inserts A's handle without
+  // rebuilding it (no modalChrome), so A's reopened error dialog had no live Tab
+  // trap. reactivate() reclaims the live slot for A's trap on the remount.
+  const [a, b] = buildN(2);
+  // A is optimistically closed while its RPC is in flight; B opens (reaping A's
+  // trap) and then closes, leaving B's inert trap as the live one.
+  a.handle.close();
+  b.handle.close();
+  // openModal(A) re-inserts A's backdrop but does NOT rebuild it, so the trap is
+  // gone until reactivate reinstalls it. Before reactivate, Tab escapes A.
+  a.handle.el.isConnected = true;
+  observableDoc.activeElement = docBody;
+  const beforeReactivate = dispatchKey("Tab", false);
+  assert.equal(beforeReactivate.defaultPrevented, false,
+    "before reactivate, the reaped A trap is gone and Tab escapes the remounted dialog");
+  // reactivate() — the seam openModal calls on every (re)mount — reclaims the live
+  // slot for A's trap, restoring Tab containment on the remounted handle.
+  a.handle.reactivate();
+  observableDoc.activeElement = docBody;
+  const afterReactivate = dispatchKey("Tab", false);
+  assert.equal(afterReactivate.defaultPrevented, true,
+    "reactivate restored Tab containment on the remounted handle");
+  assert.notEqual(observableDoc.activeElement, docBody, "focus is pulled back into the remounted dialog");
+  assert.equal((docListeners.keydown ?? []).length, 1, "reactivate reaps the stale trap and leaves one live trap");
 });
 
 test("setBusy(true) moves focus off a focused footer button before disabling it", () => {
