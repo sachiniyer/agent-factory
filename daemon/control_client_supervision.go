@@ -30,14 +30,71 @@ const (
 // read/parse/canonicalization failure is explicitly unknown rather than being
 // inverted into either owner.
 func ResolveSupervisionOwner(configDir string) (SupervisionOwner, error) {
-	serves, _, err := AutostartUnitServesHome(configDir)
+	serves, installed, err := AutostartUnitServesHome(configDir)
 	if err != nil {
 		return OwnerUnknown, err
 	}
 	if serves {
 		return OwnerUnit, nil
 	}
+	// A dangling symlink at the unit path (or an ancestor directory of it) reads
+	// as "not installed" through os.ReadFile — ENOENT follows the link — so
+	// AutostartUnitServesHome returns (false, false, nil), the same shape as a
+	// truly absent unit. But a unit the service manager loaded before its target
+	// was removed still claims this home, and a cold start that treated the
+	// broken link as absence would spawn the unsupervised escapee #4470/#4475
+	// close everywhere but here: ResolveSupervisionOwner would hand back
+	// OwnerAdHoc and the ensure path's ownerErr gate is never reached. A present
+	// symlink whose target cannot be resolved is a read failure, not a
+	// proven-absent unit, so it is OwnerUnknown — the ensure path then refuses
+	// an ad-hoc launch unless the manager is provably absent. Only a path no
+	// broken link masks stays the ad-hoc case the #2373 fallback exists for.
+	if !installed {
+		if path, pathErr := autostartUnitFilePath(); pathErr == nil && path != "" && danglingUnitLink(path) {
+			return OwnerUnknown, fmt.Errorf("the autostart unit %s is a dangling symlink: %w", path, os.ErrNotExist)
+		}
+	}
 	return OwnerAdHoc, nil
+}
+
+// danglingUnitLink reports whether path, or any ancestor directory of it, is a
+// symlink whose target does not exist. os.ReadFile and os.Stat follow symlinks,
+// so a broken link reads as ENOENT there — indistinguishable from a truly absent
+// path. Lstat does NOT follow the final component, so a present link with a
+// missing target is detectable at the path; walking the ancestors finds the same
+// shape one directory up, where a broken link makes every descendant unreadable
+// without one being a symlink itself. A real entry at any level (a directory or
+// file that Lstat resolves) means the missing entry below it is a truly absent
+// path, not a broken link, and a non-IsNotExist Lstat error is a read failure
+// AutostartUnitServesHome already reported through its own path resolution.
+func danglingUnitLink(path string) bool {
+	for p := path; p != "" && p != string(filepath.Separator); p = filepath.Dir(p) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			// A missing component keeps walking up: an ancestor may still be a
+			// broken link whose dangling target made this component unreadable.
+			// A non-absence error is AutostartUnitServesHome's path resolution
+			// to surface, not this gate's to re-classify.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			// A real entry exists here, so the missing descendant is a truly
+			// absent path under a present directory, not a broken link.
+			return false
+		}
+		// p is a symlink. If its target cannot be resolved, the link is
+		// dangling and masks whatever lived beyond it as absence.
+		if _, statErr := os.Stat(p); errors.Is(statErr, os.ErrNotExist) {
+			return true
+		}
+		// The symlink resolves, so a missing descendant under the resolved
+		// target is a truly absent path, not a broken link.
+		return false
+	}
+	return false
 }
 
 // The unit gets a bounded share of EnsureDaemon's existing five-second ready
