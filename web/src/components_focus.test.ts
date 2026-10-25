@@ -211,11 +211,32 @@ test("the Tab trap is installed at the document level in capture phase, not on t
   assert.equal(cardOf(built).listeners.keydown, undefined, "no card-level trap remains");
 });
 
-test("close() unregisters the document trap and removes the backdrop", () => {
+test("close() detaches the backdrop; the trap stays registered but inert and self-removes on the next keydown", () => {
   const built = build();
   built.handle.close();
-  assert.equal((docListeners.keydown ?? []).length, 0, "close removes the trap listener");
   assert.equal(built.handle.el.isConnected, false, "close removes the backdrop from the DOM");
+  // The trap is NOT eagerly unregistered: a refused create/kill/archive closes
+  // this modal and then remounts the same handle (index.ts openModal), and an
+  // eager remove would leave the reopened error dialog with no Tab containment.
+  // The guard self-removes once it sees the backdrop is gone.
+  assert.equal((docListeners.keydown ?? []).length, 1, "the trap is not eagerly unregistered");
+  dispatchKey("Tab", false);
+  assert.equal((docListeners.keydown ?? []).length, 0, "the trap self-removes after the backdrop detaches");
+});
+
+test("a close → remount cycle keeps the trap installed so Tab stays contained on the reopened modal", () => {
+  // The reported regression: index.ts closeModal() then openModal(m) on a refused
+  // create/kill/archive. close() detaches the backdrop; openModal re-inserts the
+  // same handle. The trap must survive the round trip, otherwise the reopened
+  // error dialog has no Tab containment and keyboard focus escapes the overlay.
+  const built = build();
+  built.handle.close();
+  // openModal re-inserts the backdrop (mountHost.replaceChildren(m.el)).
+  built.handle.el.isConnected = true;
+  observableDoc.activeElement = docBody;
+  const ev = dispatchKey("Tab", false);
+  assert.equal(ev.defaultPrevented, true, "the trap still contains Tab after a remount");
+  assert.notEqual(observableDoc.activeElement, docBody, "focus is pulled back inside the reopened dialog");
 });
 
 test("setBusy(true) moves focus off a focused footer button before disabling it", () => {

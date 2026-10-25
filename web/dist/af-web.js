@@ -7455,7 +7455,6 @@ function modalChrome(opts) {
       }
     },
     close() {
-      document.removeEventListener("keydown", trap, true);
       backdrop.remove();
     }
   };

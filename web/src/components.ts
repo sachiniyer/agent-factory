@@ -255,8 +255,11 @@ export function modalChrome(opts: {
   // A card-level trap cannot observe that event, so its rescue branch
   // (!card.contains(document.activeElement)) was dead exactly when it was needed.
   // The document-level listener sees every keydown while the modal is open, gates
-  // itself on the backdrop still being connected, and unregisters in close().
-  // Capture runs before the browser's default Tab focus shift, so the rescue can
+  // itself on the backdrop still being connected, and self-unregisters once the
+  // backdrop detaches (the guard below). It is NOT removed in close() so a
+  // remounted retained modal — close → openModal re-inserts the same handle —
+  // keeps its Tab containment; the guard handles final disposal lazily. Capture
+  // runs before the browser's default Tab focus shift, so the rescue can
   // preventDefault and pull focus back inside before it leaves the overlay.
   const backdrop = h("div", { class: "af-modal-backdrop" }, card);
   backdrop.addEventListener("click", () => opts.onCancel());
@@ -318,7 +321,13 @@ export function modalChrome(opts: {
       }
     },
     close() {
-      document.removeEventListener("keydown", trap, true);
+      // The backdrop detaches here; the trap self-removes on the next keydown
+      // once its guard above sees the backdrop is gone. We do NOT unregister
+      // the trap eagerly: a refused create/kill/archive RPC closes this modal
+      // and then remounts the same handle (index.ts openModal), and an eager
+      // remove would leave the reopened error dialog with no Tab containment.
+      // The guard's lazy removal handles final disposal; remount re-connects
+      // the backdrop and the trap keeps working.
       backdrop.remove();
     },
   };
