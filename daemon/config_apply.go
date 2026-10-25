@@ -328,7 +328,27 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		// refused apply would silently consume the fence's revocations and this
 		// warning would never reach the save surface (#5137 review).
 		if n := preSwapRevokedSandbox + m.sandboxTokens.revokeAll(); n > 0 {
-			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+			// The warning must describe the boundary the operator is actually
+			// left with. When the posture was REFUSED — or no TCP listener is
+			// bound at all — nothing answers unauthenticated callers on TCP,
+			// so the generic exposure wording would falsely report an active
+			// unauthenticated endpoint and give remediation for a boundary
+			// the refusal already enforced by taking the socket down
+			// (#5137 review).
+			servingAddr := ""
+			refusal := ""
+			if m.webListeners != nil {
+				servingAddr = m.ListenerAddress("network.listen_addr")
+				if m.lifecycle != nil {
+					refusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
+				}
+			}
+			var warning string
+			if refusal != "" || servingAddr == "" {
+				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s). Those sessions lose callback — and no TCP control listener is serving (the posture was refused rather than left answering unauthenticated over TCP), so no unauthenticated network endpoint exists. Re-enable network.require_token or bind a listener and re-provision to restore sandbox callback", n)
+			} else {
+				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+			}
 			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}

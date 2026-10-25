@@ -249,11 +249,24 @@ type postureFreeze struct {
 	pins []frozenRange
 }
 
+// posturePinHorizon bounds how long a pin's coverage can still be consulted.
+// A pin exists to carry a generation through its retire drain (~seconds);
+// past that window its livePosture is never reached again, and nothing else
+// would ever reclaim the range — every relax-or-refuse apply would otherwise
+// append a config snapshot forever and grow the mutex'd scan on the request
+// admission path without bound (#5137 review). A minute is tens of multiples
+// of the drain window, so expiry can never cut a live drain — only ranges
+// whose generations are provably finished draining.
+var posturePinHorizon = time.Minute
+
 // frozenRange freezes generations (prev, through] to cfg — the config they
-// were serving when this pin landed.
+// were serving when this pin landed. pinnedAt records when the pin landed so
+// coverage expires once every generation it could still serve has certainly
+// finished draining.
 type frozenRange struct {
-	cfg     *config.Config
-	through uint64
+	cfg      *config.Config
+	through  uint64
+	pinnedAt time.Time
 }
 
 // pin freezes the generations issued since the last pin, up to through, onto
@@ -270,11 +283,29 @@ func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 	if cfg == nil || through == 0 || config.ListenerBindRefusal(cfg) != "" {
 		return
 	}
+	now := time.Now()
 	f.mu.Lock()
+	f.pruneLocked(now)
 	if n := len(f.pins); n == 0 || through > f.pins[n-1].through {
-		f.pins = append(f.pins, frozenRange{cfg: cfg, through: through})
+		f.pins = append(f.pins, frozenRange{cfg: cfg, through: through, pinnedAt: now})
 	}
 	f.mu.Unlock()
+}
+
+// pruneLocked drops ranges past the pin horizon — every generation they could
+// still serve finished its retire drain long ago, so nothing consults them.
+// Dropping is safe precisely because expiry implies dead readers: after the
+// settle unfreeze no still-serving generation is ever covered, and a drained
+// generation's livePosture is unreachable — remapping such a generation onto
+// a later range can never be observed. Caller holds f.mu.
+func (f *postureFreeze) pruneLocked(now time.Time) {
+	keep := f.pins[:0]
+	for _, r := range f.pins {
+		if now.Sub(r.pinnedAt) <= posturePinHorizon {
+			keep = append(keep, r)
+		}
+	}
+	f.pins = keep
 }
 
 // unfreezeFrom lifts the freeze for every generation numbered seq or higher —
@@ -287,6 +318,7 @@ func (f *postureFreeze) pin(cfg *config.Config, through uint64) {
 func (f *postureFreeze) unfreezeFrom(seq uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pruneLocked(time.Now())
 	for len(f.pins) > 0 {
 		last := &f.pins[len(f.pins)-1]
 		if last.through < seq {
@@ -315,6 +347,7 @@ func (l *livePosture) current() *config.Config {
 	live := l.snapshot()
 	if f := l.freeze; f != nil {
 		f.mu.Lock()
+		f.pruneLocked(time.Now())
 		for _, r := range f.pins {
 			if l.seq <= r.through {
 				cfg := tightenFrozenPosture(r.cfg, live)

@@ -808,6 +808,36 @@ func TestOptInRevocationRejectsLateDrainHandlers(t *testing.T) {
 		"a late handler on the refused socket now crosses a token-required gate")
 }
 
+// TestPostureFreezeExpiresDrainedRanges pins the reclamation bound (#5137
+// review): a pin exists to carry a generation through its ~seconds retire
+// drain, and nothing else ever removes ranges — without expiry a long-running
+// daemon would accumulate a config snapshot per relax/refuse apply and grow
+// the mutex'd scan on every request's admission path. Ranges older than the
+// horizon (tens of multiples of the drain window) are reclaimed at the next
+// pin/consult, and a generation under an expired range reads live — which is
+// unreachable in practice because its drain ended long before expiry.
+func TestPostureFreezeExpiresDrainedRanges(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.RequireToken = true
+
+	var f postureFreeze
+	f.pins = []frozenRange{{cfg: cfg, through: 3, pinnedAt: time.Now().Add(-2 * posturePinHorizon)}}
+
+	// A generation under an expired range falls back to the live read: its
+	// drain ended long before expiry, so consulting it is already dead.
+	live := *cfg
+	live.RequireToken = false
+	live.AllowUnauthenticatedNetwork = true
+	drained := &livePosture{snapshot: func() *config.Config { return &live }, freeze: &f, seq: 2}
+	require.False(t, drained.current().RequireToken)
+
+	// And a fresh pin reclaims the dead range rather than growing beside it.
+	f.pin(cfg, 4)
+	require.Len(t, f.pins, 1,
+		"expired ranges are reclaimed at the next pin — pins cannot grow without bound")
+	require.Equal(t, uint64(4), f.pins[0].through)
+}
+
 // TestRetireWebBeforePostureSwapReportsSandboxRevocations pins the warning
 // plumbing (#5137 review): the pre-swap fence consumes the credential
 // registry before ApplyConfig's require_token transition block can count it —
