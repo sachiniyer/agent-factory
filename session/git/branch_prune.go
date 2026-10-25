@@ -75,7 +75,18 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	// determinate absence only when the root is not a bare layout; otherwise
 	// fall through to the show-ref probe (bareMetadataDirectory is the same
 	// structural check resolveRepoMetadataRoot uses on this path).
+	//
+	// bareMetadataDirectory is STRUCTURAL: it proves the layout git clones
+	// produce, not that git accepts this directory as a bare repo. A de-git'd
+	// directory that happens to carry HEAD/config/objects/refs would satisfy
+	// it, and `git -C repoRoot` could then walk upward to discover an
+	// ENCLOSING repo and answer — or let the caller's `git branch -D` act — on
+	// a same-named branch AF never created. Pin Git to repoRoot with GIT_DIR
+	// on the fall-through so discovery cannot escape it; a directory git does
+	// not accept as bare then errors (a failed probe, never absence) instead of
+	// reaching a parent.
 	gitPath := filepath.Join(repoRoot, ".git")
+	bareProbe := false
 	if _, err := os.Stat(gitPath); err != nil {
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("stat %s: %w", gitPath, err)
@@ -84,6 +95,7 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 			return false, nil
 		}
 		// Bare origin: refs live at the root; fall through to show-ref.
+		bareProbe = true
 	}
 	// Repository-selector variables (GIT_DIR, GIT_WORK_TREE, …) inherited from
 	// a daemon launched inside a hook would redirect the probe at a foreign
@@ -91,6 +103,12 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	// (worktree_remove_bounded.go). A foreign repo coincidentally holding the
 	// branch would fabricate a recovery handle that does not exist here.
 	repoEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	if bareProbe {
+		// repositoryPathEnvironment stripped any inherited GIT_DIR; pin Git to
+		// repoRoot so the bare fall-through probes exactly this directory and
+		// cannot discover an enclosing repo.
+		repoEnv = append(repoEnv, "GIT_DIR="+repoRoot)
+	}
 	check := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	check.Env = repoEnv
 	var stderr bytes.Buffer
