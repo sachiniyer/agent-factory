@@ -403,10 +403,6 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		clean = derr == nil && cerr == nil && dirty == 0 && commits == 0
 	}
 
-	id := fire.InstanceID
-	if id == "" {
-		id = session.NewInstanceID()
-	}
 	program := t.Program
 	if program == "" {
 		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
@@ -417,9 +413,23 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		created := true
 		createdByUs = &created
 	}
+	// The record's own identity is fresh: the interrupted attempt's bound id
+	// stays in the marker, not on this row — a still-draining create writing
+	// its own persisted row matches by title+stable-id, and reusing that id
+	// here would let a straggler write overwrite the leftover record.
+	recordPath := wtPath
+	if recordPath == "" {
+		// No worktree survived the branch-holder scan, so the leftover's
+		// worktree was never registered (or never created). Still record the
+		// path this attempt's placement would have used — the local backend
+		// refuses to materialize a row with an empty worktree path, and an
+		// unloadable record is skipped (with a warning) on every refresh tick
+		// instead of resting inert for inspection.
+		recordPath = taskFireExpectedWorktreePath(cfg, identityRoot, fire.Title, branch)
+	}
 	now := time.Now()
 	return &session.InstanceData{
-		ID:         id,
+		ID:         session.NewInstanceID(),
 		TaskID:     t.ID,
 		Title:      fire.Title,
 		Path:       repo.WorkspacePath(),
@@ -437,12 +447,38 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		StartupStateUnknown: !reap,
 		Worktree: session.GitWorktreeData{
 			RepoPath:          identityRoot,
-			WorktreePath:      wtPath,
+			WorktreePath:      recordPath,
 			SessionName:       sanitized,
 			BranchName:        branch,
 			BranchCreatedByUs: createdByUs,
 		},
 	}, nil
+}
+
+// taskFireExpectedWorktreePath derives where an interrupted create's worktree
+// would have been placed for the bound title, mirroring the placement rules in
+// session/git.resolveWorktreePlacement without its free-path suffixing — a
+// leftover record names the base location, not the next allocation.
+func taskFireExpectedWorktreePath(cfg *config.Config, repoRoot, title, branch string) string {
+	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
+		leaf := branch
+		if leaf == "" {
+			leaf = git.DerivedWorktreeSubdirectoryTitleSegment(title)
+		}
+		if leaf == "" {
+			leaf = "session"
+		}
+		configDir, err := config.GetConfigDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(configDir, "worktrees", leaf)
+	}
+	segment := git.DerivedWorktreePathTitleSegment(repoRoot, title)
+	if segment == "" {
+		segment = "session"
+	}
+	return filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+"-"+segment)
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to

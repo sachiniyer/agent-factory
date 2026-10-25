@@ -518,3 +518,23 @@ func TestRunTask_ReplayWithoutMarkerDeliversNormally(t *testing.T) {
 		t.Fatalf("a first-ever run must deliver; creates = %d", len(*creates))
 	}
 }
+
+// TestTaskFireExpectedWorktreePath pins the tombstone's recorded location to the
+// same placement the interrupted create would have used.
+func TestTaskFireExpectedWorktreePath(t *testing.T) {
+	sibling := taskFireExpectedWorktreePath(&config.Config{}, "/home/u/repo", "my-title", "dev/my-title")
+	want := filepath.Join("/home/u", "repo-my-title")
+	if sibling != want {
+		t.Fatalf("sibling path = %q, want %q", sibling, want)
+	}
+	sub := taskFireExpectedWorktreePath(
+		&config.Config{WorktreeRoot: config.WorktreeRootSubdirectory},
+		"/home/u/repo", "My Title", "dev/my-title")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+	if want := filepath.Join(home, "worktrees", "dev/my-title"); sub != want {
+		t.Fatalf("subdirectory path = %q, want %q", sub, want)
+	}
+}
