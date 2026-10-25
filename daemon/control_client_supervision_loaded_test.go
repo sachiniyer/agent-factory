@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,7 +88,17 @@ func TestEnsureDaemonLoadedUnitFileAbsentRefusesAdHoc(t *testing.T) {
 		if !strings.Contains(err.Error(), "loaded by the service manager but its on-disk file is absent") {
 			t.Fatalf("refusal must name the loaded-but-absent cause, got: %v", err)
 		}
-		assertRemedyOrder(t, renderedRemedies(t, err), remedyOwnerResolveLead, remedyAdoptWontHelp, uninstallRemedy)
+		// The loaded-but-file-absent case carries the same manual-unload escape
+		// hatch as the dangling-link case: af daemon uninstall follows the
+		// missing file to ENOENT with os.Stat and reports the home uninstalled
+		// without unloading the loaded job, so the standard uninstallRemedy
+		// would mislead the operator (Codex on #5528). The remedy stops at the
+		// unload — reinstalling would re-create the unit file the manager still
+		// has loaded and undo the unmanaged exit.
+		assertRemedyOrder(t, renderedRemedies(t, err), remedyOwnerResolveLead, remedyAdoptWontHelp, loadedAbsentUnloadRemedy(autostartGOOS))
+		if strings.Contains(renderedRemedies(t, err)[2], uninstallRemedy) {
+			t.Fatalf("loaded-but-absent escape must not name the no-op `af daemon uninstall`: %q", renderedRemedies(t, err)[2])
+		}
 		if adHocLaunched {
 			t.Fatal("uncertain ownership spawned an unsupervised daemon")
 		}
@@ -157,4 +168,43 @@ func TestEnsureDaemonLoadedUnitFileAbsentRefusesAdHoc(t *testing.T) {
 			t.Fatalf("fallback returned nil but the daemon is not reachable: %v", err)
 		}
 	})
+}
+
+// TestLoadedAbsentUnloadRemedyOrder pins the unmanaged-home escape hatch the
+// loaded-but-file-absent case carries: af daemon uninstall follows the missing
+// file to ENOENT with os.Stat and reports the home uninstalled without
+// unloading the loaded job (the same shape a dangling link takes), so the
+// standard uninstallRemedy would mislead the operator (Codex on #5528). The
+// escape names the manual disable/stop by unit name instead, never the no-op
+// uninstall, and never `af daemon install` (reinstalling would re-create the
+// unit file and re-enable the job, undoing the unmanaged exit the operator
+// followed this remedy to reach). Both platform arms are pinned so a
+// linux/darwin regression cannot silently swap them.
+func TestLoadedAbsentUnloadRemedyOrder(t *testing.T) {
+	loadedAbsentUnloadLead := map[string]string{
+		"linux":  "if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now " + autostartUnitName + "`",
+		"darwin": "if this home should be unmanaged, unload the loaded service by name with `launchctl bootout " + launchdServiceTarget() + "`",
+	}
+	loadedAbsentDisableCmd := map[string]string{
+		"linux":  "systemctl --user disable --now " + autostartUnitName,
+		"darwin": "launchctl bootout " + launchdServiceTarget(),
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			order := unknownOwnerRemedies(goos, fmt.Errorf("loaded but absent: %w", errLoadedUnitAbsent))
+			assertRemedyOrder(t, order, remedyOwnerResolveLead, remedyAdoptWontHelp, loadedAbsentUnloadLead[goos])
+			if !strings.Contains(order[2], loadedAbsentDisableCmd[goos]) {
+				t.Fatalf("%s loaded-but-absent escape %q must name the manual disable command %q", goos, order[2], loadedAbsentDisableCmd[goos])
+			}
+			if strings.Contains(order[2], uninstallRemedy) {
+				t.Fatalf("%s loaded-but-absent escape must not name the no-op `af daemon uninstall`: %q", goos, order[2])
+			}
+			if strings.Contains(order[2], "af daemon install") {
+				t.Fatalf("%s loaded-but-absent escape must not name `af daemon install` (it would undo the unload): %q", goos, order[2])
+			}
+			if strings.Contains(order[2], "dangling") {
+				t.Fatalf("%s loaded-but-absent escape must not name the dangling link: %q", goos, order[2])
+			}
+		})
+	}
 }

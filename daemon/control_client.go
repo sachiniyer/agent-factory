@@ -167,7 +167,7 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 		if configErr != nil {
 			log.WarningLog.Printf("could not resolve AF home while choosing daemon supervisor; using ad-hoc launch: %v", configErr)
 		} else {
-			owner, ownerErr := ResolveSupervisionOwner(configDir)
+			owner, ownerErr := resolveSupervisionOwner(configDir, deadline)
 			switch {
 			case ownerErr != nil:
 				// Uncertain ownership on a possibly-claimed home: only a

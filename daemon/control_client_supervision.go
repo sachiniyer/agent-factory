@@ -28,8 +28,22 @@ const (
 // ResolveSupervisionOwner derives whether the installed service-manager unit
 // belongs to configDir. An absent or foreign unit leaves this home ad-hoc; a
 // read/parse/canonicalization failure is explicitly unknown rather than being
-// inverted into either owner.
+// inverted into either owner. Callers without an admission deadline (adopt,
+// the upgrade actor) use this entry point; the loaded-unit probe the
+// on-disk-absent branch runs then falls back to its own bounded timeout.
 func ResolveSupervisionOwner(configDir string) (SupervisionOwner, error) {
+	return resolveSupervisionOwner(configDir, time.Time{})
+}
+
+// resolveSupervisionOwner is the deadline-aware core of ResolveSupervisionOwner.
+// The cold-start path (EnsureDaemon) threads its admission deadline through so
+// the loaded-unit probe the on-disk-absent branch runs cannot outlive the
+// caller's complete-admission budget: lock acquisition, the initial ping, or
+// the upgrade gate may have already spent most of the five-second window, and a
+// fresh two-second timeout would let a stalled systemctl exceed that window
+// (Codex on #5528). A zero deadline (the adopt/upgrade callers) keeps the
+// probe's own bound — those paths have no admission budget to honor.
+func resolveSupervisionOwner(configDir string, deadline time.Time) (SupervisionOwner, error) {
 	serves, installed, err := AutostartUnitServesHome(configDir)
 	if err != nil {
 		return OwnerUnknown, err
@@ -67,13 +81,22 @@ func ResolveSupervisionOwner(configDir string) (SupervisionOwner, error) {
 			// fails closed for an unreachable manager with a file it can read — so
 			// only a POSITIVELY confirmed loaded job reads OwnerUnknown, and a
 			// manager-less or not-loaded host keeps the #2373 ad-hoc fallback.
-			if unitLoadedByManager(autostartGOOS) {
-				return OwnerUnknown, fmt.Errorf("the autostart unit %s is loaded by the service manager but its on-disk file is absent; remove or unload the loaded job before launching an ad-hoc daemon", path)
+			if unitLoadedByManager(autostartGOOS, deadline) {
+				return OwnerUnknown, fmt.Errorf("the autostart unit %s is loaded by the service manager but its on-disk file is absent; remove or unload the loaded job before launching an ad-hoc daemon: %w", path, errLoadedUnitAbsent)
 			}
 		}
 	}
 	return OwnerAdHoc, nil
 }
+
+// errLoadedUnitAbsent marks the ownership failure where the autostart unit's
+// on-disk file is gone but the service manager still has the job loaded:
+// UninstallAutostart follows the missing file to ENOENT with os.Stat and reports
+// the home uninstalled without disabling or removing the loaded job, so
+// unknownOwnerRemedies names the manual disable and cleanup instead of the
+// no-op uninstall. The sentinel lets the remedy tell this case apart from a
+// plain read failure the way errDanglingUnitLink does the broken-link case.
+var errLoadedUnitAbsent = errors.New("the loaded service cannot be unloaded through its missing file")
 
 // errDanglingUnitLink marks the ownership failure where the autostart unit path
 // is a dangling symlink: UninstallAutostart cannot read through the broken link
@@ -102,7 +125,15 @@ var errDanglingUnitLink = errors.New("the loaded service cannot be read or remov
 // the ownerErr branch's probeUnitSupervisor already fails closed for an
 // unreachable manager with a file it can read. goos is an input so both arms
 // are testable on every host.
-func unitLoadedByManager(goos string) bool {
+//
+// deadline is the EnsureDaemon admission deadline when the probe runs from the
+// cold-start path: the command context is capped by admissionBoundedDeadline
+// so a stalled systemctl/launchctl cannot outlive the caller's
+// complete-admission budget (lock acquisition, the initial ping, or the
+// upgrade gate may already have spent most of the five-second window). A zero
+// deadline (adopt, the upgrade actor) falls back to the probe's own bounded
+// timeout, which those paths do not share.
+func unitLoadedByManager(goos string, deadline time.Time) bool {
 	switch goos {
 	case "linux":
 		// LoadState "loaded" means the manager holds the unit definition, even
@@ -114,7 +145,7 @@ func unitLoadedByManager(goos string) bool {
 		if _, err := exec.LookPath("systemctl"); err != nil {
 			return false
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), ensureUnitStartTimeout)
+		ctx, cancel := context.WithDeadline(context.Background(), admissionBoundedDeadline(deadline, ensureUnitStartTimeout))
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "systemctl", "--user", "show", autostartUnitName, "--property=LoadState", "--value").CombinedOutput()
 		if err != nil {
@@ -129,7 +160,7 @@ func unitLoadedByManager(goos string) bool {
 		if _, err := exec.LookPath("launchctl"); err != nil {
 			return false
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), ensureUnitStartTimeout)
+		ctx, cancel := context.WithDeadline(context.Background(), admissionBoundedDeadline(deadline, ensureUnitStartTimeout))
 		defer cancel()
 		return exec.CommandContext(ctx, "launchctl", "print", launchdServiceTarget()).Run() == nil
 	default:
@@ -539,23 +570,26 @@ func unknownOwnerRefusal(goos string, ownerErr, probeErr error) error {
 // same OwnerUnknown (TestAdopt_OwnerUnknown_FailsClosed), so it cannot repair
 // the resolution it cannot perform; and the unmanaged-home escape hatch is
 // always last. The directory hint is platform-specific so the operator looks
-// where this platform actually installs the autostart unit. The escape hatch
-// is the dangling-link manual disable when the ownership failure is a broken
-// unit symlink: af daemon uninstall follows the link with os.Stat, reads
-// ENOENT, and reports the home uninstalled without disabling or removing the
-// loaded job (UninstallAutostart in daemon/autostart.go), so the operator must
-// unload the service by name and clear the link by hand (the on-disk-absent
-// but loaded case, which os.Stat reads the same way, falls back to the standard
-// uninstall — its lead remedy already names reinstall, which recreates the
-// unit file the loaded job needs).
+// where this platform actually installs the autostart unit. The escape hatch is
+// the manual unload when the ownership failure is one af daemon uninstall
+// cannot repair: a broken unit symlink (UninstallAutostart follows the link
+// with os.Stat, reads ENOENT, and reports the home uninstalled without
+// disabling or removing the loaded job), and a loaded-but-file-deleted job
+// (os.Stat reads the missing file the same way), so in both cases the operator
+// must unload the service by name. The manual unload never names `af daemon
+// install`: this is the unmanaged-home exit, and reinstalling would recreate
+// and start the unit, undoing the unload (Codex on #5528).
 func unknownOwnerRemedies(goos string, ownerErr error) []string {
 	dirHint := "ensure HOME or an absolute XDG_CONFIG_HOME names the directory the installed unit lives under"
 	if goos == "darwin" {
 		dirHint = "ensure HOME names the directory the installed launch agent lives under (~/Library/LaunchAgents)"
 	}
 	escape := uninstallRemedy
-	if errors.Is(ownerErr, errDanglingUnitLink) {
+	switch {
+	case errors.Is(ownerErr, errDanglingUnitLink):
 		escape = danglingUninstallRemedy(goos)
+	case errors.Is(ownerErr, errLoadedUnitAbsent):
+		escape = loadedAbsentUnloadRemedy(goos)
 	}
 	return []string{
 		fmt.Sprintf("resolve the ownership failure described above and retry: clear any filesystem problem on the autostart unit path (an unreadable file, a directory at the path, or a broken symlink) and reinstall with `af daemon install`, or %s", dirHint),
@@ -569,12 +603,31 @@ func unknownOwnerRemedies(goos string, ownerErr error) []string {
 // broken link with os.Stat, reads ENOENT, and reports the home uninstalled
 // without disabling or removing the loaded job (UninstallAutostart in
 // daemon/autostart.go), so the operator must unload the service by name and
-// clear the link by hand before reinstalling.
+// clear the broken link by hand. It stops there: reinstalling with `af daemon
+// install` would recreate and start the unit (`enable --now` on linux,
+// `bootstrap` on darwin), undoing the unload the operator followed this
+// remedy to perform (Codex on #5528).
 func danglingUninstallRemedy(goos string) string {
 	if goos == "darwin" {
-		return fmt.Sprintf("if this home should be unmanaged, unload the loaded service by name with `launchctl bootout %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link and reinstall with `af daemon install`", launchdServiceTarget())
+		return fmt.Sprintf("if this home should be unmanaged, unload the loaded service by name with `launchctl bootout %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link", launchdServiceTarget())
 	}
-	return fmt.Sprintf("if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link and reinstall with `af daemon install`", autostartUnitName)
+	return fmt.Sprintf("if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now %s` (the unit path is a dangling symlink, so `af daemon uninstall` reads it as absent and leaves the loaded job in place), then remove the broken link", autostartUnitName)
+}
+
+// loadedAbsentUnloadRemedy is the unmanaged-home escape hatch when the
+// autostart unit's on-disk file was deleted while the manager still has the
+// job loaded: af daemon uninstall follows the missing file to ENOENT with
+// os.Stat and reports the home uninstalled without unloading the loaded job
+// (UninstallAutostart in daemon/autostart.go), so the operator must stop the
+// loaded service by name. There is no link to remove (the file is simply
+// absent, not a broken symlink), and like the dangling case this remedy stops
+// at the unload — reinstalling would re-create the unit file and re-enable the
+// job, undoing the unmanaged exit (Codex on #5528).
+func loadedAbsentUnloadRemedy(goos string) string {
+	if goos == "darwin" {
+		return fmt.Sprintf("if this home should be unmanaged, unload the loaded service by name with `launchctl bootout %s` (the unit file is absent but the service manager still has the job loaded, so `af daemon uninstall` reads it as absent and leaves the loaded job in place)", launchdServiceTarget())
+	}
+	return fmt.Sprintf("if this home should be unmanaged, disable and stop the loaded service by name with `systemctl --user disable --now %s` (the unit file is absent but the service manager still has the job loaded, so `af daemon uninstall` reads it as absent and leaves the loaded job in place)", autostartUnitName)
 }
 
 func unitStartRefusal(goos string, startErr error) error {

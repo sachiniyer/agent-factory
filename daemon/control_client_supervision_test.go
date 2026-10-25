@@ -1458,7 +1458,11 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			// A dangling unit symlink defeats af daemon uninstall (UninstallAutostart
 			// stats the broken link as ENOENT and reports the home uninstalled without
 			// disabling the loaded job), so the escape hatch names the manual disable
-			// and link cleanup by unit name instead of the no-op uninstall.
+			// and link cleanup by unit name instead of the no-op uninstall. The
+			// remedy stops at the unload and link cleanup: reinstalling with
+			// `af daemon install` would re-create the unit file and re-enable the
+			// job, undoing the unmanaged exit the operator followed this remedy to
+			// reach (Codex on #5528).
 			danglingOrder := unknownOwnerRemedies(goos, fmt.Errorf("dangling link: %w", errDanglingUnitLink))
 			assertRemedyOrder(t, danglingOrder, remedyOwnerResolveLead, remedyAdoptWontHelp, danglingUninstallRemedyLead[goos])
 			if !strings.Contains(danglingOrder[2], danglingDisableCmd[goos]) {
@@ -1466,6 +1470,9 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			}
 			if strings.Contains(danglingOrder[2], uninstallRemedy) {
 				t.Fatalf("%s dangling escape must not name the no-op `af daemon uninstall`: %q", goos, danglingOrder[2])
+			}
+			if strings.Contains(danglingOrder[2], "af daemon install") {
+				t.Fatalf("%s dangling escape must not name `af daemon install` (it would undo the unload): %q", goos, danglingOrder[2])
 			}
 		})
 	}
