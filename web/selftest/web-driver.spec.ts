@@ -7038,6 +7038,15 @@ test.describe("remote create → kill (one hook session, two flows)", () => {
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
 
+    // Capture the submit's request body: a session that comes up locally
+    // satisfies every assertion below while proving nothing about the remote
+    // path, so the picked backend must be read off the wire, not inferred.
+    let createBody: { backend?: string } | undefined;
+    await page.route("**/v1/CreateSession", async (route) => {
+      createBody = route.request().postDataJSON() as { backend?: string };
+      await route.continue();
+    });
+
     // The picker chain — daemon ListBackends → rendered options → reasoned
     // hints — is already proven by the local create above; here the field only
     // has to carry hook to the submit, the seam this pair exists to cover.
@@ -7062,6 +7071,9 @@ test.describe("remote create → kill (one hook session, two flows)", () => {
     // everything asserted below — row ready, Agent tab attached, ready marker —
     // arrives over the daemon's remote-pane proxy, not a local PTY.
     await modal.locator("button.af-primary").click();
+    expect(createBody?.backend, "the modal must send the picked backend — a dropped " +
+      "field would create locally and pass every later assertion without touching " +
+      "the remote path").toBe("hook");
 
     // The remote create crosses OpCreating for real: the row lands as an inert
     // creating row while launch_cmd provisions, and only the completed
@@ -7083,6 +7095,8 @@ test.describe("remote create → kill (one hook session, two flows)", () => {
     const lastStream = streamUrls[streamUrls.length - 1];
     expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
     expect(lastStream).not.toContain("tab=");
+
+    await page.unroute("**/v1/CreateSession");
 
     // Stash it for the kill flow.
     remoteCreatedTitle = created;
