@@ -253,21 +253,32 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// record and start the agent in. Rebuild and adoption both proved it and
 	// pinned its device/inode, but the hooks a rebuild starts, and anything else
 	// running as this user, can swap the name between that proof and the commit
-	// below — so the pin is reconfirmed before the commit (which clears the flag
-	// and persists the path as authoritative) and again before the respawn
-	// (#5102). A failure leaves the row archived, still flagged, and fenced by the
-	// git layer, and that state is persisted before the refusal is reported.
+	// below — so the pin is reconfirmed before the commit and again before the
+	// respawn (#5102). A failure leaves the row archived, still flagged, and
+	// fenced by the git layer, and that state is persisted before the refusal is
+	// reported.
+	//
+	// The worktree-missing flag does NOT clear here, though the worktree is back
+	// where af put it. The pin lives only in memory, so the flag is the one
+	// durable fence on a placed directory, and the commit below writes the
+	// restored path to disk before the respawn-boundary reconfirmation runs.
+	// Cleared first, that write claimed the path authoritative while its identity
+	// was still unverified at the boundary that matters: a daemon that exited
+	// before the second reconfirmation restarted on a row that trusted whatever
+	// a same-UID process had swapped in, and a later restore would relocate its
+	// bytes or start the agent there as the session's worktree. Kept set, the
+	// commit persists the "restore was placing…" reason the rebuild and adoption
+	// stamped for the restored path. A crash before a later commit carries the
+	// clear therefore restarts on a flagged row: the next restore finds a
+	// directory at the path and must re-prove it through moveArchivedWorktreeBack's
+	// flagged-row guard, or finds none and rebuilds. The only record that drops the
+	// flag names a directory verified at the respawn boundary. The clear is just
+	// before the respawn, below.
 	if placedByProof {
 		if err := m.reconfirmPlacedRestoreWorktree(repoID, req.Title, instance, "before recording it"); err != nil {
 			return "", err
 		}
 	}
-	// The worktree is back where af put it — moved back, or rebuilt from the
-	// branch — so a worktree-missing flag on this row is stale and the commit
-	// below must not carry it (#5102). The flag is sticky by design: only af
-	// re-placing the worktree clears it, and both routes above are such a
-	// placement.
-	instance.ClearWorktreeMissing()
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
 	// it exists only in memory, exactly as on moveArchivedWorktreeBack's cut-off
@@ -323,6 +334,15 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			return failedRestoredArchiveResult(instance, restoredPath, err)
 		}
 	}
+	// The worktree is back where af put it — moved back, or rebuilt or adopted
+	// and now verified at the respawn boundary — so a worktree-missing flag on
+	// this row is stale, and the respawn and the commits after it must not carry
+	// it (#5102). The flag is sticky by design: only af re-placing the worktree
+	// clears it, and both routes above are such a placement. It needs no persist
+	// of its own: either commit below carries it, and a crash during the respawn
+	// leaves the safer Missing=true from the first commit. Unconditional, because
+	// it is a no-op on a row that was never flagged.
+	instance.ClearWorktreeMissing()
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,
