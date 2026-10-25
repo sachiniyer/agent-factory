@@ -1187,6 +1187,9 @@ let page: Page;
 // module state, so a worker restart resets it — which is exactly why the two flows
 // that share it live in one serial describe rather than at the top level.
 let createdTitle = "";
+// The hook-backend twin of createdTitle, handed between the remote create and
+// remote kill pair below — module state for the same worker-restart reason.
+let remoteCreatedTitle = "";
 let realRailUnavailable = "";
 // Keep the tagged details at each declaration (instead of registering through a
 // wrapper) so a failure still reports its real source line; beforeEach uses the tag
@@ -6828,11 +6831,6 @@ test.describe("create → kill (one session, two flows)", () => {
   test.describe.configure({ mode: "serial" });
 
   test("create: the + New modal creates a session and its row appears", REAL_FIXTURE, async () => {
-    // This submit picks backend=hook, so the daemon provisions a real remote
-    // sandbox (clone + agent-server + remote readiness) — seconds warm, tens of
-    // seconds cold in this container. The default test budget leaves no margin
-    // for the asserting half on a cold box; triple it like the slow-create tests.
-    test.setTimeout(180_000);
     const created = `probe-created-${Date.now().toString(36)}`;
 
     // Regression guard (#1592 PR7 review): first move the CURRENT session onto a
@@ -6898,9 +6896,8 @@ test.describe("create → kill (one session, two flows)", () => {
     await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
-    // Back to the repo default: the notice clears and Create is live again. The
-    // round-trip proves the pick is not sticky; the submit below re-selects
-    // hook, so this create does NOT stay local.
+    // Back to the repo default: the notice clears, Create is live again, and the
+    // submit below sends NO backend — so this create stays local.
     await backendSelect.selectOption("");
     await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
@@ -6956,27 +6953,12 @@ test.describe("create → kill (one session, two flows)", () => {
     // Title is required; the project picker defaults to the scoped project (redesign
     // PR2 — the first mock repo A/B live in), so the created session lands there and is
     // visible in the scoped rail. Program is left at "Repo default" (claude → the fake
-    // agent).
+    // agent). Submit with the modal's Create button.
     await modal.locator('input[aria-label="Session title"]').fill(created);
-
-    // The submit goes out with backend=hook (#1933/#5107): the picker already
-    // proved the option exists and enables Create; sending it is the seam a
-    // regression could silently break — daemon-side remote create is covered by
-    // integration's TestWebCreateSessionOnHookBackend, so the browser half must
-    // carry the modal-to-createSession propagation all the way to a WORKING
-    // remote session. The fixture's coder-launch.sh is a real provisioner, so
-    // everything asserted below — row ready, Agent tab attached, ready marker —
-    // arrives over the daemon's remote-pane proxy, not a local PTY.
-    await backendSelect.selectOption("hook");
-    await expect(modal.locator(".af-backend-hint")).toHaveText("");
-    await expect(modal.locator("button.af-primary")).toBeEnabled();
     await modal.locator("button.af-primary").click();
 
     // The fast path may cross OpCreating between animation frames, but it must still
-    // close immediately and settle to the daemon's completed projection. The remote
-    // create crosses it for real: the row lands as an inert creating row while
-    // launch_cmd provisions, and only the completed projection selects it — so the
-    // waits below are sized for remote provisioning, not the local fast path.
+    // close immediately and settle to the daemon's completed projection.
     await expect(modal).toBeHidden();
     await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
 
@@ -6984,9 +6966,9 @@ test.describe("create → kill (one session, two flows)", () => {
     // the tab-2 we were on: its tab bar has just the agent tab, and its terminal
     // shows the fake agent's ready marker — which it could not if the stream had
     // dialed a ?tab=<n> the session has no tab for.
-    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1, { timeout: 90_000 });
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1);
     await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
-    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 60_000 });
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
 
     // And the new session's stream URL carries no stale tab= selector (the agent tab
     // is the default, sent only for a non-agent tab).
@@ -6999,10 +6981,6 @@ test.describe("create → kill (one session, two flows)", () => {
   });
 
   test("kill: the kill confirm removes the session's row", REAL_FIXTURE, async () => {
-    // The session it kills is the remote hook one from the serial pair above —
-    // KillSession tears down the agent-server transport and runs delete_cmd,
-    // slower than a local tmux teardown but well inside this budget.
-    test.setTimeout(90_000);
     expect(createdTitle).not.toBe("");
     // The created session is the current selection, so its rail row reveals the
     // quiet actions. Delete session it and confirm.
@@ -7016,6 +6994,118 @@ test.describe("create → kill (one session, two flows)", () => {
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
+  });
+});
+
+test.describe("remote create → kill (one hook session, two flows)", () => {
+  // The hook-backend twin of the pair above: its create hands a title to its
+  // kill through module state, so the same serial binding applies — scoped to
+  // its own two tests for the same #1898 blast-radius reason, so a local-create
+  // failure cannot also blind the remote proof (or vice versa).
+  test.describe.configure({ mode: "serial" });
+
+  test("create remote: the + New modal provisions a hook session and its row appears", REAL_FIXTURE, async () => {
+    // This submit picks backend=hook, so the daemon provisions a real remote
+    // sandbox (clone + agent-server + remote readiness) — seconds warm, tens of
+    // seconds cold in this container. The default test budget leaves no margin
+    // for the asserting half on a cold box; triple it like the slow-create tests.
+    test.setTimeout(180_000);
+    const created = `probe-remote-${Date.now().toString(36)}`;
+
+    // Same regression guard as the local create (#1592 PR7 review): move the
+    // CURRENT session onto a NON-agent tab first, so a create path that wrongly
+    // preserved activeTab would build a ?tab=1 stream URL for the brand-new
+    // session (which has only the agent tab). SESSION_B carries the guard so the
+    // pair does not stack a second terminal on SESSION_A's bar.
+    await row(page, SESSION_B).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await createTerminalTab(page);
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+    // Capture every PTY stream WebSocket opened from here on, so we can assert the
+    // new session's stream carries NO stale tab= selector — the remote pane
+    // arrives over the daemon's remote-pane proxy, and this URL is the seam a
+    // wrong selector would hide in.
+    const streamUrls: string[] = [];
+    page.on("websocket", (ws) => {
+      if (ws.url().includes("/stream")) {
+        streamUrls.push(ws.url());
+      }
+    });
+
+    await page.locator("button.af-rail-new").click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+
+    // The picker chain — daemon ListBackends → rendered options → reasoned
+    // hints — is already proven by the local create above; here the field only
+    // has to carry hook to the submit, the seam this pair exists to cover.
+    if (!await modal.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await modal.locator(".af-defaults summary").click();
+    const backendSelect = modal.locator('select[aria-label="Backend"]');
+    await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
+    await backendSelect.selectOption("hook");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // Title is required; project and program stay at the same defaults the
+    // local create leaves them on, so the ONLY thing this submit changes is
+    // the backend.
+    await modal.locator('input[aria-label="Session title"]').fill(created);
+
+    // The submit goes out with backend=hook (#1933/#5107): the picker already
+    // proved the option exists and enables Create; sending it is the seam a
+    // regression could silently break — daemon-side remote create is covered by
+    // integration's TestWebCreateSessionOnHookBackend, so the browser half must
+    // carry the modal-to-createSession propagation all the way to a WORKING
+    // remote session. The fixture's coder-launch.sh is a real provisioner, so
+    // everything asserted below — row ready, Agent tab attached, ready marker —
+    // arrives over the daemon's remote-pane proxy, not a local PTY.
+    await modal.locator("button.af-primary").click();
+
+    // The remote create crosses OpCreating for real: the row lands as an inert
+    // creating row while launch_cmd provisions, and only the completed
+    // projection selects it — so the waits below are sized for remote
+    // provisioning, not the local fast path.
+    await expect(modal).toBeHidden();
+    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
+
+    // The new session is auto-selected AND attached at its AGENT tab (index 0):
+    // its tab bar has just the agent tab, and its terminal shows the fake
+    // agent's ready marker — which could only arrive over the remote proxy if
+    // the stream bound to the right session's right tab.
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1, { timeout: 90_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 60_000 });
+
+    // And the new session's stream URL carries no stale tab= selector (the agent tab
+    // is the default, sent only for a non-agent tab).
+    const lastStream = streamUrls[streamUrls.length - 1];
+    expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
+    expect(lastStream).not.toContain("tab=");
+
+    // Stash it for the kill flow.
+    remoteCreatedTitle = created;
+  });
+
+  test("kill remote: the kill confirm removes the remote session's row", REAL_FIXTURE, async () => {
+    // The session it kills is the remote hook one from the serial pair above —
+    // KillSession tears down the agent-server transport and runs delete_cmd,
+    // slower than a local tmux teardown but well inside this budget.
+    test.setTimeout(90_000);
+    expect(remoteCreatedTitle).not.toBe("");
+    // The created session is the current selection, so its rail row reveals the
+    // quiet actions. Delete session it and confirm.
+    await row(page, remoteCreatedTitle).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await clickRailAction(page, remoteCreatedTitle, "Delete session");
+
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
+
+    // The killed row disappears from the rail (the killed event removes it).
+    await expect(row(page, remoteCreatedTitle)).toHaveCount(0, { timeout: 30_000 });
   });
 });
 
