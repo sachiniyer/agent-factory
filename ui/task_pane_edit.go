@@ -76,11 +76,30 @@ func (s *TaskPane) validateForm() (string, int) {
 // schedule picker's Custom/raw-cron cell is a free-text input that r/x/D must
 // reach — so the verbs never fire while the trigger value is focused.
 func (s *TaskPane) textFocusStop() bool {
-	switch s.focusIndex {
+	return textStopAt(s.focusIndex)
+}
+
+func textStopAt(focusIndex int) bool {
+	switch focusIndex {
 	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
 		return true
 	}
 	return false
+}
+
+// tabsToVerbStop counts the Tab presses from the focused stop to the next
+// selector/button stop where the list verbs fire. It walks the same forward
+// wraparound KeyTab applies in handleEditMode, so the count the footer
+// advertises is derived from the real stop order — it cannot silently lie if
+// a text stop is inserted, removed, or reordered. Only meaningful at text
+// stops; it always terminates because non-text stops exist.
+func (s *TaskPane) tabsToVerbStop() int {
+	for n := 1; n <= taskFocusCount; n++ {
+		if !textStopAt((s.focusIndex + n) % taskFocusCount) {
+			return n
+		}
+	}
+	return 0
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
@@ -478,21 +497,28 @@ func (s *TaskPane) renderEditMode() string {
 		if s.textFocusStop() {
 			// A text stop still names the run-now path (#1288: the overlay
 			// opens straight onto Name, and the first screen must say how to
-			// reach the verbs) — but only as the destination of the tab step,
-			// so nothing reads as a key that fires inside the field.
+			// reach the verbs) — but only as the destination of the tab steps,
+			// so nothing reads as a key that fires inside the field. The count
+			// is computed, not fixed at one: several text stops sit between
+			// selectors, so a bare "tab →" would promise a single press that
+			// lands on another typing field.
+			prefix := "tab → "
+			if n := s.tabsToVerbStop(); n > 1 {
+				prefix = fmt.Sprintf("tab×%d → ", n)
+			}
 			tiers = []string{
-				"tab → r run now · x toggle · D delete · esc list",
-				"tab → r run · x toggle · D del · esc list",
-				"tab → r/x/D · esc list",
+				prefix + "r run now · x toggle · D delete · esc list",
+				prefix + "r run · x toggle · D del · esc list",
+				prefix + "r/x/D · esc list",
 				"esc list",
 			}
 			// A watch task can't be manually run (#1758): drop "r run" so the
 			// editor never advertises an action that always fails.
 			if s.selectedTaskIsWatch() {
 				tiers = []string{
-					"tab → x toggle · D delete · esc list",
-					"tab → x toggle · D del · esc list",
-					"tab → x/D · esc list",
+					prefix + "x toggle · D delete · esc list",
+					prefix + "x toggle · D del · esc list",
+					prefix + "x/D · esc list",
 					"esc list",
 				}
 			}
