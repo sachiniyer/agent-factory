@@ -699,6 +699,89 @@ func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestOrdinarySandboxRowFencedForPreviousRelease pins the rollback-compatibility
+// projection ForStorage writes for an ordinary sandbox row that persists its
+// RuntimeCleanup handle. A binary rolled back to the immediately preceding release
+// accepts schema_version 1 but its FromInstanceData only rebuilds a teardown for a
+// UserKilled tombstone or an unknown-cleanup row, and its ForStorage clears
+// RuntimeCleanup on the ordinary branch. Publishing the handle on an ordinary row
+// without a fence would let that release load the row inert (no teardown) and
+// either erase the handle on its next checkpoint or stage KilledWithoutLiveRuntime
+// from the nil teardown on a kill — the orphan this PR reaps.
+//
+// The projection publishes the handle under a projected
+// RuntimeCleanupStateUnknown=true (the retention boundary the preceding release
+// already respects) and saves the real false in OriginalRuntimeCleanupStateUnknown
+// so a current reader restores the ordinary state and a rolled-back reader keeps
+// the projected value, which its FromInstanceData default branch rebuilds and its
+// ForStorage preserves on reload.
+func TestOrdinarySandboxRowFencedForPreviousRelease(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			inst := newLiveSandboxInstanceForOrphanGuard(t, backendType, "fence-"+backendType)
+			stored := inst.ToInstanceData().ForStorage()
+
+			if stored.UserKilled {
+				t.Fatalf("%s ordinary row was tombstoned; the fence is for ordinary rows", backendType)
+			}
+			if stored.RuntimeCleanup == nil {
+				t.Fatalf("%s ForStorage did not persist the cleanup handle; the fence test has nothing to project", backendType)
+			}
+			// The fence: the on-disk row carries the handle under a projected
+			// RuntimeCleanupStateUnknown=true so the preceding release's
+			// FromInstanceData (UserKilled || RuntimeCleanupStateUnknown) rebuilds
+			// the teardown and its ForStorage default branch preserves the handle.
+			if !stored.RuntimeCleanupStateUnknown {
+				t.Fatalf("%s ForStorage published the cleanup handle without projecting RuntimeCleanupStateUnknown; a preceding release's FromInstanceData would not rebuild the teardown and its ForStorage would erase the handle on the next checkpoint", backendType)
+			}
+			if stored.OriginalRuntimeCleanupStateUnknown == nil {
+				t.Fatalf("%s ForStorage did not save the real RuntimeCleanupStateUnknown in the rollback fence; a current reader cannot restore the ordinary state", backendType)
+			}
+			if *stored.OriginalRuntimeCleanupStateUnknown {
+				t.Fatalf("%s fence saved the wrong value: an ordinary row's real RuntimeCleanupStateUnknown is false", backendType)
+			}
+
+			// The preceding release ignores the additive fence field and keeps the
+			// projected value, so its reload path sees RuntimeCleanupStateUnknown
+			// and its disjunction (UserKilled || RuntimeCleanupStateUnknown) rebuilds
+			// the teardown. Its ForStorage default branch preserves the handle on a
+			// reload (the reloaded public field, the private staging field lost on
+			// unmarshal). Simulate that reload's ForStorage by re-storing the
+			// projected row: the default branch (RuntimeCleanupStateUnknown is true)
+			// keeps RuntimeCleanup.
+			raw, err := json.Marshal(stored)
+			if err != nil {
+				t.Fatalf("marshal %s projected row: %v", backendType, err)
+			}
+			var reloaded InstanceData
+			if err := json.Unmarshal(raw, &reloaded); err != nil {
+				t.Fatalf("unmarshal %s projected row: %v", backendType, err)
+			}
+			reProjected := reloaded.ForStorage()
+			if reProjected.RuntimeCleanup == nil {
+				t.Fatalf("%s preceding-release ForStorage erased the handle a downgrade must keep; the orphan this PR reaps would resurface", backendType)
+			}
+			if !reProjected.RuntimeCleanupStateUnknown {
+				t.Fatalf("%s preceding-release ForStorage dropped the projected RuntimeCleanupStateUnknown; the next reload would load the row inert", backendType)
+			}
+
+			// The current reader restores the real ordinary state from the fence
+			// and rebuilds the teardown via the hadPersistedCleanupHandle clause
+			// (UserKilled || RuntimeCleanupStateUnknown || hadPersistedCleanupHandle).
+			restored, err := FromInstanceData(reloaded)
+			if err != nil {
+				t.Fatalf("restore %s reloaded projected row: %v", backendType, err)
+			}
+			if restored.runtimeCleanupStateUnknown {
+				t.Fatalf("%s current reader saw the projected RuntimeCleanupStateUnknown; RestoreRuntimeCleanupRollbackFence must restore the ordinary state before any decision", backendType)
+			}
+			if restored.runtimeTeardown == nil {
+				t.Fatalf("%s current reader did not rebuild the teardown handle from the projected row; the kill would stage the nothing-owed marker", backendType)
+			}
+		})
+	}
+}
+
 // TestForClientReadDoesNotLeakRuntimeCleanup pins the fix for the third review
 // finding on ed3f86f: ForStorage now persists the operator-private cleanup
 // handle on ordinary sandbox rows so a restart can rebuild it, but the

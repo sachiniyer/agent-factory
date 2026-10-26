@@ -247,6 +247,28 @@ func (d InstanceData) ForStorage() InstanceData {
 			// fires on a fresh snapshot; the reloaded public field is preserved
 			// untouched the same way the tombstone default case does.
 			if d.runtimeCleanup != nil {
+				// Fence the previous release's read of this row. Before this
+				// release, ForStorage cleared RuntimeCleanup on the ordinary
+				// branch and FromInstanceData rebuilt a teardown only for a
+				// UserKilled tombstone or an unknown-cleanup row. A binary rolled
+				// back to that release would therefore load this ordinary sandbox
+				// row inert (no handle to rebuild) and either erase the handle on
+				// its next checkpoint or stage KilledWithoutLiveRuntime from the
+				// nil teardown on a kill — the orphan this PR reaps. Publish the
+				// handle under a projected RuntimeCleanupStateUnknown=true so the
+				// previous release's FromInstanceData rebuilds the teardown and
+				// its ForStorage default branch preserves the handle on reload,
+				// and save the real false in OriginalRuntimeCleanupStateUnknown so
+				// a current reader restores it (RestoreRuntimeCleanupRollbackFence)
+				// and treats the row as the ordinary session it is. The previous
+				// release ignores the additive field and keeps the projected value,
+				// which is the safe direction: its default branch is the retention
+				// path this handle already rode on UserKilled/unknown rows.
+				if d.OriginalRuntimeCleanupStateUnknown == nil {
+					original := false
+					d.OriginalRuntimeCleanupStateUnknown = &original
+				}
+				d.RuntimeCleanupStateUnknown = true
 				d.RuntimeCleanup = d.runtimeCleanup.clone()
 			}
 		} else {

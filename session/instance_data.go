@@ -340,6 +340,13 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	data = data.RestoreArchiveRollbackFence()
+	// ForStorage publishes an ordinary sandbox row's RuntimeCleanup under a
+	// projected RuntimeCleanupStateUnknown=true so a binary rolled back to the
+	// preceding release rebuilds and preserves the handle instead of loading the
+	// row inert and orphaning the runtime. Restore the real value before any
+	// cleanup-state decision reads it; the preceding release ignores the fence
+	// field, so a current reader sees the ordinary row it is.
+	data = data.RestoreRuntimeCleanupRollbackFence()
 	var err error
 	data, err = data.RestoreRelocationRecoveryOriginals()
 	if err != nil {
