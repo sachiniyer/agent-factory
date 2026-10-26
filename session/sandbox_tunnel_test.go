@@ -267,6 +267,25 @@ func spawnSweepSleeper(t *testing.T, home string, argv ...string) *exec.Cmd {
 	return cmd
 }
 
+// spawnSshArgvSleeper starts a sleeper presenting the argv a leaked pre-#5564
+// tunnel actually has once its `sh -c` wrapper exec's away — ssh-named with
+// af's flag signature and NO af-sandbox element. That is the shape EVERY
+// pre-fix leftover carries on darwin, where /bin/sh is a shell that always
+// tail-optimizes; the & wait positional-command keeps this sh alive holding
+// the original argv so the fixture is identical on every platform.
+func spawnSshArgvSleeper(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "sleep 60 & wait",
+		"-o", "ExitOnForwardFailure=yes", "-N", "-L", "127.0.0.1:40010:127.0.0.1:40011")
+	cmd.Args[0] = "ssh"
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd
+}
+
 // requireReaped waits for OUR CHILD to exit — the honest "the sweep killed it"
 // for a spawned sleeper, since a child killed but not yet waited on still
 // answers kill(pid, 0) as a zombie.
@@ -297,6 +316,10 @@ func TestSweepOrphanSandboxTunnels(t *testing.T) {
 	// carry. The & wait keeps sh alive holding its original argv on every
 	// shell, so the element survives to be matched on linux and darwin alike.
 	unmarkedTunnelShape := spawnSweepSleeper(t, "", "sh", "-c", "sleep 60 & wait", "af-sandbox")
+	// The darwin shape of the same leftover: once a tail-optimizing sh exec's
+	// the tunnel command away, only the ssh argv remains — no af-sandbox
+	// element at all. It must still be reported, and still never killed.
+	unmarkedSshShape := spawnSshArgvSleeper(t)
 	unrelated := spawnSweepSleeper(t, "")
 
 	warnings := captureWarningLog(t)
@@ -307,6 +330,8 @@ func TestSweepOrphanSandboxTunnels(t *testing.T) {
 		"a tunnel stamped with a different AF home is never touched")
 	assert.True(t, alive(t, unmarkedTunnelShape.Process.Pid),
 		"an unmarked af-sandbox argv must only be reported, never killed")
+	assert.True(t, alive(t, unmarkedSshShape.Process.Pid),
+		"an unmarked ssh-argv leftover must only be reported, never killed")
 	assert.True(t, alive(t, unrelated.Process.Pid))
 
 	out := warnings.String()

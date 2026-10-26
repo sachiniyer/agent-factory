@@ -337,14 +337,43 @@ func spawnTunnelViaLifeline(exe, script, forward string) (cmd *exec.Cmd, ll *tun
 	return nil, nil, true, fmt.Errorf("no ack: it wrote %q", strings.TrimSpace(line))
 }
 
-// sandboxTunnelArgv reports whether an argv is af's sandbox transport shape:
-// the af-sandbox supervisor marker appears as an element (the $0 af gives the
-// `sh -c` that runs both the tunnel and the bounded provision/reap commands).
+// sandboxTunnelArgv reports whether an argv is af's sandbox transport shape,
+// in either of the two forms a transport can present:
+//
+//   - the af-sandbox supervisor marker as an element — the $0 af gives the
+//     `sh -c` that runs both the tunnel and the bounded provision/reap
+//     commands, visible whenever that sh is still alive;
+//   - the ssh argv those `sh -c` commands become on shells that tail-optimize
+//     the last command: `ssh … -o ExitOnForwardFailure=yes -N -L <forward>` is
+//     what a leaked tunnel looks like once its sh is gone. darwin's /bin/sh
+//     ALWAYS exec-optimizes, so on a Mac every pre-#5564 leftover has this
+//     shape and no af-sandbox element — matching only the marker would render
+//     the report silently absent for exactly the population it exists for.
+//
 // Element equality, never a substring: this match may inform a report but it
 // never arms a kill, and a user's unrelated "my-af-sandbox" must not even be
 // named one.
 func sandboxTunnelArgv(argv []string) bool {
-	return slices.Contains(argv, "af-sandbox")
+	if slices.Contains(argv, "af-sandbox") {
+		return true
+	}
+	if len(argv) == 0 || filepath.Base(argv[0]) != "ssh" {
+		return false
+	}
+	hasN, hasL, hasForwardGuard := false, false, false
+	for i, a := range argv {
+		switch a {
+		case "-N":
+			hasN = true
+		case "-L":
+			hasL = true
+		case "-o":
+			if i+1 < len(argv) && argv[i+1] == "ExitOnForwardFailure=yes" {
+				hasForwardGuard = true
+			}
+		}
+	}
+	return hasN && hasL && hasForwardGuard
 }
 
 // SweepOrphanSandboxTunnels reaps ssh -L transport children a PREVIOUS daemon
@@ -366,7 +395,9 @@ func sandboxTunnelArgv(argv []string) bool {
 //     proctree.Signal, so a pid recycled between scan and kill is never hit.
 //
 // Tunnels leaked by daemons older than the marker carry no stamp and cannot be
-// proven, so they are REPORTED by argv shape and left for the operator: the
+// proven, so they are REPORTED by argv shape — the af-sandbox supervisor
+// element, or the bare `ssh -o ExitOnForwardFailure=yes -N -L` argv a leftover
+// exec's into on shells that tail-optimize — and left for the operator: the
 // warning names the pids and how to inspect and kill them by hand — and never
 // prints anything from their environment. Command line is allowed to inform a
 // report, never to arm a kill.
@@ -424,8 +455,8 @@ func SweepOrphanSandboxTunnels(homeID string) {
 		if unreadable > 0 {
 			extra = fmt.Sprintf("; %d further candidate(s) have an unreadable environment and were skipped", unreadable)
 		}
-		log.WarningLog.Printf("orphan tunnel sweep: %d process(es) look like af sandbox transports (argv carries the af-sandbox "+
-			"supervisor marker) but have no %s ownership stamp, so af cannot prove they are this home's leftovers and will "+
+		log.WarningLog.Printf("orphan tunnel sweep: %d process(es) look like af sandbox transports (argv matches af's transport "+
+			"shape) but have no %s ownership stamp, so af cannot prove they are this home's leftovers and will "+
 			"not kill them — they may be tunnels an older af daemon leaked, or live processes of a different AF home. "+
 			"Inspect them with `ps -o pid,ppid,command -p %s` and, if they are stale af ssh tunnels holding forwarded ports, "+
 			"stop them by hand with `kill %s`%s",
