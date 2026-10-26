@@ -266,6 +266,16 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("%w: resolving the task's repository: %v", errTaskFireReconcile, err)
 	}
+	// The retained binding must still resolve to this repository. A task whose
+	// project path was repointed under a pending fire would reconcile a
+	// FOREIGN repo's rows: a matching derived branch or tmux name there could
+	// be quarantined or marked for teardown as this attempt's leftover, and
+	// the binding checks in the create/delivery paths run only after this
+	// function has already persisted its record. Refuse — the fire stays owed
+	// until the binding resolves consistently (#5503 review).
+	if t.RepoID != "" && t.RepoID != repo.ID {
+		return false, fmt.Errorf("%w: task's retained repository %s no longer resolves from project path %s (got %s)", errTaskFireReconcile, t.RepoID, t.ProjectPath, repo.ID)
+	}
 	rows, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
 		return false, fmt.Errorf("%w: listing persisted sessions: %v", errTaskFireReconcile, err)
@@ -488,6 +498,11 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		// than tombstoned: nothing may auto-teardown under an identity af could
 		// not confirm (#2207), and the record is what gives inspection a handle.
 		StartupStateUnknown: !reap,
+		// The recovery handle must name the EXACT tmux session it stands for:
+		// restoreLocalTabs reads TmuxName (not Worktree.SessionName), and an
+		// empty one rebuilds an unscoped name that would address a different
+		// session entirely (#5503 review).
+		TmuxName: sanitized,
 		Worktree: session.GitWorktreeData{
 			RepoPath:          identityRoot,
 			WorktreePath:      wtPath,

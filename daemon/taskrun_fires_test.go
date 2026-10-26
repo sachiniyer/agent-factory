@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +16,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -756,6 +760,103 @@ func TestRunTask_FreshFireAfterTargetedSendDelivers(t *testing.T) {
 	}
 	if markerExists(t, "ab0r7041") {
 		t.Fatalf("the fresh fire's marker must clear once its send lands")
+	}
+}
+
+// TestRunTask_ReconcileRejectsRepointedRepo pins the retained-binding check
+// (#5503 review): a task whose project path no longer resolves its retained
+// RepoID must never reconcile that repository's rows — a matching leftover
+// identity there belongs to someone else. The reconcile refuses, the marker
+// stays owed, and nothing is delivered or mutated.
+func TestRunTask_ReconcileRejectsRepointedRepo(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7050", repoPath)
+	creates, _ := stubTaskDelivery(t)
+
+	// Repoint the retained binding on disk: the project path still resolves a
+	// real repo, just not the one this task was bound to.
+	tasksPath := filepath.Join(home, "tasks.json")
+	raw, err := os.ReadFile(tasksPath)
+	if err != nil {
+		t.Fatalf("read tasks.json: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("parse tasks.json: %v", err)
+	}
+	tasks, ok := env["tasks"].([]any)
+	if !ok || len(tasks) != 1 {
+		t.Fatalf("expected one task row, got %v", env["tasks"])
+	}
+	tasks[0].(map[string]any)["repo_id"] = "repo-other"
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal tasks.json: %v", err)
+	}
+	if err := os.WriteFile(tasksPath, out, 0o600); err != nil {
+		t.Fatalf("rewrite tasks.json: %v", err)
+	}
+
+	intendedAt := time.Now().Add(-time.Minute)
+	seedPendingFire(t, taskFireMarker{TaskID: "ab0r7050", IntendedAt: intendedAt, Title: "repointed"})
+
+	err = runTaskDelivery("ab0r7050", task.ProjectExpectation{}, nil)
+	if !errors.Is(err, errTaskFireReconcile) {
+		t.Fatalf("a repointed binding must refuse reconcile, got err=%v", err)
+	}
+	if !markerExists(t, "ab0r7050") {
+		t.Fatalf("a refused reconcile keeps the fire owed — marker was discharged")
+	}
+	if len(*creates) != 0 {
+		t.Fatalf("nothing may deliver while the binding is unresolved; creates = %d", len(*creates))
+	}
+}
+
+// TestTaskFireLeftoverRecordCarriesTmuxName: the quarantine/tombstone record's
+// recovery handle must name the exact tmux session it stands for (#5503
+// review). restoreLocalTabs reads TmuxName — leaving it empty rebuilds an
+// unscoped name that would teardown a different session. An intent in the
+// future makes every per-attempt evidence check fail, so the record takes the
+// quarantine shape on any host, with or without a tmux server.
+func TestTaskFireLeftoverRecordCarriesTmuxName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	title := "leftover-title"
+	branch := git.BranchForTitle(cfg.BranchPrefix, title)
+	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover worktree: %v: %s", err, out)
+	}
+
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7060",
+		IntendedAt: time.Now().Add(time.Hour), // future: nothing can postdate it — unproven
+		Title:      title,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7060", ProjectPath: repoPath, Prompt: "p"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil {
+		t.Fatalf("expected a quarantine record for the unproven leftover worktree")
+	}
+	if want := tmux.SanitizedNameForRepo(title, repo.IdentityPath()); row.TmuxName != want {
+		t.Fatalf("record's recovery handle names %q, want the exact leftover tmux name %q", row.TmuxName, want)
+	}
+	if !row.StartupStateUnknown {
+		t.Fatalf("an unproven leftover must quarantine as startup-state-unknown")
 	}
 }
 

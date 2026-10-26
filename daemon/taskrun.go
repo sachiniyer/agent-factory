@@ -426,17 +426,17 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 				// the adopted row or the landed send is its product. A replay
 				// is finished: it exists only to satisfy that occurrence.
 				// A fresh invocation is a NEW occurrence and still owes its
-				// own delivery, so it discharges the settled marker, mints a
-				// marker of its own, and falls through to deliver (#5503
-				// review): adopt-then-deliver, one delivery per occurrence.
+				// own delivery, so it mints a marker of its own and falls
+				// through to deliver (#5503 review): adopt-then-deliver, one
+				// delivery per occurrence. The marker file — not the returned
+				// struct — is what a later interrupt reads back, and a write
+				// failure degrades this run to pre-fix behavior, so the error
+				// is logged, never fatal.
 				if replay != nil {
 					return nil
 				}
-				pendingFire = false
-				if fresh, _, ferr := ensureTaskFireMarker(taskID); ferr == nil {
-					fire = fresh
-				} else {
-					fire = nil
+				if _, _, ferr := ensureTaskFireMarker(taskID); ferr != nil {
+					log.WarningLog.Printf("could not record cron fire marker for task %s; an interrupted run will not be replayed: %v", taskID, ferr)
 				}
 			}
 		}
