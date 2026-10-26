@@ -485,6 +485,30 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Greater(t, *calls, 0)
 	})
 
+	t.Run("a readable denied table still vetoes a foreign filesystem", func(t *testing.T) {
+		// In the denied route the peer table is readable — it may not
+		// prove (identity unknown) but it must veto: a different device
+		// under the data root is the foreign-fs shape af's own table
+		// would otherwise accept.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:2"), peerTableOn("8:1"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "denied-foreign"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a readable peer table showing another device vetoes the fallback: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
 	t.Run("a permission-blind identity read cannot help a non-root peer", func(t *testing.T) {
 		// A same-uid forwarder whose exe could not be read still fails:
 		// the fallback requires uid 0 and af's own user is not it.

@@ -444,7 +444,8 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	if !ok {
 		return false
 	}
-	if info, err := peerMountinfo(peer); err == nil {
+	peerInfo, err := peerMountinfo(peer)
+	if err == nil {
 		// Strong proof — but ONLY once the process SERVING the socket is
 		// identified as the daemon itself. SO_PEERCRED names the listener's
 		// CREATOR: a same-uid forwarder (socat, ssh -L) is a creator whose
@@ -458,15 +459,19 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 		case serverRejected:
 			return false
 		case serverProven:
+			info := peerInfo
 			if srv != peer {
-				if info, err = peerMountinfo(srv); err != nil {
-					break // serving table unreadable — same blind spot as denied
+				var serr error
+				if info, serr = peerMountinfo(srv); serr != nil {
+					info = nil // serving table unreadable — denied route below
 				}
 			}
-			// The device the daemon's own mount table shows under its
-			// data root is the device af's stat reports.
-			peerDev, ok := coveringMountDev(info, rootDir)
-			return ok && peerDev == dev
+			if info != nil {
+				// The device the daemon's own mount table shows under
+				// its data root is the device af's stat reports.
+				peerDev, ok := coveringMountDev(info, rootDir)
+				return ok && peerDev == dev
+			}
 		}
 		// serverDenied (and the unreadable serving table above) fall
 		// through to the uid-0 fallback below: a permission-blind identity
@@ -489,6 +494,16 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	// writes to.
 	if peerUID != 0 {
 		return false
+	}
+	// A peer table that IS readable may veto even though it cannot prove:
+	// it names a real process's filesystem, and a device that differs
+	// from af's stat — or a data root it does not cover at all — is the
+	// foreign-filesystem shape af's own table would otherwise accept.
+	if peerInfo != nil {
+		peerDev, ok := coveringMountDev(peerInfo, rootDir)
+		if !ok || peerDev != dev {
+			return false
+		}
 	}
 	self, err := peerMountinfo(os.Getpid())
 	if err != nil {
