@@ -31,16 +31,6 @@ func pinDaemonDraining(t *testing.T, draining bool) {
 	t.Cleanup(func() { daemonDrainingFn = orig })
 }
 
-// fireMarkerPath returns the marker file's path inside the test's AF home.
-func fireMarkerPath(t *testing.T, taskID string) string {
-	t.Helper()
-	dir, err := taskFireDir()
-	if err != nil {
-		t.Fatalf("taskFireDir: %v", err)
-	}
-	return filepath.Join(dir, taskID+".json")
-}
-
 func seedCronTask(t *testing.T, id, repoPath string) {
 	t.Helper()
 	if err := task.AddTask(task.Task{
