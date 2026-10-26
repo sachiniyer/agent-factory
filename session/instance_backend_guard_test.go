@@ -27,9 +27,16 @@ import (
 //     after releasing the lock.
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
-//   - owesNoRuntimeTeardown — holds i.mu.RLock across the backend read; the
-//     subsequent runtimeCleanupData() call is on a frozen pointer armed once at
-//     bind/rebind, mirroring IsExternalWorktree's gitWorktree snapshot pattern.
+//
+// owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
+// backend pointer its caller already read under i.mu as an argument and never
+// reads Instance.backend itself, so this scan cannot match it. That is the point
+// of the parameter: the receiver-style predecessor re-acquired i.mu.RLock from
+// inside the locked snapshot path (toInstanceDataLocked), which sync.RWMutex's
+// non-reentrancy turned into a permanent wedge. A helper that cannot reach the
+// field cannot re-enter the mutex, so a snapshot taken under the write lock can
+// no longer self-deadlock; if a future helper reintroduces a bare i.backend read
+// under the lock, this scan flags it.
 var backendReadersUnderLock = map[string]bool{
 	"currentBackend":               true,
 	"capabilitiesLocked":           true,
@@ -42,7 +49,6 @@ var backendReadersUnderLock = map[string]bool{
 	"toInstanceDataLocked":         true,
 	"PreviewTabSnapshotByID":       true,
 	"FromInstanceData":             true,
-	"owesNoRuntimeTeardown":        true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

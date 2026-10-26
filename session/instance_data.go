@@ -96,8 +96,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		//   - i.runtimeTeardown == nil: no in-memory teardown handle is bound. This
 		//     is the necessary signal a kill committed against the row would run a
 		//     no-op reap — the shape the marker exists to admit.
-		//   - i.owesNoRuntimeTeardown(): positive evidence the backend itself
-		//     carries no off-box cleanup identity. This is the EARNED part. A
+		//   - owesNoRuntimeTeardownLocked(i.backend): positive evidence the backend
+		//     itself carries no off-box cleanup identity. This is the EARNED part. A
 		//     sandbox backend rebuilt by restoreRuntimeCleanup carries the cleanup
 		//     handle it restored from disk (its runtimeCleanupData() is non-nil),
 		//     and that handle means a runtime is still owed a reap — staging the
@@ -117,7 +117,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// delete instead of installing a permanent fail-closed teardown. A local
 		// backend never reaches here: it has no off-box runtime, and its reaped
 		// shape is read from its worktree paths.
-		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil && i.owesNoRuntimeTeardown() {
+		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil && owesNoRuntimeTeardownLocked(i.backend) {
 			marker := true
 			data.killedWithoutLiveRuntime = &marker
 		}
@@ -531,6 +531,17 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 					// unknown-state sentinel, so finishUserKill retains the only record
 					// instead of laundering a missing handle into no-op success.
 					instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+					// The inert backend carries no cleanup identity, so the next
+					// checkpoint would otherwise publish no RuntimeCleanup AND clear the
+					// unknown flag (an ordinary row reloads with both gone). A subsequent
+					// restart would then load the row fully inert — runtimeTeardown nil
+					// and a backend that positively owes nothing — stage the nothing-owed
+					// marker, and let a no-op kill delete the only record pointing at a
+					// runtime whose fate this first reload correctly could not determine.
+					// Mark the cleanup state unknown durably so every later restart retries
+					// this same fail-closed rebuild instead of laundering the rejected
+					// handle into the orphan the marker exists to prevent.
+					instance.runtimeCleanupStateUnknown = true
 				}
 			} else {
 				instance.backend = backend

@@ -98,10 +98,19 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	i.runtimeTeardown = teardown
 }
 
-// owesNoRuntimeTeardown reports whether this sandbox-backed instance positively
-// owes no off-box reap — i.e. its backend carries no durable cleanup identity at
-// all (the cleanup field is nil). It is the EARNED-EVIDENCE half of the
-// KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+// owesNoRuntimeTeardownLocked reports whether a sandbox-backed instance
+// positively owes no off-box reap — i.e. its backend carries no durable cleanup
+// identity at all (the cleanup field is nil). It is the EARNED-EVIDENCE half of
+// the KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+//
+// Caller holds i.mu (read or write) and hands over the backend pointer it
+// already read. It must NOT acquire i.mu itself: sync.RWMutex is not reentrant,
+// so a nested RLock from a caller holding the read lock deadlocks the moment a
+// writer queues between the two acquisitions, and from a caller holding the
+// write lock it deadlocks unconditionally. The snapshot path (toInstanceDataLocked
+// — whose contract is that the caller already holds i.mu) calls this, so any lock
+// acquisition here would wedge snapshot, persistence, and kill behind a session
+// mutex that never releases.
 //
 // The necessity of the second condition besides `runtimeTeardown == nil` is the
 // f58ca97f wedge-fix gone wrong: a sandbox row reloaded INERT after a daemon
@@ -115,12 +124,7 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 // the marker is staged only when the backend itself positively carries no
 // cleanup identity, which is the always-inert shape the original wedge fix meant
 // to admit.
-//
-// Caller holds no lock; this acquires i.mu only to read the backend pointer.
-func (i *Instance) owesNoRuntimeTeardown() bool {
-	i.mu.RLock()
-	backend := i.backend
-	i.mu.RUnlock()
+func owesNoRuntimeTeardownLocked(backend Backend) bool {
 	if backend == nil {
 		return true
 	}

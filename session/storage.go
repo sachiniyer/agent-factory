@@ -487,6 +487,15 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	// ForStorage persists RuntimeCleanup on ordinary sandbox rows so a daemon
+	// restart can rebuild the off-box teardown handle, but that handle is
+	// operator-private (a container id, an ssh host/identity-file path, a hook
+	// delete command). The live-daemon snapshot never publishes it — ToInstanceData
+	// stages it only in the private field ForStorage consumes — so a disk-fallback
+	// client reading instances.json directly must not either: scrub it here so the
+	// daemonless `sessions list`/`get` path exposes the same shape the live path
+	// does, not the cleanup identity an ordinary row now carries on disk.
+	d.RuntimeCleanup = nil
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}

@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"regexp"
 	"strings"
@@ -357,7 +358,7 @@ func TestReloadedLiveSSHKillReapsForRealNotNoOp(t *testing.T) {
 }
 
 // TestOwesNoRuntimeTeardownGatesMarkerOnPositiveEvidence drives the
-// owesNoRuntimeTeardown half of the staging gate directly. A backend that
+// owesNoRuntimeTeardownLocked half of the staging gate directly. A backend that
 // carries no cleanup identity positively owes nothing (always-inert) and the
 // marker may be staged; a backend that DOES carry one (live or rebuilt from a
 // persisted handle) owes a reap, and the marker must be refused even when
@@ -368,7 +369,7 @@ func TestOwesNoRuntimeTeardownGatesMarkerOnPositiveEvidence(t *testing.T) {
 		// The always-inert rebuild FromInstanceData itself produces: a zero-
 		// valued backend with no cleanup handle.
 		inert := newInertSandboxInstance(t, "ssh", "owes-inert")
-		if !inert.owesNoRuntimeTeardown() {
+		if !owesNoRuntimeTeardownLocked(inert.currentBackend()) {
 			t.Fatal("an inert sandbox backend with no cleanup handle should positively owe nothing")
 		}
 		// A snapshot of that row stages the marker from runtimeTeardown==nil
@@ -381,12 +382,12 @@ func TestOwesNoRuntimeTeardownGatesMarkerOnPositiveEvidence(t *testing.T) {
 	})
 	t.Run("live_backend_owes_a_reap", func(t *testing.T) {
 		// A live backend carries a real cleanup identity; even if its
-		// runtimeTeardown is somehow nil, owesNoRuntimeTeardown returns false
+		// runtimeTeardown is somehow nil, owesNoRuntimeTeardownLocked returns false
 		// and the gate refuses the marker — the inert reload of an always-inert
 		// row is the only shape the marker vouches, not a handle-carrying live
 		// one whose runtime might still be reaped.
 		live := liveSSHInstanceForOrphanGuard(t, "owes-live")
-		if live.owesNoRuntimeTeardown() {
+		if owesNoRuntimeTeardownLocked(live.currentBackend()) {
 			t.Fatal("a live ssh backend with a cleanup handle should owe a reap, not 'nothing owed'")
 		}
 		// Force runtimeTeardown nil (the inert-reload shape) and confirm
@@ -401,7 +402,7 @@ func TestOwesNoRuntimeTeardownGatesMarkerOnPositiveEvidence(t *testing.T) {
 	t.Run("rebuilt_live_row_owes_a_reap", func(t *testing.T) {
 		// After a restart, FromInstanceData rebuilds a real backend with the
 		// cleanup handle the rebuilt restoreRuntimeCleanup returned — its
-		// runtimeCleanupData() is non-nil, so owesNoRuntimeTeardown returns
+		// runtimeCleanupData() is non-nil, so owesNoRuntimeTeardownLocked returns
 		// false. This is the live row's path through the same gate.
 		inst := liveSSHInstanceForOrphanGuard(t, "owes-rebuilt")
 		precommit := inst.ToInstanceData().ForStorage()
@@ -417,7 +418,7 @@ func TestOwesNoRuntimeTeardownGatesMarkerOnPositiveEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("restore reloaded live row: %v", err)
 		}
-		if restored.owesNoRuntimeTeardown() {
+		if owesNoRuntimeTeardownLocked(restored.currentBackend()) {
 			t.Fatal("a reloaded LIVE sandbox row whose handle rebuilt should owe a reap, not 'nothing owed'; the marker gate mis-vouches if it returns true here")
 		}
 	})
@@ -545,4 +546,192 @@ func snapshotPrivateValues(t *testing.T, inst *Instance) []string {
 		}
 	}
 	return out
+}
+
+// TestSnapshotUnderWriteLockDoesNotDeadlock pins the property the maintainer
+// (review on ed3f86f) required of the marker gate: nothing reachable from
+// toInstanceDataLocked acquires i.mu. The gate predicate it calls
+// (owesNoRuntimeTeardownLocked) takes the backend pointer the caller already
+// read under the lock, so a snapshot taken while the write lock is held cannot
+// re-enter the mutex. sync.RWMutex is not reentrant, so the receiver-style
+// predecessor (owesNoRuntimeTeardown, which took i.mu.RLock) deadlocked the
+// write-lock holder unconditionally and a read-lock holder the moment a writer
+// queued between the two acquisitions. A regression that reintroduces a lock
+// acquisition inside the locked snapshot path hangs this test instead of CI.
+func TestSnapshotUnderWriteLockDoesNotDeadlock(t *testing.T) {
+	// A reloaded LIVE sandbox row is the shape the gate exists for: its backend
+	// carries a cleanup handle (so owesNoRuntimeTeardownLocked returns false and
+	// the gate's branch is exercised), and FromInstanceData rebuilt its teardown
+	// under i.mu — exactly the load path a daemon restart takes.
+	inst := liveSSHInstanceForOrphanGuard(t, "write-lock-snapshot")
+	precommit := inst.ToInstanceData().ForStorage()
+	raw, err := json.Marshal(precommit)
+	if err != nil {
+		t.Fatalf("marshal pre-restart record: %v", err)
+	}
+	var reloaded InstanceData
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatalf("unmarshal pre-restart record: %v", err)
+	}
+	restored, err := FromInstanceData(reloaded.ForStorage())
+	if err != nil {
+		t.Fatalf("restore reloaded live row: %v", err)
+	}
+	if restored.runtimeTeardown == nil {
+		t.Fatal("reloaded live row rebuilt no teardown; the write-lock snapshot would not exercise the gate's reap branch")
+	}
+
+	// The write-lock holder is the worst case: a nested RLock from the same
+	// goroutine deadlocks unconditionally under a non-reentrant RWMutex. The
+	// gate must not reach for the lock, so the snapshot returns.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		restored.mu.Lock()
+		_ = restored.toInstanceDataLocked()
+		restored.mu.Unlock()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("toInstanceDataLocked deadlocked under the write lock — a helper reachable from the locked snapshot path re-entered i.mu (sync.RWMutex is not reentrant)")
+	}
+
+	// The read-lock holder is the interleaved case: a queued writer between the
+	// outer RLock and a nested RLock deadlocks the snapshot. The gate must take
+	// the same no-lock path, so this returns too.
+	rdone := make(chan struct{})
+	go func() {
+		defer close(rdone)
+		restored.mu.RLock()
+		_ = restored.toInstanceDataLocked()
+		restored.mu.RUnlock()
+	}()
+	select {
+	case <-rdone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("toInstanceDataLocked deadlocked under the read lock — a helper reachable from the locked snapshot path re-entered i.mu (sync.RWMutex is not reentrant)")
+	}
+}
+
+// TestRejectedCleanupHandlePersistsUnknownAcrossRestart pins the fix for the
+// second review finding on ed3f86f: when restoreRuntimeCleanup rejects an
+// ordinary sandbox row's persisted handle (a legacy Docker record with no engine
+// identity, for example), the fail-closed reload must mark the cleanup state
+// durably unknown so the next checkpoint retains it. Without that, the inert
+// backend the rejected reload leaves behind publishes no RuntimeCleanup, the
+// next restart loads the row with no handle and no unknown flag, the marker
+// gate admits the nothing-owed shape, and a no-op kill deletes the only record
+// pointing at a runtime whose fate this first reload correctly could not
+// determine — the orphan the orphan guard exists to prevent, reached through a
+// second restart.
+func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
+	// An ordinary LIVE docker row whose persisted handle a restart cannot
+	// rebuild: a container id without an engine id is the legacy shape
+	// restoreRuntimeCleanup rejects ("no engine identity (legacy record)").
+	rejected := InstanceData{
+		ID:             "rejected-engine-id-id",
+		Title:          "rejected-engine-id",
+		Path:           "/repo",
+		BackendType:    "docker",
+		Liveness:       LiveRunning,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{ContainerID: "sha256:deadbeef"}},
+	}
+	restored, err := FromInstanceData(rejected.ForStorage())
+	if err != nil {
+		t.Fatalf("restore a row with a rejected cleanup handle: %v", err)
+	}
+	// The reload fail-closed: the teardown is the unknown-state sentinel, not a
+	// no-op, so a kill retains the record instead of laundering the missing
+	// handle into no-op success.
+	if restored.runtimeTeardown == nil {
+		t.Fatal("a rejected cleanup handle installed a nil teardown; the reload must fail closed so a kill retains the record")
+	}
+	if err := restored.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a rejected cleanup handle's teardown returned %v, not ErrWorkspaceStateUnknown; the reload must fail closed", err)
+	}
+	if !restored.runtimeCleanupStateUnknown {
+		t.Fatal("a rejected cleanup handle did not mark the cleanup state unknown; the next checkpoint would drop the handle and let a later restart stage the nothing-owed marker")
+	}
+
+	// The durable part: a checkpoint persists RuntimeCleanupStateUnknown so a
+	// SECOND restart retries the same fail-closed rebuild instead of loading the
+	// row fully inert and staging the nothing-owed marker.
+	stored := restored.ToInstanceData().ForStorage()
+	if !stored.RuntimeCleanupStateUnknown {
+		t.Fatal("a rejected cleanup handle's checkpoint dropped RuntimeCleanupStateUnknown; the next restart would not retry the fail-closed rebuild")
+	}
+	if stored.RuntimeCleanup != nil {
+		t.Fatalf("a rejected handle's checkpoint published a cleanup handle; the inert backend has none to publish: %#v", stored.RuntimeCleanup)
+	}
+	if stored.KilledWithoutLiveRuntime {
+		t.Fatal("a rejected-handle row staged the nothing-owed marker; the row's cleanup state is unknown, not nothing-owed, and the marker would let a no-op kill delete the only record")
+	}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal rejected-handle checkpoint: %v", err)
+	}
+	var reloaded InstanceData
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatalf("unmarshal rejected-handle checkpoint: %v", err)
+	}
+	reloaded = reloaded.ForStorage()
+	if !reloaded.RuntimeCleanupStateUnknown {
+		t.Fatal("the RuntimeCleanupStateUnknown flag did not survive the JSON round-trip; the second restart would not retry the fail-closed rebuild")
+	}
+	restoredAgain, err := FromInstanceData(reloaded)
+	if err != nil {
+		t.Fatalf("restore the second restart: %v", err)
+	}
+	if restoredAgain.runtimeTeardown == nil {
+		t.Fatal("the second restart loaded a nil teardown; the durable unknown flag should have driven the same fail-closed rebuild, not the inert nothing-owed shape")
+	}
+	if err := restoredAgain.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("the second restart's teardown returned %v, not ErrWorkspaceStateUnknown; the durable unknown flag should have re-driven the fail-closed rebuild", err)
+	}
+	// A kill committed against the reloaded row must not stage the nothing-owed
+	// marker: the rebuilt (sentinel) teardown is non-nil, so the gate's
+	// runtimeTeardown==nil arm does not fire and the record is retained.
+	restoredAgain.MarkUserKilled()
+	tombstone := restoredAgain.ToInstanceData().ForStorage()
+	if tombstone.KilledWithoutLiveRuntime {
+		t.Fatal("a reloaded row with a rejected handle staged the nothing-owed marker across a second restart; the durable unknown flag should keep the row fail-closed and the marker off")
+	}
+}
+
+// TestForClientReadDoesNotLeakRuntimeCleanup pins the fix for the third review
+// finding on ed3f86f: ForStorage now persists the operator-private cleanup
+// handle on ordinary sandbox rows so a restart can rebuild it, but the
+// daemonless client path (diskListSessions → ForClientRead → jsonOut) reads
+// instances.json directly and ForClientRead did not scrub RuntimeCleanup. A
+// daemon-unreachable `sessions list` would therefore expose the container id,
+// ssh host/identity-file path, session directory, and delete command in client
+// JSON even though the live-daemon snapshot (ToInstanceData) never publishes
+// the public field. ForClientRead must mirror the live path and clear it.
+func TestForClientReadDoesNotLeakRuntimeCleanup(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			inst := newLiveSandboxInstanceForOrphanGuard(t, backendType, "client-read-leak-"+backendType)
+			stored := inst.ToInstanceData().ForStorage()
+			if stored.RuntimeCleanup == nil {
+				t.Fatalf("%s ForStorage did not persist the cleanup handle; the leak test has nothing to scrub", backendType)
+			}
+			// ForClientRead is the disk-fallback projection a daemonless
+			// `sessions list`/`get` reads. It must clear the handle the live
+			// snapshot never publishes, so the client JSON carries no operator-
+			// private cleanup identity.
+			client := stored.ForClientRead()
+			if client.RuntimeCleanup != nil {
+				t.Fatalf("%s ForClientRead leaked the cleanup handle into the daemonless client view: %#v", backendType, client.RuntimeCleanup)
+			}
+			// The live snapshot path is the privacy ceiling: ToInstanceData
+			// publishes the private field ForStorage consumes but never the
+			// public RuntimeCleanup, so a client reading the daemon never sees
+			// the handle either.
+			snap := inst.ToInstanceData()
+			if snap.RuntimeCleanup != nil {
+				t.Fatalf("%s ToInstanceData published the public RuntimeCleanup; only ForStorage going to disk may carry it", backendType)
+			}
+		})
+	}
 }
