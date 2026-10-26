@@ -365,8 +365,9 @@ export class ConfigPane {
     // `wasEditing` check above is first in the ladder, so a TYPED text row keeps the
     // caret-preserving branch; this branch only catches the untyped, click-focused
     // text case (plus checkbox/select, which `editingInput` never names) and is the
-    // sole restorer for it — no caret is restored here, since an untyped field has
-    // none worth preserving and a checkbox/select has none at all.
+    // sole restorer for it. A checkbox/select has no caret; a click-focused text
+    // input, however, may sit at a non-default position or selection, and that is
+    // captured just below (`focusedConfigTextCaret`) and restored after the rebuild.
     const focusedConfigControlKey =
       active instanceof HTMLElement
         && active.closest(".af-config-list") !== null
@@ -374,6 +375,19 @@ export class ConfigPane {
           || (active instanceof HTMLInputElement
             && (active.type === "checkbox" || active.type === "text")))
         ? active.getAttribute("aria-label")
+        : null;
+    // A click-focused TEXT row may sit at a non-default caret (the user clicked a
+    // position, or selected a substring) before the first keystroke assigns
+    // `editingInput`; the `wasEditing` branch above does not cover it. Capture both
+    // ends here so the rebuilt input resumes at the same place — the user's first
+    // keystroke then inserts at, or replaces, exactly what they aimed at. A checkbox
+    // has no selection; a select's value is its own state, so only the text case
+    // carries a caret worth restoring.
+    const focusedConfigTextCaret =
+      focusedConfigControlKey !== null
+        && active instanceof HTMLInputElement
+        && active.type === "text"
+        ? { start: active.selectionStart, end: active.selectionEnd }
         : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
@@ -404,14 +418,26 @@ export class ConfigPane {
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
-      // Hand focus back to the rebuilt checkbox/select for the key that genuinely
-      // held it. preventScroll for the same reason as above: focus() would otherwise
-      // undo the offset rebuildKeepingScroll just restored.
-      this.el
-        .querySelector<HTMLElement>(
-          `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`,
-        )
-        ?.focus({ preventScroll: true });
+      // Hand focus back to the rebuilt checkbox/select/text control for the key
+      // that genuinely held it. preventScroll for the same reason as above: focus()
+      // would otherwise undo the offset rebuildKeepingScroll just restored.
+      const restored = this.el.querySelector<HTMLElement>(
+        `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`,
+      );
+      restored?.focus({ preventScroll: true });
+      // A click-focused text field may have a non-default caret or selection; put
+      // it back where the user left it so the first keystroke lands correctly. A
+      // checkbox/select has nothing to restore, so the gate narrows to text inputs.
+      if (
+        restored instanceof HTMLInputElement
+        && restored.type === "text"
+        && focusedConfigTextCaret?.start != null
+      ) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start,
+        );
+      }
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {

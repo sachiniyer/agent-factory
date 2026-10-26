@@ -4602,6 +4602,20 @@ test("config: a click-focused-but-untyped text field keeps focus across an unrel
     // restore focus.
     const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
     await field.click();
+    // Place the caret at a NON-default position (the middle of the value) before
+    // the rebuild lands. The `focusedConfigControlKey` branch must restore not only
+    // focus but the caret, so the user's first keystroke lands where they clicked
+    // rather than at the field's default selection. RED without the caret
+    // preservation: focus comes back but at position 0 (the input's default), so
+    // the next keystroke inserts at the start instead of where the user aimed.
+    const fieldValue = await field.inputValue();
+    const caretStart = Math.max(1, Math.floor(fieldValue.length / 2));
+    await field.focus();
+    await field.evaluate((el, start) => {
+      const input = el as HTMLInputElement;
+      input.setSelectionRange(start, start);
+    }, caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
 
     releaseSave!();
     // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
@@ -4611,6 +4625,10 @@ test("config: a click-focused-but-untyped text field keeps focus across an unrel
     // restoration ladder had no branch for a click-focused text field, so focus
     // fell to <body>.
     await expect(field).toBeFocused();
+    // The caret survived the rebuild and is still where the user placed it — not
+    // reset to the input's default. RED without the caret-preservation fix.
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionEnd)).toBe(caretStart);
 
     // Downstream contract — the user-visible symptom from the report: with focus
     // on a native INPUT the document-level keydown gate (isNativeControl) returns

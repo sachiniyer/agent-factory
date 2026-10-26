@@ -7771,6 +7771,7 @@ var ConfigPane = class {
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
+    const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7783,9 +7784,16 @@ var ConfigPane = class {
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
-      this.el.querySelector(
+      const restored = this.el.querySelector(
         `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
-      )?.focus({ preventScroll: true });
+      );
+      restored?.focus({ preventScroll: true });
+      if (restored instanceof HTMLInputElement && restored.type === "text" && focusedConfigTextCaret?.start != null) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
+        );
+      }
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
