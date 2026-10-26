@@ -289,43 +289,76 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	if !ok {
 		return false
 	}
-	info, err := peerMountinfo(peer)
+	if info, err := peerMountinfo(peer); err == nil {
+		// Strong proof: the device the daemon's own mount table shows
+		// under its data root is the device af's stat reports.
+		peerDev, ok := coveringMountDev(info, rootDir)
+		return ok && peerDev == dev
+	}
+	// /proc/<peer> is ptrace-gated — an ordinary docker-group user cannot
+	// read a root daemon's mount table. That deployment is the common
+	// case, so fall back to af's OWN mount table (always readable): the
+	// data root must be covered by a whole filesystem — the rootfs or a
+	// complete mount — never a partial bind. A partial bind could plant a
+	// foreign subtree under the reported path; a whole-fs mount cannot
+	// hide which filesystem backs it, and a host data root bind-mounted
+	// into a container is still the same device the daemon writes to.
+	self, err := peerMountinfo(os.Getpid())
 	if err != nil {
 		return false
 	}
-	peerDev, ok := coveringMountDev(info, rootDir)
-	return ok && peerDev == dev
+	root, ok := coveringMountRoot(self, rootDir)
+	return ok && root == "/"
 }
 
-// coveringMountDev finds the mount entry covering path in a mountinfo
-// table — the longest mount-point prefix — and returns its st_dev. The
-// mount the daemon reports under its data root is the filesystem it
-// writes to; matching device numbers across namespaces name the same
-// filesystem object. Unparseable or uncovered paths are unproven.
-func coveringMountDev(info []byte, path string) (uint64, bool) {
+// coveringMountEntry finds the mount entry covering path in a mountinfo
+// table — the longest mount-point prefix — and returns its fields.
+// Unparseable or uncovered paths are unproven.
+func coveringMountEntry(info []byte, path string) ([]string, bool) {
 	if !strings.HasPrefix(path, "/") {
-		return 0, false
+		return nil, false
 	}
-	bestLen, bestDev := -1, uint64(0)
+	var best []string
+	bestLen := -1
 	for _, line := range strings.Split(string(info), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
 			continue
 		}
 		mp := unescapeMountinfoPath(fields[4])
-		if mp != "/" && !strings.HasPrefix(path, mp+"/") {
+		if mp != "/" && mp != path && !strings.HasPrefix(path, mp+"/") {
 			continue
 		}
-		if len(mp) <= bestLen {
-			continue
+		if len(mp) > bestLen {
+			bestLen, best = len(mp), fields
 		}
-		var maj, min uint64
-		if _, err := fmt.Sscanf(fields[2], "%d:%d", &maj, &min); err != nil {
-			continue
-		}
-		bestLen, bestDev = len(mp), unix.Mkdev(uint32(maj), uint32(min))
 	}
-	return bestDev, bestLen >= 0
+	return best, best != nil
+}
+
+// coveringMountDev is the st_dev of the mount covering path — the device
+// the table's owner writes to there. Matching devices across namespaces
+// name the same filesystem object.
+func coveringMountDev(info []byte, path string) (uint64, bool) {
+	fields, ok := coveringMountEntry(info, path)
+	if !ok {
+		return 0, false
+	}
+	var maj, min uint64
+	if _, err := fmt.Sscanf(fields[2], "%d:%d", &maj, &min); err != nil {
+		return 0, false
+	}
+	return unix.Mkdev(uint32(maj), uint32(min)), true
+}
+
+// coveringMountRoot is the covering mount's root field — "/" for a whole
+// filesystem or the rootfs, a subtree path for a partial bind.
+func coveringMountRoot(info []byte, path string) (string, bool) {
+	fields, ok := coveringMountEntry(info, path)
+	if !ok {
+		return "", false
+	}
+	return unescapeMountinfoPath(fields[3]), true
 }
 
 func unescapeMountinfoPath(s string) string {
