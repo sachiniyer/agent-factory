@@ -510,7 +510,13 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// resolves it and the peer answer is unaffected.
 		sock := fakeUnixDockerSocket(t)
 		sockPath := strings.TrimPrefix(sock, "unix://")
-		linkDir := filepath.Join(t.TempDir(), "lnk")
+		// The endpoint path must stay under sun_path's ~104 bytes — keep the
+		// symlink dir next to the socket under /tmp, not in t.TempDir()'s
+		// deep /var/folders tree (macOS dial fails "invalid argument").
+		linkParent, lerr := os.MkdirTemp("/tmp", "af-lnk-")
+		require.NoError(t, lerr)
+		t.Cleanup(func() { os.RemoveAll(linkParent) })
+		linkDir := filepath.Join(linkParent, "lnk")
 		require.NoError(t, os.Symlink(filepath.Dir(sockPath), linkDir))
 		t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(linkDir, filepath.Base(sockPath)))
 		t.Setenv("DOCKER_CONTEXT", "")
