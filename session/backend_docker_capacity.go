@@ -281,7 +281,7 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 		return false
 	}
 	defer conn.Close()
-	peer, err := socketPeerPid(conn)
+	peer, peerUID, err := socketPeerCred(conn)
 	if err != nil || peer <= 0 {
 		return false
 	}
@@ -297,12 +297,19 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	}
 	// /proc/<peer> is ptrace-gated — an ordinary docker-group user cannot
 	// read a root daemon's mount table. That deployment is the common
-	// case, so fall back to af's OWN mount table (always readable): the
-	// data root must be covered by a whole filesystem — the rootfs or a
-	// complete mount — never a partial bind. A partial bind could plant a
-	// foreign subtree under the reported path; a whole-fs mount cannot
-	// hide which filesystem backs it, and a host data root bind-mounted
-	// into a container is still the same device the daemon writes to.
+	// case, so fall back to weaker but cross-process evidence (#5382
+	// review): the answering process must be privileged (uid 0 — the real
+	// dockerd, never the same-user proxy or ssh forwarder that is the
+	// foreign-socket vector), AND af's own mount table (always readable)
+	// must show the data root covered by a whole filesystem — the rootfs
+	// or a complete mount — never a partial bind. A partial bind could
+	// plant a foreign subtree under the reported path; a whole-fs mount
+	// cannot hide which filesystem backs it, and a host data root
+	// bind-mounted into a container is still the device the daemon
+	// writes to.
+	if peerUID != 0 {
+		return false
+	}
 	self, err := peerMountinfo(os.Getpid())
 	if err != nil {
 		return false

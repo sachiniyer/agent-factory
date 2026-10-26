@@ -48,17 +48,17 @@ func fakeUnixDockerSocket(t *testing.T) string {
 // requires the peer's covering mount to show the same device af's stat
 // reports, or — when the peer's table is unreadable — af's own table
 // covering the root on a whole filesystem.
-func stubPeerDataRoot(t *testing.T, dev, peerTable, selfTable string, peerErr error) {
+func stubPeerDataRoot(t *testing.T, peerUID int, dev, peerTable, selfTable string, peerErr error) {
 	t.Helper()
 	var maj, min uint64
 	_, err := fmt.Sscanf(dev, "%d:%d", &maj, &min)
 	require.NoError(t, err)
-	oldP, oldM, oldS := socketPeerPid, peerMountinfo, statDev
-	socketPeerPid = func(net.Conn) (int, error) {
+	oldP, oldM, oldS := socketPeerCred, peerMountinfo, statDev
+	socketPeerCred = func(net.Conn) (int, int, error) {
 		if peerErr != nil {
-			return 0, peerErr
+			return 0, 0, peerErr
 		}
-		return 424242, nil
+		return 424242, peerUID, nil
 	}
 	peerMountinfo = func(pid int) ([]byte, error) {
 		table := peerTable
@@ -71,7 +71,7 @@ func stubPeerDataRoot(t *testing.T, dev, peerTable, selfTable string, peerErr er
 		return []byte(table), nil
 	}
 	statDev = func(string) (uint64, bool) { return unix.Mkdev(uint32(maj), uint32(min)), true }
-	t.Cleanup(func() { socketPeerPid, peerMountinfo, statDev = oldP, oldM, oldS })
+	t.Cleanup(func() { socketPeerCred, peerMountinfo, statDev = oldP, oldM, oldS })
 }
 
 // peerTableOn returns a mountinfo whose deepest mount covering the data
@@ -148,7 +148,7 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 
 	// Each failingStep names a docker argv shape emitted by one provision
 	// step; matching it makes the fake fail that call. The matchers read argv
@@ -269,7 +269,7 @@ func TestProvisionFailure_RootlessEngineReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 
 	failRun := func(args []string) ([]byte, error) {
 		if args[0] == "run" {
@@ -363,7 +363,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// DockerRootDir lives on another filesystem entirely.
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", "af-test-foreign-daemon", false), failRun)
 
 		statfsCalls := 0
@@ -396,7 +396,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// /var/lib/docker is the container rootfs).
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("9:9"), peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("9:9"), peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -413,7 +413,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// or the socket is unreachable — unproven, not shared.
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), fmt.Errorf("peer credentials unavailable"))
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), fmt.Errorf("peer credentials unavailable"))
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -432,7 +432,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// review: this deployment must not lose typed ENOSPC evidence).
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", "", peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", "", peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -444,6 +444,25 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Greater(t, *calls, 0)
 	})
 
+	t.Run("an unprivileged peer cannot use the fallback", func(t *testing.T) {
+		// The foreign-socket vector — Docker Desktop's shared socket, an
+		// `ssh -U` forwarder — answers as AF'S OWN user. If the peer's
+		// table is unreadable AND its uid is not root's, a whole-fs self
+		// mount is not proof (#5382 review).
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 1000, "8:1", "", peerTableOn("8:1"), nil)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "same-uid-proxy"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a same-uid answerer is the proxy/forwarder shape — the fallback must not apply: %v", err)
+		assert.Equal(t, 0, *calls, "an unprivileged peer must not reach statfs")
+	})
+
 	t.Run("a partial bind over the data root defeats the fallback", func(t *testing.T) {
 		// The fallback's remaining hole: af's own table showing a partial
 		// bind (mount root != "/") under the data-root path means a foreign
@@ -452,7 +471,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		t.Setenv("DOCKER_CONTEXT", "")
 		selfTable := peerTableOn("8:1") +
 			"30 24 8:1 /foreign/var/lib/docker /var/lib/docker rw - ext4 /dev/sda1 rw\n"
-		stubPeerDataRoot(t, "8:1", "", selfTable, nil)
+		stubPeerDataRoot(t, 0, "8:1", "", selfTable, nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -474,7 +493,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		stacked := peerTableOn("8:1") +
 			"1415 1371 8:1 /volumes/v/_data /var/lib/docker rw - ext4 /dev/sda1 rw\n" +
 			"1160 1415 0:198 / /var/lib/docker rw - tmpfs tmpfs rw\n"
-		stubPeerDataRoot(t, "0:198", stacked, peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "0:198", stacked, peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -495,7 +514,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		require.NoError(t, os.Symlink(filepath.Dir(sockPath), linkDir))
 		t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(linkDir, filepath.Base(sockPath)))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -510,7 +529,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	t.Run("local endpoint plus matching hostname probes", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -527,7 +546,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	t.Run("a root af cannot stat is not full", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -554,7 +573,7 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
@@ -610,7 +629,7 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 
 	// failExec kills the configureGit exec; failRun kills `docker run`.
 	failExec := func(args []string) ([]byte, error) {
@@ -874,7 +893,7 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 
 	cases := map[string]func(args []string) ([]byte, error){
 		"port output unparsable": func(args []string) ([]byte, error) {
@@ -947,19 +966,20 @@ func TestDockerStepWriterUnprivileged(t *testing.T) {
 	assert.True(t, dockerUserUnprivileged("agent"))
 }
 
-// TestProvisionFailure_BannerTimeoutWriterClass pins the two banner-timeout
+// TestProvisionFailure_BannerTimeoutWriterClass pins the banner-timeout
 // classification rules from #5382 review: (a) a timeout whose polls kept
 // FAILING is the session writer's failure — the exec state is a daemon
 // write, but the never-created banner belongs to the session user's
 // redirect, so the Bavail window must be consulted via the session-exec
-// class; and (b) only the LATEST poll outcome may classify — a recovered
-// exec must not lend a stale error to a structural timeout.
+// class; and (b) a timeout whose polls all SUCCEEDED on an empty file is
+// the same class — a readable banner proves the writer's redirect landed,
+// not that the writer's own write could populate it.
 func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 	oldT, oldI := dockerBannerPollTimeout, dockerBannerPollInterval
 	dockerBannerPollTimeout, dockerBannerPollInterval = 60*time.Millisecond, 10*time.Millisecond
 	defer func() { dockerBannerPollTimeout, dockerBannerPollInterval = oldT, oldI }()
@@ -1004,32 +1024,32 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 			"the banner timeout must consult the session writer's Bavail, not only the daemon's Bfree: %v", err)
 	})
 
-	t.Run("a recovered exec does not lend the verdict", func(t *testing.T) {
-		// The first cat races banner creation; every later poll SUCCEEDS
-		// with unparseable output — the timeout is a server-side startup
-		// problem and must not borrow the coincidentally-exhausted window.
-		polls := 0
+	t.Run("a clean-but-empty read still classifies writer-side", func(t *testing.T) {
+		// Every poll's `cat` SUCCEEDS but the banner stays empty — the
+		// startup shell's redirect can create the file while the
+		// agent-server's own write dies ENOSPC (and RunAgentServer does
+		// not propagate it). A readable file is not a populated one —
+		// the timeout keeps the session-writer class (#5382 review).
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
 			func(args []string) ([]byte, error) {
 				switch {
 				case args[0] == "run":
 					return []byte(dockerCreatedID + "\n"), nil
-				case args[0] == "exec" && containsArg(args, dockerBannerPath):
-					polls++
-					if polls == 1 {
-						return nil, fmt.Errorf("exit status 1")
-					}
-					return []byte("not json yet\n"), nil
+				case args[0] == "inspect":
+					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
+						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/work"}]}`), nil
+				case args[0] == "exec":
+					return []byte("\n"), nil
 				}
 				return nil, nil
 			})
 		reservedWindow(t)
 		stubSameFilesystem(t, true)
-		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "banner-race"}}
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "banner-empty"}}
 		_, err := p.provision()
 		require.Error(t, err)
-		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"the latest poll ran clean — a stale exec error cannot lend ENOSPC to a structural timeout: %v", err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"an existing-but-empty banner still means the session writer could not populate it: %v", err)
 	})
 }
 

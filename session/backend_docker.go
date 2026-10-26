@@ -713,25 +713,16 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 // whose real cause is a permission denied on the banner file.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	deadline := time.Now().Add(dockerBannerPollTimeout)
-	var lastExecErr error
 	for {
 		args := []string{"exec"}
 		args = append(args, p.sessionExecOptions()...)
 		args = append(args, p.containerID, "cat", dockerBannerPath)
 		out, err := p.docker(dockerShortStepTimeout, args...)
 		if err == nil {
-			// A successful exec is the latest poll outcome even when the
-			// banner content is not JSON yet — only the most recent
-			// attempt may classify the timeout, so a stale exec error from
-			// an early race cannot lend the verdict to a later structural
-			// timeout (#5382 review).
-			lastExecErr = nil
 			var b dockerBanner
 			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
-		} else {
-			lastExecErr = err
 		}
 		if time.Now().After(deadline) {
 			logArgs := []string{"exec"}
@@ -740,18 +731,14 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
 			bannerErr := fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
-			if lastExecErr == nil {
-				// The latest banner read ran fine and the answer still
-				// never arrived — a server-side startup problem, not a
-				// data-root write. Keep the fs verdict off it.
-				return dockerBanner{}, dockerStepErr(bannerErr, dockerOpLocal)
-			}
-			// The reads themselves were failing. The failure can be the
-			// daemon's own exec-state write, but it can also be the session
-			// user's banner/log redirects hitting a full fs (the banner is
-			// never created, so cat keeps failing) — classify with the
-			// session writer's privilege so the Bavail window is seen too
-			// (#5382 review).
+			// A banner that never appeared is always writer-side evidence:
+			// the reads may keep failing (daemon exec state is a data-root
+			// write), or the file exists empty because the startup shell's
+			// redirect created it while the agent-server's own write died
+			// ENOSPC — a successful `cat` only proves the file is
+			// readable, never that the writer could populate it (#5382
+			// review). Classify with the session writer's privilege so the
+			// Bavail window is seen either way.
 			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpSessionExec)
 		}
 		// The poll interval bounds how long we can outrun the deadline; use a
