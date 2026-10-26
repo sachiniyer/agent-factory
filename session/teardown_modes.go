@@ -42,6 +42,12 @@ type teardownKill struct {
 	// trustLiveGeneration is set only by prepareKillTeardown when its caller
 	// holds this session's exclusive lifecycle lock (#3413); see closeTab.
 	trustLiveGeneration bool
+	// keepWorkspace is set for a startup-state-unknown record: its persisted
+	// worktree identity was never proven to be af's, so kill drops the record
+	// and its tmux binding but must not destroy the workspace — the same
+	// keep-unknown rule that fences `git branch -D` off a nil
+	// BranchCreatedByUs (#5503 review).
+	keepWorkspace bool
 }
 
 // beforeKillTeardownOriginRecheck runs between the daemon's pre-tombstone
@@ -75,9 +81,15 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	i.mu.RLock()
 	gw := i.gitWorktree
 	archived := i.liveness == LiveArchived
+	startupUnknown := i.startupStateUnknown
 	i.mu.RUnlock()
 	if gw == nil {
 		return teardownKill{trustLiveGeneration: trustLiveGeneration}, noop, nil
+	}
+	if startupUnknown {
+		// The record is a quarantine: af never proved the workspace was its
+		// own, so the kill may only drop the record and its tmux binding.
+		return teardownKill{trustLiveGeneration: trustLiveGeneration, keepWorkspace: true}, noop, nil
 	}
 	if gw.CleanupRetryPending() {
 		return teardownKill{}, noop, fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
@@ -179,6 +191,14 @@ func (m teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (tea
 
 func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
 	if gw == nil {
+		return stateKnown, nil
+	}
+	if m.keepWorkspace {
+		// stateKnown, not stateUnknown: the teardown SUCCEEDED — the unknown
+		// verdict is what keeps the record, and this workspace is deliberately
+		// left, not unresolvable. The tree and its branch stay on disk for the
+		// owner to inspect; only the af record and tmux binding are dropped.
+		log.InfoLog.Printf("kill %q: leaving unproven workspace %q in place (startup-state-unknown record)", title, gw.GetWorktreePath())
 		return stateKnown, nil
 	}
 	var cleanupState git.CleanupState
