@@ -543,11 +543,22 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// stays in the marker, not on this row — a still-draining create writing
 	// its own persisted row matches by title+stable-id, and reusing that id
 	// here would let a straggler write overwrite the leftover record.
+	//
+	// A leftover record is recovery evidence, not a session — so for a
+	// targeted fire it must never occupy the delivery address: an inert or
+	// tombstoned row under the exact TargetSession title makes every later
+	// send fail "instance not started" forever, discharging each occurrence
+	// undelivered (#5503 review). Mint it beside the address; the record still
+	// names the exact tmux/worktree/branch it stands for.
+	title := fire.Title
+	if task.CanonicalTargetSession(t.TargetSession) != "" && title != "" {
+		title += "-interrupted"
+	}
 	now := time.Now()
 	return &session.InstanceData{
 		ID:         session.NewInstanceID(),
 		TaskID:     t.ID,
-		Title:      fire.Title,
+		Title:      title,
 		Path:       repo.WorkspacePath(),
 		Branch:     branch,
 		Status:     session.Loading,

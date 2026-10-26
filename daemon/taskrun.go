@@ -371,7 +371,12 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		// so the next boot retries the reconcile rather than silently dropping
 		// an occurrence whose outcome could not be established.
 		keepFire := errors.Is(err, errTaskFireReconcile)
-		if daemonDrainingFn() && isShutdownAbortErr(err) {
+		// A typed upgrade-gate refusal is self-proving shutdown evidence: the
+		// transaction only exists across a daemon replacement, and it can still
+		// be open while the replacement serves — after the old daemon's drain
+		// flag is gone — so it is never conjuncted with daemonDrainingFn
+		// (#5503 review).
+		if isLiveUpgradeGateErr(err) || (daemonDrainingFn() && isShutdownAbortErr(err)) {
 			status = taskStatusAbortedShutdown
 			keepFire = true
 		}

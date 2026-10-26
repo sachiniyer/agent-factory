@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -1138,5 +1139,89 @@ func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
 	}
 	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err == nil {
 		t.Fatalf("the proven leftover's runtime must be stopped inside reconcile, still alive: %s", out)
+	}
+}
+
+// TestRunTask_UpgradeGateErrorKeepsMarker: a typed upgrade-gate refusal from
+// the loopback RPC is self-proving shutdown evidence — a live upgrade
+// transaction only exists across a daemon replacement, and it can still be
+// open after the OLD daemon's drain flag is gone, so the classification must
+// not require daemonDrainingFn. Without it the occurrence would be recorded
+// "errored:" and its marker discharged undelivered (#5503 review).
+func TestRunTask_UpgradeGateErrorKeepsMarker(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7100", repo)
+	pinDaemonDraining(t, false) // deliberately not draining: the gate error alone must classify
+
+	origCreate := createSessionForTask
+	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+		return nil, &upgradetxn.UpgradeInProgressError{TransactionID: "txn-1", ToVersion: "v2"}
+	}
+	t.Cleanup(func() { createSessionForTask = origCreate })
+
+	if err := RunTask("ab0r7100", task.ProjectExpectation{}); err == nil {
+		t.Fatal("expected the delivery failure to surface")
+	}
+	if got := lastRunStatus(t, "ab0r7100"); got != taskStatusAbortedShutdown {
+		t.Fatalf("LastRunStatus = %q, want %q", got, taskStatusAbortedShutdown)
+	}
+	if !markerExists(t, "ab0r7100") {
+		t.Fatal("a fire blocked by the upgrade gate must keep its marker for the replacement daemon")
+	}
+}
+
+// TestTaskFireLeftoverRecord_TargetedFireLeavesTargetTitleFree: a leftover
+// record minted for a TARGETED fire must not occupy the delivery address.
+// Under the exact TargetSession title it loads inert or dead, and every later
+// send resolves it as the target and fails "instance not started" — each
+// occurrence discharged undelivered (#5503 review). The record keeps the exact
+// tmux/worktree/branch identities; only the address stays free.
+func TestTaskFireLeftoverRecord_TargetedFireLeavesTargetTitleFree(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	title := "aim"
+	branch := git.BranchForTitle(cfg.BranchPrefix, title)
+	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover worktree: %v: %s", err, out)
+	}
+
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7101",
+		IntendedAt: time.Now().Add(time.Hour), // future: nothing can postdate it — unproven
+		Title:      title,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7101", ProjectPath: repoPath, Prompt: "p", TargetSession: title},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil {
+		t.Fatalf("expected a quarantine record for the unproven leftover worktree")
+	}
+	if !row.StartupStateUnknown {
+		t.Fatalf("an unproven leftover must quarantine as startup-state-unknown")
+	}
+	if row.Title == title {
+		t.Fatalf("the leftover record occupies the delivery address %q; later sends would resolve it inert", title)
+	}
+	if row.Title != title+"-interrupted" {
+		t.Fatalf("leftover record title = %q, want %q", row.Title, title+"-interrupted")
+	}
+	if want := tmux.SanitizedNameForRepo(title, repo.IdentityPath()); row.TmuxName != want {
+		t.Fatalf("record's recovery handle names %q, want the exact leftover tmux name %q", row.TmuxName, want)
+	}
+	if row.Branch != branch {
+		t.Fatalf("record branch = %q, want the derived branch %q so later fires still see it foreign", row.Branch, branch)
 	}
 }
