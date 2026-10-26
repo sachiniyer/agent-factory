@@ -129,6 +129,30 @@ func (m *home) saveContentPaneState() error {
 	// replaces the pane's list with the active scope's rows.
 	type retargetCandidate struct{ id, name, newPath string }
 	var retargetCandidates []retargetCandidate
+	// recordRetargetIfMoved queues a ProjectPath change for the post-reload
+	// cross-repo notice. The save has committed the edit (nil error or
+	// IsMutationCommitted), so the post-edit name is still on the in-memory
+	// row right here — AcknowledgeSavedEdit advances the baseline but does not
+	// touch s.tasks, so the name must be captured before the reload replaces
+	// the pane's list. Record it for both outcomes: a committed-with-warning
+	// save landed the binding too, and the active-scope reload below drops the
+	// row either way, so without a candidate the warning branch would leave the
+	// user with a generic "failed to save task" and no idea where it went.
+	recordRetargetIfMoved := func(edit task.TaskEdit) {
+		if edit.Update.ProjectPath == nil {
+			return
+		}
+		name := edit.ID
+		for _, t := range sp.GetTasks() {
+			if t.ID == edit.ID {
+				if t.Name != "" {
+					name = t.Name
+				}
+				break
+			}
+		}
+		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
+	}
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
 			if updateProvedTaskDeleted(err, edit.ID) {
@@ -145,6 +169,10 @@ func (m *home) saveContentPaneState() error {
 				// failed. Keep surfacing that failure, but advance this task's
 				// baseline so a later edit is diffed against durable state.
 				sp.AcknowledgeSavedEdit(edit.ID)
+				// The binding change committed with the task, so the reload
+				// below drops a retargeted row the same way — record it so the
+				// cross-repo notice still names where it landed.
+				recordRetargetIfMoved(edit)
 			} else if mutationOutcomeUnknown(err) {
 				// The update may have landed with only its reply lost (#4824).
 				// The draft is kept, since only a positive not-found may drop one
@@ -170,18 +198,7 @@ func (m *home) saveContentPaneState() error {
 		// A ProjectPath patch retargets the task's project binding. The save
 		// committed it; the reload below decides whether the new binding
 		// stayed in the active project or moved it elsewhere.
-		if edit.Update.ProjectPath != nil {
-			name := edit.ID
-			for _, t := range sp.GetTasks() {
-				if t.ID == edit.ID {
-					if t.Name != "" {
-						name = t.Name
-					}
-					break
-				}
-			}
-			retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
-		}
+		recordRetargetIfMoved(edit)
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
 		// tsk is the record as the pane displayed it; pin its project binding

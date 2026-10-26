@@ -371,6 +371,137 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesBindingNotice(t *testing.T)
 		"the cross-repo retarget notice is raised once, then cleared")
 }
 
+// TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning is the
+// committed-with-warning sibling of the retarget notice guard above. When the
+// daemon reports MutationCommitted (the durable write landed but its scheduler
+// refresh failed), the save's error branch acknowledges the edit and keeps
+// surfacing the schedule failure, but the retarget still committed the new
+// ProjectPath — so the active-scope reload still drops the row and the
+// cross-repo notice must still be queued. Pre-fix the error branch returned
+// before the retarget-recording block, so a committed-with-warning retarget
+// left the user with a generic "failed to save task" and no idea where it landed.
+func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	repoA := initTestGitRepo(t)
+	repoB := initTestGitRepo(t)
+	require.NotEqual(t, config.RepoIDFromRoot(repoA), config.RepoIDFromRoot(repoB))
+
+	t.Chdir(repoA)
+	h.repoRoot = repoA
+	h.repoID = config.RepoIDFromRoot(repoA)
+
+	seed := task.Task{
+		ID:          "retarget-committed",
+		Name:        "Retarget me",
+		Prompt:      "p",
+		CronExpr:    "* * * * *",
+		ProjectPath: repoA,
+		Program:     "claude",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	require.NoError(t, task.AddTask(seed))
+
+	tp := h.automations.TaskPane()
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	require.True(t, tp.IsEditing(),
+		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
+	// Tab to the Path field, clear it, and enter B's root to retarget the task.
+	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
+	for i := 0; i < 6; i++ {
+		press(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	require.True(t, tp.IsTextFieldFocused(),
+		"the focus must be on a text input (Path) after the tab walk from Name")
+	for range repoA {
+		press(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(repoB)})
+	press(tea.KeyMsg{Type: tea.KeyEnter}) // submit the form (validates B as a real git repo, marks dirty, exits editing)
+	require.False(t, tp.IsEditing(), "Enter must submit the form")
+	require.True(t, tp.IsDirty(), "the retargeted task must be queued for save")
+
+	// The update commits the new ProjectPath to disk but reports a committed-
+	// with-warning outcome (the daemon's scheduler refresh failed), so the save
+	// surfaces the schedule failure AND must still record the retarget.
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		_, err := task.UpdateTask(id, update, expect)
+		require.NoError(t, err)
+		return committedTaskMutationTestError{}
+	}))
+
+	// Flush the dirty edit through saveContentPaneState directly. The committed
+	// branch surfaces the schedule failure as the return value, and the retarget
+	// recording runs on the same path the nil-error success does.
+	require.Error(t, h.saveContentPaneState(), "the post-commit schedule failure must remain visible")
+
+	// The retarget committed: disk carries the task at B, with RepoID = B.
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, disk, 1)
+	assert.Equal(t, repoB, disk[0].ProjectPath, "the patch committed with B's root as the ProjectPath")
+
+	// The active-scope reload drops the retargeted row from the pane.
+	assert.Empty(t, tp.GetTasks(),
+		"a task retargeted out of the active project must not appear in the active-scope pane")
+
+	// The retarget that committed with a warning is still recorded for the
+	// cross-repo notice — the user is told where it landed, not just shown a
+	// generic "failed to save task".
+	notice := tp.TakeCrossRepoRetargetNotice()
+	require.NotEmpty(t, notice,
+		"a committed-with-warning retarget must queue a cross-repo binding notice")
+	assert.Contains(t, notice, "Retarget me", "the notice names the retargeted task")
+	assert.Contains(t, notice, repoB, "the notice echoes the binding that landed")
+	assert.Empty(t, tp.TakeCrossRepoRetargetNotice(),
+		"the cross-repo retarget notice is raised once, then cleared")
+}
+
+// TestPollSurfacesDiscardedDraftAndRetargetTogether is the #1836 guard for the
+// snapshot poll's notice draining: a save that both discards a draft (its task
+// was deleted) and retargets another task to a different repo queues both a
+// discarded-draft notice (#4798) and a cross-repo retarget notice (#1836). The
+// poll drains both in one tick — showTransientMessage replaces the bar, so
+// draining each notice with its own call would clobber the more urgent
+// discarded-work warning with the retarget notice (and clear both durable queues
+// before either reached the user). The poll combines them into one message so
+// neither is lost.
+func TestPollSurfacesDiscardedDraftAndRetargetTogether(t *testing.T) {
+	h, sp, demo := homeWithHeldDraft(t, true)
+
+	// A save proved demo's task was deleted, so the pane discards its draft and
+	// queues the discarded-draft notice (#4798).
+	sp.DiscardDeletedDraft(demo.ID)
+
+	// The same save retargeted another task out of the active project, so a
+	// retarget notice is queued too (#1836).
+	sp.RecordCrossRepoRetarget("nightly", "/repo/other")
+
+	// The snapshot poll is the fallback delivery path for both notices. With no
+	// recovery screen shadowing the bar, it drains both in one tick.
+	h.recovery = nil
+	h.errBox.SetSize(500, 1)
+	_, _ = h.Update(snapshotFetchedMsg{repoID: h.repoID})
+
+	text, _ := h.errBox.RetainedNotice()
+	assert.Contains(t, text, `Discarded unsaved edits to "demo"`,
+		"the more urgent discarded-work notice must surface (not be clobbered by the retarget notice)")
+	assert.Contains(t, text, "nightly",
+		"the retarget notice must also surface (both notices drain in one tick, combined)")
+	assert.Contains(t, text, "/repo/other",
+		"the retarget notice's binding must surface alongside the discarded-work notice")
+}
+
 // TestSaveContentPaneState_SameRepoEditQueuesNoCrossRepoNotice is the control for
 // the retarget notice: a same-repo edit (rename a task whose ProjectPath stays
 // at the active project's root) must NOT queue a cross-repo retarget notice. The

@@ -68,13 +68,17 @@ func (s *TaskPane) TakeCrossRepoRetargetNotice() string {
 		return "Task " + name + " was rebound to " + items[0].path +
 			"; it no longer appears in this project's list"
 	}
+	// Name each retarget with the binding it landed at, not just the task name:
+	// the whole point of the notice is to tell the user where a vanished task went
+	// (#1891), and that is doubly necessary when several retargets land in different
+	// repos — a bare list of names leaves the user to re-open each one to find it.
 	quoted := make([]string, 0, len(items))
 	for _, r := range items {
 		if r.name == "" {
-			quoted = append(quoted, "a task")
+			quoted = append(quoted, "a task (rebound to "+r.path+")")
 			continue
 		}
-		quoted = append(quoted, strconv.Quote(r.name))
+		quoted = append(quoted, strconv.Quote(r.name)+" to "+r.path)
 	}
 	return "Tasks " + strings.Join(quoted, ", ") +
 		" were rebound and no longer appear in this project's list"
