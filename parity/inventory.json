@@ -1511,6 +1511,24 @@
       "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
     },
     {
+      "id": "web.terminal-font-size",
+      "title": "Adjust the terminal font size (stepped, persisted per device class)",
+      "tui": {
+        "status": "n/a",
+        "pointer": "the TUI renders inside the host terminal emulator, which owns font size; af has no font control of its own. Its `,` editor can write the [web] leaf (config.write) but the leaf only feeds the web renderer."
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/components.ts:142,145 terminalChrome A-/A+ buttons -> web/src/terminal-font.ts:183 stepTerminalFontSize (0.5px phone / 1px desktop, clamp [4,32], debounced save through SetConfigValue) -> web/src/terminal.ts:1542-1546 re-applies xterm fontSize on change"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": "commands/configcmd.go config set web.terminal_font_size_{phone,desktop} writes the leaf (config.write) but the CLI has no renderer to adjust — the same shape as appearance.select."
+      },
+      "verdict": "deliberate",
+      "notes": "#5500: web-only chrome over two manifest-admitted global config leaves (config/web.go, config/manifest.go:539). The VALUES are shared daemon-side so every browser that attaches inherits them, and the generic config write path can set them from any surface — but the capability itself (step the rendered pitch) exists only where a renderer honors it. The TUI cannot reach the host emulator's font size and the CLI has nothing to render, so both are n/a rather than gaps. Not derivable by the audit (no dedicated RPC/verb/binding), recorded here so it is never re-reported as a gap."
+    },
+    {
       "id": "wire.id-addressing",
       "title": "Address a session by its stable id rather than by title",
       "tui": {
