@@ -1339,10 +1339,11 @@ func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
 }
 
 // TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys pins the compact edit
-// footer to the keys that actually fire there (#5538): a text stop gets
-// "esc list" alone — the verb glyphs type into the field (#4838) and the quit
-// key is gated on !IsEditing (#1961) — while a selector stop advertises the
-// abbreviated verbs.
+// footer to the keys that actually fire there (#5538): a text stop names the
+// verb path behind "tab →" — the glyphs type into the field (#4838), so the
+// run-now path stays discoverable (#1288) without reading as a live key, and
+// the quit key is gated on !IsEditing (#1961) — while a selector stop
+// advertises the abbreviated verbs directly.
 func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -1365,8 +1366,8 @@ func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 		lines := strings.Split(stripANSI(tp.String()), "\n")
 		return lines[len(lines)-1]
 	}
-	assert.Equal(t, "esc list", strings.TrimSpace(lastLine()),
-		"a text stop advertises only the key that fires there")
+	assert.Equal(t, "tab → r/x/D · esc list", strings.TrimSpace(lastLine()),
+		"a text stop names the verb path behind tab, keeping esc's label")
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger selector
 	row := lastLine()
 	assert.Contains(t, row, "esc list", "list escape remains visible on the compact verb row")

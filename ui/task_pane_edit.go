@@ -474,8 +474,28 @@ func (s *TaskPane) renderEditMode() string {
 		// selector/button stops — at a text stop they are typed input (#4838) —
 		// and the configured quit key is gated on !IsEditing in handleStateTasks
 		// (#1961), so it is dead at every edit stop and never advertised.
+		var tiers []string
 		if s.textFocusStop() {
-			b.WriteString(ActionHint(fitLine("esc list", s.width)))
+			// A text stop still names the run-now path (#1288: the overlay
+			// opens straight onto Name, and the first screen must say how to
+			// reach the verbs) — but only as the destination of the tab step,
+			// so nothing reads as a key that fires inside the field.
+			tiers = []string{
+				"tab → r run now · x toggle · D delete · esc list",
+				"tab → r run · x toggle · D del · esc list",
+				"tab → r/x/D · esc list",
+				"esc list",
+			}
+			// A watch task can't be manually run (#1758): drop "r run" so the
+			// editor never advertises an action that always fails.
+			if s.selectedTaskIsWatch() {
+				tiers = []string{
+					"tab → x toggle · D delete · esc list",
+					"tab → x toggle · D del · esc list",
+					"tab → x/D · esc list",
+					"esc list",
+				}
+			}
 		} else {
 			// Three tiers, not two (#3630). The old ladder jumped straight from
 			// the full row to a much shorter one, and of everything it dropped
@@ -483,7 +503,7 @@ func (s *TaskPane) renderEditMode() string {
 			// ("back to the list", not "out of the manager") is not guessable
 			// from the glyph. The middle tier abbreviates the verbs and keeps
 			// every destination.
-			tiers := []string{
+			tiers = []string{
 				"r run now · x toggle · D delete · esc list",
 				"r run · x toggle · D del · esc list",
 				"r run · x toggle · D del · esc",
@@ -497,15 +517,15 @@ func (s *TaskPane) renderEditMode() string {
 					"x toggle · D del · esc",
 				}
 			}
-			actions := tiers[len(tiers)-1]
-			for _, tier := range tiers {
-				if s.width <= 0 || lipgloss.Width(tier) <= s.width {
-					actions = tier
-					break
-				}
-			}
-			b.WriteString(ActionHint(fitLine(actions, s.width)))
 		}
+		actions := tiers[len(tiers)-1]
+		for _, tier := range tiers {
+			if s.width <= 0 || lipgloss.Width(tier) <= s.width {
+				actions = tier
+				break
+			}
+		}
+		b.WriteString(ActionHint(fitLine(actions, s.width)))
 	}
 
 	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)

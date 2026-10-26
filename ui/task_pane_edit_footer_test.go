@@ -13,13 +13,15 @@ import (
 )
 
 // TestTaskPaneEditActionFooterFollowsFocus pins #5538: the action row may only
-// advertise keys that fire at the focused stop. At a text stop r/x/D (and q)
-// are typed input — #4838 routes the verb glyphs into the field — so the row
-// advertises "esc list" alone, the way the Trigger selector's "←/→ switch"
-// only appears while it is focused. At a selector/button stop the verbs are
-// live and return to the row. The configured quit key is gated on !IsEditing
-// in handleStateTasks (#1961), so it is dead at EVERY edit stop — text or
-// selector — and the row never advertises it.
+// advertise keys as live where they fire. At a text stop r/x/D (and q) are
+// typed input — #4838 routes the verb glyphs into the field — so the row
+// names them only as the destination of the tab step ("tab → …"), the same
+// honesty the Trigger selector's "←/→ switch" follows by appearing only while
+// focused. That path name also keeps #1288's contract: the overlay opens
+// straight onto Name, so the first screen must still say how to reach run-now.
+// At a selector/button stop the verbs are live and lose the qualifier. The
+// configured quit key is gated on !IsEditing in handleStateTasks (#1961), so
+// it is dead at EVERY edit stop — text or selector — and never advertised.
 func TestTaskPaneEditActionFooterFollowsFocus(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -47,15 +49,15 @@ func TestTaskPaneEditActionFooterFollowsFocus(t *testing.T) {
 		tp.updateEditFocus()
 		row := footer()
 		if textStop[stop] {
-			assert.NotContainsf(t, row, "r run",
-				"stop %d is a text field: 'r run' invites a keystroke that types instead", stop)
-			assert.NotContainsf(t, row, "x toggle",
-				"stop %d is a text field: 'x toggle' invites a keystroke that types instead", stop)
-			assert.NotContainsf(t, row, "D del",
-				"stop %d is a text field: 'D delete/del' invites a keystroke that types instead", stop)
+			assert.Truef(t, strings.HasPrefix(row, "tab → "),
+				"stop %d is a text field: verbs are a path, not live keys — row must open with the tab qualifier: %q", stop, row)
+			assert.Containsf(t, row, "r run",
+				"stop %d: the run-now path stays discoverable on first entry (#1288)", stop)
 			assert.Containsf(t, row, "esc list",
 				"stop %d: esc still exits to the list and stays advertised", stop)
 		} else {
+			assert.NotContainsf(t, row, "tab →",
+				"stop %d routes the verbs live — no path qualifier belongs here", stop)
 			assert.Containsf(t, row, "r run",
 				"stop %d routes the verbs — they must be advertised", stop)
 			assert.Containsf(t, row, "x toggle", "stop %d routes the verbs", stop)
