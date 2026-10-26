@@ -27,6 +27,9 @@ import (
 //     after releasing the lock.
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
+//   - resetRemoteRuntime — reads i.backend under i.mu to clear its discharged
+//     cleanup identity after a confirmed reap. The whole body runs under the
+//     i.mu.Lock it takes at the top, so the read is synchronized.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -46,6 +49,7 @@ var backendReadersUnderLock = map[string]bool{
 	"AgentServer":                  true,
 	"agentServerLocked":            true,
 	"reprovisionRemote":            true,
+	"resetRemoteRuntime":           true,
 	"toInstanceDataLocked":         true,
 	"PreviewTabSnapshotByID":       true,
 	"FromInstanceData":             true,

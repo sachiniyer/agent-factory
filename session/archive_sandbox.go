@@ -451,6 +451,18 @@ func (i *Instance) resetRemoteRuntime() {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
+	// A confirmed reap discharged the off-box runtime this backend's immutable
+	// cleanup identity points at. Clear it under the same lock so the next
+	// checkpoint stages no RuntimeCleanup for a runtime af already reaped:
+	// otherwise a restart's FromInstanceData would rebuild a teardown handle
+	// from it and a later kill/recovery would act on a resource it no longer
+	// owns (#5553 review). The unknown-outcome path returns before this point,
+	// so only a provably-gone runtime reaches here. The reaper itself is the
+	// provisioner's (bound to runtimeTeardown, already nilled above), not this
+	// field, so clearing it does not affect a teardown still in flight.
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		provider.clearRuntimeCleanupData()
+	}
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false
 		i.touchLocked()
