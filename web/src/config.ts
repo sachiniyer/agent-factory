@@ -349,6 +349,25 @@ export class ConfigPane {
     const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
     const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    // The pane's own checkbox and select rows save on `change`, which fires the
+    // full rebuild below; unlike text rows they were never tracked via
+    // `editingInput`, so their saves dropped focus to <body> and the user's next
+    // `[`/`]` became a view-cycle shortcut (other keystrokes silently swallowed) —
+    // the exact body-focus hazard the rest of this method exists to prevent. The
+    // controls already carry `aria-label = e.key`, so capture the focused
+    // control's key here and re-locate its replacement after the rebuild, extending
+    // to these rows the same guarantee `wasEditing` upholds for text rows. Scoped
+    // to `.af-config-list` so the account-agent select (which lives in the accounts
+    // section and has its own branch below) is never matched. `editingInput` is for
+    // the text-row path only, so it never names these controls — this branch is the
+    // sole restorer for them.
+    const focusedConfigControlKey =
+      active instanceof HTMLElement
+        && active.closest(".af-config-list") !== null
+        && (active instanceof HTMLSelectElement
+          || (active instanceof HTMLInputElement && active.type === "checkbox"))
+        ? active.getAttribute("aria-label")
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -377,6 +396,15 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (focusedConfigControlKey !== null) {
+      // Hand focus back to the rebuilt checkbox/select for the key that genuinely
+      // held it. preventScroll for the same reason as above: focus() would otherwise
+      // undo the offset rebuildKeepingScroll just restored.
+      this.el
+        .querySelector<HTMLElement>(
+          `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`,
+        )
+        ?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
