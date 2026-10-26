@@ -78,9 +78,16 @@ func stubPeerDataRoot(t *testing.T, peerUID int, dev, peerTable, selfTable strin
 		}
 		return "", fmt.Errorf("process gone")
 	}
+	// No listening-socket holders by default — a directly-bound dockerd
+	// never reaches the scan (its own exe answers first).
+	oldH := listenerHolders
+	listenerHolders = func(string) (map[int]struct{}, bool) {
+		return map[int]struct{}{}, true
+	}
 	statDev = func(string) (uint64, bool) { return unix.Mkdev(uint32(maj), uint32(min)), true }
 	t.Cleanup(func() {
-		socketPeerCred, peerMountinfo, statDev, peerExe = oldP, oldM, oldS, oldE
+		socketPeerCred, peerMountinfo, statDev, peerExe, listenerHolders =
+			oldP, oldM, oldS, oldE, oldH
 	})
 }
 
@@ -504,6 +511,11 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		old := peerExe
 		peerExe = func(int) (string, error) { return "/usr/bin/socat", nil }
 		t.Cleanup(func() { peerExe = old })
+		oldH := listenerHolders
+		listenerHolders = func(string) (map[int]struct{}, bool) {
+			return map[int]struct{}{424242: {}}, true // socat holds its own listener
+		}
+		t.Cleanup(func() { listenerHolders = oldH })
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -513,6 +525,86 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
 			"a forwarder's mount table describes af's fs, not the remote daemon's — no verdict: %v", err)
 		assert.Equal(t, 0, *calls, "a forwarding peer must not reach statfs")
+	})
+
+	// stubSocketActivation makes the peer a non-dockerd listener creator
+	// (systemd, or the play-test activator) while pid 424243 holds the same
+	// listener fd — the `dockerd -H fd://` shape. mountinfo for the creator
+	// is PID 1's table; the server's is the daemon table on dev.
+	stubSocketActivation := func(t *testing.T, serverExe string, extra int) {
+		t.Helper()
+		stubPeerDataRoot(t, 0, "8:1", "1 0 0:0 / / rw - rootfs rootfs rw", peerTableOn("8:1"), nil)
+		oldE, oldH, oldM := peerExe, listenerHolders, peerMountinfo
+		peerExe = func(pid int) (string, error) {
+			if pid == 424243 {
+				return serverExe, nil
+			}
+			return "/usr/lib/systemd/systemd", nil
+		}
+		listenerHolders = func(string) (map[int]struct{}, bool) {
+			h := map[int]struct{}{424242: {}, 424243: {}}
+			if extra > 0 {
+				h[extra] = struct{}{}
+			}
+			return h, true
+		}
+		peerMountinfo = func(pid int) ([]byte, error) {
+			if pid == 424243 {
+				return []byte(peerTableOn("8:1")), nil
+			}
+			return []byte("1 0 0:0 / / rw - rootfs rootfs rw"), nil
+		}
+		t.Cleanup(func() { peerExe, listenerHolders, peerMountinfo = oldE, oldH, oldM })
+	}
+
+	t.Run("a socket-activated local daemon still proves co-location", func(t *testing.T) {
+		// dockerd -H fd:// behind docker.socket: SO_PEERCRED names PID 1
+		// (the listener's creator), but the fd-holder set proves dockerd
+		// is the serving process and ITS mountinfo carries the compare.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubSocketActivation(t, "/usr/bin/dockerd", 0)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "activated"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"a socket-activated dockerd is still the daemon — evidence must join: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
+	t.Run("an activated socket served by a non-dockerd is unproven", func(t *testing.T) {
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubSocketActivation(t, "/usr/bin/socat", 0)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "act-fwd"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"one holder besides the creator, but it is not dockerd: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
+	t.Run("extra listener holders are ambiguous", func(t *testing.T) {
+		// A third process holding the fd could have served the connection —
+		// the server is no longer uniquely named, so nothing is proven.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubSocketActivation(t, "/usr/bin/dockerd", 424244)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "ambiguous"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"an ambiguous holder set cannot prove the server: %v", err)
+		assert.Equal(t, 0, *calls)
 	})
 
 	t.Run("stacked mounts take the top of the stack", func(t *testing.T) {

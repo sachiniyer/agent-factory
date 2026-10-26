@@ -270,6 +270,116 @@ var peerExe = func(pid int) (string, error) {
 	return os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
 }
 
+// socketServerPid names the process that actually SERVES the socket — the
+// real dockerd — not merely the creator SO_PEERCRED reports. /proc/<pid>/exe
+// settles the common case (creator is dockerd); the ptrace gate matches
+// mountinfo's so the link is readable exactly when the table was. When the
+// creator is not dockerd, the activated shape is proven instead: the
+// listener's inode (from /proc/net/unix) names the holder set in /proc/*/fd,
+// and exactly one holder besides the creator — a dockerd — is the
+// socket-activation shape. Any other answer is unproven: a forwarder holds
+// its own listener (holder set = itself, no dockerd), an extra inherited fd
+// makes the set ambiguous, and an fd table af cannot fully read cannot prove
+// who else holds it.
+func socketServerPid(peer int, sockPath string) (int, bool) {
+	if exe, err := peerExe(peer); err == nil &&
+		strings.TrimSuffix(filepath.Base(exe), " (deleted)") == "dockerd" {
+		return peer, true
+	}
+	holders, ok := listenerHolders(sockPath)
+	if !ok {
+		return 0, false
+	}
+	delete(holders, peer)
+	if len(holders) != 1 {
+		return 0, false
+	}
+	for pid := range holders {
+		exe, err := peerExe(pid)
+		if err != nil || strings.TrimSuffix(filepath.Base(exe), " (deleted)") != "dockerd" {
+			return 0, false
+		}
+		return pid, true
+	}
+	return 0, false
+}
+
+// listenerHolders returns the pids holding sockPath's LISTENING unix socket
+// open. The listener inode comes from /proc/net/unix (the row carrying
+// __SO_ACCEPTCON at this path); holder pids come from scanning /proc/*/fd.
+// Both match the ptrace policy mountinfo already lives under — a root af
+// enumerates everything; a same-uid af sees what it can prove. An fd table
+// af cannot fully enumerate cannot prove the holder set is complete, so the
+// second return is false whenever any /proc/<pid>/fd is unreadable.
+var listenerHolders = func(sockPath string) (map[int]struct{}, bool) {
+	inodes, ok := listenerInodes(sockPath)
+	if !ok || len(inodes) == 0 {
+		return nil, false
+	}
+	pids, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, false
+	}
+	holders := map[int]struct{}{}
+	for _, p := range pids {
+		pid, perr := strconv.Atoi(p.Name())
+		if perr != nil || pid <= 0 {
+			continue
+		}
+		fds, ferr := os.ReadDir("/proc/" + p.Name() + "/fd")
+		if ferr != nil {
+			if errors.Is(ferr, os.ErrNotExist) {
+				continue // the process raced away — not a blind spot
+			}
+			return nil, false // unreadable fd table: holder set unproven
+		}
+		for _, fd := range fds {
+			link, lerr := os.Readlink("/proc/" + p.Name() + "/fd/" + fd.Name())
+			if lerr != nil {
+				continue // the fd raced away — not a blind spot
+			}
+			if ino, found := strings.CutPrefix(link, "socket:["); found {
+				if _, hit := inodes[strings.TrimSuffix(ino, "]")]; hit {
+					holders[pid] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	return holders, true
+}
+
+// listenerInodes parses /proc/net/unix for the inode of every socket bound
+// at sockPath in the accept state (__SO_ACCEPTCON). Columns are
+// Num RefCount Protocol Flags Type St Inode Path. The bound path is matched
+// both literally and symlink-resolved (/var/run vs /run spellings).
+func listenerInodes(sockPath string) (map[string]struct{}, bool) {
+	raw, err := os.ReadFile("/proc/net/unix")
+	if err != nil {
+		return nil, false
+	}
+	resolved, rerr := filepath.EvalSymlinks(sockPath)
+	if rerr != nil {
+		resolved = ""
+	}
+	inodes := map[string]struct{}{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 8 {
+			continue
+		}
+		flags, ferr := strconv.ParseUint(f[3], 16, 32)
+		if ferr != nil || flags&0x00010000 == 0 {
+			continue
+		}
+		if f[7] != sockPath && f[7] != resolved {
+			continue
+		}
+		inodes[f[6]] = struct{}{}
+	}
+	return inodes, true
+}
+
 // daemonSharesDataRootFS is the mount-identity proof hostname equality
 // cannot give (#5382 review). SO_PEERCRED names the process answering af's
 // socket; its mount table then shows which device really backs the data
@@ -299,15 +409,22 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 		return false
 	}
 	if info, err := peerMountinfo(peer); err == nil {
-		// Strong proof — but ONLY once the answering process is identified
-		// as the daemon itself: a same-uid socket forwarder (socat, ssh -L)
-		// has an equally readable mountinfo describing AF's filesystem, and
-		// matching devices then "prove" co-location with a remote engine
-		// (#5382 review). /proc/<pid>/exe carries the same ptrace gate as
-		// mountinfo, so it is readable exactly when the table was.
-		exe, xerr := peerExe(peer)
-		if xerr != nil || strings.TrimSuffix(filepath.Base(exe), " (deleted)") != "dockerd" {
+		// Strong proof — but ONLY once the process SERVING the socket is
+		// identified as the daemon itself. SO_PEERCRED names the listener's
+		// CREATOR: a same-uid forwarder (socat, ssh -L) is a creator whose
+		// readable mountinfo describes AF's filesystem, not the remote
+		// engine's; and under socket activation (dockerd -H fd:// behind
+		// docker.socket) the creator is PID 1 while dockerd serves via an
+		// inherited fd. The mount table used for the compare must be the
+		// serving dockerd's (#5382 review).
+		srv, ok := socketServerPid(peer, sockPath)
+		if !ok {
 			return false
+		}
+		if srv != peer {
+			if info, err = peerMountinfo(srv); err != nil {
+				return false
+			}
 		}
 		// The device the daemon's own mount table shows under its data
 		// root is the device af's stat reports.
