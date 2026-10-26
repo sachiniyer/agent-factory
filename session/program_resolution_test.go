@@ -198,6 +198,30 @@ func TestBuiltInProgramOverride_DoubleQuotedEscapeDecode(t *testing.T) {
 		`\x is not an escapable pair inside "…" — the decoded word keeps the backslash`)
 }
 
+// Codex review round 6: ~ after an unquoted : or = expands only inside an
+// assignment-shaped word (NAME=…), so a detected path containing a colon keeps
+// its tilde literal — the bare and double-quoted spellings are the same argv.
+// Inside an assignment-shaped word the same :~ really does expand and must
+// stay refused.
+func TestBuiltInProgramOverride_ColonTildePathRoundTrips(t *testing.T) {
+	const detected = `'/tmp/a:~/claude' --dangerously-skip-permissions`
+	for _, configured := range []string{
+		detected,
+		"/tmp/a:~/claude --dangerously-skip-permissions",
+		`"/tmp/a:~/claude" --dangerously-skip-permissions`,
+	} {
+		resolved := overrideResolution("claude", configured, detected)
+		require.True(t, builtInProgramOverride(resolved, "claude", configured),
+			"every spelling of /tmp/a:~/claude is the same argv word: %q", configured)
+	}
+
+	resolved := overrideResolution("claude",
+		"x=a:~/claude --dangerously-skip-permissions", detected)
+	require.False(t, builtInProgramOverride(resolved, "claude",
+		"x=a:~/claude --dangerously-skip-permissions"),
+		"inside an assignment-shaped word the :~ expands — never trust it")
+}
+
 // The end-to-end repro from #5487: a config written by an older af carries the
 // unquoted detected override, while the built-in candidate in the same
 // resolution is the quoted form detection now produces. The instance resolver

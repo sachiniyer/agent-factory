@@ -105,9 +105,16 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 	// emitted byte or quote part — even an empty one — ends it.
 	wordStart := true
 	bare := true
+	// Tilde expansion after = or : applies only inside an assignment-shaped
+	// word (NAME=...): a ~ in /tmp/a:~/claude is literal in every shell while
+	// x=a:~ expands. assignment turns true when the word emits an unquoted =
+	// whose decoded prefix is a valid shell name; lastDelim marks the position
+	// right after that delimiter, since only the FIRST = enables a following ~
+	// (v=a=~ is literal under bash).
+	assignment, lastDelim := false, false
 	for i, part := range word.Parts {
 		if dq, ok := part.(*syntax.DblQuoted); ok {
-			wordStart, bare = false, false
+			wordStart, bare, lastDelim = false, false, false
 			before := value.Len()
 			if !appendLiteralDblQuoted(&value, dq) {
 				return "", false, false
@@ -119,7 +126,7 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 		}
 		lit, ok := part.(*syntax.Lit)
 		if !ok {
-			wordStart, bare = false, false
+			wordStart, bare, lastDelim = false, false, false
 			before := value.Len()
 			if !appendLiteralShellPart(&value, part) {
 				return "", false, false
@@ -138,16 +145,19 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 					// Unreachable from a successful parse (a trailing escape
 					// continues into the next part); keep it as literal text.
 					value.WriteByte('\\')
-					prev, prevInert, wordStart = '\\', false, false
+					prev, prevInert, wordStart, lastDelim = '\\', false, false, false
 					continue
 				}
 				n := raw[j+1]
 				if n == '\n' {
-					j++
-					continue
+					// A line continuation is removed before everything except
+					// reserved-word recognition, which still sees the joined
+					// word — the comparator cannot prove how ti\<newline>me
+					// lexes, so it must not certify (Codex review round 6).
+					return "", false, false
 				}
 				value.WriteByte(n)
-				prev, prevInert, wordStart = n, false, false
+				prev, prevInert, wordStart, lastDelim = n, false, false, false
 				j++
 				continue
 			}
@@ -155,13 +165,17 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 			case '*', '?', '[':
 				return "", false, false
 			case '~':
-				if wordStart || (prevInert && (prev == '=' || prev == ':')) {
+				if wordStart || lastDelim || (prevInert && prev == ':' && assignment) {
 					return "", false, false
 				}
 			}
+			delim := c == '=' && !assignment && isShellName(value.String())
 			value.WriteByte(c)
 			unquoted.WriteByte(c)
-			prev, prevInert, wordStart = c, true, false
+			prev, prevInert, wordStart, lastDelim = c, true, false, delim
+			if delim {
+				assignment = true
+			}
 		}
 		// The $ check runs after the Lit is decoded so an escaped \$ — literal
 		// text — is not mistaken for the $'…'/$"…" spelling.
@@ -196,17 +210,36 @@ func appendLiteralDblQuoted(b *strings.Builder, dq *syntax.DblQuoted) bool {
 		for j := 0; j < len(raw); j++ {
 			c := raw[j]
 			if c == '\\' && j+1 < len(raw) {
+				if raw[j+1] == '\n' {
+					// Same continuation ambiguity as the unquoted walk —
+					// refuse rather than model it.
+					return false
+				}
 				switch raw[j+1] {
 				case '$', '`', '"', '\\':
 					b.WriteByte(raw[j+1])
 					j++
 					continue
-				case '\n':
-					j++
-					continue
 				}
 			}
 			b.WriteByte(c)
+		}
+	}
+	return true
+}
+
+// isShellName reports whether s is a valid shell variable name — the
+// assignment-shape gate for the = / : tilde rule.
+func isShellName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		name := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(i > 0 && c >= '0' && c <= '9')
+		if !name {
+			return false
 		}
 	}
 	return true

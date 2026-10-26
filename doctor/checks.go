@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -423,7 +424,11 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		compared++
-		if configuredProgram == runningProgram {
+		// Same byte-or-literal-argv rule as the daemon's drift latch
+		// (#5504): quoting-only spellings of the same argv are not drift,
+		// and a non-literal side falls back to the byte verdict.
+		if configuredProgram == runningProgram ||
+			sessionenv.LiteralCommandsEqual(configuredProgram, runningProgram) {
 			continue
 		}
 		drifted++

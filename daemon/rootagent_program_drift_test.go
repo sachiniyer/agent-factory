@@ -958,6 +958,14 @@ func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
 			"command text differs"},
 		{"escaped keyword spelling stays quiet",
 			`ti\me claude`, "'time' claude", false, ""},
+		{"non-assignment colon-tilde stays quiet",
+			`'/tmp/a:~/claude' --x`, "/tmp/a:~/claude --x", false, ""},
+		{"assignment colon-tilde is real drift",
+			`'x=a:~/claude'`, "x=a:~/claude", true,
+			"command text differs"},
+		{"continuation-joined keyword is real drift",
+			"'time' claude", "ti\\\nme claude", true,
+			"command text differs"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, warnings, repo, st, profile, root :=
