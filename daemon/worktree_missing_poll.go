@@ -18,11 +18,12 @@ import (
 // healthy pass is a handful of cheap lstats and nothing gains from more.
 const worktreeProbeConcurrency = 8
 
-// worktreeMissingSummaryThreshold is the most rows one status pass warns about
-// individually (#5547). A healthy pass flags a handful; a pass over a backlog —
-// the archive directories a cleanup script reclaims, or a whole worktree root
-// deleted at once — emits ONE summary WARNING with per-row detail at INFO, so
-// the sweep cannot bury the log a line per row.
+// worktreeMissingSummaryThreshold is the most flagged rows of one kind — live
+// or archived — one status pass reports individually (#5547). A live-flagged
+// count past it collapses the pass's per-row detail to INFO behind one summary
+// WARNING; an archived-flagged count past it collapses likewise behind one
+// summary INFO line, since a reclaimed-archive backlog is a normal state, not
+// an anomaly.
 const worktreeMissingSummaryThreshold = 20
 
 type worktreeProbeTarget struct {
@@ -81,32 +82,45 @@ func (m *Manager) refreshWorktreesMissing(targets []worktreeProbeTarget) {
 // worktree is an anomaly and keeps its own WARNING; an archived row's is a
 // normal state on any home that reclaims archive directories
 // (on_archive_command, manual cleanup, disk-pressure sweeps) and reads at INFO
-// (#5547). Past worktreeMissingSummaryThreshold — counted over live and
-// archived rows together, since the (M archived) breakdown is what tells a mass
-// archive prune from a live fleet losing its root — the pass emits one summary
-// WARNING with the per-row detail at INFO.
+// (#5547). Each kind reports individually only up to
+// worktreeMissingSummaryThreshold: past it, live misses collapse to one summary
+// WARNING and archived misses to one summary INFO line, so a backlog sweep
+// cannot bury the log at either level. The WARNING is keyed on the LIVE count
+// alone — an archive-only backlog, however large, is intentional on those
+// homes and must not warn on every pass.
 func (m *Manager) logWorktreesMissing(flagged []worktreeMissingFlag) {
 	if len(flagged) == 0 {
 		return
 	}
 	// The probes answered in parallel; sort so the detail block reads stably.
 	sort.Slice(flagged, func(a, b int) bool { return flagged[a].detail < flagged[b].detail })
-	if len(flagged) > worktreeMissingSummaryThreshold {
-		archived := 0
+	live := 0
+	for _, flag := range flagged {
+		if !flag.archived {
+			live++
+		}
+	}
+	archived := len(flagged) - live
+	switch {
+	case live > worktreeMissingSummaryThreshold:
 		for _, flag := range flagged {
-			if flag.archived {
-				archived++
-			}
 			m.info().Print(flag.detail)
 		}
 		m.warn().Printf("flagged %d sessions whose tracked worktree is missing (%d archived); 'af sessions list' shows them", len(flagged), archived)
-		return
-	}
-	for _, flag := range flagged {
-		if flag.archived {
-			m.info().Print(flag.detail)
-		} else {
-			m.warn().Print(flag.detail)
+	case archived > worktreeMissingSummaryThreshold:
+		for _, flag := range flagged {
+			if !flag.archived {
+				m.warn().Print(flag.detail)
+			}
+		}
+		m.info().Printf("flagged %d archived sessions whose tracked worktree is missing; 'af sessions list' shows them", archived)
+	default:
+		for _, flag := range flagged {
+			if flag.archived {
+				m.info().Print(flag.detail)
+			} else {
+				m.warn().Print(flag.detail)
+			}
 		}
 	}
 }

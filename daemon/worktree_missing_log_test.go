@@ -38,20 +38,30 @@ func registerMissingWorktreeRow(t *testing.T, m *Manager, repoID, repoPath, titl
 	return inst
 }
 
-// missingWorktreePass registers n rows of one settled status — Ready for a
-// live row, Archived for an archived one — each flaggable by the next pass, and
-// seeds their disk records in ONE SaveInstances call so the flag write lands
-// (seedDiskInstance overwrites the file per call, so a multi-row fixture
-// cannot seed a row at a time).
-func missingWorktreePass(t *testing.T, m *Manager, repoID, repoPath, prefix string, n int, status session.Status) []worktreeProbeTarget {
+// missingWorktreeGroup is one homogeneously-statused batch of fixture rows:
+// prefix-0 … prefix-(n-1) at the given settled status (Ready for live,
+// Archived for archived).
+type missingWorktreeGroup struct {
+	prefix string
+	n      int
+	status session.Status
+}
+
+// missingWorktreeFixture registers every group's rows — each flaggable by the
+// next pass — and seeds ALL their disk records in ONE SaveInstances call so
+// every flag write lands (SaveInstances overwrites the file, so a mixed
+// fixture cannot seed per group). Returns the pass's probe targets.
+func missingWorktreeFixture(t *testing.T, m *Manager, repoID, repoPath string, groups ...missingWorktreeGroup) []worktreeProbeTarget {
 	t.Helper()
-	targets := make([]worktreeProbeTarget, 0, n)
-	rows := make([]session.InstanceData, 0, n)
-	for i := 0; i < n; i++ {
-		title := fmt.Sprintf("%s-%d", prefix, i)
-		inst := registerMissingWorktreeRow(t, m, repoID, repoPath, title, status)
-		targets = append(targets, worktreeProbeTarget{repoID: repoID, instance: inst})
-		rows = append(rows, session.InstanceData{Title: title, Path: repoPath, Status: status})
+	var targets []worktreeProbeTarget
+	var rows []session.InstanceData
+	for _, g := range groups {
+		for i := 0; i < g.n; i++ {
+			title := fmt.Sprintf("%s-%d", g.prefix, i)
+			inst := registerMissingWorktreeRow(t, m, repoID, repoPath, title, g.status)
+			targets = append(targets, worktreeProbeTarget{repoID: repoID, instance: inst})
+			rows = append(rows, session.InstanceData{Title: title, Path: repoPath, Status: g.status})
+		}
 	}
 	raw, err := json.Marshal(rows)
 	require.NoError(t, err)
@@ -64,7 +74,8 @@ func missingWorktreePass(t *testing.T, m *Manager, repoID, repoPath, prefix stri
 // path byte-for-byte.
 func TestRefreshWorktreesMissing_SingleLiveMissKeepsPerRowWarning(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
-	targets := missingWorktreePass(t, manager, repoID, repoPath, "lone", 1, session.Ready)
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"lone", 1, session.Ready})
 
 	manager.refreshWorktreesMissing(targets)
 
@@ -83,7 +94,8 @@ func TestRefreshWorktreesMissing_SingleLiveMissKeepsPerRowWarning(t *testing.T) 
 func TestRefreshWorktreesMissing_ArchivedMissesLogInfoNotWarning(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	const n = 3
-	targets := missingWorktreePass(t, manager, repoID, repoPath, "arch", n, session.Archived)
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"arch", n, session.Archived})
 
 	manager.refreshWorktreesMissing(targets)
 
@@ -97,14 +109,14 @@ func TestRefreshWorktreesMissing_ArchivedMissesLogInfoNotWarning(t *testing.T) {
 	}
 }
 
-// A mass flagging — a whole worktree root deleted out from under a live fleet —
-// must not bury the log a line per row: past worktreeMissingSummaryThreshold
-// the pass emits ONE summary WARNING and moves the per-row detail to INFO
-// (#5547).
+// A mass flagging that is genuinely anomalous — a whole worktree root deleted
+// out from under a live fleet — earns exactly one summary WARNING for the
+// pass, with the per-row detail at INFO (#5547).
 func TestRefreshWorktreesMissing_OverThresholdLiveEmitsOneSummaryWarning(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	const n = worktreeMissingSummaryThreshold + 1
-	targets := missingWorktreePass(t, manager, repoID, repoPath, "live", n, session.Ready)
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"live", n, session.Ready})
 
 	manager.refreshWorktreesMissing(targets)
 
@@ -120,22 +132,74 @@ func TestRefreshWorktreesMissing_OverThresholdLiveEmitsOneSummaryWarning(t *test
 }
 
 // The reported #5547 shape: thousands of archived rows converge to
-// worktree-missing on a home that reclaims archive directories. Over the
-// threshold the pass is still ONE summary WARNING — every flagged row here is
-// archived, so the summary's parenthetical accounts for all of them — with the
-// per-row detail at INFO.
-func TestRefreshWorktreesMissing_OverThresholdAllArchivedSummarizes(t *testing.T) {
+// worktree-missing on a home that reclaims archive directories. However large
+// the backlog, it is intentional there — the summary WARNING is keyed on the
+// LIVE count, so an archive-only pass produces ZERO warnings and the per-row
+// detail collapses to one summary INFO line.
+func TestRefreshWorktreesMissing_OverThresholdAllArchivedEmitsNoWarning(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	const n = worktreeMissingSummaryThreshold + 1
-	targets := missingWorktreePass(t, manager, repoID, repoPath, "arch", n, session.Archived)
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"arch", n, session.Archived})
+
+	manager.refreshWorktreesMissing(targets)
+
+	assert.NotContains(t, logs.warnings.String(), "tracked worktree",
+		"an archive-only backlog must never warn, however large")
+	infos := logs.info.String()
+	assert.Equal(t, 1, strings.Count(infos, "sessions whose tracked worktree is missing"),
+		"the backlog collapses to one summary INFO line")
+	assert.Contains(t, infos,
+		fmt.Sprintf("flagged %d archived sessions whose tracked worktree is missing; 'af sessions list' shows them", n))
+	assert.NotContains(t, infos, "is gone (deleted outside af)",
+		"per-row detail gives way to the summary at this scale")
+	for _, target := range targets {
+		missing, _ := target.instance.WorktreeMissing()
+		assert.True(t, missing)
+	}
+}
+
+// A pass flagging an over-threshold LIVE set warns once even when archived
+// rows are flagged beside it: the summary WARNING counts all the rows and its
+// parenthetical keeps the archived share visible (#5547).
+func TestRefreshWorktreesMissing_MixedOverThresholdEmitsOneSummaryWarning(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	const live = worktreeMissingSummaryThreshold + 1
+	const archived = 3
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"live", live, session.Ready},
+		missingWorktreeGroup{"arch", archived, session.Archived})
 
 	manager.refreshWorktreesMissing(targets)
 
 	warnings := logs.warnings.String()
 	assert.Equal(t, 1, strings.Count(warnings, "sessions whose tracked worktree is missing"),
-		"the backlog sweep must produce exactly one warning line")
+		"a mixed over-threshold pass still emits exactly one warning")
 	assert.Contains(t, warnings,
-		fmt.Sprintf("flagged %d sessions whose tracked worktree is missing (%d archived); 'af sessions list' shows them", n, n))
-	assert.Equal(t, n, strings.Count(logs.info.String(), "is gone (deleted outside af)"),
-		"every flagged archived row still reports at INFO")
+		fmt.Sprintf("flagged %d sessions whose tracked worktree is missing (%d archived); 'af sessions list' shows them", live+archived, archived))
+	assert.NotContains(t, warnings, "is gone (deleted outside af)")
+	assert.Equal(t, live+archived, strings.Count(logs.info.String(), "is gone (deleted outside af)"),
+		"live and archived rows alike report their detail at INFO")
+}
+
+// Live misses below the threshold keep their own WARNINGs even when the same
+// pass sweeps an over-threshold archived backlog: the backlog summarizes at
+// INFO while the anomalies stay loud (#5547).
+func TestRefreshWorktreesMissing_SmallLiveSetStillWarnsBesideArchivedBacklog(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	const live = 2
+	const archived = worktreeMissingSummaryThreshold + 1
+	targets := missingWorktreeFixture(t, manager, repoID, repoPath,
+		missingWorktreeGroup{"live", live, session.Ready},
+		missingWorktreeGroup{"arch", archived, session.Archived})
+
+	manager.refreshWorktreesMissing(targets)
+
+	warnings := logs.warnings.String()
+	assert.Equal(t, live, strings.Count(warnings, "is gone (deleted outside af)"),
+		"each live miss keeps its own warning")
+	assert.NotContains(t, warnings, "sessions whose tracked worktree is missing",
+		"no summary WARNING without an over-threshold live count")
+	assert.Contains(t, logs.info.String(),
+		fmt.Sprintf("flagged %d archived sessions whose tracked worktree is missing; 'af sessions list' shows them", archived))
 }
