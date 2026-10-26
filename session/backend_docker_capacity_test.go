@@ -461,6 +461,74 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Greater(t, *calls, 0)
 	})
 
+	t.Run("a permission-blind identity read falls back for a root peer", func(t *testing.T) {
+		// Stock Linux, non-root af: /proc/<dockerd>/mountinfo is readable
+		// but /proc/<dockerd>/exe needs PTRACE_MODE_READ — EACCES is
+		// "identity unproven", routing to the same uid-0 + whole-fs-self
+		// fallback an unreadable table takes.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "denied-root"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"EACCES on the identity read must reach the uid-0 fallback, not fail closed: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
+	t.Run("a permission-blind identity read cannot help a non-root peer", func(t *testing.T) {
+		// A same-uid forwarder whose exe could not be read still fails:
+		// the fallback requires uid 0 and af's own user is not it.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 1000, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "denied-nonroot"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a denied identity read on a non-root peer must not borrow the fallback: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
+	t.Run("a vanished peer is not a denied one", func(t *testing.T) {
+		// ENOENT means the answering process is gone — no evidence, never
+		// the fallback (which belongs to live-but-unreadable peers).
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.ENOENT}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "vanished"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a vanished process is rejected, not denied — no evidence: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
 	t.Run("an unprivileged peer cannot use the fallback", func(t *testing.T) {
 		// The foreign-socket vector — Docker Desktop's shared socket, an
 		// `ssh -U` forwarder — answers as AF'S OWN user. If the peer's

@@ -263,11 +263,32 @@ var peerMountinfo = func(pid int) ([]byte, error) {
 }
 
 // peerExe reads the answering process's binary identity — /proc/<pid>/exe.
-// The ptrace gate matches mountinfo's: wherever the table was readable the
-// link is too, so an unreadable exe on a readable table means the process
-// vanished — unproven, never a match.
+// The link is PTRACE-gated where mountinfo is not: a non-root af gets
+// EACCES on a root daemon's exe while the mount table stays readable, so
+// a permission error means "identity unproven" — the same blind spot as
+// an unreadable table — never a vanished peer. Callers distinguish that
+// (serverDenied) from ENOENT/ESRCH, which is a vanished process.
 var peerExe = func(pid int) (string, error) {
 	return os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+}
+
+// serverVerdict is socketServerPid's tri-state. serverProven names the
+// serving dockerd; serverRejected is a proven non-daemon or a vanished
+// process; serverDenied is a permission-blind identity read (EACCES/EPERM
+// on exe or an fd table af cannot fully enumerate) — the caller treats it
+// exactly like an unreadable mount table and takes the uid-0 fallback.
+type serverVerdict int
+
+const (
+	serverRejected serverVerdict = iota
+	serverProven
+	serverDenied
+)
+
+// isDockerdExe identifies the daemon binary, tolerating the "(deleted)"
+// suffix a replaced binary's exe link carries until restart.
+func isDockerdExe(exe string) bool {
+	return strings.TrimSuffix(filepath.Base(exe), " (deleted)") == "dockerd"
 }
 
 // socketServerPid names the process that actually SERVES the socket — the
@@ -281,27 +302,42 @@ var peerExe = func(pid int) (string, error) {
 // its own listener (holder set = itself, no dockerd), an extra inherited fd
 // makes the set ambiguous, and an fd table af cannot fully read cannot prove
 // who else holds it.
-func socketServerPid(peer int, sockPath string) (int, bool) {
-	if exe, err := peerExe(peer); err == nil &&
-		strings.TrimSuffix(filepath.Base(exe), " (deleted)") == "dockerd" {
-		return peer, true
+func socketServerPid(peer int, sockPath string) (int, serverVerdict) {
+	exe, err := peerExe(peer)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			// af cannot even name the creator — EACCES here is the stock
+			// non-root case (root daemon, unprivileged docker-group user).
+			return 0, serverDenied
+		}
+		return 0, serverRejected // ENOENT/ESRCH: the process vanished
 	}
+	if isDockerdExe(exe) {
+		return peer, serverProven
+	}
+	// The creator is provably not dockerd — fd-activation is the only
+	// remaining positive proof: exactly one non-creator holder, a dockerd.
 	holders, ok := listenerHolders(sockPath)
 	if !ok {
-		return 0, false
+		// The holder set cannot be fully enumerated (foreign-uid fd tables
+		// are the same PTRACE gate as exe) — identity unproven.
+		return 0, serverDenied
 	}
 	delete(holders, peer)
 	if len(holders) != 1 {
-		return 0, false
+		return 0, serverRejected
 	}
 	for pid := range holders {
 		exe, err := peerExe(pid)
-		if err != nil || strings.TrimSuffix(filepath.Base(exe), " (deleted)") != "dockerd" {
-			return 0, false
+		switch {
+		case err != nil && errors.Is(err, os.ErrPermission):
+			return 0, serverDenied
+		case err != nil || !isDockerdExe(exe):
+			return 0, serverRejected
 		}
-		return pid, true
+		return pid, serverProven
 	}
-	return 0, false
+	return 0, serverRejected
 }
 
 // listenerHolders returns the pids holding sockPath's LISTENING unix socket
@@ -417,26 +453,34 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 		// docker.socket) the creator is PID 1 while dockerd serves via an
 		// inherited fd. The mount table used for the compare must be the
 		// serving dockerd's (#5382 review).
-		srv, ok := socketServerPid(peer, sockPath)
-		if !ok {
+		srv, verdict := socketServerPid(peer, sockPath)
+		switch verdict {
+		case serverRejected:
 			return false
-		}
-		if srv != peer {
-			if info, err = peerMountinfo(srv); err != nil {
-				return false
+		case serverProven:
+			if srv != peer {
+				if info, err = peerMountinfo(srv); err != nil {
+					break // serving table unreadable — same blind spot as denied
+				}
 			}
+			// The device the daemon's own mount table shows under its
+			// data root is the device af's stat reports.
+			peerDev, ok := coveringMountDev(info, rootDir)
+			return ok && peerDev == dev
 		}
-		// The device the daemon's own mount table shows under its data
-		// root is the device af's stat reports.
-		peerDev, ok := coveringMountDev(info, rootDir)
-		return ok && peerDev == dev
+		// serverDenied (and the unreadable serving table above) fall
+		// through to the uid-0 fallback below: a permission-blind identity
+		// read is the same blind spot as an unreadable table.
 	}
-	// /proc/<peer> is ptrace-gated — an ordinary docker-group user cannot
-	// read a root daemon's mount table. That deployment is the common
-	// case, so fall back to weaker but cross-process evidence (#5382
-	// review): the answering process must be privileged (uid 0 — the real
-	// dockerd, never the same-user proxy or ssh forwarder that is the
-	// foreign-socket vector), AND af's own mount table (always readable)
+	// Two blind spots land here: /proc/<peer>/mountinfo unreadable (the
+	// ptrace gate a hardened system applies), and the identity read above
+	// being permission-denied (serverDenied — the stock non-root case,
+	// where mountinfo is world-readable but exe/fd need PTRACE_MODE_READ).
+	// That deployment is the common case, so fall back to weaker but
+	// cross-process evidence (#5382 review): the answering process must
+	// be privileged (uid 0 — the real dockerd, never the same-user proxy
+	// or ssh forwarder that is the foreign-socket vector), AND af's own
+	// mount table (always readable)
 	// must show the data root covered by a whole filesystem — the rootfs
 	// or a complete mount — never a partial bind. A partial bind could
 	// plant a foreign subtree under the reported path; a whole-fs mount
