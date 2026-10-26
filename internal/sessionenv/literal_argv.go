@@ -223,15 +223,16 @@ func isQuotedWordPart(part syntax.WordPart) bool {
 // braceExpandable reports whether the concatenated unescaped, unquoted text
 // of a word carries a brace expansion. Bash pairs braces at any depth — {a,b}
 // and {x..y} each produce several words — so this is a single pass over a
-// stack of open braces: a , or .. at depth ≥ 1 marks its innermost enclosing
-// {, and a } that closes a marked frame means the word expands (Codex review
-// round 4: the earlier every-pair rescan was cubic in the command length).
-// That rule over-approximates bash's in one detail — a , inside a nested
-// group also marks that group even when bash might treat the inner braces as
-// literal — which is the conservative direction: it can refuse a literal word
-// but never certify an expandable one. Escaped and quoted characters never
-// reach this text, so a{','}b stays literal while a{'x',y}b expands — exactly
-// like the shells.
+// stack of open braces (Codex review round 4: the earlier every-pair rescan
+// was cubic in the command length). A , or .. at any depth marks its
+// innermost enclosing frame, and a } that closes a marked frame means the
+// word expands. Bash's pairing rule (verified against bash and dash): at
+// depth 1 an unmarked } does NOT close the group — it is absorbed as literal
+// text and the { keeps seeking a close, so {a},b} expands to "a}" "b" while
+// {a},{b} stays literal because the inner { keeps the outer one from ever
+// closing. A } deeper than depth 1 closes its nested group normally.
+// Escaped and quoted characters never reach this text, so a{','}b stays
+// literal while a{'x',y}b expands — exactly like the shells.
 func braceExpandable(unquoted string) bool {
 	var stack []bool
 	for j := 0; j < len(unquoted); j++ {
@@ -242,11 +243,14 @@ func braceExpandable(unquoted string) bool {
 			if len(stack) == 0 {
 				continue
 			}
-			marked := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if marked {
+			if stack[len(stack)-1] {
 				return true
 			}
+			if len(stack) > 1 {
+				stack = stack[:len(stack)-1]
+			}
+			// len == 1 with an unmarked top: absorb the } as literal text;
+			// the sole open frame keeps seeking its real close.
 		case ',':
 			if len(stack) > 0 {
 				stack[len(stack)-1] = true
