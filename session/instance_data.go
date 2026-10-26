@@ -83,23 +83,41 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.TabRosterMutable = &rosterMutable
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
-			// ForStorage publishes it only when UserKilled or an unknown cleanup
-			// outcome makes it durable, including the persistKillTombstone copy that
-			// flips the kill flag after this read.
+			// ForStorage publishes it for a UserKilled tombstone, an unknown cleanup
+			// outcome, and now ordinary sandbox rows (so a restart can rebuild the
+			// handle and a later kill reaps for real) — including the
+			// persistKillTombstone copy that flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
 		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
-		// session whose off-box runtime owes no teardown (runtimeTeardown == nil).
-		// ForStorage publishes it only for a UserKilled tombstone, where it records
-		// that the kill was committed against an inert rebuild and the tombstone
-		// therefore carries no RuntimeCleanup handle on purpose. The marker is the
-		// durable token FromInstanceData reads to admit that "nothing owed" shape —
-		// the sandbox analog of the local branch's worktreeReaped admission (#2691)
-		// — so a handle-less tombstone that survives a daemon restart can still
-		// complete its pending record delete instead of installing a permanent
-		// fail-closed teardown. A local backend never reaches here: it has no
-		// off-box runtime, and its reaped shape is read from its worktree paths.
-		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil {
+		// session whose off-box runtime POSITIVELY owes no teardown. The two
+		// conditions are deliberately independent and BOTH must hold:
+		//
+		//   - i.runtimeTeardown == nil: no in-memory teardown handle is bound. This
+		//     is the necessary signal a kill committed against the row would run a
+		//     no-op reap — the shape the marker exists to admit.
+		//   - i.owesNoRuntimeTeardown(): positive evidence the backend itself
+		//     carries no off-box cleanup identity. This is the EARNED part. A
+		//     sandbox backend rebuilt by restoreRuntimeCleanup carries the cleanup
+		//     handle it restored from disk (its runtimeCleanupData() is non-nil),
+		//     and that handle means a runtime is still owed a reap — staging the
+		//     marker from a nil runtimeTeardown ALONE would launder that still-live
+		//     runtime into a no-op success and orphan it (the original f58ca97f
+		//     wedge fix did exactly that, because reload produced a handle-less
+		//     inert backend for every sandbox row regardless of whether its runtime
+		//     survived the restart).
+		//
+		// ForStorage publishes the staged marker only for a UserKilled tombstone,
+		// where it records that the kill was committed against a rebuild that owed
+		// no off-box reap and the tombstone therefore carries no RuntimeCleanup
+		// handle on purpose. The marker is the durable token FromInstanceData reads
+		// to admit that "nothing owed" shape — the sandbox analog of the local
+		// branch's worktreeReaped admission (#2691) — so a handle-less tombstone
+		// that survives a daemon restart can still complete its pending record
+		// delete instead of installing a permanent fail-closed teardown. A local
+		// backend never reaches here: it has no off-box runtime, and its reaped
+		// shape is read from its worktree paths.
+		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil && i.owesNoRuntimeTeardown() {
 			marker := true
 			data.killedWithoutLiveRuntime = &marker
 		}
@@ -479,11 +497,19 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
-		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
-		// sandbox client is dialled during load. Archived sandboxes were already
-		// reaped before becoming Archived, so deleting their record needs no remote
-		// cleanup handle.
-		if (data.UserKilled || data.RuntimeCleanupStateUnknown) && liveness != LiveArchived {
+		// intent. An ordinary sandbox row carries a persisted RuntimeCleanup handle
+		// (ForStorage publishes it for sandbox backends) precisely so this branch
+		// can rebuild a real teardown after a restart — its off-box runtime
+		// SURVIVES the restart, and without the handle a later kill would stage an
+		// unearned KilledWithoutLiveRuntime marker from the inert backend's nil
+		// runtimeTeardown alone and orphan the still-live runtime. Rebuild only
+		// that teardown handle — no endpoint, tunnel, or live sandbox client is
+		// dialled during load. Archived sandboxes were already reaped before
+		// becoming Archived, so deleting their record needs no remote cleanup
+		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
+		// handle here is naturally nil for those rows.
+		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
+		if liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {

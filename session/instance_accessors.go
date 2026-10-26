@@ -98,6 +98,39 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	i.runtimeTeardown = teardown
 }
 
+// owesNoRuntimeTeardown reports whether this sandbox-backed instance positively
+// owes no off-box reap — i.e. its backend carries no durable cleanup identity at
+// all (the cleanup field is nil). It is the EARNED-EVIDENCE half of the
+// KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+//
+// The necessity of the second condition besides `runtimeTeardown == nil` is the
+// f58ca97f wedge-fix gone wrong: a sandbox row reloaded INERT after a daemon
+// restart ALWAYS has `runtimeTeardown == nil` (the inert backend binds no live
+// teardown), regardless of whether its off-box runtime survived — so gating the
+// "nothing owed" marker on that nil alone laundered a still-live ssh workspace or
+// hook-provisioned sandbox into a no-op kill and deleted the only record that
+// pointed at it. Persisting RuntimeCleanup for ordinary sandbox rows (ForStorage)
+// and rebuilding it at load (FromInstanceData) puts a real teardown handle back on
+// a reloaded LIVE row, so this `runtimeTeardown == nil` arm stops firing for it;
+// the marker is staged only when the backend itself positively carries no
+// cleanup identity, which is the always-inert shape the original wedge fix meant
+// to admit.
+//
+// Caller holds no lock; this acquires i.mu only to read the backend pointer.
+func (i *Instance) owesNoRuntimeTeardown() bool {
+	i.mu.RLock()
+	backend := i.backend
+	i.mu.RUnlock()
+	if backend == nil {
+		return true
+	}
+	provider, ok := backend.(runtimeCleanupProvider)
+	if !ok {
+		return true
+	}
+	return provider.runtimeCleanupData() == nil
+}
+
 // SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
 // under the same mutex GetBranch reads it with.
 //

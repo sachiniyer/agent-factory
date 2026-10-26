@@ -27,6 +27,9 @@ import (
 //     after releasing the lock.
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
+//   - owesNoRuntimeTeardown — holds i.mu.RLock across the backend read; the
+//     subsequent runtimeCleanupData() call is on a frozen pointer armed once at
+//     bind/rebind, mirroring IsExternalWorktree's gitWorktree snapshot pattern.
 var backendReadersUnderLock = map[string]bool{
 	"currentBackend":               true,
 	"capabilitiesLocked":           true,
@@ -39,6 +42,7 @@ var backendReadersUnderLock = map[string]bool{
 	"toInstanceDataLocked":         true,
 	"PreviewTabSnapshotByID":       true,
 	"FromInstanceData":             true,
+	"owesNoRuntimeTeardown":        true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.
