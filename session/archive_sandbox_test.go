@@ -428,6 +428,106 @@ func TestArchiveSandbox_KnownKillDropsDischargedCleanupHandle(t *testing.T) {
 		"the reloaded row rebuilt a teardown handle for a runtime af already reaped")
 }
 
+// TestArchiveSandbox_DischargedKnownKillTombstoneStagesMarker is the regression for
+// the Codex P2 on e6221bf6 (session/archive_sandbox.go:134): when ArchiveSandbox's
+// as.Kill returns a KNOWN error the sandbox reap still succeeded, so
+// clearDischargedRuntimeCleanup drops the backend's immutable cleanup identity but
+// deliberately leaves the in-memory wiring (runtimeTeardown/remoteClient/agentSrv)
+// for the abort-to-Lost retry. The kill-tombstone gate (toInstanceDataLocked)
+// used to require runtimeTeardown==nil to stage the nothing-owed marker, so a kill
+// committed against the discharged-but-not-rewired row staged neither RuntimeCleanup
+// (the discharged handle) nor KilledWithoutLiveRuntime (the marker gate refused it),
+// and a crash after the tombstone write reloaded it through the fail-closed
+// missing-handle path — every cleanup retry returned ErrWorkspaceStateUnknown even
+// though the runtime was already conclusively reaped.
+//
+// The fix stages the marker when the backend positively owes no teardown
+// (owesNoRuntimeTeardownLocked) AND the cleanup state is known, not when the
+// in-memory teardown pointer is nil — the discharged state leaves a stale closure
+// for the in-process retry, but the reap already latched and the cleanup identity
+// is gone, so the row is "nothing owed" the same way an inert row is. A kill
+// tombstone written in that state now carries the marker, and a crash-after-
+// tombstone reload admits it as inert instead of installing the sentinel teardown.
+func TestArchiveSandbox_DischargedKnownKillTombstoneStagesMarker(t *testing.T) {
+	// A KNOWN kill error — the reap succeeded, only the REST teardown failed.
+	as := &stubAgentServer{branch: "root/s", killErr: fmt.Errorf("container rm failed")}
+	i := newStubbedSandboxInstance(as)
+	i.backend = &dockerBackend{
+		containerID: "reaped-container",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "reaped-container",
+			EngineID:    "engine-id",
+		},
+	}
+	i.runtimeTeardown = func() error { return nil }
+
+	_, err := i.ArchiveSandbox()
+	require.Error(t, err, "the known teardown failure must surface to the caller")
+
+	// The discharged state clearDischargedRuntimeCleanup leaves: the backend's
+	// cleanup identity is gone (so a later checkpoint stages no RuntimeCleanup),
+	// the in-memory teardown closure is retained for the abort-to-Lost retry, and
+	// the cleanup state is KNOWN (not unknown — the unknown branch returns before
+	// this point).
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		require.Nil(t, provider.runtimeCleanupData(),
+			"the known reap discharged the cleanup identity")
+	}
+	i.mu.RLock()
+	teardownBound := i.runtimeTeardown != nil
+	i.mu.RUnlock()
+	require.True(t, teardownBound,
+		"the in-memory teardown closure is retained for the abort-to-Lost retry")
+	require.False(t, i.ToInstanceData().RuntimeCleanupStateUnknown,
+		"a known reap must not be collapsed into unknown state")
+
+	// The kill is committed against the discharged-but-not-rewired row (the abort
+	// leaves it Lost; the daemon's finishUserKill path or a manual kill can reach
+	// it before the in-process retry reaps through the retained closure).
+	i.MarkUserKilled()
+	tombstone := i.ToInstanceData().ForStorage()
+	if !tombstone.UserKilled {
+		t.Fatal("the kill tombstone did not carry the kill-intent flag")
+	}
+	if tombstone.RuntimeCleanup != nil {
+		t.Fatalf("the discharged row persisted a cleanup handle a runtime af already reaped: %#v", tombstone.RuntimeCleanup)
+	}
+	if !tombstone.KilledWithoutLiveRuntime {
+		t.Fatal("the discharged row's kill tombstone did not stage the nothing-owed marker; a crash-after-tombstone reload would fail closed on a runtime that was already reaped (ErrWorkspaceStateUnknown forever) instead of admitting the row as inert")
+	}
+
+	// The crash window: the committed tombstone survives a JSON round-trip the way
+	// a daemon restart reloads it, and FromInstanceData admits the marker as the
+	// inert-at-kill shape — a nil teardown, not the unavailableRuntimeCleanup
+	// sentinel — so a finishUserKill re-run completes the no-op reap instead of
+	// retaining the record forever behind ErrWorkspaceStateUnknown.
+	raw, err := json.Marshal(tombstone)
+	require.NoError(t, err, "marshal discharged-known-kill tombstone")
+	var reloaded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &reloaded), "unmarshal discharged-known-kill tombstone")
+	reloaded = reloaded.ForStorage()
+	if !reloaded.KilledWithoutLiveRuntime {
+		t.Fatal("the nothing-owed marker did not survive the crash-window reload")
+	}
+	if reloaded.RuntimeCleanup != nil {
+		t.Fatalf("the reloaded tombstone rebuilt a cleanup handle a runtime af already reaped: %#v", reloaded.RuntimeCleanup)
+	}
+	restored, err := FromInstanceData(reloaded)
+	require.NoError(t, err, "restore the discharged-known-kill tombstone")
+	if restored.runtimeTeardown != nil {
+		t.Fatal("the reloaded tombstone installed a teardown handle for a runtime af already reaped; the marker should admit the row as inert")
+	}
+	if provider, ok := restored.backend.(runtimeCleanupProvider); ok && provider.runtimeCleanupData() != nil {
+		t.Fatalf("the restored backend carried a rebuilt cleanup handle: %#v", provider.runtimeCleanupData())
+	}
+	// The inert-at-kill admission the marker exists for: Kill is a no-op success,
+	// not the ErrWorkspaceStateUnknown a fail-closed (unavailableRuntimeCleanup)
+	// teardown would return, so the pending record delete can complete.
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("the reloaded discharged-known-kill tombstone did not complete the no-op reap: %v (it should be admitted as inert, not fail-closed)", err)
+	}
+}
+
 // TestArchiveSandbox_RecordsBranchOnSuccess pins that moving the assignment earlier
 // (#1781) did not drop it from the success path, alongside the archive's other
 // post-conditions: the wiring is reset and the session is no longer started.
