@@ -469,36 +469,43 @@ func (s *TaskPane) renderEditMode() string {
 		}
 		b.WriteString(ActionHint(fitLine(hint, s.width)))
 		b.WriteString("\n")
-		// Three tiers, not two (#3630). The old ladder jumped straight from the
-		// full 51-cell row to a 39-cell one, and of everything it dropped it
-		// dropped esc's LABEL — the one key here whose destination ("back to the
-		// list", not "out of the manager") is not guessable from the glyph. The
-		// middle tier abbreviates the verbs and keeps every destination; the
-		// narrowest tier is unchanged, because below 44 cells the only way to
-		// keep esc's label is to drop the quit key, which
-		// TestTaskPaneEditModeCompactActionFooterShowsQuitKey pins.
-		tiers := []string{
-			"r run now · x toggle · D delete · esc list · " + quitHint,
-			"r run · x toggle · D del · esc list · " + quitHint,
-			"r run · x toggle · D del · esc · " + quitHint,
-		}
-		// A watch task can't be manually run (#1758): drop "r run" so the
-		// editor never advertises an action that always fails.
-		if s.selectedTaskIsWatch() {
-			tiers = []string{
-				"x toggle · D delete · esc list · " + quitHint,
-				"x toggle · D del · esc list · " + quitHint,
-				"x toggle · D del · esc · " + quitHint,
+		// The action row is contextual (#5538), the same contract the Trigger
+		// selector's "←/→ switch" already follows: r/x/D fire only from
+		// selector/button stops — at a text stop they are typed input (#4838) —
+		// and the configured quit key is gated on !IsEditing in handleStateTasks
+		// (#1961), so it is dead at every edit stop and never advertised.
+		if s.textFocusStop() {
+			b.WriteString(ActionHint(fitLine("esc list", s.width)))
+		} else {
+			// Three tiers, not two (#3630). The old ladder jumped straight from
+			// the full row to a much shorter one, and of everything it dropped
+			// it dropped esc's LABEL — the one key here whose destination
+			// ("back to the list", not "out of the manager") is not guessable
+			// from the glyph. The middle tier abbreviates the verbs and keeps
+			// every destination.
+			tiers := []string{
+				"r run now · x toggle · D delete · esc list",
+				"r run · x toggle · D del · esc list",
+				"r run · x toggle · D del · esc",
 			}
-		}
-		actions := tiers[len(tiers)-1]
-		for _, tier := range tiers {
-			if s.width <= 0 || lipgloss.Width(tier) <= s.width {
-				actions = tier
-				break
+			// A watch task can't be manually run (#1758): drop "r run" so the
+			// editor never advertises an action that always fails.
+			if s.selectedTaskIsWatch() {
+				tiers = []string{
+					"x toggle · D delete · esc list",
+					"x toggle · D del · esc list",
+					"x toggle · D del · esc",
+				}
 			}
+			actions := tiers[len(tiers)-1]
+			for _, tier := range tiers {
+				if s.width <= 0 || lipgloss.Width(tier) <= s.width {
+					actions = tier
+					break
+				}
+			}
+			b.WriteString(ActionHint(fitLine(actions, s.width)))
 		}
-		b.WriteString(ActionHint(fitLine(actions, s.width)))
 	}
 
 	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)
