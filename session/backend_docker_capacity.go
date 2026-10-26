@@ -312,8 +312,10 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 }
 
 // coveringMountEntry finds the mount entry covering path in a mountinfo
-// table — the longest mount-point prefix — and returns its fields.
-// Unparseable or uncovered paths are unproven.
+// table — the longest mount-point prefix — and returns its fields. Mounts
+// stack at the same mountpoint (a tmpfs over a bind): later lines shadow
+// earlier ones, so the LAST entry at the longest prefix is what a stat
+// actually sees. Unparseable or uncovered paths are unproven.
 func coveringMountEntry(info []byte, path string) ([]string, bool) {
 	if !strings.HasPrefix(path, "/") {
 		return nil, false
@@ -329,7 +331,7 @@ func coveringMountEntry(info []byte, path string) ([]string, bool) {
 		if mp != "/" && mp != path && !strings.HasPrefix(path, mp+"/") {
 			continue
 		}
-		if len(mp) > bestLen {
+		if len(mp) >= bestLen {
 			bestLen, best = len(mp), fields
 		}
 	}

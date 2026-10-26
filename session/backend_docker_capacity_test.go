@@ -464,6 +464,28 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Equal(t, 0, *calls, "a partial-bind-covered root must not reach statfs")
 	})
 
+	t.Run("stacked mounts take the top of the stack", func(t *testing.T) {
+		// Real rigs stack mounts at one mountpoint: a volume bind at
+		// /var/lib/docker with a tmpfs (the controlled data root) mounted
+		// over it. af's stat sees the top entry; the peer table lists both
+		// — the proof must compare against the LAST covering entry.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stacked := peerTableOn("8:1") +
+			"1415 1371 8:1 /volumes/v/_data /var/lib/docker rw - ext4 /dev/sda1 rw\n" +
+			"1160 1415 0:198 / /var/lib/docker rw - tmpfs tmpfs rw\n"
+		stubPeerDataRoot(t, "0:198", stacked, peerTableOn("8:1"), nil)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "stacked-root"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"the top of a mount stack is what stat sees — the verdict must apply: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
 	t.Run("a symlinked socket path still dials the daemon", func(t *testing.T) {
 		// DOCKER_HOST may traverse a symlink (/var/run -> /run); the dial
 		// resolves it and the peer answer is unaffected.
