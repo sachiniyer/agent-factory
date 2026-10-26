@@ -36,7 +36,14 @@ func TestRunDaemonSweepsOrphanSandboxTunnelsBeforeReady(t *testing.T) {
 	t.Cleanup(func() { sweepOrphanSandboxTunnels = previousSweep })
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	// runExited closes when the RunDaemon goroutine returns. runDone is
+	// single-consumption — the body below receives the error — so the cleanup
+	// join needs its own multi-reader signal for "the goroutine finished".
+	runExited := make(chan struct{})
+	go func() {
+		runDone <- RunDaemon(config.DefaultConfig())
+		close(runExited)
+	}()
 	// Every goroutine this test starts is joined before it returns: an
 	// unjoined RunDaemon keeps the home's control socket and races the NEXT
 	// test's RunDaemon. releaseSweep runs first because a daemon parked in
@@ -48,7 +55,7 @@ func TestRunDaemonSweepsOrphanSandboxTunnelsBeforeReady(t *testing.T) {
 			var resp ShutdownResponse
 			_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 			select {
-			case <-runDone:
+			case <-runExited:
 				return
 			case <-time.After(50 * time.Millisecond):
 			}
@@ -113,16 +120,21 @@ func TestRunDaemonStopsSandboxTunnelsOnExit(t *testing.T) {
 	t.Cleanup(func() { sweepOrphanContainers = previousSweep })
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	runExited := make(chan struct{})
+	go func() {
+		runDone <- RunDaemon(config.DefaultConfig())
+		close(runExited)
+	}()
 	// Same join rule as the sweep test above: the daemon goroutine must not
-	// outlive this test.
+	// outlive this test. runExited — not runDone — is the join signal: the
+	// body below receives the error, so the channel is already drained.
 	t.Cleanup(func() {
 		deadline := time.Now().Add(10 * time.Second)
 		for {
 			var resp ShutdownResponse
 			_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 			select {
-			case <-runDone:
+			case <-runExited:
 				return
 			case <-time.After(50 * time.Millisecond):
 			}
