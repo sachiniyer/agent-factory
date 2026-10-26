@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // fakeUnixDockerSocket stands up a real unix socket in a temp dir so the
@@ -39,30 +40,39 @@ func fakeUnixDockerSocket(t *testing.T) string {
 	return "unix://" + sock
 }
 
-// stubPeerMountNS installs the peer-identity seams the namespace gate
+// stubPeerDataRoot installs the three seams the data-root identity proof
 // consults: socketPeerPid reports the answering process as pid 424242 (or
-// fails when peerErr is set), and mountNSID answers "mnt:[self]" for af's
-// own pid and peerNS for the stubbed peer — "" simulates an unreadable
-// peer (/proc/<pid> gone or permission denied).
-func stubPeerMountNS(t *testing.T, peerNS string, peerErr error) {
+// fails when peerErr is set), af's own stat of the data root reports
+// "maj:min" dev, and peerMountinfo answers peerTable — "" simulates an
+// unreadable peer table. Proof requires the peer's covering mount to show
+// the same device af's stat reports.
+func stubPeerDataRoot(t *testing.T, dev, peerTable string, peerErr error) {
 	t.Helper()
-	oldP, oldM := socketPeerPid, mountNSID
+	var maj, min uint64
+	_, err := fmt.Sscanf(dev, "%d:%d", &maj, &min)
+	require.NoError(t, err)
+	oldP, oldM, oldS := socketPeerPid, peerMountinfo, statDev
 	socketPeerPid = func(net.Conn) (int, error) {
 		if peerErr != nil {
 			return 0, peerErr
 		}
 		return 424242, nil
 	}
-	mountNSID = func(pid int) (string, error) {
-		if pid == 424242 {
-			if peerNS == "" {
-				return "", fmt.Errorf("process gone")
-			}
-			return peerNS, nil
+	peerMountinfo = func(pid int) ([]byte, error) {
+		require.Equal(t, 424242, pid)
+		if peerTable == "" {
+			return nil, fmt.Errorf("process gone")
 		}
-		return "mnt:[self]", nil
+		return []byte(peerTable), nil
 	}
-	t.Cleanup(func() { socketPeerPid, mountNSID = oldP, oldM })
+	statDev = func(string) (uint64, bool) { return unix.Mkdev(uint32(maj), uint32(min)), true }
+	t.Cleanup(func() { socketPeerPid, peerMountinfo, statDev = oldP, oldM, oldS })
+}
+
+// peerTableOn returns a mountinfo whose deepest mount covering the data
+// root reports device dev — the proven shape when dev matches af's stat.
+func peerTableOn(dev string) string {
+	return "24 1 " + dev + " / / rw,relatime - ext4 /dev/sda1 rw\n"
 }
 
 // dockerInfoAnswer is the fake `docker info` payload for capacity-evidence
@@ -133,7 +143,7 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 
 	// Each failingStep names a docker argv shape emitted by one provision
 	// step; matching it makes the fake fail that call. The matchers read argv
@@ -254,7 +264,7 @@ func TestProvisionFailure_RootlessEngineReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 
 	failRun := func(args []string) ([]byte, error) {
 		if args[0] == "run" {
@@ -348,7 +358,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// DockerRootDir lives on another filesystem entirely.
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "mnt:[self]", nil)
+		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", "af-test-foreign-daemon", false), failRun)
 
 		statfsCalls := 0
@@ -373,14 +383,15 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		return calls
 	}
 
-	t.Run("a peer in another mount namespace is not proof", func(t *testing.T) {
+	t.Run("a peer whose data root is another filesystem is not proof", func(t *testing.T) {
 		// The #5382-review gap a hostname cannot close: `--uts=host` gives
 		// an af container the host's name and `-v` hands it the daemon's
-		// socket — but the answering process still lives in a DIFFERENT
-		// mount namespace, so its DockerRootDir is not af's filesystem.
+		// socket — but the answering daemon's own mount table shows its
+		// data root on a device af's stat does not see (af's
+		// /var/lib/docker is the container rootfs).
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "mnt:[foreign]", nil)
+		stubPeerDataRoot(t, "8:1", peerTableOn("9:9"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -388,8 +399,8 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a socket answered from another mount namespace proves the daemon answers, not that af's /var/lib/docker is the daemon's: %v", err)
-		assert.Equal(t, 0, *calls, "a foreign-namespace peer must not reach statfs")
+			"a socket answered for a data root on another device proves the daemon answers, not that af's /var/lib/docker is the daemon's: %v", err)
+		assert.Equal(t, 0, *calls, "a foreign-device peer must not reach statfs")
 	})
 
 	t.Run("an unidentifiable peer is not proof", func(t *testing.T) {
@@ -397,7 +408,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// or the socket is unreachable — unproven, not shared.
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "", fmt.Errorf("peer credentials unavailable"))
+		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), fmt.Errorf("peer credentials unavailable"))
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -405,14 +416,14 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a peer af cannot name cannot be shown to share its mount namespace: %v", err)
+			"a peer af cannot name cannot be shown to share its data root: %v", err)
 		assert.Equal(t, 0, *calls, "an unnamed peer must not reach statfs")
 	})
 
 	t.Run("an unreadable peer mount table is not proof", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "", nil) // peer answers, but /proc/<pid>/ns/mnt does not
+		stubPeerDataRoot(t, "8:1", "", nil) // peer answers, but its mountinfo does not
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -420,7 +431,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a peer whose mount namespace cannot be read is unproven: %v", err)
+			"a peer whose mount table cannot be read is unproven: %v", err)
 		assert.Equal(t, 0, *calls, "an unreadable peer must not reach statfs")
 	})
 
@@ -433,7 +444,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		require.NoError(t, os.Symlink(filepath.Dir(sockPath), linkDir))
 		t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(linkDir, filepath.Base(sockPath)))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "mnt:[self]", nil)
+		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -448,7 +459,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	t.Run("local endpoint plus matching hostname probes", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "mnt:[self]", nil)
+		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -465,7 +476,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	t.Run("a root af cannot stat is not full", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubPeerMountNS(t, "mnt:[self]", nil)
+		stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -492,7 +503,7 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
@@ -548,7 +559,7 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 
 	// failExec kills the configureGit exec; failRun kills `docker run`.
 	failExec := func(args []string) ([]byte, error) {
@@ -812,7 +823,7 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 
 	cases := map[string]func(args []string) ([]byte, error){
 		"port output unparsable": func(args []string) ([]byte, error) {
@@ -897,7 +908,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubPeerMountNS(t, "mnt:[self]", nil)
+	stubPeerDataRoot(t, "8:1", peerTableOn("8:1"), nil)
 	oldT, oldI := dockerBannerPollTimeout, dockerBannerPollInterval
 	dockerBannerPollTimeout, dockerBannerPollInterval = 60*time.Millisecond, 10*time.Millisecond
 	defer func() { dockerBannerPollTimeout, dockerBannerPollInterval = oldT, oldI }()

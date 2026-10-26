@@ -58,6 +58,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"golang.org/x/sys/unix"
 )
 
 // statfsFull is the test seam over the bounded filesystem fullness answer —
@@ -205,14 +206,15 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 	if !ok || info.root == "" || info.name == "" || info.name != host {
 		return nil
 	}
-	// Mount-identity evidence, not hostname equality: the process answering
-	// af's socket must live in af's own mount namespace, or its reported
-	// data root is a path in a filesystem af's statfs does not see (a
-	// bind-mounted socket under --uts=host, Docker Desktop's shared
-	// socket, an ssh-forwarded one). SO_PEERCRED names the answering
-	// pid; its ns/mnt must equal af's own. Anything unreadable or
-	// unprovable is not proven (#5382 review).
-	if !socketSharesMountNamespace(endpoint) {
+	// Mount-identity evidence, not hostname equality: the filesystem the
+	// daemon's own mount table shows under its reported data root must be
+	// the filesystem af's stat of that path sees (#5382 review). Asking the
+	// daemon's namespace directly is what keeps genuine co-location working
+	// — a tmpfs /run, a rootlesskit mount namespace — while a socket the
+	// daemon never wrote into af's view (a bind under --uts=host, Docker
+	// Desktop's artifact, an ssh forward) still cannot prove the root is
+	// af's. Anything unreadable or unprovable is not proven.
+	if !daemonSharesDataRootFS(endpoint, info.root) {
 		return nil
 	}
 	// The failed step's writer picks the block counter: a rootless engine's
@@ -252,29 +254,26 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 		info.root, who, &os.PathError{Op: "statfs", Path: info.root, Err: syscall.ENOSPC})
 }
 
-// mountNSID reads a process's mount-namespace identity —
-// /proc/<pid>/ns/mnt's link target. pid 0 means this process. Every failure
-// is an unproven identity, never a match.
-var mountNSID = func(pid int) (string, error) {
-	proc := "self"
-	if pid > 0 {
-		proc = strconv.Itoa(pid)
-	}
-	return os.Readlink("/proc/" + proc + "/ns/mnt")
+// peerMountinfo reads the answering daemon's own mount table —
+// /proc/<pid>/mountinfo. Same-uid peers (rootful af-as-root, rootless
+// af-as-that-user) can always read it; a peer af cannot see is unproven.
+var peerMountinfo = func(pid int) ([]byte, error) {
+	return os.ReadFile("/proc/" + strconv.Itoa(pid) + "/mountinfo")
 }
 
-// socketSharesMountNamespace is the mount-identity proof hostname equality
-// cannot give (#5382 review): dial the endpoint, ask the kernel which
-// process answered (SO_PEERCRED — platform helper, unproven where the
-// socket option does not exist), and compare that process's mount
-// namespace to af's own. A bind-mounted or forwarded socket answers with
-// a process in a DIFFERENT namespace (or one af cannot see), so the
-// daemon's reported data root cannot be trusted as af's filesystem — and
-// a genuinely co-located daemon, tmpfs /run included, still passes.
-// Anything that cannot establish the peer is not proven.
-func socketSharesMountNamespace(endpoint string) bool {
+// daemonSharesDataRootFS is the mount-identity proof hostname equality
+// cannot give (#5382 review). SO_PEERCRED names the process answering af's
+// socket; its mount table then shows which device really backs the data
+// root in the DAEMON's view. When that device equals af's stat of the same
+// path, af's statfs verdict is the daemon's verdict — even when the daemon
+// lives in a different mount namespace, as every rootless engine does, or
+// sits under a tmpfs /run bind-visible mounts could never describe. A
+// socket bind-mounted into a container fails here: the answering daemon's
+// mountinfo shows a different device than af's container-rootfs stat. Any
+// step that cannot name the peer or read its view is not proven.
+func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	sockPath := strings.TrimPrefix(endpoint, "unix://")
-	if !strings.HasPrefix(sockPath, "/") {
+	if !strings.HasPrefix(sockPath, "/") || rootDir == "" {
 		return false
 	}
 	conn, err := net.DialTimeout("unix", sockPath, dockerShortStepTimeout)
@@ -286,12 +285,53 @@ func socketSharesMountNamespace(endpoint string) bool {
 	if err != nil || peer <= 0 {
 		return false
 	}
-	self, err := mountNSID(0)
-	if err != nil || self == "" {
+	dev, ok := statDev(rootDir)
+	if !ok {
 		return false
 	}
-	peerNS, err := mountNSID(peer)
-	return err == nil && peerNS == self
+	info, err := peerMountinfo(peer)
+	if err != nil {
+		return false
+	}
+	peerDev, ok := coveringMountDev(info, rootDir)
+	return ok && peerDev == dev
+}
+
+// coveringMountDev finds the mount entry covering path in a mountinfo
+// table — the longest mount-point prefix — and returns its st_dev. The
+// mount the daemon reports under its data root is the filesystem it
+// writes to; matching device numbers across namespaces name the same
+// filesystem object. Unparseable or uncovered paths are unproven.
+func coveringMountDev(info []byte, path string) (uint64, bool) {
+	if !strings.HasPrefix(path, "/") {
+		return 0, false
+	}
+	bestLen, bestDev := -1, uint64(0)
+	for _, line := range strings.Split(string(info), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		mp := unescapeMountinfoPath(fields[4])
+		if mp != "/" && !strings.HasPrefix(path, mp+"/") {
+			continue
+		}
+		if len(mp) <= bestLen {
+			continue
+		}
+		var maj, min uint64
+		if _, err := fmt.Sscanf(fields[2], "%d:%d", &maj, &min); err != nil {
+			continue
+		}
+		bestLen, bestDev = len(mp), unix.Mkdev(uint32(maj), uint32(min))
+	}
+	return bestDev, bestLen >= 0
+}
+
+func unescapeMountinfoPath(s string) string {
+	// mountinfo octal-escapes ' ', '\t', '\n', '\\' — decode so prefix
+	// matching sees the real path the daemon reported.
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(s)
 }
 
 // dockerStepWriterUnprivileged answers whether the FAILED operation's writer
@@ -420,7 +460,7 @@ var sameFilesystem = func(a, b string) bool {
 	return oka && okb && da == db
 }
 
-func statDev(path string) (uint64, bool) {
+var statDev = func(path string) (uint64, bool) {
 	st, err := fsprobe.Stat(path)
 	if err != nil {
 		return 0, false
