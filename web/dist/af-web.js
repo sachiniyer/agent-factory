@@ -7770,7 +7770,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;

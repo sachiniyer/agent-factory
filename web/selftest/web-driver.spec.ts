@@ -4539,6 +4539,91 @@ test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, a
   }
 });
 
+test("config: a click-focused-but-untyped text field keeps focus across an unrelated rebuild", REAL_FIXTURE, async ({ browser }) => {
+  // The text-input sibling of the #4244/checkbox/select family. #4244 types into
+  // the field first, so the `input` event assigns `this.editingInput` and the
+  // `wasEditing` branch (caret-preserving) restores focus. This test deliberately
+  // SKIPS the `input` event: the user has only CLICKED into the field.
+  // `editingInput` is therefore null (it is set only on the `input` event in
+  // renderControl, i.e. once the user has typed), so `wasEditing` is false, and
+  // before the fix the restoration ladder had no branch for a click-focused text
+  // input — `focusedConfigControlKey` matched only checkbox/select — so the
+  // rebuild detached the focused input and focus fell to <body>. The user's next
+  // `[` then cycled the view out of config mid-edit, and any other printable key
+  // was silently swallowed. The fix extends `focusedConfigControlKey` to
+  // `type === "text"`, and because render() already sets `aria-label = e.key` on
+  // every text input, the unchanged querySelector restore re-locates the rebuilt
+  // input — exactly the path already used for checkbox/select. The `wasEditing`
+  // check is first in the ladder, so a TYPED text row keeps the caret-preserving
+  // branch; this branch only fires for the untyped, click-focused case.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has been click-focused. The daemon is not mutated: the intercepted reply is
+    // enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    // Click-focus the text field WITHOUT typing. The #4244 sibling dispatches an
+    // `input` event here (setting `editingInput`); this test deliberately does not,
+    // so `wasEditing` is false and only the `focusedConfigControlKey` branch can
+    // restore focus.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.click();
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt input replaced the focused one and the
+    // restoration ladder had no branch for a click-focused text field, so focus
+    // fell to <body>.
+    await expect(field).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user mid-edit.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
   // The third case in this family, and the only one that moves focus to the WRONG
   // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
