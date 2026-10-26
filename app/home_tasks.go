@@ -137,9 +137,26 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		}
 	}
 	if addErr != nil && apiclient.IsMutationCommitted(addErr) {
-		return m.handleError(errors.Join(
+		err := errors.Join(
 			fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr),
-			reloadErr))
+			reloadErr)
+		// A cross-repo create that committed with a warning still landed in
+		// another project, so the active-scope reload omits it — the scheduler
+		// warning alone reads as a failed save that lost the task. The nil-error
+		// cross-repo branch below names where it landed; surface the same
+		// destination here so a committed-with-warning create does not regress
+		// it. Only when the reload succeeded: a reload failure leaves the list
+		// stale and the absence unreadable.
+		if reloadErr == nil {
+			for _, t := range tasks {
+				if t.ID == id {
+					return m.handleError(err)
+				}
+			}
+			err = errors.Join(err,
+				fmt.Errorf("task %q was saved and bound to %s; it does not appear in this project's list", name, absPath))
+		}
+		return m.handleError(err)
 	}
 	if addErr != nil {
 		return m.handleError(errors.Join(

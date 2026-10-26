@@ -94,6 +94,78 @@ func TestHandleTaskCreate_CrossRepoSurfacesBindingNotice(t *testing.T) {
 		"the notice must explain why the pane omits the just-saved task")
 }
 
+// TestHandleTaskCreate_CrossRepoCommittedWarningNamesTheBinding is the
+// committed-with-warning sibling of the cross-repo create guard above. When the
+// durable write lands but the daemon's scheduler refresh fails (the adder
+// returns MutationCommitted), the create path surfaces the scheduler warning
+// via handleError. A cross-repo create's task is omitted from the active-scope
+// reload, so before this guard the warning branch returned before reaching the
+// absence check — the user got the scheduler warning but not the binding, and
+// read the empty pane as a failed save that lost the task. The warning branch
+// now names where the task landed the way the nil-error branch does.
+func TestHandleTaskCreate_CrossRepoCommittedWarningNamesTheBinding(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	repoA := initTestGitRepo(t)
+	repoB := initTestGitRepo(t)
+	require.NotEqual(t, config.RepoIDFromRoot(repoA), config.RepoIDFromRoot(repoB))
+
+	t.Chdir(repoA)
+	h.repoRoot = repoA
+	h.repoID = config.RepoIDFromRoot(repoA)
+
+	// The adder writes the task to disk (so the active-scope reload omits it as
+	// cross-repo) and returns a committed-with-warning outcome so handleTaskCreate
+	// takes the MutationCommitted branch rather than the nil-error cross-repo path.
+	t.Cleanup(SetTaskAdderForTest(func(tk task.Task) error {
+		require.NoError(t, task.AddTask(tk))
+		return committedTaskMutationTestError{}
+	}))
+
+	tp := h.automations.TaskPane()
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	tp.EnterCreateMode(repoB)
+	require.True(t, tp.IsCreating())
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("cross-warn")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // trigger selector
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // schedule picker
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("committed cross-repo")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // path (B's root, prefilled)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // program
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // save
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// The durable write landed in B (its RepoID is derived from ProjectPath at
+	// AddTask time), but the active-scope reload (A) omits it.
+	saved, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, saved, 1, "the committed add must reach disk")
+	assert.Equal(t, "cross-warn", saved[0].Name)
+	assert.Equal(t, repoB, saved[0].ProjectPath)
+	assert.Empty(t, tp.GetTasks(),
+		"the cross-repo task must NOT appear in the active project's pane")
+
+	// The scheduler warning surfaces (the committed-with-warning outcome), and
+	// the cross-repo binding rides with it so the empty pane does not read as a
+	// failed save that lost the task.
+	h.errBox.SetSize(500, 1)
+	assert.Contains(t, h.errBox.String(), "scheduler",
+		"the committed-with-warning outcome must still surface")
+	assert.Contains(t, h.errBox.String(), "cross-warn",
+		"the warning must name the committed task")
+	assert.Contains(t, h.errBox.String(), repoB,
+		"the warning must echo the binding the task landed at, not just the scheduler failure")
+	assert.Contains(t, h.errBox.String(), "does not appear in this project's list",
+		"the warning must explain why the pane omits the just-saved task")
+}
+
 // TestHandleTaskCreate_SameRepoAfterSwitchAppearsInList is the control + the
 // post-project-switch fix: when the user switches to a project (m.repoID/repoRoot
 // move with it) and then creates a task at that project's root, the reload is
