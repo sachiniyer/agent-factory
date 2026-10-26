@@ -116,17 +116,20 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 		// token keeps authenticating until a recovery happens to replace it — or
 		// until the daemon restarts, if none ever does.
 		//
-		// The reap SUCCEEDED on this branch (a known error still means the sandbox is
-		// gone), so the backend's immutable cleanup identity is discharged. Clear it
-		// too, but leave the in-memory wiring (runtimeTeardown/remoteClient/agentSrv)
-		// for the abort-to-Lost retry: the in-process re-provision reaps through that
-		// closure (reapRemoteRuntimeForReplacement), not this field. resetRemoteRuntime
-		// clears the same identity on the success path where the wiring is also
-		// dropped; without it here, an ordinary sandbox row's ForStorage projection
-		// persists the discharged handle and a restart's FromInstanceData rebuilds a
-		// teardown for a runtime af already reaped (#5559 review). The unknown-
-		// outcome branch above returns before this point, so only a provably-gone
-		// runtime reaches here.
+		// The reap answered definitively on this branch (a known error is a
+		// definite answer, not an unknown one) and latched, so af's teardown
+		// obligation is discharged and the backend's immutable cleanup identity
+		// points at a runtime af already reaped. Clear it too, but leave the
+		// in-memory wiring (runtimeTeardown/remoteClient/agentSrv) for the
+		// abort-to-Lost retry: the in-process re-provision reaps through that
+		// closure (reapRemoteRuntimeForReplacement), not this field.
+		// resetRemoteRuntime clears the same identity on the success path where
+		// the wiring is also dropped; without it here, an ordinary sandbox row's
+		// ForStorage projection persists the discharged handle and a restart's
+		// FromInstanceData rebuilds a teardown for a runtime af already reaped
+		// (#5559 review). The unknown-outcome branch above returns before this
+		// point, so only a runtime whose reap answered definitively and latched
+		// reaches here.
 		i.revokeSandboxCredential()
 		i.clearDischargedRuntimeCleanup()
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
@@ -517,16 +520,19 @@ func (i *Instance) revokeSandboxCredential() {
 }
 
 // clearDischargedRuntimeCleanup drops the backend's immutable cleanup identity
-// after a reap that completed but left the in-memory wiring in place for a retry.
-// It is the ArchiveSandbox known-failure branch's analogue of resetRemoteRuntime's
-// cleanup clear: the sandbox reap succeeded (the REST teardown returned a known
-// error), so the cleanup identity points at a runtime af already reaped, but the
-// row aborts to Lost and the in-process retry (reapRemoteRuntimeForReplacement)
-// still needs the in-memory runtimeTeardown/remoteClient/agentSrv to re-enter
-// the reap. Only the persisted identity is cleared, so a restart's FromInstanceData
-// cannot rebuild a teardown for the reaped runtime and the next checkpoint stages
-// no RuntimeCleanup for it (#5559 review). The unknown-outcome branch returns
-// before this is reached, so only a provably-gone runtime discharges here.
+// after a reap that answered definitively and latched but left the in-memory
+// wiring in place for a retry. It is the ArchiveSandbox known-failure branch's
+// analogue of resetRemoteRuntime's cleanup clear: the reap returned a known
+// error (a definite answer, success or a definite failure) and latched, so
+// af's teardown obligation is discharged and the cleanup identity points at a
+// runtime af already reaped, but the row aborts to Lost and the in-process
+// retry (reapRemoteRuntimeForReplacement) still needs the in-memory
+// runtimeTeardown/remoteClient/agentSrv to re-enter the reap. Only the
+// persisted identity is cleared, so a restart's FromInstanceData cannot
+// rebuild a teardown for the reaped runtime and the next checkpoint stages no
+// RuntimeCleanup for it (#5559 review). The unknown-outcome branch returns
+// before this is reached, so only a runtime whose reap answered definitively
+// and latched discharges here.
 func (i *Instance) clearDischargedRuntimeCleanup() {
 	i.mu.Lock()
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
