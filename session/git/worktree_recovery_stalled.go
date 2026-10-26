@@ -173,14 +173,26 @@ func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
 // wrong, does not invalidate that evidence: it remains the conservative stale
 // fence the failed-settle path installs. Preserve it so the restored record
 // matches disk and claim resolution can still arbitrate both candidates on
-// the next retry. Drop to the bare identity-unknown shape only when the stale
-// fence itself carried no identity and no alternate — the case the durable
-// record also matches, and the only case the bare restore is correct for.
-// Forcing the bare shape on an identity-qualified record would misalign
-// memory from disk and unlock the ENOENT discharges that this file
-// deliberately excludes for identity-qualified records, and a subsequent
-// persist would durably erase the alternate pointer needed to arbitrate
-// candidates after a restart.
+// the next retry. Drop to the bare identity-unknown shape only when the
+// durable record the claim consumed carried no identity and no alternate —
+// the only case the bare restore is correct for. Forcing the bare shape on
+// an identity-qualified record would misalign memory from disk and unlock
+// the ENOENT discharges that this file deliberately excludes for
+// identity-qualified records, and a subsequent persist would durably erase
+// the alternate pointer needed to arbitrate candidates after a restart.
+//
+// The claim_stale fence a failed settle leaves behind can carry an identity
+// the durable record never had: a claim over an identity-unknown stalled
+// record probes the recorded path and captures whatever answers, so the
+// claim_stale fence carries that freshly observed identity even though the
+// durable record was bare. Restoring it would diverge from disk and close
+// the identity-unknown ENOENT discharge the next same-process retry needs
+// when the archived path disappeared between claim and settle; only a
+// restart reloads the original durable shape. ClaimRelocationSource
+// therefore retains the pre-claim fence shape on relocationRecoveryOrigin,
+// and the restore uses it instead of inferring the shape from the stale
+// fence: when the durable record was identity-unknown, the bare shape is
+// restored regardless of the identity the claim observed (#5555).
 func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
@@ -189,6 +201,18 @@ func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 		return fmt.Errorf("no stale fence from a failed settle to restore")
 	}
 	stale := g.relocationRecovery
+	origin := g.relocationRecoveryOrigin
+	g.relocationRecoveryOrigin = nil
+	// When the durable record the claim consumed was a bare identity-unknown
+	// stalled fence, restore that bare shape even if the claim resolved a fresh
+	// identity — the durable record is the authority, and a bare stall keeps the
+	// identity-unknown ENOENT discharge armed for the next same-process retry
+	// when the archived path disappeared between claim and settle (#5555).
+	if origin != nil && origin.State == RelocationRecoveryStalled &&
+		!origin.IdentityKnown && origin.AlternatePath == "" {
+		g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+		return nil
+	}
 	if stale.IdentityKnown || stale.AlternatePath != "" {
 		g.relocationRecovery = &RelocationRecovery{
 			State:         RelocationRecoveryStalled,

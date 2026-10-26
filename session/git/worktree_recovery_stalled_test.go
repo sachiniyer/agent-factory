@@ -107,6 +107,82 @@ func TestRestoreStalledFenceAfterFailedSettle_IdentityQualifiedPreservesEvidence
 	assert.True(t, gw.HasUnresolvedRelocation(), "the fence must remain after the refused discharge")
 }
 
+// TestRestoreStalledFenceAfterFailedSettle_BareStalledPreservesDurableIdentityUnknown
+// is the #5555 review regression: a durable identity-unknown stalled fence
+// (the shape a timed-out relocation probe installs) is reclaimed by a claim
+// whose retry probe resolves a fresh identity from the recorded path, then the
+// settle revalidation times out and installs an in-memory claim_stale fence
+// carrying that freshly observed identity. Restoring from the claim_stale
+// fence would install an identity-known stalled record that diverges from the
+// durable identity-unknown record on disk and closes the identity-unknown
+// ENOENT discharge the next same-process retry needs when the archived path
+// disappeared between claim and settle. The restore must instead retain the
+// pre-claim fence shape — the bare identity-unknown stall — so a later same-
+// process retry still discharges over a conclusively absent path instead of
+// repeatedly failing in ClaimRelocationSource until a restart reloads the
+// durable record.
+func TestRestoreStalledFenceAfterFailedSettle_BareStalledPreservesDurableIdentityUnknown(t *testing.T) {
+	root := testguard.CanonicalTempDir(t)
+	primary := filepath.Join(root, "primary")
+	require.NoError(t, os.Mkdir(primary, 0o755))
+	identity, err := inspectRelocationPathIdentity(primary)
+	require.NoError(t, err)
+
+	gw := stalledRecoveryWorktree(t, primary)
+	// The durable record is the bare identity-unknown stall a timed-out probe
+	// installs: no identity, no alternate.
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+		State: RelocationRecoveryStalled,
+	}))
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err, "the recorded path exists, so the claim's retry probe resolves a fresh identity")
+	require.Equal(t, primary, claim.Path, "the claim selects the recorded path")
+	require.True(t, claim.identity.same(identity),
+		"the claim acquires the identity the durable record never had")
+
+	// Fail only the settle revalidation probe: the claim's resolution probe
+	// already consumed the record, so the settle runs and fails to revalidate.
+	restoreSeam := SetRelocationIdentityErrorForTest(primary, context.DeadlineExceeded)
+	t.Cleanup(restoreSeam)
+	require.ErrorIs(t, gw.SettleRelocationClaim(claim), ErrRelocateStateUnknown,
+		"a probe timeout during settle must surface as an unknown, fail-closed answer")
+
+	// The failed settle installs a claim_stale fence carrying the identity the
+	// claim's retry probe observed — the durable record never had it.
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok)
+	require.Equal(t, RelocationRecoveryClaimStale, recovery.State,
+		"the failed settle must leave a claim_stale fence for the restore to consume")
+	require.True(t, recovery.IdentityKnown,
+		"the failed-settle fence carries the identity the claim observed, not the durable record's")
+
+	require.NoError(t, gw.RestoreStalledFenceAfterFailedSettle(),
+		"restoring the reclaimable stalled fence must succeed for a claim_stale fence")
+
+	// The restored record must be the bare identity-unknown stall the durable
+	// record carried, not the identity the claim's retry probe observed.
+	recovery, ok = gw.GetRelocationRecovery()
+	require.True(t, ok, "the restored fence must remain so the next kill re-claims")
+	assert.Equal(t, RelocationRecoveryStalled, recovery.State)
+	assert.False(t, recovery.IdentityKnown,
+		"the restored record must keep the durable record's identity-unknown shape, not the claim's observed identity")
+	assert.Empty(t, recovery.AlternatePath, "a bare stalled fence has no alternate candidate")
+
+	// The restored identity-unknown record is exactly the shape the
+	// identity-unknown ENOENT discharge is documented to clear, so removing
+	// the recorded path must discharge the fence — the next same-process retry
+	// must not be stranded the way restoring the claim's identity would.
+	gw.relocationMu.Lock()
+	assert.True(t, gw.identityUnknownStallLocked(),
+		"the restored bare fence must match the identity-unknown discharge shape")
+	gw.relocationMu.Unlock()
+	require.NoError(t, os.RemoveAll(primary),
+		"the recorded path disappears between the failed settle and the next retry")
+	assert.True(t, gw.SettleAbsentIdentityUnknownStall(),
+		"the next same-process retry must discharge the bare fence over the gone path, not strand on the claim's identity")
+	assert.False(t, gw.HasUnresolvedRelocation(), "the discharged fence must clear")
+}
+
 // TestRestoreStalledFenceAfterFailedSettle_AlternateSelectedPreservesPrimaryAsAlternate
 // covers the symmetric reclaim where the primary is gone and the claim selects
 // the alternate, moving the recorded worktree path there. The failed settle
