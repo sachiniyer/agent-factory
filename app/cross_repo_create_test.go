@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -533,6 +534,108 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t 
 	notice := tp.TakeCrossRepoRetargetNotice()
 	require.NotEmpty(t, notice,
 		"a committed-with-warning retarget must queue a cross-repo binding notice")
+	assert.Contains(t, notice, "Retarget me", "the notice names the retargeted task")
+	assert.Contains(t, notice, repoB, "the notice echoes the binding that landed")
+	assert.Empty(t, tp.TakeCrossRepoRetargetNotice(),
+		"the cross-repo retarget notice is raised once, then cleared")
+}
+
+// TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeWhenReloadFails is the
+// reload-failure sibling of the retarget notice guards above. The retarget
+// commits the new ProjectPath, but the post-save active-scope reload fails
+// transiently — so the in-scope list above cannot classify the retarget. The
+// save still knows the committed destination, so a retarget that crossed repos
+// must be recorded from the reload-failure branch too; otherwise the next
+// successful snapshot poll drops the row from the pane with no notice and the
+// task vanishes the way this change exists to prevent (#1836).
+func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeWhenReloadFails(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	repoA := initTestGitRepo(t)
+	repoB := initTestGitRepo(t)
+	require.NotEqual(t, config.RepoIDFromRoot(repoA), config.RepoIDFromRoot(repoB))
+
+	t.Chdir(repoA)
+	h.repoRoot = repoA
+	h.repoID = config.RepoIDFromRoot(repoA)
+
+	seed := task.Task{
+		ID:          "retarget-reload-fail",
+		Name:        "Retarget me",
+		Prompt:      "p",
+		CronExpr:    "* * * * *",
+		ProjectPath: repoA,
+		Program:     "claude",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	require.NoError(t, task.AddTask(seed))
+
+	tp := h.automations.TaskPane()
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	require.True(t, tp.IsEditing(),
+		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
+	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
+	for i := 0; i < 6; i++ {
+		press(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	require.True(t, tp.IsTextFieldFocused(),
+		"the focus must be on a text input (Path) after the tab walk from Name")
+	for range repoA {
+		press(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(repoB)})
+	press(tea.KeyMsg{Type: tea.KeyEnter}) // submit the form (validates B as a real git repo, marks dirty, exits editing)
+	require.False(t, tp.IsEditing(), "Enter must submit the form")
+	require.True(t, tp.IsDirty(), "the retargeted task must be queued for save")
+
+	// The update commits the retarget to disk (B's root as ProjectPath), then
+	// makes the post-save active-scope reload fail so the in-scope list above
+	// cannot classify the retarget. The save must still record the notice from
+	// the reload-failure branch using the committed destination.
+	var restoreReloadPath func()
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		_, err := task.UpdateTask(id, update, expect)
+		require.NoError(t, err)
+		// The update committed via the real path; now the reload reads through
+		// getTasksPathFn, so swap it to a synthetic failure for the reload only.
+		restoreReloadPath = task.SetTasksPathFnForTest(func() (string, error) {
+			return "", fmt.Errorf("simulated tasks.json read failure")
+		})
+		return nil
+	}))
+
+	require.ErrorContains(t, h.saveContentPaneState(), "failed to reload tasks after save",
+		"the reload failure must surface alongside the retarget notice")
+	// Restore the real path so the disk assertions below can read tasks.json.
+	if restoreReloadPath != nil {
+		restoreReloadPath()
+	}
+
+	// The retarget committed: disk carries the task at B, with RepoID = B.
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, disk, 1)
+	assert.Equal(t, repoB, disk[0].ProjectPath, "the patch committed with B's root as the ProjectPath")
+	assert.Equal(t, config.RepoIDFromRoot(repoB), disk[0].RepoID,
+		"the daemon re-derived the RepoID from the new ProjectPath at write time")
+
+	// The reload failed, so the pane's list is unchanged (the retargeted row is
+	// still on it from before the save). The notice is what tells the user the
+	// task landed in B — without it, the next successful snapshot poll drops the
+	// row with no explanation.
+	notice := tp.TakeCrossRepoRetargetNotice()
+	require.NotEmpty(t, notice,
+		"a cross-repo retarget whose reload failed must still queue a binding notice")
 	assert.Contains(t, notice, "Retarget me", "the notice names the retargeted task")
 	assert.Contains(t, notice, repoB, "the notice echoes the binding that landed")
 	assert.Empty(t, tp.TakeCrossRepoRetargetNotice(),

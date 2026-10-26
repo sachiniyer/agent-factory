@@ -267,6 +267,25 @@ func (m *home) saveContentPaneState() error {
 		}
 	} else {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
+		// The reload failed, so the in-scope list above is unavailable to
+		// classify each retarget. The save already committed the new
+		// ProjectPath, and the next successful snapshot poll will drop a
+		// cross-repo retarget's row from the pane — without recording the
+		// notice here, the task vanishes with no explanation (the same #1836
+		// silent drop this change exists to surface). Classify the destination
+		// directly from the committed path: a retarget whose newPath resolves
+		// to a different repo than the active scope has left the pane, so echo
+		// its binding the way the successful-reload branch does. A same-repo
+		// subdirectory retarget resolves to the same id and produces no
+		// notice, matching the in-scope check above; with no active scope
+		// (registry mode) every retarget leaves the pane and is announced,
+		// matching the empty list LoadTasksForKnownRepo returns there.
+		for _, rc := range retargetCandidates {
+			if m.repoID != "" && config.RepoIDForPath(rc.newPath) == m.repoID {
+				continue
+			}
+			sp.RecordCrossRepoRetarget(rc.name, rc.newPath)
+		}
 	}
 	if failedEdit {
 		m.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained. " + saveErr.Error(), "Press any key to continue."}
