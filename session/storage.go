@@ -387,6 +387,30 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// KilledWithoutLiveRuntime is the inert-at-kill admission marker for a
+	// sandbox kill tombstone (docker/ssh/hook/remote) whose commit found no live
+	// off-box runtime to reap: the kill ran against an inert rebuild (nil
+	// runtimeTeardown), so the tombstone carries no RuntimeCleanup handle on
+	// purpose — "nothing on-box to reap", the sandbox analog of the local
+	// branch's worktreeReaped admission (#2691).
+	//
+	// A current-binary inert-at-kill tombstone and a legacy pre-#2265 tombstone
+	// are indistinguishable on disk without this marker: both persist a nil
+	// RuntimeCleanup, and the load path could not tell "the kill owed nothing"
+	// from "the binary could not store the handle it owed". The distinction is
+	// therefore WRITTEN at commit time — toInstanceDataLocked sets the private
+	// marker below when a sandbox backend owes no teardown — and READ at load
+	// time by FromInstanceData, which admits the marker the way worktreeReaped
+	// does and lets the pending record delete proceed instead of installing a
+	// permanent fail-closed teardown no retry, re-kill, or restart can clear.
+	//
+	// Additive + omitempty + rollforward on the same precedent as UserKilled: a
+	// record written before this field simply has no marker and fails closed,
+	// which is the safe legacy direction (a wedge an older binary already
+	// cannot unwedge). Published only for UserKilled tombstones by ForStorage,
+	// so it never reaches an ordinary snapshot or disk row.
+	KilledWithoutLiveRuntime bool `json:"killed_without_live_runtime,omitempty"`
+	killedWithoutLiveRuntime *bool
 	// archivePushCompleted is process-local evidence that the push belonging to
 	// the CURRENT OpArchiving generation returned successfully. Branch cannot be
 	// that evidence: restore deliberately preserves the previous archive branch.
@@ -490,135 +514,6 @@ func archiveWarningOperation(liveness Liveness) string {
 	default:
 		return "restore"
 	}
-}
-
-// ForStorage returns data suitable for instances.json. InstanceData is also the
-// daemon Snapshot payload, so it can carry transient in-flight operation state;
-// disk persistence must not.
-func (d InstanceData) ForStorage() InstanceData {
-	if d.snapshotTabsProjected {
-		d.Tabs = d.snapshotStorageTabs
-		d.snapshotTabsProjected = false
-		d.snapshotStorageTabs = nil
-	}
-	reportDetached := false
-	if d.archiveReportSource != nil {
-		path, recovery, hasRecovery, report := d.archiveReportSource.PersistenceSnapshot()
-		d.Worktree.WorktreePath = path
-		d.Worktree.RelocationRecovery = nil
-		if hasRecovery {
-			externalWorktree := d.Worktree.ExternalWorktree
-			branchCreatedByUs := cloneBoolPointer(d.Worktree.BranchCreatedByUs)
-			startupStateUnknown := d.StartupStateUnknown
-			d.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
-				State: recovery.State, AlternatePath: recovery.AlternatePath,
-				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
-				Inode: recovery.Inode, FileType: recovery.FileType,
-				CleanupGeneration:           recovery.CleanupGeneration,
-				OriginalExternalWorktree:    &externalWorktree,
-				OriginalBranchCreatedByUs:   branchCreatedByUs,
-				OriginalStartupStateUnknown: &startupStateUnknown,
-			}
-		}
-		if report.Empty() {
-			d.ArchiveReport = nil
-		} else {
-			report.RollbackFence = archiveRollbackFence(d)
-			d.ArchiveReport = &report
-			reportDetached = true
-		}
-	}
-	lv := livenessFromData(d)
-	d.Status = composeStatus(lv, OpNone)
-	d.Liveness = lv
-	d.InFlightOp = OpNone
-	d.LifecycleAction = LifecycleActionNone
-	d.CanKill = false
-	d.CanHandoff = false
-	d.CurrentAgent = ""
-	d.IsRoot = false
-	d.ModelChange = nil
-	d.IdleReason = IdleReasonNone
-	// Derived from the backend on every snapshot, exactly like CanKill above, so
-	// persisting them stores a stale answer that a restart would recompute anyway —
-	// and these carry long, versioned refusal PROSE, which would sit in every
-	// instances.json row and be read back as fact by an older binary.
-	d.TabKinds = nil
-	d.TabRosterMutable = nil
-	d.ArchiveWarning = ""
-	// The compatibility projection must capture original values before either it
-	// or the relocation fence below overwrites them. The live archiveReportSource
-	// block above already stamps the fence pre-projection; on the disk-reload path
-	// (archiveReportSource == nil) the recapture below would otherwise run after
-	// projectPending{AccountSwap,Handoff}ForPreviousRelease set
-	// d.StartupStateUnknown = true and snapshot the projected value as the
-	// "original". Snapshot the fence now and reuse it at recapture, exactly as the
-	// live block does. Guarded to the recapture path so the live path pays nothing.
-	var fenceSnapshot *git.ArchiveRollbackFence
-	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
-		fenceSnapshot = archiveRollbackFence(d)
-	}
-	d = d.restoreMissingHandoffMissionEvidence()
-	d = d.restoreMissingAccountSwapMissionEvidence()
-	d = d.projectPendingAccountSwapForPreviousRelease()
-	d = d.projectPendingHandoffForPreviousRelease()
-	// Older binaries ignore ArchiveReport, but the previous release understands
-	// the inert/ownership fields and relocation recovery. Together they refuse
-	// restore and explicit kill instead of publishing an incomplete tree or
-	// deleting the report's row.
-	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
-		report := *d.ArchiveReport
-		if !reportDetached {
-			report = d.ArchiveReport.Clone()
-		}
-		if report.RollbackFence == nil {
-			report.RollbackFence = fenceSnapshot
-		}
-		d.ArchiveReport = &report
-		d.StartupStateUnknown = true
-		d.Worktree.ExternalWorktree = true
-		branchCreatedByUs := false
-		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
-		// v1.0.235 already understands relocation recovery and refuses an
-		// explicit kill while one is unresolved. Project a read-only stall through
-		// that admission path so rollback cannot turn ExternalWorktree's cleanup
-		// no-op into permission to delete the row which owns the retained trees.
-		// Current readers remove this synthetic latch from RollbackFence before
-		// reconstructing the worktree.
-		d.Worktree.RelocationRecovery = archiveReportKillFence(report)
-	}
-	projectRelocationRecoveryForPreviousRelease(d.Worktree.RelocationRecovery)
-	if d.Worktree.RelocationRecovery != nil {
-		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
-		// Project the unresolved row through safety fields that version already
-		// understands: it loads inert, treats the checkout as user-owned, and
-		// cannot delete its branch. The recovery record carries the original
-		// values so current readers remove this rollback fence on load.
-		d.StartupStateUnknown = true
-		d.Worktree.ExternalWorktree = true
-		branchCreatedByUs := false
-		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
-	}
-	switch {
-	case lv == LiveArchived:
-		// Archived rows have already reaped their runtime, so retaining a teardown
-		// identity here would only preserve unused credentials until row deletion.
-		d.RuntimeCleanupStateUnknown = false
-		d.RuntimeCleanup = nil
-	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
-		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. Kill intent and an unknown teardown outcome are the two durable
-		// retention boundaries.
-		d.RuntimeCleanup = nil
-	case d.runtimeCleanup != nil:
-		d.RuntimeCleanup = d.runtimeCleanup.clone()
-	}
-	// Never let the private staging pointer escape a storage projection. Loaded
-	// tombstones have only RuntimeCleanup set and therefore preserve it above.
-	d.runtimeCleanup = nil
-	d.archiveReportSource = nil
-	d.archiveReportPending = false
-	return d
 }
 
 // TabData is the serializable form of a session.Tab. The full list is persisted
