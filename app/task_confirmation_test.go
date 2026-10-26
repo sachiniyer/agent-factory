@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +153,12 @@ func TestUnavailableTasksCreateClearsLoadFailure(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = setupRealRepo(t)
 	t.Chdir(h.repoRoot)
+	// Mirror the production startup that newHome runs when af launches inside a
+	// git repo: resolve the active scope so the post-save reload (the
+	// active-scope LoadTasksForKnownRepo) reads the created task's project. The
+	// previous cwd-based reload masked the missing repoID in this test, but the
+	// active-scope scoping must have a non-empty repoID to find anything.
+	h.repoID = config.RepoIDFromRoot(h.repoRoot)
 	h.termWidth, h.termHeight = 100, 30
 	h.relayout()
 	pane := h.automations.TaskPane()

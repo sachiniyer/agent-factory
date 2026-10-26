@@ -113,8 +113,15 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// list missing the task they just created and reasonably conclude the save
 	// failed — so they create it again (#3095). Surfaced the way
 	// saveContentPaneState already surfaces the same reload.
+	//
+	// Scope the reload by the TUI's ACTIVE project (m.repoRoot/m.repoID), not the
+	// process cwd, so a task created after an in-place project switch (#1461)
+	// shows up in the switched-to project's pane rather than being clobbered by
+	// the launch repo's rows. The cross-repo create case — a path pointing at a
+	// different repo than the active scope — is intentionally outside this list
+	// and is surfaced below.
 	var reloadErr error
-	tasks, err := task.LoadTasksForCurrentRepo()
+	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
 	if err == nil {
 		// Like refreshTasks, a successful read clears load errors separately
 		// from replacing the task data and its transient pane state.
@@ -142,7 +149,24 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if reloadErr != nil {
 		return m.handleError(reloadErr)
 	}
-	return nil
+	// Cross-repo binding notice. A committed save whose owning project differs
+	// from the active scope is omitted from the reloaded list above (the same
+	// scope-matching the snapshot poll uses), so the pane closes as it opened
+	// for that task and the user reads the unchanged list as a failed save and
+	// creates the task again — the same #3095 duplicate-create hazard the
+	// reload-failure branch above calls out. The reload succeeded, so the
+	// list IS current; what it lacks is the task, because the task landed in
+	// another repo. Mirror the CLI's project_path echo (#1891, "the id alone
+	// left the caller no way to tell which project the task attached to") by
+	// naming where this one landed. Same treatment for the registry-mode
+	// create (empty active scope): the task is bound, but no project is
+	// selected to display it in.
+	for _, t := range tasks {
+		if t.ID == id {
+			return nil
+		}
+	}
+	return m.handleNotice(fmt.Errorf("task %q was saved and bound to %s; it does not appear in this project's list", name, absPath))
 }
 
 // taskTriggeredMsg reports the outcome of a TUI "run now" (#1169). The run

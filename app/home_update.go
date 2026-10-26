@@ -127,6 +127,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
 				cmds = append(cmds, m.showTransientMessage(notice))
 			}
+			// A retarget a save moved out of the active project drops the row
+			// from the pane (#1836); raised here for the same reason — the
+			// save runs as the overlay closes and this poll is its other
+			// delivery path, so a Take clears the durable copy and the
+			// recovery screen would shadow the bar to a lossier drain.
+			if notice := m.automations.TaskPane().TakeCrossRepoRetargetNotice(); notice != "" {
+				cmds = append(cmds, m.showTransientMessage(notice))
+			}
 		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its

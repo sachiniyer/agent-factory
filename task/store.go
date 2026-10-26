@@ -36,6 +36,20 @@ func getTasksPath() (string, error) {
 	return filepath.Join(configDir, tasksFileName), nil
 }
 
+// SetTasksPathFnForTest swaps the tasks-file path resolver for tests in other
+// packages. Returns a restore func. The default getTasksPath resolves
+// tasks.json under AGENT_FACTORY_HOME; tests point it at a fixture file or
+// return a synthetic error to inject a deterministic read failure through the
+// active-scope (LoadTasksForKnownRepo) load path. The active-scope reloads in
+// app/saveContentPaneState and app/handleTaskCreate no longer call
+// config.CurrentRepo, so a non-git cwd can no longer trigger the read
+// failure — a path-resolver error is the cleanest replacement.
+func SetTasksPathFnForTest(f func() (string, error)) func() {
+	prev := getTasksPathFn
+	getTasksPathFn = f
+	return func() { getTasksPathFn = prev }
+}
+
 // MigrateOnLoadPath returns the absolute path of tasks.json, which LoadTasks
 // rewrites in place when it migrates a legacy file to the current schema at daemon
 // load (task/schema_migration.go -> config.LoadAndMigrateSchemaFile). The upgrade
