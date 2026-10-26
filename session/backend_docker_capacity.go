@@ -19,14 +19,14 @@
 //     kernel: a forwarded or proxied socket (ssh -U, Docker Desktop's host
 //     socket artifact) answers with the REMOTE daemon's info, whose
 //     DockerRootDir is a path in another filesystem entirely.
-//   - The socket af dials must live in af's OWN mount namespace — hostname
-//     equality alone cannot prove it (an af container on --uts=host sees the
-//     host's name but keeps its own mounts). The mount-identity evidence is
-//     /proc/self/mountinfo: a socket reached through ANY covering mount —
-//     file bind, dir bind, or whole-filesystem bind, whose root="/" entry is
-//     indistinguishable from a fresh tmpfs — is the daemon's inode borrowed,
-//     not shared; anything the mount table cannot rule out fails closed
-//     (#5382 review).
+//   - The daemon answering af's socket must share af's mount namespace —
+//     hostname equality alone cannot prove it (an af container on
+//     --uts=host sees the host's name but keeps its own mounts). The
+//     namespace proof is SO_PEERCRED: dialing the endpoint yields the
+//     answering process's pid, and /proc/<pid>/ns/mnt either equals
+//     /proc/self/ns/mnt or does not — borrowed sockets, forwarded
+//     sockets, and foreign-namespace daemons all fail closed (#5382
+//     review).
 //   - The privilege mode decides WHICH block count answers the fullness
 //     question, and the class of the failed step decides whose privilege
 //     matters (dockerOpClass): a rootful dockerd allocates reserved blocks
@@ -51,8 +51,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -205,16 +205,14 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 	if !ok || info.root == "" || info.name == "" || info.name != host {
 		return nil
 	}
-	// Mount-identity evidence, not hostname equality: the socket af dials
-	// must exist in af's own mount namespace as an UNMOUNTED file — a unix
-	// socket with no mount entry can only be the daemon's inode if the
-	// daemon created it in this namespace. A file- or dir-level bind
-	// (`-v /var/run/docker.sock:…`, Docker Desktop's shared socket, an af
-	// container on --uts=host) shows a mountinfo entry whose root is not
-	// "/", meaning the path reaches through a foreign filesystem view —
-	// and /var/lib/docker on af's side is a different object than the
-	// daemon's (#5382 review).
-	if mnt, err := os.ReadFile(procMountinfoFile); err != nil || !socketSharesMountNamespace(endpoint, mnt) {
+	// Mount-identity evidence, not hostname equality: the process answering
+	// af's socket must live in af's own mount namespace, or its reported
+	// data root is a path in a filesystem af's statfs does not see (a
+	// bind-mounted socket under --uts=host, Docker Desktop's shared
+	// socket, an ssh-forwarded one). SO_PEERCRED names the answering
+	// pid; its ns/mnt must equal af's own. Anything unreadable or
+	// unprovable is not proven (#5382 review).
+	if !socketSharesMountNamespace(endpoint) {
 		return nil
 	}
 	// The failed step's writer picks the block counter: a rootless engine's
@@ -254,49 +252,46 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 		info.root, who, &os.PathError{Op: "statfs", Path: info.root, Err: syscall.ENOSPC})
 }
 
-// procMountinfoFile is the test seam over the mount table the namespace
-// proof reads. The production path is /proc/self/mountinfo.
-var procMountinfoFile = "/proc/self/mountinfo"
+// mountNSID reads a process's mount-namespace identity —
+// /proc/<pid>/ns/mnt's link target. pid 0 means this process. Every failure
+// is an unproven identity, never a match.
+var mountNSID = func(pid int) (string, error) {
+	proc := "self"
+	if pid > 0 {
+		proc = strconv.Itoa(pid)
+	}
+	return os.Readlink("/proc/" + proc + "/ns/mnt")
+}
 
-// socketSharesMountNamespace is the mount-identity proof the hostname check
-// cannot give (#5382 review): the socket af dials must live in af's own
-// mount namespace as a file nothing mounted there — only then is the
-// answering daemon necessarily a writer INTO this namespace, which is what
-// makes its reported data root the same filesystem object af would statfs.
-// ANY mount entry covering the socket path denies that proof: a subtree
-// bind (root != "/") is a borrowed inode, and a whole-filesystem mount
-// (root == "/") is the same foreign object arriving whole — a `-v /run:/run`
-// bind is indistinguishable from a fresh tmpfs in this table, so both fail
-// closed. The path is canonicalized first because mountinfo records
-// kernel-resolved mountpoints while the endpoint may traverse a symlink
-// (/var/run -> /run).
-func socketSharesMountNamespace(endpoint string, mountinfo []byte) bool {
+// socketSharesMountNamespace is the mount-identity proof hostname equality
+// cannot give (#5382 review): dial the endpoint, ask the kernel which
+// process answered (SO_PEERCRED — platform helper, unproven where the
+// socket option does not exist), and compare that process's mount
+// namespace to af's own. A bind-mounted or forwarded socket answers with
+// a process in a DIFFERENT namespace (or one af cannot see), so the
+// daemon's reported data root cannot be trusted as af's filesystem — and
+// a genuinely co-located daemon, tmpfs /run included, still passes.
+// Anything that cannot establish the peer is not proven.
+func socketSharesMountNamespace(endpoint string) bool {
 	sockPath := strings.TrimPrefix(endpoint, "unix://")
 	if !strings.HasPrefix(sockPath, "/") {
 		return false
 	}
-	st, err := os.Stat(sockPath)
-	if err != nil || st.Mode()&os.ModeSocket == 0 {
-		return false
-	}
-	sockPath, err = filepath.EvalSymlinks(sockPath)
+	conn, err := net.DialTimeout("unix", sockPath, dockerShortStepTimeout)
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(mountinfo), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		mnt := fields[4]
-		if mnt == "/" {
-			continue // af's own rootfs — an unmounted socket is in-namespace
-		}
-		if mnt == sockPath || strings.HasPrefix(sockPath, mnt+"/") {
-			return false
-		}
+	defer conn.Close()
+	peer, err := socketPeerPid(conn)
+	if err != nil || peer <= 0 {
+		return false
 	}
-	return true
+	self, err := mountNSID(0)
+	if err != nil || self == "" {
+		return false
+	}
+	peerNS, err := mountNSID(peer)
+	return err == nil && peerNS == self
 }
 
 // dockerStepWriterUnprivileged answers whether the FAILED operation's writer
@@ -415,8 +410,10 @@ func (p *dockerProvisioner) containerExecIdentity(dataRoot string) (user string,
 
 // sameFilesystem is the st_dev comparison behind the overlay-bypass proof:
 // a mount source and the data root share a filesystem only when the kernel
-// reports the same device. It is a seam so tests need not arrange real
-// mount geometry. Unstatable means unproven — never "same".
+// reports the same device. The stats run through fsprobe.Stat's bounded
+// flight — a mount source on an unresponsive NFS/FUSE filesystem must not
+// wedge the synchronous restore loop; a timeout is unproven identity,
+// never "same" (#5382 review). Seamable so tests need no real mounts.
 var sameFilesystem = func(a, b string) bool {
 	da, oka := statDev(a)
 	db, okb := statDev(b)
@@ -424,7 +421,7 @@ var sameFilesystem = func(a, b string) bool {
 }
 
 func statDev(path string) (uint64, bool) {
-	st, err := os.Stat(path)
+	st, err := fsprobe.Stat(path)
 	if err != nil {
 		return 0, false
 	}

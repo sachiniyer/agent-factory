@@ -20,7 +20,7 @@ import (
 )
 
 // fakeUnixDockerSocket stands up a real unix socket in a temp dir so the
-// mount-namespace gate's os.Stat sees a genuine socket file; it returns the
+// mount-namespace gate has something genuinely dialable; it returns the
 // DOCKER_HOST endpoint form.
 func fakeUnixDockerSocket(t *testing.T) string {
 	t.Helper()
@@ -39,17 +39,30 @@ func fakeUnixDockerSocket(t *testing.T) string {
 	return "unix://" + sock
 }
 
-// stubMountinfo points the namespace gate at a mount table with one benign
-// root mount (root "/" = a whole filesystem, never a foreign subtree).
-// extra entries simulate bind mounts — root != "/" is what flags them.
-func stubMountinfo(t *testing.T, extra ...string) {
+// stubPeerMountNS installs the peer-identity seams the namespace gate
+// consults: socketPeerPid reports the answering process as pid 424242 (or
+// fails when peerErr is set), and mountNSID answers "mnt:[self]" for af's
+// own pid and peerNS for the stubbed peer — "" simulates an unreadable
+// peer (/proc/<pid> gone or permission denied).
+func stubPeerMountNS(t *testing.T, peerNS string, peerErr error) {
 	t.Helper()
-	f := filepath.Join(t.TempDir(), "mountinfo")
-	content := "24 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n" + strings.Join(extra, "\n")
-	require.NoError(t, os.WriteFile(f, []byte(content), 0o644))
-	old := procMountinfoFile
-	procMountinfoFile = f
-	t.Cleanup(func() { procMountinfoFile = old })
+	oldP, oldM := socketPeerPid, mountNSID
+	socketPeerPid = func(net.Conn) (int, error) {
+		if peerErr != nil {
+			return 0, peerErr
+		}
+		return 424242, nil
+	}
+	mountNSID = func(pid int) (string, error) {
+		if pid == 424242 {
+			if peerNS == "" {
+				return "", fmt.Errorf("process gone")
+			}
+			return peerNS, nil
+		}
+		return "mnt:[self]", nil
+	}
+	t.Cleanup(func() { socketPeerPid, mountNSID = oldP, oldM })
 }
 
 // dockerInfoAnswer is the fake `docker info` payload for capacity-evidence
@@ -120,7 +133,7 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 
 	// Each failingStep names a docker argv shape emitted by one provision
 	// step; matching it makes the fake fail that call. The matchers read argv
@@ -241,7 +254,7 @@ func TestProvisionFailure_RootlessEngineReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 
 	failRun := func(args []string) ([]byte, error) {
 		if args[0] == "run" {
@@ -335,7 +348,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		// DockerRootDir lives on another filesystem entirely.
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubMountinfo(t)
+		stubPeerMountNS(t, "mnt:[self]", nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", "af-test-foreign-daemon", false), failRun)
 
 		statfsCalls := 0
@@ -351,12 +364,6 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Equal(t, 0, statfsCalls, "a mismatched daemon hostname must not reach statfs")
 	})
 
-	resolvedSock := func(t *testing.T, sock string) string {
-		t.Helper()
-		p, err := filepath.EvalSymlinks(strings.TrimPrefix(sock, "unix://"))
-		require.NoError(t, err)
-		return p
-	}
 	statfsCounter := func(t *testing.T) *int {
 		t.Helper()
 		calls := new(int)
@@ -366,18 +373,14 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		return calls
 	}
 
-	t.Run("bind-mounted socket is not mount-identity proof", func(t *testing.T) {
-		// The #5382-review gap: `--uts=host` gives an af container the
-		// host's hostname, and `-v /var/run/docker.sock:/…` hands it the
-		// daemon's socket inode — but af's /var/lib/docker is still its own
-		// container rootfs. The mount entry covering the socket path is
-		// what proves the socket reaches af through a foreign view.
-		sock := fakeUnixDockerSocket(t)
-		t.Setenv("DOCKER_HOST", sock)
+	t.Run("a peer in another mount namespace is not proof", func(t *testing.T) {
+		// The #5382-review gap a hostname cannot close: `--uts=host` gives
+		// an af container the host's name and `-v` hands it the daemon's
+		// socket — but the answering process still lives in a DIFFERENT
+		// mount namespace, so its DockerRootDir is not af's filesystem.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubMountinfo(t,
-			// `-v /var/run/docker.sock:<sockPath>` — a file-level bind.
-			fmt.Sprintf("99 24 8:1 /var/run/docker.sock %s rw - ext4 /dev/sda1 rw", resolvedSock(t, sock)))
+		stubPeerMountNS(t, "mnt:[foreign]", nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
@@ -385,80 +388,67 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a bind-mounted socket proves the daemon answers, not that af's /var/lib/docker is the daemon's: %v", err)
-		assert.Equal(t, 0, *calls, "a borrowed socket must not reach statfs")
+			"a socket answered from another mount namespace proves the daemon answers, not that af's /var/lib/docker is the daemon's: %v", err)
+		assert.Equal(t, 0, *calls, "a foreign-namespace peer must not reach statfs")
 	})
 
-	t.Run("a socket dir bind-mounted is not mount-identity proof", func(t *testing.T) {
-		// `-v /run:/run` of a foreign subtree — the same gap through a
-		// directory instead of a file.
-		sock := fakeUnixDockerSocket(t)
-		t.Setenv("DOCKER_HOST", sock)
+	t.Run("an unidentifiable peer is not proof", func(t *testing.T) {
+		// The platform cannot name the answering process (no SO_PEERCRED)
+		// or the socket is unreachable — unproven, not shared.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		sockDir := filepath.Dir(resolvedSock(t, sock))
-		stubMountinfo(t,
-			fmt.Sprintf("99 24 8:1 /foreign%s %s rw - ext4 /dev/sda1 rw", sockDir, sockDir))
+		stubPeerMountNS(t, "", fmt.Errorf("peer credentials unavailable"))
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
-		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "borrowed-dir"}}
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "unnamed-peer"}}
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"a dir-bound socket is the same borrowed inode as a file bind: %v", err)
-		assert.Equal(t, 0, *calls, "a dir-bound socket must not reach statfs")
+			"a peer af cannot name cannot be shown to share its mount namespace: %v", err)
+		assert.Equal(t, 0, *calls, "an unnamed peer must not reach statfs")
 	})
 
-	t.Run("a whole-filesystem mount is still foreign", func(t *testing.T) {
-		// Mounting a whole filesystem (`-v /run:/run` of the host tmpfs)
-		// records mount root "/", indistinguishable in this table from a
-		// fresh tmpfs — so a covering mount denies the proof regardless of
-		// its root field. The rootfs "/" itself is exempt: an unmounted
-		// socket on it is in-namespace.
-		sock := fakeUnixDockerSocket(t)
-		t.Setenv("DOCKER_HOST", sock)
+	t.Run("an unreadable peer mount table is not proof", func(t *testing.T) {
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		sockDir := filepath.Dir(resolvedSock(t, sock))
-		stubMountinfo(t,
-			fmt.Sprintf("99 24 0:52 / %s rw - tmpfs tmpfs rw", sockDir))
+		stubPeerMountNS(t, "", nil) // peer answers, but /proc/<pid>/ns/mnt does not
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
-		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "wholefs-bind"}}
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "blind-peer"}}
 		_, err := p.provision()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"root=\"/\" only says the mount starts at its fs root — the socket still arrived through a mount: %v", err)
-		assert.Equal(t, 0, *calls, "a whole-fs bind must not reach statfs")
+			"a peer whose mount namespace cannot be read is unproven: %v", err)
+		assert.Equal(t, 0, *calls, "an unreadable peer must not reach statfs")
 	})
 
-	t.Run("a symlinked socket path cannot hide the mount", func(t *testing.T) {
-		// DOCKER_HOST may traverse a symlink (/var/run -> /run) while
-		// mountinfo records kernel-resolved mountpoints — matching must
-		// happen on the resolved path or the covering mount goes unseen.
+	t.Run("a symlinked socket path still dials the daemon", func(t *testing.T) {
+		// DOCKER_HOST may traverse a symlink (/var/run -> /run); the dial
+		// resolves it and the peer answer is unaffected.
 		sock := fakeUnixDockerSocket(t)
 		sockPath := strings.TrimPrefix(sock, "unix://")
 		linkDir := filepath.Join(t.TempDir(), "lnk")
 		require.NoError(t, os.Symlink(filepath.Dir(sockPath), linkDir))
 		t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(linkDir, filepath.Base(sockPath)))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubMountinfo(t,
-			fmt.Sprintf("99 24 8:1 /var/run/docker.sock %s rw - ext4 /dev/sda1 rw", resolvedSock(t, sock)))
+		stubPeerMountNS(t, "mnt:[self]", nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
 		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "symlinked-sock"}}
 		_, err := p.provision()
 		require.Error(t, err)
-		assert.False(t, errors.Is(err, syscall.ENOSPC),
-			"the covering mount is recorded under the resolved path — the symlink cannot hide it: %v", err)
-		assert.Equal(t, 0, *calls, "a symlinked socket path must not reach statfs")
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"a symlinked endpoint still reaches the same daemon — the verdict must apply: %v", err)
+		assert.Greater(t, *calls, 0)
 	})
 
 	t.Run("local endpoint plus matching hostname probes", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubMountinfo(t)
+		stubPeerMountNS(t, "mnt:[self]", nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -475,7 +465,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 	t.Run("a root af cannot stat is not full", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 		t.Setenv("DOCKER_CONTEXT", "")
-		stubMountinfo(t)
+		stubPeerMountNS(t, "mnt:[self]", nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 
 		old := statfsFull
@@ -502,7 +492,7 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
@@ -558,7 +548,7 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 
 	// failExec kills the configureGit exec; failRun kills `docker run`.
 	failExec := func(args []string) ([]byte, error) {
@@ -822,7 +812,7 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 
 	cases := map[string]func(args []string) ([]byte, error){
 		"port output unparsable": func(args []string) ([]byte, error) {
@@ -907,7 +897,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 	oldT, oldI := dockerBannerPollTimeout, dockerBannerPollInterval
 	dockerBannerPollTimeout, dockerBannerPollInterval = 60*time.Millisecond, 10*time.Millisecond
 	defer func() { dockerBannerPollTimeout, dockerBannerPollInterval = oldT, oldI }()

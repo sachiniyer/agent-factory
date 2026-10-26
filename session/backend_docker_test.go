@@ -155,7 +155,7 @@ func TestRunContainer_CapturesCreatedIDOnError(t *testing.T) {
 func TestProvision_DockerRunJoinsDockerRootFSFullEvidence(t *testing.T) {
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 	host, err := os.Hostname()
 	require.NoError(t, err)
 	statfsCalls := 0
@@ -192,7 +192,7 @@ func TestProvision_DockerRootFSEvidenceSkipped(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
 	sock := fakeUnixDockerSocket(t)
-	stubMountinfo(t)
+	stubPeerMountNS(t, "mnt:[self]", nil)
 	statfsCalls := 0
 	old := statfsFull
 	statfsFull = func(string) (bool, error) { statfsCalls++; return false, nil }
