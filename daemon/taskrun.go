@@ -135,10 +135,6 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
-		// TaskID carries the fire identity through targeted delivery (#5503): an
-		// auto-create binds the durable marker's title and instance id so the
-		// replacement daemon can adopt a half-made target instead of resending.
-		TaskID: t.ID,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.
@@ -338,7 +334,11 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 			return nil
 		}
 		fire, pendingFire = m, true
-	} else {
+	} else if task.CanonicalTargetSession(t.TargetSession) == "" {
+		// Targeted (--target-session) fires write NO marker and get no replay —
+		// master behaviour; crash-safe targeted delivery is its own slice
+		// (#5503, follow-up). Everything below this guard serves the untargeted
+		// path only.
 		var fireErr error
 		fire, pendingFire, fireErr = ensureTaskFireMarker(taskID)
 		if fireErr != nil {
@@ -451,15 +451,6 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	if err != nil {
 		return err
 	}
-
-	// Per-fire completion evidence goes onto the marker BEFORE the task
-	// status write: the only other place a landed targeted send is recorded
-	// is the shared target row, whose attribution a later task's or
-	// interactive send can overwrite in exactly this interval — and a
-	// restart would then replay a prompt that already delivered (#5503
-	// review). The marker is per-fire, so nothing else's delivery can
-	// clobber it.
-	noteTaskFireDelivered(taskID, status)
 
 	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
 	// — the task already ran via deliverTaskPrompt, and the stored Program

@@ -201,14 +201,6 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	// lastPromptTaskID attributes the send recorded in lastPromptAttemptAt to
-	// the task whose fire it satisfied, or "" for any send without task
-	// provenance (#5503). Written in the same lock hold as the attempt stamp —
-	// every send restates it, so a manual or other-task send can never inherit
-	// a stale attribution. It is what lets a boot-time reconcile distinguish
-	// "this task's interrupted delivery landed" from "someone sent to the same
-	// shared target afterwards".
-	lastPromptTaskID string
 	// taskRunPromptAttemptAt is the task run's OWN prompt boundary (#5219),
 	// scoped apart from lastPromptAttemptAt: a manual send while the run is
 	// active must not re-arm a delivery window the agent already satisfied.

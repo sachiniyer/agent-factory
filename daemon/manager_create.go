@@ -84,13 +84,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// title is the one the admission actually committed. A daemon killed from
 	// here on leaves a marker naming this title, which is what the replay's
 	// reconcile uses to prove ownership of the leftovers. No-op for creates
-	// that carry no marker. A targeted delivery's auto-created target binds
-	// through FireTaskID rather than TaskID: its row stays unowned, but the
-	// marker still gains the evidence a replay needs to adopt it.
+	// that carry no marker.
 	fireTask := req.TaskID
-	if fireTask == "" {
-		fireTask = req.FireTaskID
-	}
 	if fireTask != "" {
 		noteTaskFireTitle(fireTask, title)
 	}

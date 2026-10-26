@@ -58,13 +58,6 @@ type CreateSessionRequest struct {
 	// spawned.
 	TaskID     string `json:"-"`
 	TaskRepoID string `json:"-"`
-	// FireTaskID names the durable cron-fire marker this create satisfies
-	// (#5503). Unlike TaskID it is never persisted on the session and does not
-	// enter concurrency accounting: it only lets the reservation bind the
-	// committed title and instance id onto that task's marker, so an
-	// interrupted delivery (a targeted task's auto-created target) can be
-	// adopted by the replacement daemon rather than re-created.
-	FireTaskID string `json:"-"`
 	// TaskOrigin marks every daemon-internal automated create, including a
 	// legacy targeted task with neither retained RepoID nor per-run ownership.
 	// Unlike TaskID it is not persisted on the session and never affects
@@ -271,12 +264,6 @@ type SendPromptRequest struct {
 	// manual send-prompt leaves it false because an operator may need to answer a
 	// limit or credits picker in that pane.
 	TaskOrigin bool `json:"-"`
-	// TaskID attributes the send's attempt evidence to a specific task fire
-	// (#5503). Stamped atomically with LastPromptAttemptAt so a boot-time
-	// reconcile can distinguish "this task's interrupted delivery landed" from
-	// another task's or an interactive send to the same shared target — only a
-	// positively attributed send may discharge a pending fire marker.
-	TaskID string `json:"-"`
 }
 
 type SendPromptResponse struct {
@@ -303,13 +290,6 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
-	// TaskID identifies the task fire this delivery satisfies (#5503). The
-	// auto-create path forwards it to CreateSessionRequest.FireTaskID so a
-	// target created mid-fire binds the durable marker's title and instance id
-	// — enough for a replacement daemon to adopt the half-made row — without
-	// stamping the row itself: a task's delivery target is its ongoing address,
-	// not a per-run product, and must not carry task_id/run-active semantics.
-	TaskID string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

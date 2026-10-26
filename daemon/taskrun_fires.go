@@ -57,24 +57,10 @@ var errTaskFireReconcile = errors.New("task fire reconcile failed")
 // bound by the create path as it commits them — a marker without them died
 // before the reservation, which is itself information the reconcile uses.
 type taskFireMarker struct {
-	TaskID     string            `json:"task_id"`
-	IntendedAt time.Time         `json:"intended_at"`
-	Title      string            `json:"title,omitempty"`
-	InstanceID string            `json:"instance_id,omitempty"`
-	Delivered  *taskFireDelivery `json:"delivered,omitempty"`
-}
-
-// taskFireDelivery is per-fire completion evidence, stamped when the run's
-// delivery lands but before its task status is written. It exists because the
-// OTHER evidence lives on shared state: a targeted send stamps its attempt
-// onto the target row, where another task's — or an interactive — send into
-// the same target can overwrite it before this task records its outcome. A
-// restart in that interval would see only the later send's attribution and
-// replay an already-delivered prompt (#5503 review). The marker is the one
-// place keyed to THIS occurrence that nothing else's delivery can touch.
-type taskFireDelivery struct {
-	At     time.Time `json:"at"`
-	Status string    `json:"status"`
+	TaskID     string    `json:"task_id"`
+	IntendedAt time.Time `json:"intended_at"`
+	Title      string    `json:"title,omitempty"`
+	InstanceID string    `json:"instance_id,omitempty"`
 }
 
 // daemonDrainingFn reports whether the owning daemon has closed mutation
@@ -216,17 +202,6 @@ func noteTaskFireInstance(taskID, instanceID string) {
 	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.InstanceID = instanceID })
 }
 
-// noteTaskFireDelivered stamps per-fire completion evidence onto the marker
-// the moment the delivery is known to have landed — BEFORE the task status
-// write, so the interval where a shared-target send's row evidence can be
-// clobbered while the occurrence is still owed shrinks to this one mutate
-// (#5503 review).
-func noteTaskFireDelivered(taskID, status string) {
-	mutateTaskFireMarker(taskID, func(m *taskFireMarker) {
-		m.Delivered = &taskFireDelivery{At: time.Now(), Status: status}
-	})
-}
-
 func mutateTaskFireMarker(taskID string, mutate func(*taskFireMarker)) {
 	m, err := readTaskFireMarker(taskID)
 	if err != nil || m == nil {
@@ -294,23 +269,6 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     is quarantined as a startup-state-unknown record for inspection rather
 //     than destroyed on a guess.
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
-	// Per-fire completion evidence first: a delivery that landed but whose
-	// status write (or discharge) was interrupted is already satisfied. The
-	// marker — unlike the shared target row — cannot have been overwritten
-	// by another task's send in the interval (#5503 review).
-	if fire.Delivered != nil && !fire.Delivered.At.Before(fire.IntendedAt) {
-		status := fire.Delivered.Status
-		if status == "" {
-			status = "sent"
-		}
-		now := time.Now()
-		if _, uerr := task.UpdateTaskStatus(t.ID, &now, status); uerr != nil {
-			return false, fmt.Errorf("%w: recording delivered run status: %v", errTaskFireReconcile, uerr)
-		}
-		clearTaskFire(t.ID)
-		log.InfoLog.Printf("task %s: interrupted cron fire's delivery already landed", t.ID)
-		return true, nil
-	}
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
 		return false, fmt.Errorf("%w: resolving the task's repository: %v", errTaskFireReconcile, err)
@@ -371,31 +329,6 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		// already satisfied, and replaying it would deliver the same prompt
 		// twice.
 		//
-		// The attempt must be attributed to THIS task: targets can be shared,
-		// so another task's send — or an interactive one — must never satisfy
-		// this fire (#5503 review). An unattributed attempt cannot prove which
-		// send it was, so the fire stays owed rather than discharged.
-		if target := task.CanonicalTargetSession(t.TargetSession); target != "" {
-			for i := range rows {
-				data := &rows[i]
-				if data.Title != target || data.LastPromptTaskID != t.ID ||
-					data.LastPromptAttemptAt.Before(fire.IntendedAt) ||
-					data.LastPromptAttemptAt.IsZero() {
-					continue
-				}
-				if data.LastPromptDeliveryStatus != session.PromptDelivered &&
-					data.LastPromptDeliveryStatus != session.PromptSentUnverified {
-					continue
-				}
-				now := time.Now()
-				if _, uerr := task.UpdateTaskStatus(t.ID, &now, "sent"); uerr != nil {
-					return false, fmt.Errorf("%w: recording targeted run status: %v", errTaskFireReconcile, uerr)
-				}
-				clearTaskFire(t.ID)
-				log.InfoLog.Printf("task %s: interrupted cron fire already delivered to target %q", t.ID, target)
-				return true, nil
-			}
-		}
 		// Killed before the reservation committed a title: no runtime identity
 		// can be attributed, and the create died too early to leave one to probe.
 		return false, nil
@@ -543,22 +476,11 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// stays in the marker, not on this row — a still-draining create writing
 	// its own persisted row matches by title+stable-id, and reusing that id
 	// here would let a straggler write overwrite the leftover record.
-	//
-	// A leftover record is recovery evidence, not a session — so for a
-	// targeted fire it must never occupy the delivery address: an inert or
-	// tombstoned row under the exact TargetSession title makes every later
-	// send fail "instance not started" forever, discharging each occurrence
-	// undelivered (#5503 review). Mint it beside the address; the record still
-	// names the exact tmux/worktree/branch it stands for.
-	title := fire.Title
-	if task.CanonicalTargetSession(t.TargetSession) != "" && title != "" {
-		title += "-interrupted"
-	}
 	now := time.Now()
 	return &session.InstanceData{
 		ID:         session.NewInstanceID(),
 		TaskID:     t.ID,
-		Title:      title,
+		Title:      fire.Title,
 		Path:       repo.WorkspacePath(),
 		Branch:     branch,
 		Status:     session.Loading,

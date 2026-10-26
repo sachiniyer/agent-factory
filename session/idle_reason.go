@@ -136,7 +136,7 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.recordPromptAttemptLocked(status, attemptedAt, "")
+	return i.recordPromptAttemptLocked(status, attemptedAt)
 }
 
 // recordPromptAttemptForObservation commits only while runtime still owns the
@@ -146,7 +146,6 @@ func (i *Instance) recordPromptAttemptForObservation(
 	status PromptDeliveryStatus,
 	attemptedAt time.Time,
 	runtime *agentObservationRuntime,
-	taskID string,
 ) bool {
 	if attemptedAt.IsZero() {
 		return false
@@ -156,19 +155,15 @@ func (i *Instance) recordPromptAttemptForObservation(
 	if i.agentObservation != runtime {
 		return false
 	}
-	return i.recordPromptAttemptLocked(status, attemptedAt, taskID)
+	return i.recordPromptAttemptLocked(status, attemptedAt)
 }
 
 // recordPromptAttemptLocked stores a prompt boundary. Caller holds i.mu.
-// taskID attributes the attempt to the task whose fire it satisfied — "" for a
-// send without task provenance. Every attempt restates it, so a manual or
-// other-task send can never inherit a stale attribution (#5503).
-func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time, taskID string) bool {
+func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time) bool {
 	if !status.Valid() {
 		status = PromptCouldNotConfirm
 	}
-	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status &&
-		i.lastPromptTaskID == taskID {
+	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status {
 		return false
 	}
 	// The attempt and pane snapshots share their runtime's observation lock, while stateEpoch
@@ -180,7 +175,6 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
-	i.lastPromptTaskID = taskID
 	// The task run's completion gate binds to the run's own prompt boundary,
 	// not the session's latest send (#5221 review): a manual prompt after the
 	// agent already took the turn must not re-arm a window that was satisfied.
@@ -391,10 +385,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" ||
-		!i.lastPaneChurnAt.IsZero() || i.lastPromptTaskID != ""
+		!i.lastPaneChurnAt.IsZero()
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
-	i.lastPromptTaskID = ""
 	i.lastPaneChurnAt = time.Time{}
 	// The task-run boundary and turn observation are pane-relative evidence of
 	// the RETIRED runtime: a replacement pane owns neither the send it did not

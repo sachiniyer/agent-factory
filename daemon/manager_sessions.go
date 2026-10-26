@@ -511,7 +511,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
-	status, err := instance.SendPromptWithTaskEvidence(req.Prompt, nowFunc, req.TaskID)
+	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
 	releaseObservationFence()
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's

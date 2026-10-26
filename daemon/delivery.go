@@ -15,9 +15,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // targetDeliverWait bounds how long DeliverPrompt waits for a target session to
@@ -285,7 +283,6 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		}
 		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
-			TaskID: req.TaskID,
 		})
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
@@ -336,7 +333,6 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
 				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
-				TaskID: req.TaskID,
 			})
 			if serr != nil {
 				if errors.Is(serr, errTargetLimitReached) {
@@ -349,19 +345,6 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		return "", session.PromptCouldNotConfirm, false, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
 	status := createdTaskStatus(created)
-	if req.TaskID != "" && created.Title != req.Title {
-		// The exact address was occupied — the derived walk minted a fresh
-		// target beside it. Rebind the task to the working session so every
-		// later occurrence resolves it instead of minting a new suffix forever
-		// (#5503 review). A rebind failure degrades to that drift, never to a
-		// lost occurrence: this delivery already landed.
-		newTitle := created.Title
-		if _, uerr := task.UpdateTask(req.TaskID, task.TaskUpdate{TargetSession: &newTitle}, task.ProjectExpectation{}); uerr != nil {
-			log.WarningLog.Printf("task %s: delivered to %q but failed to rebind target from %q: %v", req.TaskID, created.Title, req.Title, uerr)
-		} else {
-			log.InfoLog.Printf("task %s: target %q was occupied; rebound to %q", req.TaskID, req.Title, created.Title)
-		}
-	}
 	return status, session.PromptCouldNotConfirm, status == TaskStatusLimitParked, nil
 }
 
@@ -384,29 +367,14 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		return session.InstanceData{}, err
 	}
 	managerDelegated = true
-	createReq := CreateSessionRequest{
+	return m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:      req.Title,
 		RepoPath:   req.RepoPath,
 		Program:    req.Program,
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
 		TaskOrigin: req.TaskOrigin,
-		// FireTaskID, not TaskID: the auto-created target is this task's ongoing
-		// delivery address, so it must not stamp task_id/run-active or enter the
-		// task's concurrency accounting — but the reservation still binds the
-		// durable fire marker so an interrupted create is adoptable (#5503).
-		FireTaskID: req.TaskID,
-	}
-	if req.TaskID != "" {
-		// A task-targeted delivery derives its address instead of claiming the
-		// exact title: artifacts an interrupted fire left under it — a
-		// quarantined tmux session, a held derived branch — would make the
-		// exact-name create refuse the occurrence forever. The derived walk
-		// still resolves the base itself when the lane is free (#5503 review).
-		createReq.Title = ""
-		createReq.TitleBase = req.Title
-	}
-	return m.CreateSession(context.Background(), createReq)
+	})
 }
 
 // lockTarget acquires the per-(repo, title) delivery lock, creating it on first
