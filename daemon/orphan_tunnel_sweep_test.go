@@ -37,6 +37,27 @@ func TestRunDaemonSweepsOrphanSandboxTunnelsBeforeReady(t *testing.T) {
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	// Every goroutine this test starts is joined before it returns: an
+	// unjoined RunDaemon keeps the home's control socket and races the NEXT
+	// test's RunDaemon. releaseSweep runs first because a daemon parked in
+	// the gated sweep can never answer the Shutdown RPC.
+	t.Cleanup(func() {
+		releaseSweep()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var resp ShutdownResponse
+			_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+			select {
+			case <-runDone:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			if time.Now().After(deadline) {
+				t.Error("in-process daemon did not exit during cleanup")
+				return
+			}
+		}
+	})
 
 	var sweptHome string
 	select {
@@ -93,8 +114,30 @@ func TestRunDaemonStopsSandboxTunnelsOnExit(t *testing.T) {
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	// Same join rule as the sweep test above: the daemon goroutine must not
+	// outlive this test.
+	t.Cleanup(func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var resp ShutdownResponse
+			_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+			select {
+			case <-runDone:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			if time.Now().After(deadline) {
+				t.Error("in-process daemon did not exit during cleanup")
+				return
+			}
+		}
+	})
 
-	require.NoError(t, pingDaemonUntil(time.Now().Add(10*time.Second)))
+	// The PID file is written before the control socket binds (#5188), so the
+	// socket — not the file — is what readiness waits on.
+	waitForReady(t, "daemon serving the control socket", func() bool {
+		return pingDaemon() == nil
+	})
 	result, _, err := RequestShutdown()
 	require.NoError(t, err)
 	assert.Equal(t, ShutdownViaRPC, result)

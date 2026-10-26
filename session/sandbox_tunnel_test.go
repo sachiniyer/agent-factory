@@ -291,7 +291,12 @@ func TestSweepOrphanSandboxTunnels(t *testing.T) {
 
 	ours := spawnSweepSleeper(t, home)
 	foreign := spawnSweepSleeper(t, "/nonexistent/foreign-af-home")
-	unmarkedTunnelShape := spawnSweepSleeper(t, "", "sh", "-c", "sleep 60", "af-sandbox")
+	// `sleep 60 & wait`, not `sleep 60`: a bare last command is exec'd away by
+	// shells that tail-optimize (darwin's /bin/sh is one), which sheds the
+	// af-sandbox element from argv — the very thing this fixture exists to
+	// carry. The & wait keeps sh alive holding its original argv on every
+	// shell, so the element survives to be matched on linux and darwin alike.
+	unmarkedTunnelShape := spawnSweepSleeper(t, "", "sh", "-c", "sleep 60 & wait", "af-sandbox")
 	unrelated := spawnSweepSleeper(t, "")
 
 	warnings := captureWarningLog(t)
