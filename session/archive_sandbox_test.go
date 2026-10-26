@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -358,6 +359,73 @@ func TestArchiveSandbox_UnknownKillCleanupSurvivesRestart(t *testing.T) {
 	_, err := i.ArchiveSandbox()
 	require.ErrorIs(t, err, ErrWorkspaceStateUnknown)
 	assertUnknownCleanupSurvivesRestart(t, i)
+}
+
+// TestArchiveSandbox_KnownKillDropsDischargedCleanupHandle is the regression for
+// the Codex P2 on 431c9740: when ArchiveSandbox's as.Kill returns a KNOWN error the
+// sandbox reap still succeeded, so the runtime is gone. The runtime wiring is
+// deliberately retained for the abort-to-Lost retry, but this PR's ForStorage
+// projection persists an ordinary sandbox row's RuntimeCleanup, so without clearing
+// the backend's discharged cleanup identity the next checkpoint would publish it and
+// a restart's FromInstanceData would rebuild a teardown for a runtime af already
+// reaped. The known-failure branch must clear the identity the same way
+// resetRemoteRuntime does on the success path, leaving the in-memory wiring (which
+// the in-process retry reaps through) untouched.
+func TestArchiveSandbox_KnownKillDropsDischargedCleanupHandle(t *testing.T) {
+	// A KNOWN kill error — the reap succeeded, only the REST teardown failed.
+	as := &stubAgentServer{branch: "root/s", killErr: fmt.Errorf("container rm failed")}
+	i := newStubbedSandboxInstance(as)
+	i.backend = &dockerBackend{
+		containerID: "reaped-container",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "reaped-container",
+			EngineID:    "engine-id",
+		},
+	}
+	i.runtimeTeardown = func() error { return nil }
+
+	_, err := i.ArchiveSandbox()
+	require.Error(t, err, "the known teardown failure must surface to the caller")
+	assert.Contains(t, err.Error(), "failed to tear the sandbox down", "the known failure path ran")
+	assert.False(t, i.ToInstanceData().RuntimeCleanupStateUnknown,
+		"a known reap must not be collapsed into unknown state")
+
+	// The in-memory wiring is retained for the abort-to-Lost retry path.
+	i.mu.RLock()
+	remoteClient := i.remoteClient
+	teardown := i.runtimeTeardown
+	backend := i.backend
+	i.mu.RUnlock()
+	assert.NotNil(t, remoteClient, "the retry path keeps the in-memory client wiring")
+	assert.NotNil(t, teardown, "the retry path keeps the in-memory teardown closure")
+
+	// The discharged cleanup identity is gone from the backend, so the next
+	// checkpoint stages no RuntimeCleanup for the reaped runtime.
+	if provider, ok := backend.(runtimeCleanupProvider); ok {
+		assert.Nil(t, provider.runtimeCleanupData(),
+			"the known reap discharged the cleanup identity; a later checkpoint must not persist it")
+	}
+
+	stored := i.ToInstanceData().ForStorage()
+	assert.Nil(t, stored.RuntimeCleanup,
+		"a known-failure archive persisted the reaped runtime's cleanup identity; a restart would rebuild a teardown for a runtime af already reaped")
+	assert.False(t, stored.RuntimeCleanupStateUnknown,
+		"a known reap manufactured an unknown-cleanup boundary; the in-flight-archive rule must not fire without a live handle")
+	assert.False(t, stored.KilledWithoutLiveRuntime,
+		"an ordinary Lost row staged the nothing-owed marker; the marker is a tombstone property")
+
+	// The restart carries no rebuildable handle for the reaped runtime: the
+	// reloaded row loads inert, with no RuntimeCleanup and no rebuilt teardown.
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err, "marshal discharged-cleanup checkpoint")
+	var reloaded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &reloaded), "unmarshal discharged-cleanup checkpoint")
+	reloaded = reloaded.ForStorage()
+	assert.Nil(t, reloaded.RuntimeCleanup, "the reloaded row still carries a cleanup handle for the reaped runtime")
+	restored, err := FromInstanceData(reloaded)
+	require.NoError(t, err, "restore the reloaded row")
+	assert.Nil(t, restored.runtimeTeardown,
+		"the reloaded row rebuilt a teardown handle for a runtime af already reaped")
 }
 
 // TestArchiveSandbox_RecordsBranchOnSuccess pins that moving the assignment earlier

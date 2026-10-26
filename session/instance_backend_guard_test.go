@@ -30,6 +30,11 @@ import (
 //   - resetRemoteRuntime — reads i.backend under i.mu to clear its discharged
 //     cleanup identity after a confirmed reap. The whole body runs under the
 //     i.mu.Lock it takes at the top, so the read is synchronized.
+//   - clearDischargedRuntimeCleanup — reads i.backend under i.mu to clear a
+//     confirmed reap's cleanup identity on the ArchiveSandbox known-failure
+//     branch, where the in-memory wiring is retained for the abort-to-Lost
+//     retry. The whole body runs under the i.mu.Lock it takes at the top, so
+//     the read is synchronized.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -41,18 +46,19 @@ import (
 // no longer self-deadlock; if a future helper reintroduces a bare i.backend read
 // under the lock, this scan flags it.
 var backendReadersUnderLock = map[string]bool{
-	"currentBackend":               true,
-	"capabilitiesLocked":           true,
-	"SetBackend":                   true,
-	"bindProvisionResult":          true,
-	"retainProvisionResultCleanup": true,
-	"AgentServer":                  true,
-	"agentServerLocked":            true,
-	"reprovisionRemote":            true,
-	"resetRemoteRuntime":           true,
-	"toInstanceDataLocked":         true,
-	"PreviewTabSnapshotByID":       true,
-	"FromInstanceData":             true,
+	"currentBackend":                true,
+	"capabilitiesLocked":            true,
+	"SetBackend":                    true,
+	"bindProvisionResult":           true,
+	"retainProvisionResultCleanup":  true,
+	"AgentServer":                   true,
+	"agentServerLocked":             true,
+	"reprovisionRemote":             true,
+	"resetRemoteRuntime":            true,
+	"clearDischargedRuntimeCleanup": true,
+	"toInstanceDataLocked":          true,
+	"PreviewTabSnapshotByID":        true,
+	"FromInstanceData":              true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.
