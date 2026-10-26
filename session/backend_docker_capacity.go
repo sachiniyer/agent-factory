@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -261,6 +262,14 @@ var peerMountinfo = func(pid int) ([]byte, error) {
 	return os.ReadFile("/proc/" + strconv.Itoa(pid) + "/mountinfo")
 }
 
+// peerExe reads the answering process's binary identity — /proc/<pid>/exe.
+// The ptrace gate matches mountinfo's: wherever the table was readable the
+// link is too, so an unreadable exe on a readable table means the process
+// vanished — unproven, never a match.
+var peerExe = func(pid int) (string, error) {
+	return os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+}
+
 // daemonSharesDataRootFS is the mount-identity proof hostname equality
 // cannot give (#5382 review). SO_PEERCRED names the process answering af's
 // socket; its mount table then shows which device really backs the data
@@ -290,8 +299,18 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 		return false
 	}
 	if info, err := peerMountinfo(peer); err == nil {
-		// Strong proof: the device the daemon's own mount table shows
-		// under its data root is the device af's stat reports.
+		// Strong proof — but ONLY once the answering process is identified
+		// as the daemon itself: a same-uid socket forwarder (socat, ssh -L)
+		// has an equally readable mountinfo describing AF's filesystem, and
+		// matching devices then "prove" co-location with a remote engine
+		// (#5382 review). /proc/<pid>/exe carries the same ptrace gate as
+		// mountinfo, so it is readable exactly when the table was.
+		exe, xerr := peerExe(peer)
+		if xerr != nil || strings.TrimSuffix(filepath.Base(exe), " (deleted)") != "dockerd" {
+			return false
+		}
+		// The device the daemon's own mount table shows under its data
+		// root is the device af's stat reports.
 		peerDev, ok := coveringMountDev(info, rootDir)
 		return ok && peerDev == dev
 	}

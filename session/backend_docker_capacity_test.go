@@ -53,7 +53,7 @@ func stubPeerDataRoot(t *testing.T, peerUID int, dev, peerTable, selfTable strin
 	var maj, min uint64
 	_, err := fmt.Sscanf(dev, "%d:%d", &maj, &min)
 	require.NoError(t, err)
-	oldP, oldM, oldS := socketPeerCred, peerMountinfo, statDev
+	oldP, oldM, oldS, oldE := socketPeerCred, peerMountinfo, statDev, peerExe
 	socketPeerCred = func(net.Conn) (int, int, error) {
 		if peerErr != nil {
 			return 0, 0, peerErr
@@ -70,8 +70,18 @@ func stubPeerDataRoot(t *testing.T, peerUID int, dev, peerTable, selfTable strin
 		}
 		return []byte(table), nil
 	}
+	// peerExe mirrors the real gate: readable exactly when the peer's own
+	// table is. Tests that need a non-dockerd peer re-stub after this.
+	peerExe = func(pid int) (string, error) {
+		if pid == 424242 && peerTable != "" {
+			return "/usr/bin/dockerd", nil
+		}
+		return "", fmt.Errorf("process gone")
+	}
 	statDev = func(string) (uint64, bool) { return unix.Mkdev(uint32(maj), uint32(min)), true }
-	t.Cleanup(func() { socketPeerCred, peerMountinfo, statDev = oldP, oldM, oldS })
+	t.Cleanup(func() {
+		socketPeerCred, peerMountinfo, statDev, peerExe = oldP, oldM, oldS, oldE
+	})
 }
 
 // peerTableOn returns a mountinfo whose deepest mount covering the data
@@ -481,6 +491,28 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
 			"a subtree bind under the data root could be a foreign filesystem — unproven: %v", err)
 		assert.Equal(t, 0, *calls, "a partial-bind-covered root must not reach statfs")
+	})
+
+	t.Run("a same-uid forwarder is not the daemon", func(t *testing.T) {
+		// socat/ssh -L answering the socket runs as af's uid: its mountinfo
+		// is readable and describes AF's filesystem, so a device match alone
+		// "proves" co-location with a remote engine. The exe identity is
+		// what separates the daemon from the pipe (#5382 review).
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) { return "/usr/bin/socat", nil }
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "forwarder"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a forwarder's mount table describes af's fs, not the remote daemon's — no verdict: %v", err)
+		assert.Equal(t, 0, *calls, "a forwarding peer must not reach statfs")
 	})
 
 	t.Run("stacked mounts take the top of the stack", func(t *testing.T) {
@@ -1061,9 +1093,11 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 
 // TestAccountRuntimeVerify_ExecFailureCarriesWriteClass pins the #5382-review
 // classification: the boundary check's `docker exec --user 0:0 cat
-// /proc/self/mountinfo` records exec state under the data root — a write
-// the engine can fail with ENOSPC — so the error carries a write-capable
-// class for the provision boundary, unlike the local refusals around it.
+// /proc/self/mountinfo` records exec state under the data root — a
+// daemon-side bookkeeping write the engine can fail with ENOSPC — so the
+// error carries the daemon-write class for the provision boundary: it
+// joins the fs verdict but can never borrow the reserved-block window
+// (the cat itself writes nothing under the account bind).
 func TestAccountRuntimeVerify_ExecFailureCarriesWriteClass(t *testing.T) {
 	dir := t.TempDir()
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -1083,6 +1117,57 @@ func TestAccountRuntimeVerify_ExecFailureCarriesWriteClass(t *testing.T) {
 	require.Error(t, err)
 	var se *dockerStepError
 	require.True(t, errors.As(err, &se), "the exec failure must carry an operation class")
-	assert.Equal(t, dockerOpRootExec, se.op,
-		"the mountinfo exec's state write belongs to a uid-0 exec, not the local checks")
+	assert.Equal(t, dockerOpDaemonWrite, se.op,
+		"the mountinfo exec's state write is dockerd's bookkeeping, not a container-side write")
+}
+
+// TestAccountRuntimeVerify_ExecFailureNeverBorrowsBavail is the #5382-review
+// scenario end to end: a userns-remapped engine, a session with an account
+// bind, an image without `cat`, and a data root whose reserved-block window
+// is open (Bavail==0, Bfree>0). The verify exec's only data-root writes are
+// dockerd's own bookkeeping — privileged — so the Bavail window must NOT
+// produce a verdict: a failure that is not a full disk must not wait on the
+// environment.
+func TestAccountRuntimeVerify_ExecFailureNeverBorrowsBavail(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+	t.Setenv("DOCKER_CONTEXT", "")
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), "", nil)
+
+	info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(info, &raw))
+	raw["SecurityOptions"] = []string{"name=seccomp,profile=builtin", "name=userns"}
+	info, err = json.Marshal(raw)
+	require.NoError(t, err)
+
+	fakeDockerCapacityProbe(t, info, func(args []string) ([]byte, error) {
+		switch args[0] {
+		case "run":
+			return []byte("cid\n"), nil
+		case "inspect":
+			return []byte(cleanInspect(dir)), nil
+		case "exec": // the image has no cat — the exec bookkeeping fails
+			return nil, fmt.Errorf("exit status 127")
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})
+	// Bavail==0, Bfree>0 — the reserved-block window, reachable only for an
+	// unprivileged writer. A privileged (daemon) write sees the free blocks.
+	oldPriv, oldUnpriv := statfsFull, statfsFullUnprivileged
+	statfsFull = func(string) (bool, error) { return false, nil }
+	statfsFullUnprivileged = func(string) (bool, error) { return true, nil }
+	defer func() { statfsFull, statfsFullUnprivileged = oldPriv, oldUnpriv }()
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		spec: ProvisionSpec{Title: "scoped",
+			Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
+	}
+	_, err = p.provision()
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, syscall.ENOSPC),
+		"dockerd's own exec bookkeeping is a privileged write — the Bavail window is not its ENOSPC: %v", err)
 }
