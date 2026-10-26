@@ -57,10 +57,24 @@ var errTaskFireReconcile = errors.New("task fire reconcile failed")
 // bound by the create path as it commits them — a marker without them died
 // before the reservation, which is itself information the reconcile uses.
 type taskFireMarker struct {
-	TaskID     string    `json:"task_id"`
-	IntendedAt time.Time `json:"intended_at"`
-	Title      string    `json:"title,omitempty"`
-	InstanceID string    `json:"instance_id,omitempty"`
+	TaskID     string            `json:"task_id"`
+	IntendedAt time.Time         `json:"intended_at"`
+	Title      string            `json:"title,omitempty"`
+	InstanceID string            `json:"instance_id,omitempty"`
+	Delivered  *taskFireDelivery `json:"delivered,omitempty"`
+}
+
+// taskFireDelivery is per-fire completion evidence, stamped when the run's
+// delivery lands but before its task status is written. It exists because the
+// OTHER evidence lives on shared state: a targeted send stamps its attempt
+// onto the target row, where another task's — or an interactive — send into
+// the same target can overwrite it before this task records its outcome. A
+// restart in that interval would see only the later send's attribution and
+// replay an already-delivered prompt (#5503 review). The marker is the one
+// place keyed to THIS occurrence that nothing else's delivery can touch.
+type taskFireDelivery struct {
+	At     time.Time `json:"at"`
+	Status string    `json:"status"`
 }
 
 // daemonDrainingFn reports whether the owning daemon has closed mutation
@@ -202,6 +216,17 @@ func noteTaskFireInstance(taskID, instanceID string) {
 	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.InstanceID = instanceID })
 }
 
+// noteTaskFireDelivered stamps per-fire completion evidence onto the marker
+// the moment the delivery is known to have landed — BEFORE the task status
+// write, so the interval where a shared-target send's row evidence can be
+// clobbered while the occurrence is still owed shrinks to this one mutate
+// (#5503 review).
+func noteTaskFireDelivered(taskID, status string) {
+	mutateTaskFireMarker(taskID, func(m *taskFireMarker) {
+		m.Delivered = &taskFireDelivery{At: time.Now(), Status: status}
+	})
+}
+
 func mutateTaskFireMarker(taskID string, mutate func(*taskFireMarker)) {
 	m, err := readTaskFireMarker(taskID)
 	if err != nil || m == nil {
@@ -238,6 +263,13 @@ func isShutdownAbortErr(err error) bool {
 func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 	return t.LastRunAt != nil &&
 		!t.LastRunAt.Before(fire.IntendedAt) &&
+		// Arming verdicts are not run evidence: armTaskAutomation can rewrite
+		// an interrupted run's "aborted:" status to "errored: not armed — …"
+		// (or clearStaleNotArmedStatus's empty one) while preserving LastRunAt,
+		// and accepting either as a completed run would discharge a fire that
+		// never delivered (#5503 review).
+		t.LastRunStatus != "" &&
+		!strings.HasPrefix(t.LastRunStatus, notArmedPrefix) &&
 		!strings.HasPrefix(t.LastRunStatus, taskStatusAbortedPrefix) &&
 		!strings.Contains(t.LastRunStatus, errTaskFireReconcile.Error())
 }
@@ -262,6 +294,23 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     is quarantined as a startup-state-unknown record for inspection rather
 //     than destroyed on a guess.
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
+	// Per-fire completion evidence first: a delivery that landed but whose
+	// status write (or discharge) was interrupted is already satisfied. The
+	// marker — unlike the shared target row — cannot have been overwritten
+	// by another task's send in the interval (#5503 review).
+	if fire.Delivered != nil && !fire.Delivered.At.Before(fire.IntendedAt) {
+		status := fire.Delivered.Status
+		if status == "" {
+			status = "sent"
+		}
+		now := time.Now()
+		if _, uerr := task.UpdateTaskStatus(t.ID, &now, status); uerr != nil {
+			return false, fmt.Errorf("%w: recording delivered run status: %v", errTaskFireReconcile, uerr)
+		}
+		clearTaskFire(t.ID)
+		log.InfoLog.Printf("task %s: interrupted cron fire's delivery already landed", t.ID)
+		return true, nil
+	}
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
 		return false, fmt.Errorf("%w: resolving the task's repository: %v", errTaskFireReconcile, err)
@@ -444,32 +493,46 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		proven = false
 	}
 
-	// Cleanliness is the second gate: even proven leftovers are only reaped when
-	// they carry no work. Anything committed beyond the mainline or dirty in the
-	// tree is the only copy of that work — a quarantine preserves it.
-	clean := proven && wtPath == ""
-	if proven && wtPath != "" {
-		dirty, derr := git.WorktreeDirtyFiles(wtPath)
-		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
-		clean = derr == nil && cerr == nil && dirty == 0 && commits == 0
-	}
-
 	program := t.Program
 	if program == "" {
 		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
 	}
+
+	// A PROVEN leftover's live tmux runtime is stopped BEFORE the cleanliness
+	// probe: the interrupted create may already have submitted its prompt, so
+	// its agent can still be writing in the worktree, and a dirty-check taken
+	// while it runs would authorize a `worktree remove -f` teardown that
+	// deletes work generated after the snapshot (#5503 review). A kill that
+	// fails leaves the writer question unanswered — quarantine, never reap.
+	runtimeStopped := false
+	if proven && tmuxPresent {
+		if _, kerr := tmux.NewTmuxSessionFromSanitizedName(sanitized, program).Close(); kerr == nil {
+			runtimeStopped = true
+			log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q from an interrupted cron fire", t.ID, sanitized)
+		}
+	}
+
+	// Cleanliness is the second gate: even proven leftovers are only reaped when
+	// they carry no work. Anything committed beyond the mainline or dirty in the
+	// tree is the only copy of that work — a quarantine preserves it.
+	clean := proven && wtPath == "" && (!tmuxPresent || runtimeStopped)
+	if proven && wtPath != "" {
+		if tmuxPresent && !runtimeStopped {
+			clean = false
+		} else {
+			dirty, derr := git.WorktreeDirtyFiles(wtPath)
+			commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
+			clean = derr == nil && cerr == nil && dirty == 0 && commits == 0
+		}
+	}
+
 	reap := proven && clean
 	if reap && wtPath == "" {
 		// A proven tmux-only leftover has no worktree to reap through a
 		// tombstone record — and a record without a worktree path cannot
-		// materialize a teardown handle anyway — so kill it inline. A kill
-		// failure degrades to the quarantine record below rather than losing
-		// the residue.
-		if _, kerr := tmux.NewTmuxSessionFromSanitizedName(sanitized, program).Close(); kerr == nil {
-			log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q from an interrupted cron fire", t.ID, sanitized)
-			return nil, nil
-		}
-		reap = false
+		// materialize a teardown handle anyway. Its runtime was already
+		// stopped above, so nothing remains of the attempt.
+		return nil, nil
 	}
 	// BranchCreatedByUs stays nil: the worktree-registration evidence proves
 	// the WORKTREE is this attempt's, but a create may have reused a

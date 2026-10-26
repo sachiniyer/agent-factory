@@ -914,3 +914,229 @@ func TestReplayPendingTaskFires_TaskReadErrorKeepsMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskFireResidue_RejectsArmingVerdicts pins the arming-vs-run distinction:
+// armTaskAutomation can rewrite an interrupted run's "aborted:" status to a
+// not-armed refusal (or clearStaleNotArmedStatus's empty one) while preserving
+// LastRunAt. Neither is evidence a run completed — accepting them would
+// discharge a fire that never delivered.
+func TestTaskFireResidue_RejectsArmingVerdicts(t *testing.T) {
+	fire := &taskFireMarker{TaskID: "x", IntendedAt: time.Now().Add(-time.Minute)}
+	at := time.Now()
+	for _, tc := range []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{"arming-cleared empty status", "", false},
+		{"arming refusal", notArmedPrefix + "root agent policy disabled", false},
+		{"shutdown abort", taskStatusAbortedShutdown, false},
+		{"other abort", "aborted: superseded", false},
+		{"reconcile failure", "errored: " + errTaskFireReconcile.Error(), false},
+		{"real run error", "errored: unexpected EOF", true},
+		{"sent", "sent", true},
+		{"started", "started", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := taskFireResidue(&task.Task{LastRunAt: &at, LastRunStatus: tc.status}, fire)
+			if got != tc.want {
+				t.Fatalf("taskFireResidue(%q) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+	// A timestamp before the intent is never residue, whatever the status.
+	pre := fire.IntendedAt.Add(-time.Second)
+	if taskFireResidue(&task.Task{LastRunAt: &pre, LastRunStatus: "started"}, fire) {
+		t.Fatal("a status written before the intent must never discharge it")
+	}
+}
+
+// TestReconcilePendingTaskFire_DeliveredStampDischarges pins per-fire evidence:
+// when the shared target row's attribution has been overwritten by another
+// task's send, the marker's own delivered stamp still discharges the
+// occurrence — and a stamp older than the intent discharges nothing.
+func TestReconcilePendingTaskFire_DeliveredStampDischarges(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if err := task.AddTask(task.Task{
+		ID: "ab0r7090", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *",
+		ProjectPath: repoPath, TargetSession: "shared-target",
+		Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	// The shared target's row carries ANOTHER task's landed send — the row
+	// evidence that used to be the only record is clobbered.
+	seeded, err := json.Marshal([]session.InstanceData{{
+		Title: "shared-target", Path: repoPath, Status: session.Running,
+		LastPromptTaskID:         "other-task",
+		LastPromptAttemptAt:      time.Now(),
+		LastPromptDeliveryStatus: session.PromptDelivered,
+	}})
+	if err != nil {
+		t.Fatalf("marshal row: %v", err)
+	}
+	if err := config.LoadState().SaveInstances(repo.ID, seeded); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	intendedAt := time.Now().Add(-time.Minute)
+	seedPendingFire(t, taskFireMarker{
+		TaskID: "ab0r7090", IntendedAt: intendedAt,
+		Delivered: &taskFireDelivery{At: time.Now(), Status: "sent"},
+	})
+
+	tsk, err := task.GetTask("ab0r7090")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	fire, err := readTaskFireMarker("ab0r7090")
+	if err != nil || fire == nil {
+		t.Fatalf("readTaskFireMarker: %v nil=%v", err, fire == nil)
+	}
+	done, err := reconcilePendingTaskFire(tsk, fire)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !done {
+		t.Fatal("the marker's delivered stamp must discharge the occurrence even though the row's attribution was overwritten")
+	}
+	if markerExists(t, "ab0r7090") {
+		t.Fatal("a discharged marker must be cleared")
+	}
+	if got := lastRunStatus(t, "ab0r7090"); got != "sent" {
+		t.Fatalf("discharged status = %q, want the stamped %q", got, "sent")
+	}
+
+	// A stamp written before the intent is stale — it must not discharge.
+	seedPendingFire(t, taskFireMarker{
+		TaskID: "ab0r7090", IntendedAt: intendedAt,
+		Delivered: &taskFireDelivery{At: intendedAt.Add(-time.Second), Status: "sent"},
+	})
+	done, err = reconcilePendingTaskFire(tsk, &taskFireMarker{
+		TaskID: "ab0r7090", IntendedAt: intendedAt,
+		Delivered: &taskFireDelivery{At: intendedAt.Add(-time.Second), Status: "sent"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile (stale stamp): %v", err)
+	}
+	if done {
+		t.Fatal("a delivered stamp older than the intent must not discharge the occurrence")
+	}
+	if !markerExists(t, "ab0r7090") {
+		t.Fatal("an owed marker must survive a stale stamp")
+	}
+}
+
+// TestDeliverToReemergingRoot_ForwardsTaskID pins the attribution gap: the
+// re-emerging-root wait-and-send builds its inner SendPromptRequest from
+// scratch, so it must forward req.TaskID — without it the landed send stamps
+// no task attribution and a pending fire can never match its own evidence.
+func TestDeliverToReemergingRoot_ForwardsTaskID(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	installRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Root re-materializes mid-wait, exactly like the ensure loop would.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+			Title: session.RootSessionTitle, RepoPath: repoPath,
+			Program: "claude", InPlace: true, allowReserved: true,
+		}); err != nil {
+			t.Errorf("background root (re-)create: %v", err)
+		}
+	}()
+
+	status, _, handled, derr := manager.deliverToReemergingRoot(repo, DeliverPromptRequest{
+		Title: session.RootSessionTitle, Prompt: "monitor-event",
+		TaskID: "ab0r7095", TaskOrigin: true,
+	})
+	if !handled {
+		t.Fatal("the re-emerging-root path must handle this delivery")
+	}
+	if derr != nil {
+		t.Fatalf("deliverToReemergingRoot: %v", derr)
+	}
+	if status != "sent" {
+		t.Fatalf("status = %q, want sent", status)
+	}
+	rows, err := loadRepoInstanceData(repo.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("expected one persisted root row: %v len=%d", err, len(rows))
+	}
+	if rows[0].LastPromptTaskID != "ab0r7095" {
+		t.Fatalf("the landed send's evidence carries task %q, want ab0r7095", rows[0].LastPromptTaskID)
+	}
+}
+
+// TestTaskFireLeftoverRecord_StopsProvenRuntime pins the writer-stop ordering:
+// a proven leftover's tmux runtime can still be writing its worktree while the
+// cleanliness probe runs, and a clean snapshot taken before the stop would
+// authorize a `worktree remove -f` teardown that deletes work generated
+// afterwards. The runtime is killed before the probe, so the row persisted
+// for a clean leftover is a tombstone AND the session is already dead.
+func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	title := "writer-leftover"
+	branch := git.BranchForTitle(cfg.BranchPrefix, title)
+	sanitized := tmux.SanitizedNameForRepo(title, repo.IdentityPath())
+	wtPath := filepath.Join(t.TempDir(), "writer-wt")
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover worktree: %v: %s", err, out)
+	}
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
+		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover tmux session: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
+	})
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7097", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7097", ProjectPath: repoPath, Prompt: "p"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil || !row.UserKilled {
+		t.Fatalf("a proven clean leftover must record a teardown tombstone, got %+v", row)
+	}
+	if row.StartupStateUnknown {
+		t.Fatal("a proven clean leftover must not be quarantined")
+	}
+	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err == nil {
+		t.Fatalf("the proven leftover's runtime must be stopped inside reconcile, still alive: %s", out)
+	}
+}

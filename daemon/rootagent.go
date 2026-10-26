@@ -720,6 +720,7 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	}
 	status, err := m.SendPromptWithStatus(SendPromptRequest{
 		Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+		TaskID: req.TaskID,
 	})
 	if err != nil {
 		if errors.Is(err, errTargetLimitReached) {

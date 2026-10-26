@@ -447,6 +447,15 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		return err
 	}
 
+	// Per-fire completion evidence goes onto the marker BEFORE the task
+	// status write: the only other place a landed targeted send is recorded
+	// is the shared target row, whose attribution a later task's or
+	// interactive send can overwrite in exactly this interval — and a
+	// restart would then replay a prompt that already delivered (#5503
+	// review). The marker is per-fire, so nothing else's delivery can
+	// clobber it.
+	noteTaskFireDelivered(taskID, status)
+
 	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
