@@ -2,7 +2,6 @@ package integration_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -93,12 +92,9 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		post("/v1/Preview", daemon.PreviewRequest{Title: name, RepoID: repoID, Tab: tab}, &resp)
 		return resp.Content
 	}
-	agentServers := func() int {
-		out := host.exec(t, "pgrep -f 'agent-server --listen' | wc -l")
-		var n int
-		_, _ = fmt.Sscan(out, &n)
-		return n
-	}
+	// The shared helper execs pgrep directly: a `sh -c "pgrep -f …"` would match
+	// its own command line and never read zero.
+	agentServers := func() int { return sshdAgentServerProcs(t, host.container) }
 	sessionDirs := func() string { return host.exec(t, "ls -1 /root/.af-sessions 2>/dev/null") }
 
 	// --- create ---------------------------------------------------------------
