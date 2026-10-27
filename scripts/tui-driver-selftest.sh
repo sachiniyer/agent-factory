@@ -1334,6 +1334,44 @@ _expect_config_editor_writes() {
         printf 'daemon did not apply default_program = codex live:\n%s\n' "$programs"
         return 1
     }
+
+    # Restore claude through the SAME live path — editor write, file check,
+    # ListPrograms readback. Since #4893 the new-session form follows the LIVE
+    # default_program rather than the boot-time value (this step's own readback
+    # above is the proof that resolution is live). Leaving codex here would
+    # make the later 'cycle: create a multi-tab instance' step hit preflight —
+    # codex is not installed in the test image — instead of exercising its
+    # flow. The sandbox's claude resolves to bash via program_overrides, so
+    # claude is the value the rest of the suite can actually spawn.
+    af_open_config || return 1
+    af_send Enter
+    for i in $(seq 1 32); do af_send BSpace; done
+    af_send_literal 'claude' || return 1
+    af_send Enter
+
+    af_wait_for 'set default_program = claude' "$AF_DRIVER_TIMEOUT" 'config write echo' || return 1
+    af_wait_for 'using the new value now' "$AF_DRIVER_TIMEOUT" 'config live-apply notice' || return 1
+    af_close_config || return 1
+
+    grep -q "default_program = 'claude'" "$AGENT_FACTORY_HOME/config.toml" || {
+        printf 'config.toml was not restored to claude:\n'
+        cat "$AGENT_FACTORY_HOME/config.toml"
+        return 1
+    }
+
+    programs="$(curl --fail --silent --show-error \
+        --max-time "$AF_DRIVER_TIMEOUT" \
+        --unix-socket "$socket_path" \
+        http://localhost/v1/ListPrograms \
+        -d '{}')" || {
+        printf 'could not re-read the live program catalog from the daemon\n'
+        return 1
+    }
+    printf '%s' "$programs" |
+        jq -e '.error == null and .data.default == "claude"' >/dev/null || {
+        printf 'daemon did not restore default_program = claude live:\n%s\n' "$programs"
+        return 1
+    }
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.

@@ -30,8 +30,8 @@ type home struct {
 
 	// -- Storage and Configuration --
 
-	program string
-	repoID  string
+	programChoice
+	repoID string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
@@ -433,6 +433,15 @@ type home struct {
 	// would silently replace it — putting the session on an identity the user had
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
+	// pendingProgramChosen records that the USER confirmed this form's program
+	// through the picker (#4889 review) — including deliberately re-picking the
+	// value already shown. A confirmed choice submits the concrete program on
+	// the wire; an untouched config-derived seed submits "" so the daemon
+	// resolves default_program at create time. String equality cannot see the
+	// re-picked-same-value case — this flag is what can. Reset by
+	// startNewInstance; set by a program-picker submit and by a failed
+	// create's draft restore.
+	pendingProgramChosen bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the
@@ -443,6 +452,27 @@ type home struct {
 	// rows are built from the daemon's registry (plus a leading "ambient identity"
 	// row), so the overlay's index cannot be mapped back through any local list.
 	accountPickerChoices []accountChoice
+	// accountDefaultSeq is the issuance counter fetchAccountDefault stamps on
+	// each accountDefaultMsg it launches. Two preselect fetches can be in flight
+	// at once — a submit-then-fail restore re-fires one while the form-open fetch
+	// still pends — and the older reply landing last must not overwrite the
+	// newer answer (#4889 review).
+	accountDefaultSeq int64
+	// remoteDefaultPending marks the window between a remote-target form open
+	// (or implicit restore) and the ListPrograms reply: submitting "" before the
+	// daemon's resolved default corrects the field would create a program the
+	// user never saw (#4889 review).
+	remoteDefaultPending bool
+	// remoteProgramCatalog is the program list the remote daemon reported,
+	// which the program picker offers instead of the local
+	// tmux.SupportedPrograms — a newer daemon can support agents this client
+	// lacks (#4889 review).
+	remoteProgramCatalog []string
+	// programPickerChoices is the option list the open program picker is
+	// showing, held alongside the overlay for the same reason
+	// accountPickerChoices is: a remote catalog cannot be mapped back through
+	// the local enum.
+	programPickerChoices []string
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
 	// (capture-pane via runMetadataTick, refreshPanesCmd) is
@@ -457,7 +487,7 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
+func newHome(ctx context.Context, program, configuredDefault string, repo *config.RepoContext) *home {
 	// repo is nil when af was launched outside a git repository (#2477): the TUI
 	// opens in registry mode with no active project, and the user selects one
 	// from the Projects section. An empty repoID makes the cold-start snapshot an
@@ -518,7 +548,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
 		appConfig:                   appConfig,
-		program:                     program,
+		programChoice:               newProgramChoice(program, configuredDefault, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),
