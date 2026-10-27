@@ -883,8 +883,8 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if uid, _, _ := strings.Cut(owner, ":"); uid == "0" {
 		return nil
 	}
-	script := fmt.Sprintf("mkdir -p %s && chown %s %s %s",
-		shellQuote(dockerWorkspaceDir), owner,
+	script := fmt.Sprintf("mkdir -p %s %s && chown %s %s %s",
+		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir), owner,
 		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir))
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
