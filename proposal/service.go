@@ -37,6 +37,11 @@ type Host interface {
 	CloseDocsTabs(sessionID, slug string) (string, error)
 	// Publish sends a proposal.changed event.
 	Publish(Change)
+	// SendPrompt delivers a push prompt to the session through the same path
+	// as af sessions send-prompt.
+	SendPrompt(sessionID, prompt string) (Delivery, error)
+	// PublishPush sends a proposal.push event.
+	PublishPush(PushStatus)
 }
 
 // Change is the payload of a proposal.changed event. Commit is nil for an
@@ -109,11 +114,18 @@ type Service struct {
 	mu      sync.Mutex
 	watch   watchState
 	lastSet map[string]map[string][]string
+	// push maps session id → push state.
+	push  map[string]*pushEntry
+	now   func() time.Time
+	spawn func(func())
 }
 
 // NewService returns a service that uses host.
 func NewService(host Host) *Service {
-	return &Service{host: host, watch: newWatchState()}
+	return &Service{
+		host: host, watch: newWatchState(), push: map[string]*pushEntry{},
+		now: time.Now, spawn: func(f func()) { go f() },
+	}
 }
 
 type resolved struct {
@@ -416,6 +428,7 @@ func (s *Service) Changes(sessionID string) (*Changes, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer s.markUnsentStale("", "", r.session.ID)
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
@@ -454,6 +467,7 @@ func (s *Service) Checkpoint(sessionID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer s.markUnsentStale("", "", r.session.ID)
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
@@ -586,6 +600,7 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	switch {
 	case res.saved:
 		s.committed(r, slug, file, res.Commit, AuthorHuman)
+		s.noteHumanSave(r, slug)
 	case res.snapshotted:
 		s.committed(r, slug, file, res.Commit, AuthorExternal)
 	default:

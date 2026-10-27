@@ -630,6 +630,11 @@ func redactTabData(tab *session.TabData) {
 	if tab.Proposal != "" {
 		tab.Proposal = redactedMarker
 	}
+	// Only the two push modes af writes are kept, so a hand-edited value cannot
+	// carry user text into a shared report.
+	if tab.PushMode != "" && tab.PushMode != "auto" && tab.PushMode != "manual" {
+		tab.PushMode = redactedMarker
+	}
 	// An account label, the same fact InstanceData.Account is redacted for
 	// (#4506 review).
 	if tab.AccountScope != "" {
