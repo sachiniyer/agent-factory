@@ -108,8 +108,71 @@ func TestHookProvisionSSHCommandPinsVerification(t *testing.T) {
 	assert.Contains(t, cmd, "KnownHostsCommand=none",
 		"ssh_config KnownHostsCommand is consulted IN ADDITION to both files, so an operator's Host block "+
 			"could otherwise supply a key and satisfy verification without our pin deciding anything")
+	assert.Contains(t, cmd, "RemoteCommand=none",
+		"the transport always passes its own remote script via \"$@\" in buildRunCommand, so a config "+
+			"RemoteCommand makes ssh refuse outright: \"Cannot execute command-line and remote command.\" "+
+			"— every provision step AND the live-teardown sandbox sub-reap would fail")
 	assert.Contains(t, cmd, "-p 2222")
 	assert.Contains(t, cmd, "'af@10.0.0.7'")
+}
+
+// EVERY -o option hookProvisionSSHCommand emits, so a new one cannot be added
+// without a reviewer pricing its version cost — the same guard
+// TestSSHCommandEmitsOnlyLongEstablishedOptions holds for backend=ssh.
+//
+// backend=ssh takes the reduction `-F none`, so its allowlist is belt-and-braces;
+// THIS command deliberately reads the operator's ssh_config, so per-directive
+// pinning is the only instrument and the allowlist is the guardrail against the
+// "false on the next release" rot ssh_command.go warns about (OpenSSH adds
+// keywords across releases, and a pin is a promise to have thought of all of
+// them). It fails on an addition OR a removal: an addition is an unpriced version
+// floor, and a removal is a lost guarantee — e.g. the RemoteCommand=none pin this
+// test was added alongside.
+func TestHookProvisionSSHCommandEmitsOnlyKnownOptions(t *testing.T) {
+	// Options the command may emit, each with the OpenSSH release that introduced
+	// it. The binding floor is OpenSSH 8.5 — KnownHostsCommand (8.5, 2021) sets it,
+	// and every other option predates that, so none of them adds version cost.
+	allowed := map[string]string{
+		"UserKnownHostsFile":    "1.2",
+		"GlobalKnownHostsFile":  "1.2",
+		"KnownHostsCommand":     "8.5",
+		"RemoteCommand":         "7.6",
+		"StrictHostKeyChecking": "1.2",
+		"BatchMode":             "1.2",
+	}
+
+	// BOTH shapes: a full record emits `-p` and `user@host`; a minimal one emits
+	// neither. The -o set is the same either way, and exercising both keeps the
+	// allowlist honest against a future option gated on the port or user branch.
+	records := []*hookProvisionRecord{
+		{Host: "10.0.0.7", User: "af", Port: 2222, HostKey: provisionKey},
+		{Host: "h.invalid", HostKey: provisionKey},
+	}
+	for _, rec := range records {
+		cmd := hookProvisionSSHCommand("/af/known_hosts", rec)
+		emitted := map[string]bool{}
+		fields := strings.Fields(cmd)
+		for i, f := range fields {
+			if f != "-o" || i+1 >= len(fields) {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.Trim(fields[i+1], "'"), "=")
+			emitted[name] = true
+			_, ok := allowed[name]
+			assert.True(t, ok,
+				"hookProvisionSSHCommand emits -o %s=…, which is not in the priced allowlist. Every option costs "+
+					"a MINIMUM OpenSSH VERSION: `KnownHostsCommand` (8.5) already sets the binding floor, and an "+
+					"unrecognised -o aborts option parsing rather than warning (#3092). Add it here with the "+
+					"release that introduced it, or drop it.", name)
+		}
+		// The reverse direction: every priced option must actually be emitted, or a
+		// pin silently went missing — the failure mode this test exists to catch.
+		for name := range allowed {
+			assert.True(t, emitted[name],
+				"hookProvisionSSHCommand no longer emits -o %s=…, which is in the allowlist. A removal is a lost "+
+					"guarantee, not a cleanup — re-add it or update the allowlist with the reason.", name)
+		}
+	}
 }
 
 // No user and no port is the common case and must not emit empty flags.

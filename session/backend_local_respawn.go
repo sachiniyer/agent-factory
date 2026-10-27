@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -54,10 +55,88 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			if recovery.AlternatePath != "" {
 				location += " and " + recovery.AlternatePath
 			}
-			return fmt.Errorf(
-				"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
-				i.Title, recovery.State, location,
-			)
+			// A durable record says an interrupted relocation left this
+			// worktree's directory identity unestablished. Single-candidate
+			// records (claim_stale or stalled with no alternate) provably owe
+			// no repair: the claim they preserve was either record-free or
+			// resolved to the recorded primary, and a move start writes its
+			// own move_unknown record before any bytes relocate — so identity
+			// confirmation is the only thing left to establish. Resolve
+			// those here through the bounded claim machinery rather than
+			// stranding the session until some unrelated archive/restore
+			// claims the record (#5295). Two-candidate records (a timed-out
+			// move) can additionally owe `git worktree repair` and submodule
+			// gitdir repair — that repair belongs to the relocation-capable
+			// consumers, not a respawn, so they keep the refusal below.
+			resolvable := recovery.AlternatePath == "" &&
+				(recovery.State == git.RelocationRecoveryClaimStale ||
+					recovery.State == git.RelocationRecoveryStalled)
+			if !resolvable {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
+			// Keep the record about to be consumed: if the settle-persist
+			// below fails, the durable file still carries it and the next
+			// retry must re-enter this checkpoint rather than spawn ahead of
+			// the durable clear — re-arm it on that path.
+			consumedRecovery := recovery
+			// Every probe inside is deadline-bounded, so a still-stalled
+			// filesystem fails without wedging this goroutine, and a record
+			// that cannot be established keeps its durable evidence and
+			// still refuses.
+			claim, claimErr := i.ClaimWorktreeRelocationForRetry()
+			if claimErr != nil {
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s: %w",
+					i.Title, recovery.State, location, claimErr,
+				)
+			}
+			if err := i.SettleWorktreeRelocationClaim(claim); err != nil {
+				return fmt.Errorf(
+					"recover: session %q resolved worktree recovery at %s but could not settle its identity: %w",
+					i.Title, claim.Path, err,
+				)
+			}
+			// Re-snapshot: a concurrent operation may have installed a fresh
+			// record the next retry must resolve.
+			workDir, recovery, unresolved = gw.RelocationSnapshot()
+			if unresolved {
+				location = workDir
+				if recovery.AlternatePath != "" {
+					location += " and " + recovery.AlternatePath
+				}
+				return fmt.Errorf(
+					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+					i.Title, recovery.State, location,
+				)
+			}
+			// The settle cleared the record in memory only. Make it durable
+			// BEFORE the spawn proceeds: a daemon exit in this window would
+			// otherwise restart onto the stale record, reload inert, and
+			// strand the automatic recovery this settle just enabled (#5295
+			// review). The daemon installs the persist callback at its
+			// recover/respawn entry points; a write failure fails the attempt
+			// so the spawn never runs ahead of the durable clear.
+			if notify := i.relocationSettleNotifyFn(); notify != nil {
+				if perr := notify(i); perr != nil {
+					// The persist failed, so the durable file still carries
+					// the record the settle just consumed in memory. Re-arm
+					// it: without this, the next retry sees unresolved ==
+					// false, skips the checkpoint entirely, and spawns ahead
+					// of the durable clear — the same settle→exit window this
+					// notify exists to close (#5295 review).
+					if rerr := gw.RestoreRelocationRecovery(consumedRecovery); rerr != nil {
+						perr = errors.Join(perr, fmt.Errorf(
+							"re-arming the relocation record for the next retry: %w", rerr))
+					}
+					return fmt.Errorf(
+						"recover: session %q resolved worktree recovery at %s but the cleared record is not yet durable: %w",
+						i.Title, location, perr,
+					)
+				}
+			}
 		}
 	}
 	if workDir == "" {
@@ -85,7 +164,53 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// durable workspace state (and a fresh rebuild recreates the branch) — so
 	// the later error returns carry RecoverRebuiltWorkspaceError (#3236).
 	rebuilt := false
-	if _, err := os.Stat(workDir); err != nil {
+	// A row flagged worktree-missing recorded that the directory af tracked at
+	// workDir is gone (#5102). Something existing there now is unverified by
+	// default — a mkdir, an unrelated checkout, a stranger moved in after the
+	// adopted worktree vanished — and starting the agent in it would hand its
+	// files to the agent. It re-qualifies only on git's own proof that it is this
+	// session's checkout (ProveRecordedWorktree: registered on the session's
+	// branch, its back-binding pointing into this repo, identity pinned). That is
+	// what an earlier attempt of THIS respawn leaves behind when it rebuilt the
+	// worktree and then failed before its pane started (an environment refresh,
+	// a tmux start): without the proof, af's own rebuild would be refused on
+	// every later retry and the row stranded. It is also what the user putting
+	// the checkout back leaves. Anything else is refused. An absent workDir falls
+	// through to the rebuild below. Either way the flag clears only once a fresh
+	// pane starts in the directory.
+	i.mu.RLock()
+	worktreeMissing := i.worktreeMissing
+	i.mu.RUnlock()
+	provedPresent := false
+	if worktreeMissing {
+		if _, err := os.Lstat(workDir); err == nil {
+			if gw == nil {
+				return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+					Err: fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified")}
+			}
+			if proveErr := gw.ProveRecordedWorktree(); proveErr != nil {
+				return &WorktreeUnavailableError{
+					Title:        i.Title,
+					WorktreePath: workDir,
+					Err:          fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified — git does not prove it is the session's checkout (%v); refusing to start the agent in it — inspect it, remove it or move it aside, then retry", proveErr),
+				}
+			}
+			provedPresent = true
+			log.InfoLog.Printf("recover: session %q: the directory at %s is the session's own checkout of branch %s (git registration and back-binding); starting in it", i.Title, workDir, gw.GetBranchName())
+		} else if !os.IsNotExist(err) {
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		}
+	}
+	if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+		if err == nil {
+			// A non-directory squats on the worktree path — a file, device,
+			// socket, anything af did not create. Rebuild cannot repair it
+			// without deleting foreign data, and the tmux spawn seam refuses
+			// it outright (#5172), so fail fast with the cause named rather
+			// than retrying into the same refusal until give-up.
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+				Err: fmt.Errorf("worktree path exists but is not a directory")}
+		}
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
 			// a deleted worktree is the expected permanent-failure shape, and the
@@ -97,10 +222,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				// The fresh-rebuild fallback below is an EXACT-RESUME command, which
 				// is the one thing this path must not launch. Refuse instead: the
 				// swap's caller stops the replacement and retries the whole boundary.
+				// rebuildErr stays wrapped: its errno is what lets the restore
+				// loop tell a still-full disk from a session defect (#5295 review).
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %w)", err, rebuildErr),
 				}
 			}
 			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
@@ -108,7 +235,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild requires a recorded conversation id for the resolved agent)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild requires a recorded conversation id for the resolved agent)",
 						err, rebuildErr),
 				}
 			}
@@ -116,7 +243,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild from recorded base failed: %v)",
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild from recorded base failed: %w)",
 						err, rebuildErr, freshErr),
 				}
 			}
@@ -144,6 +271,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// rather than leave a replacement agent running with no siblings.
 	restoreResult := tmux.RestoreRespawned
 	var err error
+	if provedPresent {
+		// The proof ran before the environment refresh; the agent must start in
+		// the directory it proved, not one swapped in since. A failure has
+		// installed the git layer's fence, which every later attempt honors.
+		if err := gw.ReconfirmAdoptedWorktree(); err != nil {
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		}
+	}
 	if resume {
 		restoreResult, err = ts.RestoreWithResult(workDir)
 	} else {
@@ -151,16 +286,26 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	}
 	if err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	if restoreResult == tmux.RestoreRespawned {
-		i.setRuntimeProgram(declarationBase)
+		i.setRuntimeLaunch(declarationBase, ts)
+		// af just recreated the missing worktree AND started a fresh agent pane
+		// in it, which is the one event that makes a worktree-missing row
+		// deliverable again (#5102). Both halves matter: a pathname reappearing
+		// on its own leaves an old pane cwd'd in the unlinked inode, and a rebuild
+		// followed by a reattach to that old pane does too.
+		if rebuilt || provedPresent {
+			i.ClearWorktreeMissing()
+		}
 	} else {
-		// Restore established only that the persisted tmux name exists. A session
-		// recreated under that name is not proof of the command AF last launched.
-		i.clearRuntimeProgramForUnverifiedReattach()
+		// Restore established only that the persisted tmux name exists. The pane
+		// root's recorded (pid, start-time) identity decides whether it still
+		// names the launch AF recorded — a match keeps the claim, anything else
+		// retires it.
+		i.clearRuntimeProgramForUnverifiedReattach(ts)
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

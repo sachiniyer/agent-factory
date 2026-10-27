@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -88,15 +89,15 @@ func newWebListeners(manager *Manager, webMux, previewMux http.Handler) *webList
 }
 
 // reconcile brings the two socket listeners in line with newCfg, rebinding only
-// the one whose CONFIG address changed (bind-new-before-close). It never touches
-// the auth/CORS posture — that is live-read per request. It returns the socket keys
-// whose rebind FAILED (the current listener is left serving for each) and the
-// joined error naming each address and reason, so a save surface can report the
-// change as deferred rather than silently dropping it.
+// the one whose CONFIG address changed (bind-new-before-close, with a
+// release-then-bind fallback for the same-port overlap shape of #5140). It never
+// touches the auth/CORS posture — that is live-read per request. It returns the
+// socket keys whose rebind FAILED (the current listener is left serving for each)
+// and the joined error naming each address and reason, so a save surface can
+// report the change as deferred rather than silently dropping it.
 func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err error) {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
-	var errs []error
 	// A handle retained after unexpected listener death outlives the empty
 	// binding sentinel. Disabling that listener must still enter bindWebLocked's
 	// teardown path so accepted connections do not survive reconciliation.
@@ -115,21 +116,53 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 		}
 		return wl.manager.lifecycle.snapshot().listeners
 	}()
+	var webErr, previewErr error
 	if newCfg.ListenAddr != wl.webConfigAddr ||
 		(newCfg.ListenAddr == "" && wl.webHandle != nil) ||
 		(newCfg.ListenAddr == "" && lcfg.TCPConfigured) {
-		if e := wl.bindWebLocked(newCfg.ListenAddr); e != nil {
-			errs = append(errs, e)
-			failed = append(failed, "network.listen_addr")
-		}
+		webErr = wl.bindWebLocked(newCfg.ListenAddr)
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
 		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) ||
 		(newCfg.PreviewListenAddr == "" && lcfg.PreviewConfigured) {
-		if e := wl.bindPreviewLocked(newCfg.PreviewListenAddr); e != nil {
-			errs = append(errs, e)
-			failed = append(failed, "network.preview_listen_addr")
+		previewErr = wl.bindPreviewLocked(newCfg.PreviewListenAddr)
+	}
+	// A bind the gate declined for SIBLING overlap was decided against the
+	// sibling's OLD bound address — and this same apply may have just moved or
+	// torn the sibling down. Retry each declined bind once now that both steps
+	// have run: a sibling that left the port frees the blocker entirely.
+	//
+	// The exception is the TWO-WAY swap: when BOTH binds came back
+	// sibling-declined, each request names the address the other listener is
+	// holding, so no single release frees a port and plain retries repeat the
+	// same conflict forever. If the two requests can coexist — the swap shape —
+	// retire both listeners and bind each in turn; a bind that still fails
+	// rolls that listener back to the address it just left, the same rollback
+	// the single-listener release path runs. When the requests OVERLAP each
+	// other (both sides asked for the same wildcard, say) the mutual decline is
+	// not a swap at all — releasing both would strand one listener — so the
+	// errors stand and both changes report deferred with both handles intact.
+	var sb siblingBlockedError
+	webSB := errors.As(webErr, &sb)
+	previewSB := errors.As(previewErr, &sb)
+	if webSB && previewSB && listenRequestsCoexist(listenErrAddr(webErr, newCfg.ListenAddr), listenErrAddr(previewErr, newCfg.PreviewListenAddr)) {
+		webErr, previewErr = wl.swapWebPreviewLocked(newCfg)
+	} else {
+		if webSB {
+			webErr = wl.bindWebLocked(newCfg.ListenAddr)
 		}
+		if previewSB {
+			previewErr = wl.bindPreviewLocked(newCfg.PreviewListenAddr)
+		}
+	}
+	var errs []error
+	if webErr != nil {
+		errs = append(errs, webErr)
+		failed = append(failed, "network.listen_addr")
+	}
+	if previewErr != nil {
+		errs = append(errs, previewErr)
+		failed = append(failed, "network.preview_listen_addr")
 	}
 	return failed, errors.Join(errs...)
 }
@@ -142,7 +175,15 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 // unbindable host, permission denied on a low port — the OLD listener is left
 // serving and an actionable error naming the address and reason is returned. A
 // failed rebind must never leave the daemon unreachable through the very API an
-// operator would use to fix the address. Caller holds wl.mu.
+// operator would use to fix the address.
+//
+// One shape is exempt from bind-first because it CANNOT work (#5140): a move that
+// keeps the PORT while the two binds overlap — a wildcard owns every address on
+// its port, so narrowing 0.0.0.0:P to a specific :P or widening one back out has
+// the new bind meet the old listener still holding that port and fail EADDRINUSE
+// no matter how many times it retries. That pair takes the inverse order in
+// rebindWebSamePortLocked: release, bind, roll back on failure.
+// Caller holds wl.mu.
 func (wl *webListeners) bindWebLocked(addr string) error {
 	if addr == "" {
 		if wl.webHandle != nil {
@@ -197,15 +238,63 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// network.require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
-	handle, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
+	handle, info, err := wl.webBind(addr)
+	if err != nil {
+		// The #5140 shape: the new bind failed EADDRINUSE on an address the
+		// listener we already hold could be blocking — same port AND the two
+		// binds overlap (a wildcard owns every address on its port, or the
+		// spellings resolve to the same address). Only then is release-then-bind
+		// worth the gap it buys: a different-port failure is never the old
+		// listener's doing, and a same-port failure on a DISTINCT address —
+		// 127.0.0.1:P → 127.0.0.2:P while a third party owns the latter — is a
+		// pair that could have coexisted, so releasing would bounce a healthy
+		// listener for a conflict it did not cause. The comparison runs on
+		// webBoundAddr — the RESOLVED address — so a ":0" config measures
+		// against the port the kernel actually chose.
+		//
+		// The SIBLING is checked independently: a request overlapping the
+		// preview listener's bound address cannot be fixed by releasing ours —
+		// whether or not ours overlaps too — but this same apply may move or
+		// tear the sibling down, so it is marked for reconcile's one retry
+		// rather than settled here.
+		if errors.Is(err, syscall.EADDRINUSE) {
+			req := listenErrAddr(err, addr)
+			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
+				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
+			}
+			if wl.webHandle != nil && boundListenerBlocks(wl.webBoundAddr, req) {
+				return wl.rebindWebSamePortLocked(addr, policy, notice)
+			}
+		}
+		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
+	}
+	wl.adoptWebListenerLocked(addr, handle, info)
+	wl.announceWebListenerLocked(addr, info, policy, notice)
+	return nil
+}
+
+// webBind is the control listener's raw bind: one startTCPListenerWithListen
+// on the web mux under the current config, policy and live posture. Hoisted
+// out of bindWebLocked so the swap path's rollback can re-bind a released
+// listener without re-running the whole gate. Caller holds wl.mu.
+func (wl *webListeners) webBind(bindAddr string) (*tcpListenerHandle, tcpListenerInfo, error) {
+	cfg := wl.manager.Config()
+	return startTCPListenerWithListen(wl.webMux, bindAddr, cfg, webListenerPolicy(cfg), withWebShell, nil,
 		&livePosture{
 			snapshot:         wl.manager.Config,
 			policyFromConfig: true,
 			sandboxTokens:    &wl.manager.sandboxTokens,
 		}, wl.listenTCP)
-	if err != nil {
-		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
-	}
+}
+
+// adoptWebListenerLocked installs a freshly bound listener as THE control-plane
+// listener: swaps it into the owner, advances the generation, updates the
+// lifecycle bound state, starts the done-watcher, and retires the superseded
+// listener when one is still held. It never revokes sandbox credentials or logs
+// the banner — announceWebListenerLocked owns that half — so a rollback onto
+// the previous address can adopt without declaring a move that never happened.
+// Caller holds wl.mu.
+func (wl *webListeners) adoptWebListenerLocked(addr string, handle *tcpListenerHandle, info tcpListenerInfo) {
 	// New listener is live. Swap it in, update lifecycle to the new address, THEN
 	// close the old — never before, or a same-host client races an unreachable gap.
 	old := wl.webHandle
@@ -273,6 +362,16 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// for the very handler that is calling us.
 		old.retire()
 	}
+}
+
+// announceWebListenerLocked is the second half of a successful control-plane
+// bind: every sandbox callback credential minted against the previous listener
+// points at a closed address now, so they are revoked — and the enable banner
+// with the bound address, bearer token, and posture notice is logged. A rollback
+// onto the previous address does NOT call it: the listener ended where it
+// started, so nothing minted against it moved, and the banner would claim a
+// move that never happened. Caller holds wl.mu.
+func (wl *webListeners) announceWebListenerLocked(addr string, info tcpListenerInfo, policy tokenGatePolicy, notice string) {
 	// The listener moved, so every sandbox callback credential minted against the
 	// old one now points at a closed address (#3012 review). Each sandbox has the
 	// URL baked into the environment file written at provision time and nothing
@@ -306,11 +405,11 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	default:
 		log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set network.require_token=false only on a fully trusted network)")
 	}
-	return nil
 }
 
 // bindPreviewLocked is bindWebLocked for the web-tab preview listener: same
-// bind-new-before-close discipline, its own mux (previewMux), its own per-tab
+// bind-new-before-close discipline (and the same #5140 release-then-bind escape
+// for a same-port overlap), its own mux (previewMux), its own per-tab
 // credential (previewOriginAuth), its own always-strict gate posture, and the
 // previewOrigin posture — a forced-empty CORS allow-list (the cross-tab read
 // isolation #1856 rests on), no control-plane path/method shortcuts, and framed
@@ -344,14 +443,44 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 		return nil
 	}
 	cfg := wl.manager.Config()
-	policy := previewListenerPolicy(cfg)
 	notice := config.PreviewListenerExposureNotice(cfg)
-	handle, info, err := startTCPListenerWithListen(wl.previewMux, addr, cfg, policy, previewShell, previewOriginAuth(wl.manager),
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true,
-			previewWarmingUp: func() bool { return !wl.manager.Ready() }}, wl.listenTCP)
+	handle, info, err := wl.previewBind(addr)
 	if err != nil {
+		// Same #5140 gate as the control listener, symmetric in both directions:
+		// a request overlapping the CONTROL listener's bound address is marked
+		// for reconcile's post-sibling retry whether or not ours overlaps too,
+		// and release-then-bind runs only when the conflict could be ours alone.
+		if errors.Is(err, syscall.EADDRINUSE) {
+			req := listenErrAddr(err, addr)
+			if wl.webBoundAddr != "" && boundListenerBlocks(wl.webBoundAddr, req) {
+				return siblingBlockedError{fmt.Errorf("apply network.preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))}
+			}
+			if wl.previewHandle != nil && boundListenerBlocks(wl.previewBoundAddr, req) {
+				return wl.rebindPreviewSamePortLocked(addr, notice)
+			}
+		}
 		return fmt.Errorf("apply network.preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
+	wl.adoptPreviewListenerLocked(addr, handle, info)
+	announcePreviewListenerLocked(info.Addr, notice)
+	return nil
+}
+
+// previewBind is webBind for the preview listener: one
+// startTCPListenerWithListen on the preview mux under the current config —
+// previewOrigin posture and per-tab credential included. Caller holds wl.mu.
+func (wl *webListeners) previewBind(bindAddr string) (*tcpListenerHandle, tcpListenerInfo, error) {
+	cfg := wl.manager.Config()
+	return startTCPListenerWithListen(wl.previewMux, bindAddr, cfg, previewListenerPolicy(cfg), previewShell, previewOriginAuth(wl.manager),
+		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true,
+			previewWarmingUp: func() bool { return !wl.manager.Ready() }}, wl.listenTCP)
+}
+
+// adoptPreviewListenerLocked is adoptWebListenerLocked for the preview
+// listener: swap the handle and addresses in, advance the generation, update
+// the lifecycle bound state, start the done-watcher, and retire the superseded
+// listener when one is still held. Caller holds wl.mu.
+func (wl *webListeners) adoptPreviewListenerLocked(addr string, handle *tcpListenerHandle, info tcpListenerInfo) {
 	old := wl.previewHandle
 	wl.previewHandle = handle
 	wl.previewConfigAddr = addr
@@ -390,11 +519,16 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 		// whichever path is the exception is the one a later change reasons from.
 		old.retire()
 	}
-	log.InfoLog.Printf("%s", previewOriginBanner(info.Addr))
+}
+
+// announcePreviewListenerLocked logs the preview listener's bind banner — the
+// per-tab origin notice, plus the exposure warning when configured. Skipped on
+// a rollback, like the control listener's announce: nothing moved.
+func announcePreviewListenerLocked(boundAddr string, notice string) {
+	log.InfoLog.Printf("%s", previewOriginBanner(boundAddr))
 	if notice != "" {
 		log.WarningLog.Printf("%s", notice)
 	}
-	return nil
 }
 
 // previewConfigAddress returns the CONFIG address that produced the preview listener

@@ -336,7 +336,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	done := make(chan struct{})
-	h := &tcpListenerHandle{srv: srv, addr: listener.Addr().String()}
+	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String()}
 	go func() {
 		defer close(done)
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -396,6 +396,20 @@ var listenerRetireGrace = 2 * time.Second
 //     would deadlock it against itself.
 type tcpListenerHandle struct {
 	srv *http.Server
+	// ln is the socket srv serves, kept so the teardowns below can close it
+	// THEMSELVES. http.Server closes only the listeners its Serve goroutine has
+	// already registered (trackListener) — and Serve is spawned, not started, at
+	// bind time, so a retire/close that lands before the goroutine is scheduled
+	// frees nothing: the socket stays bound until Serve runs and its own
+	// deferred close fires. That is a scheduling delay, not a bound — on a
+	// loaded macOS runner it outlasted two bind attempts, so a same-port move's
+	// post-release bind met the socket retire() had supposedly freed, and the
+	// rollback met it too (#5140 darwin). close()/retire() therefore close ln
+	// directly, on the caller's goroutine — the guarantee the release path of
+	// listener_rebind.go stands on. Double-closing is safe: Serve wraps the
+	// socket in onceCloseListener and a second Close on the raw listener is a
+	// reported-then-ignored error.
+	ln net.Listener
 	// addr is the resolved bound address, snapshotted at bind: it is read for the
 	// deadline warning after the listener has been closed.
 	addr string
@@ -423,7 +437,16 @@ func (h *tcpListenerHandle) close() error {
 	// Set before Close so the Serve watcher can distinguish our teardown from
 	// an underlying listener failure even when Serve returns immediately.
 	h.closeRequested.Store(true)
-	return h.srv.Close()
+	err := h.srv.Close()
+	// srv.Close reaches only listeners the spawned Serve goroutine has already
+	// registered; a not-yet-scheduled Serve leaves the socket bound until its
+	// deferred close runs (the ln field comment). Close it on THIS goroutine —
+	// ordering after the srv call so an Accept woken by the close sees
+	// inShutdown and returns ErrServerClosed rather than a raw accept error.
+	if h.ln != nil {
+		_ = h.ln.Close()
+	}
+	return err
 }
 
 // retire stops accepting now and drains what is already in flight off the
@@ -449,6 +472,16 @@ func (h *tcpListenerHandle) retire() {
 		expired, cancel := context.WithDeadline(context.Background(), time.Now())
 		_ = h.srv.Shutdown(expired)
 		cancel()
+		// Shutdown closes only listeners the spawned Serve goroutine has already
+		// registered, so a retire landing before Serve is scheduled would leave
+		// the port bound for a scheduling delay the caller cannot see (the ln
+		// field comment). Close the socket HERE so the port is free when retire
+		// returns — the bound the same-port release path stands on. Ordering is
+		// after Shutdown for the same reason as in close(): inShutdown is already
+		// set, so a woken Accept returns ErrServerClosed, not a raw error.
+		if h.ln != nil {
+			_ = h.ln.Close()
+		}
 		// The grace is captured BEFORE the goroutine starts — the rule
 		// boundedRecordRootAbsent already states in deleteproject_target.go.
 		// Reading the package var inside the goroutine races a test that swaps it,

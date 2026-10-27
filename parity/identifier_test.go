@@ -56,6 +56,7 @@ var tabKindsUnderAudit = []struct {
 	{session.TabKindProcess, "build"},
 	{session.TabKindWeb, "docs"},
 	{session.TabKindVSCode, "editor"},
+	{session.TabKindDocs, "proposal"},
 }
 
 // TestLabelIsNeverAnAcceptedIdentifier is the #1986 invariant: the name is the

@@ -123,6 +123,26 @@ func rootAgentReadValue(projectSelector, keyPath string, strictProjectLookup boo
 		}
 		return projected, nil
 	}
+	// An ignored-global table (markRootAgentGlobalIneligible) marks the present
+	// global [root_agent] row Allowed:false to encode the registry cause
+	// ("project is not registered and has no legacy root_agents entry"). The
+	// generic ResolvedValuePath projector relabels every Allowed:false
+	// candidate as "disallowed · manifest policy does not allow this key at
+	// this source" — a factually false claim here, since the root_agent
+	// manifest entry DOES admit the global layer — which clobbers the true
+	// cause and contradicts the full-table `root_agent --explain` trace
+	// (the very "confidently wrong trace" this surface exists to prevent). The
+	// fail-closed shape already routes around that relabeling via
+	// ProjectFailClosedRootAgentLeaf (the #3264 / #3305 precedent); the
+	// ignored-global shape has the same claim on its own cause-preserving
+	// projector so the dotted read cannot disagree with its full-table sibling.
+	if config.RootAgentValueHasIgnoredGlobal(parent) {
+		projected, ok := config.ProjectIgnoredGlobalRootAgentLeaf(parent, keyPath)
+		if !ok {
+			return config.ResolvedValue{}, unknownConfigKeyError(keyPath)
+		}
+		return projected, nil
+	}
 	synthetic := &config.ResolvedConfig{Resolution: []config.ResolvedValue{parent}}
 	projected, ok := synthetic.ResolvedValuePath(keyPath)
 	if !ok {

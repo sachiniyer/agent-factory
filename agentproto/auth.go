@@ -153,10 +153,13 @@ func redactAccessTokenComponents(u *url.URL) {
 		// TOP:SECRET) or to the closing ']' of a bracketed IP-literal, and the
 		// port survives the redacted value in both shapes. Re-encoding does
 		// not touch the ASCII ":<port>" suffix, so TrimSuffix removes exactly
-		// it. A bracketed authority a parser hands this branch cannot itself
-		// carry 'access_token=' — url.Parse validates the bracket as an
-		// IP-literal, which admits no '=' — so the ']' terminator is the
-		// defensive boundary for the overlap shape.
+		// it. A bracketed authority carrying 'access_token=' reaches this
+		// branch wherever net/url accepts the bracket: the strict IP-literal
+		// host validation that rejects '=' inside one landed in go1.25.2,
+		// after the go.mod floor (go1.25.0) — so on the floor the ']'
+		// terminator is the load-bearing boundary for the overlap shape, and
+		// on newer patches it is the defensive one behind the fail-closed
+		// parse rejection.
 		hostSegment := escapedHost
 		port := u.Port()
 		if port != "" {
