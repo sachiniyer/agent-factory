@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, workflowState, combineVerification, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
+const { selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, workflowState, combineVerification, MASTER_WORKFLOWS, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
 
 const run = (name, conclusion = 'SUCCESS', status = 'COMPLETED') => ({ __typename: 'CheckRun', name, status, conclusion });
 const green = [run('Build'), run('Lint'), run('Test', 'FAILURE')];
@@ -137,7 +137,7 @@ async function runWith(runs, files = { 1: ['a.go'], 2: ['a.go'] }, mutate) {
 test('verified head (both success) merges', async () => {
   const { github } = await runWith({});
   assert.deepEqual(github.merged, [1, 2]);
-  assert.deepEqual(github_runs.dispatched.filter((w) => w !== 'build.yml' && w !== 'lint.yml'), ['docs.yml', 'tui-driver-selftest.yml', 'web-selftest.yml']);
+  assert.deepEqual(github_runs.dispatched.filter((w) => w !== 'build.yml' && w !== 'lint.yml'), ['docs.yml', 'pr.yml', 'tui-driver-selftest.yml', 'web-selftest.yml']);
 });
 
 test('a failed Build or Lint on the head halts merging', async () => {
@@ -177,4 +177,12 @@ test('only a batch of AUTO_MERGE_BATCH_SIZE PRs merges per verified head', async
     const { github } = await runWith({});
     assert.deepEqual(github.merged, [1]);
   } finally { delete process.env.AUTO_MERGE_BATCH_SIZE; }
+});
+
+test('post-merge dispatch list includes pr.yml (master-only heavy jobs, #5674)', async () => {
+  assert.ok(MASTER_WORKFLOWS.includes('pr.yml'));
+  await runWith({});
+  assert.ok(github_runs.dispatched.includes('pr.yml'));
+  // pr.yml is dispatched with no inputs, so probe mode (workflow_dispatch input) stays off
+  assert.equal(new Set(github_runs.dispatched).size, github_runs.dispatched.length);
 });

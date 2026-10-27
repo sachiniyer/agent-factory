@@ -19,6 +19,9 @@ const MASTER_WORKFLOWS = [
   "build.yml",
   "docs.yml",
   "lint.yml",
+  // Since slim PR CI (#5615) the heavy jobs (macOS, systemd, perf) run only on
+  // master's pr.yml, and a GITHUB_TOKEN merge fires no push to run them (#5674).
+  "pr.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];
