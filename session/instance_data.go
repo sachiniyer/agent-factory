@@ -73,7 +73,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// Project the per-kind tab verdict rather than leaving clients to infer one
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
-		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
+		data.TabKinds = tabKindAllowances(i.capabilitiesLocked())
 		// NOT Capabilities.TabManagement any more. tabMutationTarget dropped that gate
 		// when the first off-box tab was admitted (#3062), so projecting it would tell
 		// clients to hide close/rename/reorder for tabs the daemon now accepts —

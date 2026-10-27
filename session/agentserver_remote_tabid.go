@@ -33,7 +33,7 @@ func (s *remoteAgentServer) idNative() bool {
 	}
 	native = slices.Contains(h.Features, tabIDAddressingFeature)
 	s.mu.Lock()
-	s.idPlaneKnown, s.idPlane = true, native
+	s.idPlaneKnown, s.idPlane, s.features = true, native, h.Features
 	s.mu.Unlock()
 	return native
 }

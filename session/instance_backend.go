@@ -909,7 +909,15 @@ func (i *Instance) capabilitiesLocked() Capabilities {
 	if i.backend == nil {
 		return (&LocalBackend{}).Capabilities()
 	}
-	return i.backend.Capabilities()
+	caps := i.backend.Capabilities()
+	// A sandbox whose agent-server advertises the tab API serves shell and
+	// process tabs off-box (#5571 W4.5): the static backend declaration is the
+	// floor, the cached advertisement lifts it. Cache read only — no network
+	// under i.mu.
+	if caps.Workspace == WorkspaceRemote && i.offBoxTabAPILocked() {
+		caps.TabManagement = true
+	}
+	return caps
 }
 
 // GetBackend returns the backend for the instance (mainly for testing).

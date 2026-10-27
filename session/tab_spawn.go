@@ -80,6 +80,9 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // roster dedupe could never undo. adoptOnSpawnFailure is the roster recheck
 // applied when OUR spawn is the one that failed.
 func (i *Instance) AddShellTabWithID(id string) (resultTab *Tab, resultErr error) {
+	if i.offBoxTabAPI() {
+		return i.addOffBoxTab(id, TabKindShell, "", "")
+	}
 	// One write-lock section covers the id check, the in-flight id claim, the
 	// roster reads, AND the tmux-name claim: a concurrent create derives its
 	// tmux name off the same roster, so claiming while we derive is what keeps
@@ -270,6 +273,10 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (resultTab *Tab, resultErr error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("a process tab requires a non-empty command")
+	}
+
+	if i.offBoxTabAPI() {
+		return i.addOffBoxTab(id, TabKindProcess, command, requestedName)
 	}
 
 	// One write-lock section covers the id check, the in-flight id claim, the

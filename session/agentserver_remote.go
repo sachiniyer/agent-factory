@@ -78,6 +78,7 @@ type remoteAgentServer struct {
 	idBrokers    map[string]*ptyBroker
 	idPlaneKnown bool
 	idPlane      bool
+	features     []string
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
 	// cannot lazily resurrect a broker (and dial a fresh WS to a torn-down sandbox
 	// that never gets closed) — the local runtime's #1632 guard, same reasoning.
@@ -133,11 +134,19 @@ func (s *remoteAgentServer) noteAdoption() error {
 }
 
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	err := s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	if err == nil {
+		s.idNative() // warm the feature advertisement (#5571 W4.5)
+	}
+	return err
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	err := s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	if err == nil {
+		s.idNative() // warm the feature advertisement (#5571 W4.5)
+	}
+	return err
 }
 
 func (s *remoteAgentServer) Expose() (StreamEndpoint, error) {
