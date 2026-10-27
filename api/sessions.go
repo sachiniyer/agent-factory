@@ -165,9 +165,17 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			// rows); the destructive paths already resolve through findSession.
 			var notice string
 			if !apiclient.IsRemoteTarget() {
-				extra, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
-				if err == nil && len(extra) > 1 {
-					return nil, "", session.AmbiguousTitleError(title, extra)
+				// Count distinct PROJECTS by repoID (the storage map key,
+				// never empty), not by Path: the snapshot carries no repoID,
+				// so its primary check above keys on Path and DedupeSorted
+				// drops an empty-Path row, collapsing two distinct repos to
+				// zero and silently returning one of them. The widening
+				// reads the repoID-keyed storage map and so recovers what the
+				// snapshot dropped. The error message keeps the
+				// human-readable repo Paths the user passes to --repo.
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
+				if err == nil && len(repoIDs) > 1 {
+					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
 				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
@@ -759,6 +767,28 @@ var sessionsAttachCmd = &cobra.Command{
 		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// Apply the configured detach key BEFORE the attach dials. `af sessions
+		// attach` recognizes the detach key CLIENT-side in this process —
+		// apiclient's stdin pump matches tmux.DetachKeyByte live (see
+		// apiclient/trailingDetachKeyLen) — so the global must be armed from
+		// the user's config here, exactly what the TUI does at startup
+		// (app's newHome). Without this, the matcher ran with the hardcoded
+		// default ctrl+w regardless of detach_keys, so a user who customized
+		// the key could not detach with it (ctrl+w tore them out instead),
+		// even though this command's Long help promises "the configured detach
+		// key". config.ApplyConfiguredDetachKey is the shared wiring site so
+		// the CLI and TUI paths cannot drift apart again.
+		//
+		// A config load failure is warned, not fatal: attach only needs the
+		// detach key from config, and the global already defaults to ctrl+w,
+		// so the user can still attach (with the documented default detach)
+		// while a broken config is surfaced rather than silently ignored.
+		if appConfig, cfgErr := config.LoadConfig(); cfgErr != nil {
+			log.WarningLog.Printf("failed to load config for detach key: %v; using default detach key", cfgErr)
+		} else {
+			config.ApplyConfiguredDetachKey(appConfig.DetachKeys)
 		}
 
 		// EVERY session — local or remote — attaches CLIENT-side over the daemon's

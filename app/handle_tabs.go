@@ -66,6 +66,16 @@ func tabPickerRefusal(selected *session.Instance) error {
 // while the modal owns the keyboard and may replace the instance pointer or
 // reuse its display title.
 func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
+	// Gated on workspace focus, exactly as the rename prompt and the
+	// jump-to-tab prompt are (#3067): t is routed through the global key map,
+	// so without this gate it would open the new-tab picker targeting the
+	// sidebar cursor's row — a session whose row the Automations or Projects
+	// rail does not display — while that rail owns the keyboard. A key the
+	// focused rail's footer does not advertise must stay inert there (#1417):
+	// a rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
 	selected := m.sidebar.RowVerbTarget()
 	if selected == nil || selected.HasInFlightOp() {
 		return m, nil
@@ -204,6 +214,17 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 // tab locally via DropClosedTab — a no-kill removal, since the daemon already
 // tore the tmux session down.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
+	// Gated on workspace focus, exactly as the rename prompt and the
+	// jump-to-tab prompt are (#3067): w is routed through the global key map,
+	// so without this gate it would open the delete-tab confirmation against
+	// the store's sticky last tree selection — a session whose row the
+	// Automations or Projects rail does not display — while that rail owns the
+	// keyboard. That is the most destructive verb of the #1417 leak class: a
+	// key the focused rail's footer does not advertise must stay inert there.
+	// A rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
 	// The focused pane owns the close target: w acts on the tab on screen, not
 	// the tree cursor's tab (#1884). Fall back to the tree's selection + its
 	// active tab when focus is on the tree.
@@ -250,7 +271,10 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	target := captureSessionActionTarget(inst, m.repoID)
 	tabID := tab.ID
 	rosterGeneration := inst.TabRosterGeneration()
-	tabLabel, _ := tree.TabLabelAt(inst, idx)
+	// Quote the tab's TEXT, not its decorated label: "› Terminal" would put
+	// the presentation glyph inside the quotation as if it were part of the
+	// name (#4630). The slot-number prefix still applies when texts collide.
+	tabLabel, _ := tree.TabTextAt(inst, idx)
 	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
 	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
 	if tab.Kind == session.TabKindWeb {
