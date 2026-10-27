@@ -444,7 +444,7 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab)
+	conn, err := c.rc.dialStream(ctx, c.tab, "")
 	if err != nil {
 		cancel()
 		return nil, err
@@ -656,22 +656,35 @@ func (c *remoteAgentClient) call(path string, req, resp any) error {
 // callWithin is call with an explicit budget, for the one route whose work is
 // not a health check.
 func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.Duration) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("remote agent-server: marshal request: %w", err)
+	return c.doJSON(http.MethodPost, path, req, resp, timeout)
+}
+
+// doJSON is callWithin's plumbing generalized over the HTTP method: GET
+// /v1/health is the one non-POST route on the wire, and it shares the same
+// token, envelope, and error-code reconstruction. A nil req sends no body.
+func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout time.Duration) error {
+	var body io.Reader
+	if req != nil {
+		data, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("remote agent-server: marshal request: %w", err)
+		}
+		body = bytes.NewReader(data)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.httpBase+path, body)
 	if err != nil {
 		return fmt.Errorf("remote agent-server: build request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	httpReq.Header.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("remote agent-server: POST %s: %w", path, err)
+		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
@@ -707,6 +720,14 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 			// site's bare-deadline arm see the stall (#5295 review).
 			err = fmt.Errorf("%s: %w", env.Error.Message, context.DeadlineExceeded)
 		}
+		if env.Error.Code == apiproto.ErrorCodeTabGone {
+			// The status line alone cannot name this class — an unknown ROUTE
+			// on an older server is a 404 too — so the server emits the code
+			// only for a genuine stale-id refusal, and ErrTabGone is
+			// reconstructed for the caller's errors.Is check exactly as the
+			// classes above (#5571 W4.3).
+			err = fmt.Errorf("%s: %w", env.Error.Message, ErrTabGone)
+		}
 		return err
 	}
 	if resp != nil {
@@ -720,8 +741,24 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 // preview fetches tab `tab`'s content over the control REST — shared by the
 // AgentServer.Preview surface and the broker's fresh-subscriber repaint (Snapshot).
 func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error) {
+	return c.previewReq(agentPreviewReq{Tab: tab, Full: full})
+}
+
+// previewByID is preview addressed by the tab's STABLE id (#5571 W4.3): the
+// sandbox binds the identified target itself — atomically, inside its own
+// roster — so the id never round-trips through an ordinal a close/reorder can
+// shift (#1779). ErrTabGone when the id names no live tab (the envelope's
+// tab_gone code reconstructs it). Only call it against a server that advertises
+// the "tab-id-addressing" feature: an older one rejects the unknown `tab_id`
+// field outright under strict decoding, which is the honest failure — but a
+// caller that checks health first avoids paying the round-trip.
+func (c *remoteAgentClient) previewByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return c.previewReq(agentPreviewReq{TabID: tabID, Full: full})
+}
+
+func (c *remoteAgentClient) previewReq(req agentPreviewReq) (PreviewSnapshot, error) {
 	var resp agentPreviewResp
-	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Full: full}, &resp); err != nil {
+	if err := c.call("/v1/agent/preview", req, &resp); err != nil {
 		return PreviewSnapshot{}, err
 	}
 	return PreviewSnapshot{
@@ -731,14 +768,62 @@ func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error)
 	}, nil
 }
 
+// createTab asks the sandbox to spawn one tab under the daemon's STABLE id
+// (#5571 W4.3). The id travels verbatim — the driving daemon is the id
+// authority, and the id is the create's idempotency key: a retry of the same
+// create answers the tab the first call made (see agentTabCreateReq). The
+// response is the sandbox's own roster row — one shape shared with tabs().
+func (c *remoteAgentClient) createTab(id, kind, command, name string) (TabData, error) {
+	var resp agentTabCreateResp
+	if err := c.call("/v1/agent/tab-create",
+		agentTabCreateReq{ID: id, Kind: kind, Command: command, Name: name}, &resp); err != nil {
+		return TabData{}, err
+	}
+	return resp.Tab, nil
+}
+
+// closeTab asks the sandbox to close the tab a stable id names — never an
+// ordinal. ErrTabGone when it names no live tab (reconstructed from the
+// envelope's tab_gone code), which a W4.4 reconciler reads as "already closed"
+// rather than a failure.
+func (c *remoteAgentClient) closeTab(id string) error {
+	return c.call("/v1/agent/tab-close", agentTabCloseReq{ID: id}, nil)
+}
+
+// tabs reads the sandbox's roster: every tab with its stable id, kind, name,
+// and — for process tabs — the exit evidence (status, time, stopped_by) the
+// server refreshed before answering (#5571 W4.3).
+func (c *remoteAgentClient) tabs() ([]TabData, error) {
+	var resp agentTabsResp
+	if err := c.call("/v1/agent/tabs", struct{}{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tabs, nil
+}
+
+// health GETs the agent-server's /v1/health — the capability probe a driver
+// runs before depending on a W4.3+ surface. `version` says which af build
+// answered; `features` says which route clusters it speaks, so the caller
+// degrades on a missing token instead of calling a route that may not exist.
+func (c *remoteAgentClient) health() (agentHealthResp, error) {
+	var resp agentHealthResp
+	if err := c.doJSON(http.MethodGet, "/v1/health", nil, &resp, remoteAgentCallTimeout); err != nil {
+		return agentHealthResp{}, err
+	}
+	return resp, nil
+}
+
 // dialStream opens the WS PTY subscription to tab `tab` (from the live tail). The
 // token rides both the Authorization header and the ?access_token= query — the
 // agent-server honors either, and the query mirrors the browser WS path Phase 5
 // needs. The read limit is raised off the 32 KiB default: a repaint of a wide pane
-// is a single large binary frame.
-func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket.Conn, error) {
+// is a single large binary frame. tabID selects the stable-id addressing arm
+// (#5571 W4.3) — see dialStreamByID for when that is safe to send.
+func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID string) (*websocket.Conn, error) {
 	q := url.Values{}
-	if tab != 0 {
+	if tabID != "" {
+		q.Set("tab_id", tabID)
+	} else if tab != 0 {
 		q.Set("tab", strconv.Itoa(tab))
 	}
 	q.Set(agentproto.AccessTokenQueryParam, c.token)
@@ -769,6 +854,17 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 	}
 	conn.SetReadLimit(4 << 20)
 	return conn, nil
+}
+
+// dialStreamByID is dialStream addressed by the tab's STABLE id (#5571 W4.3):
+// the sandbox binds the id once, at subscribe time, inside its own roster — an
+// id-addressed connection can never be retargeted by a close/reorder the way
+// re-resolving an ordinal can. Only dial it against a server advertising the
+// "tab-id-addressing" feature on /v1/health: an OLDER agent-server parses no
+// ?tab_id= and would silently bind the AGENT tab — the query carries no strict
+// decode to refuse on, so the features check is the only guard.
+func (c *remoteAgentClient) dialStreamByID(ctx context.Context, tabID string) (*websocket.Conn, error) {
+	return c.dialStream(ctx, 0, tabID)
 }
 
 // splitHTTPBaseURL validates an agent-server base URL and derives its REST
@@ -823,8 +919,12 @@ type agentSnapshotResp struct {
 }
 
 type agentPreviewReq struct {
-	Tab  int  `json:"tab"`
-	Full bool `json:"full"`
+	// TabID addresses by stable id and wins over Tab, mirroring the daemon's
+	// own PreviewRequest precedence — a stale id is a tab_gone 404, never an
+	// ordinal fallback (#5571 W4.3).
+	TabID string `json:"tab_id,omitempty"`
+	Tab   int    `json:"tab"`
+	Full  bool   `json:"full"`
 }
 
 type agentPreviewResp struct {
@@ -848,4 +948,50 @@ type agentSendPromptResp struct {
 
 type agentArchiveResp struct {
 	Branch string `json:"branch"`
+}
+
+// --- wire structs: the W4.3 stable-id tab surface (#5571) ---
+//
+// These mirror daemon/agentserver_headless.go's agentTab*/agentHealth* types
+// field-for-field, the same duplication rule as the rest of this file: the JSON
+// tags are the contract, and the round-trip tests pin them.
+
+// agentTabCreateReq asks the sandbox to spawn a tab under the daemon's stable
+// id. Kind is the tabKindVocabulary wire name — only "shell" and "process" are
+// creatable here. ID is verbatim AND the idempotency key: a retry repeating
+// id+kind (and command, for a process tab) answers the tab the first create
+// made; a same-id request of a different shape refuses. Empty ID mints.
+type agentTabCreateReq struct {
+	ID      string `json:"id,omitempty"`
+	Kind    string `json:"kind"`
+	Command string `json:"command,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// agentTabCreateResp carries the created tab as the sandbox's roster row — the
+// same TabData shape /v1/agent/tabs reports, so the create answer can never
+// drift from the roster.
+type agentTabCreateResp struct {
+	Tab TabData `json:"tab"`
+}
+
+// agentTabCloseReq names the tab to close by stable id only.
+type agentTabCloseReq struct {
+	ID string `json:"id"`
+}
+
+// agentTabsResp is the sandbox's roster: every tab as TabData, exit evidence
+// included.
+type agentTabsResp struct {
+	Tabs []TabData `json:"tabs"`
+}
+
+// agentHealthResp is /v1/health's payload: liveness plus the version/features
+// advertisement. Features is nil against a server that predates the field —
+// the caller degrades on a missing TOKEN, and a missing field is just zero
+// tokens.
+type agentHealthResp struct {
+	OK       bool     `json:"ok"`
+	Version  string   `json:"version"`
+	Features []string `json:"features"`
 }

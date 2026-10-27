@@ -94,6 +94,28 @@ func stampProcessTabExit(i *Instance, tab *Tab) bool {
 	return stamped
 }
 
+// RecordProcessTabExits probes every process tab with no recorded exit and
+// stamps the ones whose command tmux reports finished (#5571 W4.3). It is the
+// roster-read counterpart of stampProcessTabExit's restore path: exit evidence
+// is only discovered when something looks, and on a LIVE instance nothing looks
+// — so a process tab that exits while the agent-server runs would report an
+// un-stamped Exit on /v1/agent/tabs forever. The roster handler runs this
+// first; the probe is the same bounded has-session/pane_dead pair the restore
+// path spends. Inert or tmux-less rows are skipped rather than probed: absence
+// is not evidence of how the command ended (restoreProcessTab's rule), and
+// inventing one would fabricate the record this field exists to keep honest.
+// Iterates a GetTabs snapshot: stampProcessTabExit re-finds each row by id under
+// i.mu itself (updateTabByID), so a row that changed since the snapshot is
+// either stamped on its current copy or skipped as already recorded.
+func (i *Instance) RecordProcessTabExits() {
+	for _, tab := range i.GetTabs() {
+		if tab.Kind != TabKindProcess || tab.Exit != nil || tab.inert || tab.tmux == nil {
+			continue
+		}
+		stampProcessTabExit(i, tab)
+	}
+}
+
 // stampProcessTabStopped records that af stopped a process tab's running
 // command, and why, unless the row already records how the command ended. The
 // tab stays inert afterwards, and without this the row could not say why.

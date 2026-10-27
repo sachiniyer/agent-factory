@@ -23,6 +23,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The daemon-hosted HTTP/JSON server (#1029 PR 4) makes HTTP just another thin
@@ -294,6 +295,9 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 //
 //	200 — success: {"data": <resp>, "error": null}
 //	400 — malformed / unreadable JSON request body, or unknown request field
+//	404 — the addressed tab is gone (session.ErrTabGone — the same mapping the
+//	      stream data plane applies, shared so an id-keyed RPC answers like
+//	      the WS it drives, #5571 W4.3)
 //	405 — wrong HTTP verb (not POST)
 //	413 — request body exceeds maxHTTPBodyBytes
 //	503 — daemon warm-up or upgrade probation (typed, retryable)
@@ -349,8 +353,8 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		pending := &pendingUntracks{}
 		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
 		if err := call(ctx, req, &resp); err != nil {
-			status := http.StatusInternalServerError
-			if IsDaemonAdmissionRetryable(err) {
+			status := httpStatusForTab(err)
+			if status == http.StatusInternalServerError && IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
 			}
 			writeHTTPError(w, r, status, err)
@@ -491,6 +495,15 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 	var coded codedError
 	if errors.As(err, &coded) {
 		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
+		return
+	}
+	// A stale stable-id refusal is a bare 404 on the status line — the same
+	// status the catch-all gives an unknown route — so without a code the two
+	// are indistinguishable on the wire. tab_gone lets a remote client
+	// reconstruct session.ErrTabGone instead of guessing (#5571 W4.3).
+	if errors.Is(err, session.ErrTabGone) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeTabGone))
 		return
 	}
 	// A verified resource errno is worth a machine-readable code on the wire:

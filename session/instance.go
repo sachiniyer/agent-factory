@@ -494,6 +494,16 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+
+	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
+	// still in flight — derived under i.mu, released once the append resolves
+	// (#5571 W4.3). uniqueTabTmuxNameReserving consults it alongside the roster
+	// and pendingTabCleanup so two concurrent creates never derive the same
+	// name: without it a loser's new-session collides inside tmux on the
+	// winner's name and Start's failed-spawn cleanup kill-sessions that name —
+	// the winner's live session. Guarded by i.mu; lazily allocated since an
+	// instance that never spawns a sibling never needs it.
+	tabSpawnClaims map[string]bool
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

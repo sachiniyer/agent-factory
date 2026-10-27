@@ -64,22 +64,63 @@ func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool, kind TabKind) e
 // it is collision-free and restorable by exact name across a restart (#930 PR
 // 4). Errors when the instance is not started or has no agent session/worktree.
 func (i *Instance) AddShellTab() (*Tab, error) {
-	i.mu.RLock()
+	return i.AddShellTabWithID("")
+}
+
+// AddShellTabWithID is AddShellTab with the caller's stable id assigned verbatim
+// when non-empty — the create form the in-sandbox agent-server's tab route
+// serves, where the DRIVING daemon is the id authority (#5571 W4.3). Empty mints
+// a fresh id, exactly as AddShellTab. The supplied id doubles as the create's
+// idempotency key: a roster entry already bearing it answers as that existing
+// tab when it is the same kind, and refuses otherwise (tabIDCollisionLocked).
+// The check runs early AND again at the i.mu append point — a concurrent
+// same-id create is deduped there: tabSpawnClaims gives the loser a tmux name
+// of its own, its spawn succeeds, and the append-point recheck closes that
+// just-spawned session and adopts the winner rather than landing a second tab
+// under the id, so W1.2's reconnect-replayed create can never double-spawn.
+// adoptOnSpawnFailure is the same recheck applied when OUR spawn is the one
+// that failed.
+func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
+	// One write-lock section covers the id check, the roster reads, AND the
+	// name claim: a concurrent create derives its tmux name off the same roster,
+	// so claiming while we derive is what keeps two racers from being issued
+	// the same session name — a loser's new-session would collide inside tmux
+	// on the winner's name, where Start's failed-spawn cleanup kill-sessions
+	// the name it just failed on: the WINNER's live session (#5571 W4.3). The
+	// claim is held until the append resolves so the loser walks to "-2", spawns
+	// a session of its own, and the collide arm below only ever reaps a session
+	// this create genuinely made.
+	i.mu.Lock()
+	if refused, existing, found := i.tabIDCollisionLocked(id, TabKindShell, ""); found {
+		i.mu.Unlock()
+		return existing, refused
+	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueShellName(i.Tabs)
-	// Resolve the tmux session name under the SAME read lock as the display name:
+	// Resolve the tmux session name under the SAME lock as the display name:
 	// the two are independent namespaces (see tab_names.go) and both are read off
 	// i.Tabs, so deriving the tmux name after the unlock would read the roster
 	// unsynchronized. Guarded on agentTmux because a not-started instance has no
 	// session to spawn a sibling of — the precondition check below rejects it.
 	tmuxName := ""
 	if agentTmux != nil {
-		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
+		tmuxName = uniqueTabTmuxNameReserving(i.Tabs, i.pendingTabCleanup, i.tabSpawnClaims, agentTmux.SanitizedName(), displayName)
+		if i.tabSpawnClaims == nil {
+			i.tabSpawnClaims = map[string]bool{}
+		}
+		i.tabSpawnClaims[tmuxName] = true
 	}
-	i.mu.RUnlock()
+	i.mu.Unlock()
+	if tmuxName != "" {
+		defer func() {
+			i.mu.Lock()
+			delete(i.tabSpawnClaims, tmuxName)
+			i.mu.Unlock()
+		}()
+	}
 
 	if spawnErr != nil {
 		return nil, spawnErr
@@ -101,12 +142,16 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		return nil, fmt.Errorf("failed to prepare shell tab: %w", err)
 	}
 	if err := shellTmux.Start(worktreePath); err != nil {
-		return nil, fmt.Errorf("failed to start shell tab: %w", err)
+		return i.adoptOnSpawnFailure(id, TabKindShell, "",
+			fmt.Errorf("failed to start shell tab: %w", err))
 	}
 
 	tab := newShellTab(shellTmux)
 	tab.Name = displayName
 	tab.accountScope = shellTmux.Account()
+	if id != "" {
+		tab.ID = id
+	}
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending: we
 	// released the lock to spawn, and Kill (which does NOT take repoStartLock, so
@@ -117,13 +162,19 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// or moved (#990, #1028). Make the recheck and append atomic under one
 	// acquisition so no further race opens.
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	// Same-id dedupe re-run under the SAME acquisition that appends (#5571 W4.3):
+	// a concurrent same-id create can have landed in the spawn window, and a
+	// second append under one id is what the idempotency contract forbids.
+	colErr, existing, collide := i.tabIDCollisionLocked(id, TabKindShell, "")
+	adopt := !stale && !collide
 	title := i.Title
-	if !stale {
+	if adopt {
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
 	}
 	i.mu.Unlock()
-	if stale {
+	switch {
+	case stale:
 		// Tear down the just-spawned session so it does not outlive the worktree
 		// Kill is removing or archive is moving. Close is best-effort/idempotent
 		// (#967): a kill-session on an already-gone session is not an error.
@@ -133,6 +184,17 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 			log.WarningLog.Printf("add shell tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
+	case collide:
+		// The other same-id create landed while we spawned: our session is the
+		// orphan, so close it (same abandoned-spawn cleanup as the stale arm)
+		// and answer the collision the way the early check would have. The name
+		// claim held through this append is what makes the close safe to run
+		// unconditionally: our spawned session can never share the winner's
+		// tmux name.
+		if _, cerr := shellTmux.Close(); cerr != nil {
+			log.WarningLog.Printf("add shell tab to %q: closing raced same-id spawn: %v", title, cerr)
+		}
+		return existing, colErr
 	}
 	return tab, nil
 }
@@ -150,22 +212,49 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // across a restart. Errors on an empty command, or an instance that is not started /
 // has no worktree.
 func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
+	return i.AddProcessTabWithID("", command, requestedName)
+}
+
+// AddProcessTabWithID is AddProcessTab with the caller's stable id assigned
+// verbatim when non-empty — the create form the in-sandbox agent-server's tab
+// route serves (#5571 W4.3); see AddShellTabWithID for the idempotency contract.
+// The same-id shape match extends to Command: a process tab's command is part of
+// what the id names, so an id retry with a different command is a collision, not
+// a replay.
+func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("a process tab requires a non-empty command")
 	}
 
-	i.mu.RLock()
+	// One write-lock section covers the id check, the roster reads, AND the name
+	// claim — see AddShellTabWithID for why derivation and claim are atomic.
+	i.mu.Lock()
+	if refused, existing, found := i.tabIDCollisionLocked(id, TabKindProcess, command); found {
+		i.mu.Unlock()
+		return existing, refused
+	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
-	// Both namespaces resolved under the one read lock; see AddShellTab.
+	// Both namespaces resolved under the one lock; see AddShellTabWithID.
 	tmuxName := ""
 	if agentTmux != nil {
-		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
+		tmuxName = uniqueTabTmuxNameReserving(i.Tabs, i.pendingTabCleanup, i.tabSpawnClaims, agentTmux.SanitizedName(), displayName)
+		if i.tabSpawnClaims == nil {
+			i.tabSpawnClaims = map[string]bool{}
+		}
+		i.tabSpawnClaims[tmuxName] = true
 	}
-	i.mu.RUnlock()
+	i.mu.Unlock()
+	if tmuxName != "" {
+		defer func() {
+			i.mu.Lock()
+			delete(i.tabSpawnClaims, tmuxName)
+			i.mu.Unlock()
+		}()
+	}
 
 	if spawnErr != nil {
 		return nil, spawnErr
@@ -189,17 +278,23 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// held pane its exit status is unobservable (#4479).
 	procTmux.SetRemainOnExit()
 	if err := procTmux.Start(worktreePath); err != nil {
-		return nil, fmt.Errorf("failed to start process tab: %w", err)
+		return i.adoptOnSpawnFailure(id, TabKindProcess, command,
+			fmt.Errorf("failed to start process tab: %w", err))
 	}
 	// Before remain-on-exit, a command that failed at once took its session
 	// down and Start reported it. The held pane hides that, so look for it
 	// (#4506 review).
 	exit := awaitImmediateProcessExit(procTmux)
 	if exit != nil && exit.StatusKnown && exit.Status != 0 {
-		return nil, failedProcessTabError(procTmux, command, exit.Status)
+		return i.adoptOnSpawnFailure(id, TabKindProcess, command,
+			failedProcessTabError(procTmux, command, exit.Status))
 	}
 
-	tab := &Tab{ID: newTabID(), Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux,
+	tabID := id
+	if tabID == "" {
+		tabID = newTabID()
+	}
+	tab := &Tab{ID: tabID, Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux,
 		accountScope: procTmux.Account(), Exit: exit}
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending (see
@@ -209,21 +304,82 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// would leak a tmux session whose worktree Kill deletes or archive moves (#990,
 	// #1028). Recheck + append are atomic under one acquisition.
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	// Same-id dedupe re-run under the SAME acquisition that appends (#5571 W4.3);
+	// see AddShellTabWithID.
+	colErr, existing, collide := i.tabIDCollisionLocked(id, TabKindProcess, command)
+	adopt := !stale && !collide
 	title := i.Title
-	if !stale {
+	if adopt {
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
 	}
 	i.mu.Unlock()
-	if stale {
+	switch {
+	case stale:
 		// Best-effort/idempotent teardown of the orphaned session (#967).
 		// Pane state deliberately ignored: same abandoned-spawn cleanup as above.
 		if _, cerr := procTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add process tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
+	case collide:
+		if _, cerr := procTmux.Close(); cerr != nil {
+			log.WarningLog.Printf("add process tab to %q: closing raced same-id spawn: %v", title, cerr)
+		}
+		return existing, colErr
 	}
 	return tab, nil
+}
+
+// adoptOnSpawnFailure resolves a failed supplied-id create against the roster
+// (#5571 W4.3). tabSpawnClaims already keeps two in-flight creates off the same
+// tmux name, so a spawn failure here is a real one — but the id the caller
+// supplied may still have an owner on the roster: a concurrent same-id create
+// can have landed while our spawn was failing for an unrelated reason, and the
+// idempotency contract answers that existing tab rather than our error. The
+// same recheck answers a mismatched owner with its collision error (a refusal
+// either way, but the honest one), and leaves every failure of a create whose
+// id has no owner exactly as reported. id "" skips the recheck entirely: a
+// mint-on-append id can name nothing yet.
+func (i *Instance) adoptOnSpawnFailure(id string, kind TabKind, command string, err error) (*Tab, error) {
+	if id == "" {
+		return nil, err
+	}
+	i.mu.RLock()
+	colErr, existing, found := i.tabIDCollisionLocked(id, kind, command)
+	i.mu.RUnlock()
+	if !found {
+		return nil, err
+	}
+	return existing, colErr
+}
+
+// tabIDCollisionLocked answers a supplied-id create against whoever already owns
+// id: found=false when nothing does. On a live-roster hit the same kind (and
+// command, for a process tab) makes the request a replay of the create that made
+// that tab — adopt it (existing non-nil, err nil); anything else is an id
+// collision and refuses. A staged pendingMetadataTabs row owns the id too, but
+// is not a live tab and so can never be adopted — a hit there is always a
+// refusal. Callers must hold i.mu.
+func (i *Instance) tabIDCollisionLocked(id string, kind TabKind, command string) (err error, existing *Tab, found bool) {
+	if id == "" {
+		return nil, nil, false
+	}
+	for _, t := range i.Tabs {
+		if t.ID != id {
+			continue
+		}
+		if t.Kind == kind && (kind != TabKindProcess || t.Command == command) {
+			return nil, t, true
+		}
+		return fmt.Errorf("tab id %q already names a %s tab", id, TabKindName(t.Kind)), nil, true
+	}
+	for _, td := range i.pendingMetadataTabs {
+		if td.ID == id {
+			return fmt.Errorf("tab id %q already names a staged %s tab", id, TabKindName(td.Kind)), nil, true
+		}
+	}
+	return nil, nil, false
 }
 
 // appendReconciledTab appends a tab ReconcileTabsFromData rebuilt from the

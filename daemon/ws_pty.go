@@ -123,7 +123,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// re-resolves per operation and is safe while that runtime's roster remains
 	// immutable; bindTab documents that capability boundary. Without a ?tab_id=
 	// (legacy client) the binding pins ?tab=, preserving positional behavior.
-	binding, err := cs.bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
+	binding, err := bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
 		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
@@ -266,12 +266,22 @@ func (b resolvingTabBinding) resize(rows, cols uint16) error {
 // race-free path; a runtime without one re-resolves the id per operation. Either
 // way an id-addressed connection NEVER pins an ordinal. No ?tab_id= at all is a
 // legacy client: pin the ordinal it asked for, exactly as before #1738.
-func (cs *controlServer) bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
+//
+// Package-level rather than a controlServer method: it uses no controlServer
+// state, and the headless agent-server binds the exact same decision
+// (agentserver_headless.go's streamHandler) — one selection rule, two servers.
+// A nil instance is legal only when as is TabAddressableServer (the id-native
+// arm needs no roster); without that plane the resolving arm has nothing to
+// resolve against, so a nil instance + a ?tab_id= refuses rather than panics.
+func bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
 	if tabID == "" {
 		return ordinalTabBinding{as: as, tab: tab}, nil
 	}
 	if ta, ok := as.(session.TabAddressableServer); ok {
 		return idTabBinding{as: ta, tabID: tabID}, nil
+	}
+	if instance == nil {
+		return nil, fmt.Errorf("tab id %q cannot be addressed: this agent-server has no stable-id roster", tabID)
 	}
 	return resolvingTabBinding{as: as, instance: instance, tabID: tabID}, nil
 }

@@ -138,12 +138,11 @@ func TestBindTab_RefusesStaleID(t *testing.T) {
 		t.Fatalf("CloseTab: %v", err)
 	}
 
-	cs := &controlServer{manager: manager}
 	as := inst.AgentServer()
 
 	// bindTab never resolves an id up front — the refusal surfaces at the operation,
 	// which is the point where the id is resolved atomically.
-	binding, err := cs.bindTab(as, inst, a.ID, 1)
+	binding, err := bindTab(as, inst, a.ID, 1)
 	if err != nil {
 		t.Fatalf("bindTab: %v", err)
 	}
@@ -161,7 +160,7 @@ func TestBindTab_RefusesStaleID(t *testing.T) {
 	}
 
 	// The surviving tab's own id still binds and subscribes.
-	binding, err = cs.bindTab(as, inst, b.ID, 0)
+	binding, err = bindTab(as, inst, b.ID, 0)
 	if err != nil {
 		t.Fatalf("a live tab's stable id must bind: %v", err)
 	}
@@ -193,8 +192,7 @@ func TestBindTab_NoTabIDPinsOrdinal(t *testing.T) {
 		t.Fatalf("AddProcessTab: %v", err)
 	}
 
-	cs := &controlServer{manager: manager}
-	binding, err := cs.bindTab(inst.AgentServer(), inst, "", 1)
+	binding, err := bindTab(inst.AgentServer(), inst, "", 1)
 	if err != nil {
 		t.Fatalf("a legacy no-tab_id bind must succeed: %v", err)
 	}
@@ -231,8 +229,7 @@ func TestBindTab_LiveIDBindsIDNativePlane(t *testing.T) {
 		t.Fatalf("AddProcessTab: %v", err)
 	}
 
-	cs := &controlServer{manager: manager}
-	binding, err := cs.bindTab(inst.AgentServer(), inst, b.ID, 0)
+	binding, err := bindTab(inst.AgentServer(), inst, b.ID, 0)
 	if err != nil {
 		t.Fatalf("bindTab: %v", err)
 	}
@@ -271,10 +268,9 @@ func TestBindTab_IDAddressedNeverPinsAnOrdinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddProcessTab: %v", err)
 	}
-	cs := &controlServer{manager: manager}
 
 	// The id-native runtime.
-	binding, err := cs.bindTab(inst.AgentServer(), inst, b.ID, 0)
+	binding, err := bindTab(inst.AgentServer(), inst, b.ID, 0)
 	if err != nil {
 		t.Fatalf("bindTab: %v", err)
 	}
@@ -283,7 +279,7 @@ func TestBindTab_IDAddressedNeverPinsAnOrdinal(t *testing.T) {
 	}
 
 	// A runtime with NO id-native plane must re-resolve, not pin.
-	binding, err = cs.bindTab(ordinalOnlyServer{}, inst, b.ID, 0)
+	binding, err = bindTab(ordinalOnlyServer{}, inst, b.ID, 0)
 	if err != nil {
 		t.Fatalf("bindTab (ordinal-only runtime): %v", err)
 	}

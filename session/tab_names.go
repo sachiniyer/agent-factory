@@ -91,6 +91,22 @@ func uniqueTabNameExcluding(tabs []*Tab, base string, exclude *Tab) string {
 // (tab_spawn.go) already holds the agent session it is spawning a sibling of,
 // and an instance with no agent session cannot spawn a sibling at all.
 func uniqueTabTmuxName(tabs []*Tab, pending []TabCleanupData, agentSanitized, base string) string {
+	return uniqueTabTmuxNameReserving(tabs, pending, nil, agentSanitized, base)
+}
+
+// uniqueTabTmuxNameReserving is uniqueTabTmuxName with one more reservation
+// source: claimed holds the FULL session names of sibling spawns still in
+// flight — names a create derived but has not appended its tab for yet
+// (Instance.tabSpawnClaims, #5571 W4.3). They reserve exactly like the roster's
+// live sessions and the pending list. The reservation matters because two
+// concurrent creates read the SAME roster: without claims both derive the same
+// free token, the loser's new-session collides inside tmux on the winner's
+// name, and Start's failed-spawn cleanup kill-sessions that name — which is the
+// WINNER's live session, not a partial of the loser's. Holding a claim from
+// derivation through append makes the loser walk to "-2" and spawn a session
+// of its own, so every abandoned spawn is a session its create really made.
+// claimed may be nil for callers that spawn without an in-flight registry.
+func uniqueTabTmuxNameReserving(tabs []*Tab, pending []TabCleanupData, claimed map[string]bool, agentSanitized, base string) string {
 	prefix := agentSanitized + tmuxTabSeparator
 	// Sized off the roster alone rather than len(tabs)+len(pending): a map grows
 	// on its own, pending is empty on every close that confirmed its teardown, and
@@ -107,6 +123,13 @@ func uniqueTabTmuxName(tabs []*Tab, pending []TabCleanupData, agentSanitized, ba
 		// reserving a token derived wrongly.
 		if strings.HasPrefix(entry.TmuxName, prefix) {
 			used[strings.TrimPrefix(entry.TmuxName, prefix)] = true
+		}
+	}
+	for name := range claimed {
+		// Claims are full session names; the pending loop's same HasPrefix
+		// honesty applies to a handle from some other prefix.
+		if strings.HasPrefix(name, prefix) {
+			used[strings.TrimPrefix(name, prefix)] = true
 		}
 	}
 	return prefix + firstFreeName(used, base)
