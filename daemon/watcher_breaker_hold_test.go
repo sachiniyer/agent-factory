@@ -135,7 +135,7 @@ func (f *breakerHoldFixture) updateOther(t *testing.T) {
 // TestWatcherTrippedBreakerSurvivesAnUnrelatedTaskUpdate is the issue's repro at the
 // control-server boundary every task write crosses.
 func TestWatcherTrippedBreakerSurvivesAnUnrelatedTaskUpdate(t *testing.T) {
-	const wantStatus = "errored: exit status 1"
+	const wantStatus = "errored: gave up after 5 failures in 10m0s (last: exit status 1)"
 	f := newBreakerHoldFixture(t, "echo run; exit 1", wantStatus)
 	require.Equal(t, f.watchers.crashMaxExits, f.runsAtStop,
 		"the breaker should have tripped after exactly crashMaxExits runs")
@@ -158,7 +158,7 @@ func TestWatcherCleanExitSurvivesAnUnrelatedTaskUpdate(t *testing.T) {
 // TestWatcherTerminalStateSurvivesUnrelatedAddAndRemove covers the other two
 // writers that share the post-write reconcile (AddTask, RemoveTask).
 func TestWatcherTerminalStateSurvivesUnrelatedAddAndRemove(t *testing.T) {
-	const wantStatus = "errored: exit status 1"
+	const wantStatus = "errored: gave up after 5 failures in 10m0s (last: exit status 1)"
 	f := newBreakerHoldFixture(t, "echo run; exit 1", wantStatus)
 
 	added := watchTask("cccc3837", "sleep 60", f.b.ProjectPath)
@@ -181,7 +181,7 @@ func TestWatcherTerminalStateSurvivesUnrelatedAddAndRemove(t *testing.T) {
 // of the desired set still disarms it, promptly and through the same stop-and-
 // join path a full reload uses.
 func TestWatcherDisableThroughTheControlServerStopsTheWatcher(t *testing.T) {
-	const wantStatus = "errored: exit status 1"
+	const wantStatus = "errored: gave up after 5 failures in 10m0s (last: exit status 1)"
 	f := newBreakerHoldFixture(t, "echo run; exit 1", wantStatus)
 	require.Contains(t, f.watchers.watchingTaskIDs(), f.b.ID, "precondition: task B is watching")
 
@@ -197,7 +197,7 @@ func TestWatcherDisableThroughTheControlServerStopsTheWatcher(t *testing.T) {
 // TestWatcherReloadTasksRPCRearmsATrippedBreaker is the first negative: the explicit
 // reload poke still means what it says.
 func TestWatcherReloadTasksRPCRearmsATrippedBreaker(t *testing.T) {
-	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: exit status 1")
+	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: gave up after 5 failures in 10m0s (last: exit status 1)")
 	require.NoError(t, f.server.ReloadTasks(ReloadTasksRequest{}, &ReloadTasksResponse{}))
 	f.requireRearmed(t, "the ReloadTasks poke")
 }
@@ -205,7 +205,7 @@ func TestWatcherReloadTasksRPCRearmsATrippedBreaker(t *testing.T) {
 // TestWatcherExplicitReEnableRearmsATrippedBreaker is the second negative: an
 // enable/disable names the task, so it re-arms it.
 func TestWatcherExplicitReEnableRearmsATrippedBreaker(t *testing.T) {
-	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: exit status 1")
+	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: gave up after 5 failures in 10m0s (last: exit status 1)")
 	enabled := true
 	require.NoError(t, f.server.updateTask(context.Background(),
 		UpdateTaskRequest{ID: f.a.ID, Update: task.TaskUpdate{Enabled: &enabled}},
@@ -216,7 +216,7 @@ func TestWatcherExplicitReEnableRearmsATrippedBreaker(t *testing.T) {
 // TestWatcherOwnScriptEditRearmsAStoppedTask is the third negative: a change
 // to the watcher signature is a new process to try, terminal or not.
 func TestWatcherOwnScriptEditRearmsAStoppedTask(t *testing.T) {
-	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: exit status 1")
+	f := newBreakerHoldFixture(t, "echo run; exit 1", "errored: gave up after 5 failures in 10m0s (last: exit status 1)")
 	cmd := "echo restarted; sleep 60"
 	require.NoError(t, f.server.updateTask(context.Background(),
 		UpdateTaskRequest{ID: f.a.ID, Update: task.TaskUpdate{WatchCmd: &cmd}},

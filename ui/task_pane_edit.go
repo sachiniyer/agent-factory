@@ -86,7 +86,11 @@ func (s *TaskPane) validateForm() (string, int) {
 // schedule picker's Custom/raw-cron cell is a free-text input that r/x/D must
 // reach — so the verbs never fire while the trigger value is focused.
 func (s *TaskPane) textFocusStop() bool {
-	switch s.focusIndex {
+	return textStopAt(s.focusIndex)
+}
+
+func textStopAt(focusIndex int) bool {
+	switch focusIndex {
 	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
 		return true
 	case taskFocusMaxRuns:
@@ -96,6 +100,21 @@ func (s *TaskPane) textFocusStop() bool {
 		return s.capApplies()
 	}
 	return false
+}
+
+// tabsToVerbStop counts the Tab presses from the focused stop to the next
+// selector/button stop where the list verbs fire. It walks the same forward
+// wraparound KeyTab applies in handleEditMode, so the count the footer
+// advertises is derived from the real stop order — it cannot silently lie if
+// a text stop is inserted, removed, or reordered. Only meaningful at text
+// stops; it always terminates because non-text stops exist.
+func (s *TaskPane) tabsToVerbStop() int {
+	for n := 1; n <= taskFocusCount; n++ {
+		if !textStopAt((s.focusIndex + n) % taskFocusCount) {
+			return n
+		}
+	}
+	return 0
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
@@ -169,6 +188,14 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.pendingCreate = true
 			s.creating = false
 		} else {
+			// A discard that removed the form's row closes the form, so this
+			// branch should never run with the cursor out of range. The guard
+			// keeps a future row-removal path from writing the form's stale
+			// buffers into whatever row the cursor re-clamped onto (#4798
+			// follow-up): consume the keystroke without saving.
+			if !s.selectedTaskInRange() {
+				return true
+			}
 			// Mirror the create path (app.handleTaskCreate): expand a
 			// leading ~ then resolve to an absolute form so an empty or
 			// relative value behaves the same when the scheduler fires
@@ -392,7 +419,7 @@ func (s *TaskPane) renderEditMode() string {
 
 	if s.creating {
 		b.WriteString(editTitleStyle.Render("New task"))
-	} else {
+	} else if s.selectedTaskInRange() {
 		tsk := s.tasks[s.selectedIdx]
 		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit task %s", tsk.ID)))
 	}
@@ -502,26 +529,60 @@ func (s *TaskPane) renderEditMode() string {
 		}
 		b.WriteString(ActionHint(fitLine(hint, s.width)))
 		b.WriteString("\n")
-		// Three tiers, not two (#3630). The old ladder jumped straight from the
-		// full 51-cell row to a 39-cell one, and of everything it dropped it
-		// dropped esc's LABEL — the one key here whose destination ("back to the
-		// list", not "out of the manager") is not guessable from the glyph. The
-		// middle tier abbreviates the verbs and keeps every destination; the
-		// narrowest tier is unchanged, because below 44 cells the only way to
-		// keep esc's label is to drop the quit key, which
-		// TestTaskPaneEditModeCompactActionFooterShowsQuitKey pins.
-		tiers := []string{
-			"r run now · x toggle · D delete · esc list · " + quitHint,
-			"r run · x toggle · D del · esc list · " + quitHint,
-			"r run · x toggle · D del · esc · " + quitHint,
-		}
-		// A watch task can't be manually run (#1758): drop "r run" so the
-		// editor never advertises an action that always fails.
-		if s.selectedTaskIsWatch() {
+		// The action row is contextual (#5538), the same contract the Trigger
+		// selector's "←/→ switch" already follows: r/x/D fire only from
+		// selector/button stops — at a text stop they are typed input (#4838) —
+		// and the configured quit key is gated on !IsEditing in handleStateTasks
+		// (#1961), so it is dead at every edit stop and never advertised.
+		var tiers []string
+		if s.textFocusStop() {
+			// A text stop still names the run-now path (#1288: the overlay
+			// opens straight onto Name, and the first screen must say how to
+			// reach the verbs) — but only as the destination of the tab steps,
+			// so nothing reads as a key that fires inside the field. The count
+			// is computed, not fixed at one: several text stops sit between
+			// selectors, so a bare "tab →" would promise a single press that
+			// lands on another typing field.
+			prefix := "tab → "
+			if n := s.tabsToVerbStop(); n > 1 {
+				prefix = fmt.Sprintf("tab×%d → ", n)
+			}
 			tiers = []string{
-				"x toggle · D delete · esc list · " + quitHint,
-				"x toggle · D del · esc list · " + quitHint,
-				"x toggle · D del · esc · " + quitHint,
+				prefix + "r run now · x toggle · D delete · esc list",
+				prefix + "r run · x toggle · D del · esc list",
+				prefix + "r/x/D · esc list",
+				"esc list",
+			}
+			// A watch task can't be manually run (#1758): drop "r run" so the
+			// editor never advertises an action that always fails.
+			if s.selectedTaskIsWatch() {
+				tiers = []string{
+					prefix + "x toggle · D delete · esc list",
+					prefix + "x toggle · D del · esc list",
+					prefix + "x/D · esc list",
+					"esc list",
+				}
+			}
+		} else {
+			// Three tiers, not two (#3630). The old ladder jumped straight from
+			// the full row to a much shorter one, and of everything it dropped
+			// it dropped esc's LABEL — the one key here whose destination
+			// ("back to the list", not "out of the manager") is not guessable
+			// from the glyph. The middle tier abbreviates the verbs and keeps
+			// every destination.
+			tiers = []string{
+				"r run now · x toggle · D delete · esc list",
+				"r run · x toggle · D del · esc list",
+				"r run · x toggle · D del · esc",
+			}
+			// A watch task can't be manually run (#1758): drop "r run" so the
+			// editor never advertises an action that always fails.
+			if s.selectedTaskIsWatch() {
+				tiers = []string{
+					"x toggle · D delete · esc list",
+					"x toggle · D del · esc list",
+					"x toggle · D del · esc",
+				}
 			}
 		}
 		actions := tiers[len(tiers)-1]

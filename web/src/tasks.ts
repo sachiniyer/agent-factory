@@ -311,6 +311,40 @@ export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
   return "";
 }
 
+type FocusLike = Pick<HTMLElement, "getAttribute" | "textContent"> & { parentElement: { className: string } | null };
+
+/** Identifies a row control across a rebuild. The desktop icons and the phone menu
+ *  repeat the same labels, so the surface (parent group) is part of the key. */
+export function controlKey(el: FocusLike): { name: string; surface: string } {
+  return { name: el.getAttribute("aria-label") || el.textContent || "", surface: el.parentElement?.className ?? "" };
+}
+
+export function sameControlKey(a: { name: string; surface: string }, b: { name: string; surface: string }): boolean {
+  return a.name === b.name && a.surface === b.surface;
+}
+
+export interface TaskVerb {
+  label: string;
+  glyph: IconName;
+  run: () => void;
+  /** Why the verb is unavailable; set means render it disabled. */
+  blocked?: string;
+}
+
+/** The row verbs both the desktop icons and the phone menu render, in order. */
+export function taskVerbs(t: TaskData, actions: Pick<TaskActions, "edit" | "trigger" | "remove">): TaskVerb[] {
+  const triggerBlocked = canTrigger(t)
+    ? undefined
+    : !t.enabled
+      ? "Enable the task to trigger it"
+      : "Only scheduled tasks can be triggered";
+  return [
+    { label: "Edit", glyph: "pencil", run: () => actions.edit(t) },
+    { label: "Trigger", glyph: "play", run: () => actions.trigger(t), blocked: triggerBlocked },
+    { label: "Remove", glyph: "trash", run: () => actions.remove(t) },
+  ];
+}
+
 /**
  * The tasks pane: build once (its `el` mounts into the app body), then
  * update(tasks) re-renders on a change. A small stateful class like the projects
@@ -348,7 +382,7 @@ export class TasksPane {
       .map((menu) => menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId));
     const active = document.activeElement as HTMLElement | null;
     const focusedId = active?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId;
-    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    const focused = active ? controlKey(active) : null;
     for (const menu of this.menus) menu.dispose();
     this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
@@ -356,10 +390,10 @@ export class TasksPane {
     for (const menu of this.menus) {
       if (openIds.has(menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId)) menu.open();
     }
-    if (focusedId && focusedName) {
+    if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
       const control = [...(row?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
-        .find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+        .find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
   }
@@ -409,7 +443,7 @@ export class TasksPane {
     const enabledDot = h(
       "span",
       { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
-      icon(mark ? mark.icon : t.enabled ? "square-check" : "square"),
+      ...(mark ? [icon(mark.icon)] : []),
     );
     // Hidden from assistive tech even when it is a MARK. The glyph exists to
     // survive visual CLIPPING, and clipping is a sighted-reader problem: CSS
@@ -449,31 +483,51 @@ export class TasksPane {
       main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
 
-    const toggleBtn = h(
+    const toggle = h(
       "button",
-      { type: "button", class: "af-ghost af-task-action" },
-      t.enabled ? "Disable" : "Enable",
+      { type: "button", class: `af-task-switch${t.enabled ? " af-task-switch-on" : ""}`, role: "switch" },
+      h("span", { class: "af-task-switch-track" }, h("span", { class: "af-task-switch-thumb" })),
     );
-    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
+    toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
+    toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
+    toggle.addEventListener("click", () => this.actions.toggle(t));
 
-    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
-    editBtn.addEventListener("click", () => this.actions.edit(t));
+    const verbs = taskVerbs(t, this.actions);
 
+    const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
+      btn.setAttribute("aria-label", label);
+      if (blocked) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    });
+
+    // Phones show the same verbs as a menu; CSS picks one of the two sets.
     const menu = actionsDisclosure(`Actions for ${t.name}`);
     this.menus.push(menu);
-    const actionEls: HTMLElement[] = [toggleBtn];
-    if (canTrigger(t)) {
-      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
-      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
-      actionEls.push(triggerBtn);
-    }
-    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
-    removeBtn.addEventListener("click", () => this.actions.remove(t));
-    actionEls.push(removeBtn);
-
-    menu.panel.append(...actionEls);
+    menu.panel.append(...verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
+      if (blocked) {
+        btn.disabled = true;
+        btn.title = blocked;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    }));
     menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
-    const actions = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+
+    const actions = h(
+      "div",
+      { class: "af-task-actions" },
+      h("div", { class: "af-task-icons" }, ...iconBtns),
+      menu.el,
+      toggle,
+    );
     const row = h("li", { class: "af-task-row" }, enabledDot, main, actions);
     row.dataset.taskId = t.id;
     return row;
