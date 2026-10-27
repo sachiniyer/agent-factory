@@ -120,6 +120,7 @@ func TestJumpTabPromptReportsLiveMatch(t *testing.T) {
 		inst.AddTabForTest("vscode", session.TabKindVSCode)
 		inst.AddTabForTest("vagrant", session.TabKindShell)
 		selectInstance(h, inst)
+		resizeHome(h, 120, 40)
 
 		_, _ = h.showJumpTabPrompt()
 		require.NotNil(t, h.promptOverlay)
@@ -136,6 +137,7 @@ func TestJumpTabPromptReportsLiveMatch(t *testing.T) {
 		inst := freshLocalInstance(t, "jump-live-miss")
 		inst.AddTabForTest("vscode", session.TabKindVSCode)
 		selectInstance(h, inst)
+		resizeHome(h, 120, 40)
 
 		_, _ = h.showJumpTabPrompt()
 		typeKeys(h, "zz")
@@ -147,6 +149,7 @@ func TestJumpTabPromptReportsLiveMatch(t *testing.T) {
 		inst := freshLocalInstance(t, "jump-live-back")
 		inst.AddTabForTest("vscode", session.TabKindVSCode)
 		selectInstance(h, inst)
+		resizeHome(h, 120, 40)
 
 		_, _ = h.showJumpTabPrompt()
 		typeKeys(h, "zz")
@@ -162,6 +165,7 @@ func TestJumpTabPromptReportsLiveMatch(t *testing.T) {
 		inst := freshLocalInstance(t, "jump-live-num")
 		inst.AddTabForTest("vscode", session.TabKindVSCode)
 		selectInstance(h, inst)
+		resizeHome(h, 120, 40)
 
 		_, _ = h.showJumpTabPrompt()
 		typeKeys(h, "2")
