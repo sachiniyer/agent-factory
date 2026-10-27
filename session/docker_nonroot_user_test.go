@@ -2,11 +2,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -331,4 +333,24 @@ func TestPrepareNonAccountUser_NoOpForAccount(t *testing.T) {
 		"prepareNonAccountUser must be a no-op for an account-scoped session")
 	require.Equal(t, "", p.containerUser,
 		"the non-account probe must not overwrite the account path's containerUser")
+}
+
+// TestPrepareNonAccountUser_OwnerParseIsLocal pins the same contract as
+// TestPrepareAccountUser_OwnerParseIsLocal: unparseable id output is af's
+// failure (dockerOpLocal), never a dockerOpRootExec a full data root could
+// attach an ENOSPC verdict to.
+func TestPrepareNonAccountUser_OwnerParseIsLocal(t *testing.T) {
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte("not-a-uid-gid\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+	p := &dockerProvisioner{containerID: "cid"}
+	err := p.prepareNonAccountUser()
+	require.Error(t, err)
+	var se *dockerStepError
+	require.True(t, errors.As(err, &se), "the owner-parse failure must carry an operation class")
+	assert.Equal(t, dockerOpLocal, se.op,
+		"unparseable id output is af's failure, never a filesystem verdict")
 }

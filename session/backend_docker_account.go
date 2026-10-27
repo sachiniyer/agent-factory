@@ -874,7 +874,8 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	}
 	owner, err := parseContainerOwner(string(out))
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err)
+		// af failed to read the engine's answer — nothing reached a writer.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err), dockerOpLocal)
 	}
 	// UID 0 is root regardless of the gid — a `USER 0:<gid>` directive probes
 	// as 0:<gid>, and uid 0 needs no writable-HOME/workspace preparation. The
@@ -889,8 +890,8 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
-			owner, strings.TrimSpace(string(out)), err)
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
+			owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
 	}
 	p.containerUser = owner
 	return nil

@@ -157,6 +157,13 @@ func fakeDockerCapacityProbe(t *testing.T, infoPayload []byte,
 				return []byte("engine-capacity-test\n"), nil
 			}
 		}
+		// The non-account provision probes the image's default USER via `id
+		// -u`/`id -g`; a root default (0:0) makes prepareNonAccountUser a
+		// no-op so these capacity probes reach the step each case targets
+		// instead of failing on an unparseable probe.
+		if args[0] == "exec" && containsArg(args, "id -u") {
+			return []byte("0:0\n"), nil
+		}
 		return dispatch(args)
 	}))
 	return calls
