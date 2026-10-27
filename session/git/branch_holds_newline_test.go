@@ -161,7 +161,7 @@ func TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap(t *tes
 	}
 	for _, tc := range unreadable {
 		t.Run(tc.name, func(t *testing.T) {
-			holds, err := parseWorktreeBranchHolds(tc.porcelain)
+			holds, err := holdsFromPorcelain(tc.porcelain)
 			require.Error(t, err,
 				"an unreadable listing must be reported, not returned as a map: a partial map is "+
 					"indistinguishable from a complete one and silently answers \"not held\" (#3524)")
@@ -172,7 +172,7 @@ func TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap(t *tes
 	// The readable cases must still answer, or every create would lose the #2091
 	// skip and fall back to failing at `worktree add`.
 	t.Run("well-formed", func(t *testing.T) {
-		holds, err := parseWorktreeBranchHolds(
+		holds, err := holdsFromPorcelain(
 			"worktree /repo/main\x00HEAD abc\x00branch refs/heads/master\x00\x00" +
 				"worktree /repo/wt\nbroken\x00HEAD abc\x00branch refs/heads/held\x00\x00")
 		require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap(t *tes
 		}, holds, "-z carries a newline-bearing path through intact")
 	})
 	t.Run("well-formed: detached and bare worktrees hold nothing", func(t *testing.T) {
-		holds, err := parseWorktreeBranchHolds(
+		holds, err := holdsFromPorcelain(
 			"worktree /repo/b.git\x00bare\x00\x00worktree /repo/d\x00HEAD abc\x00detached\x00\x00")
 		require.NoError(t, err)
 		assert.Empty(t, holds, "a complete listing with no branch holds is a real answer")
