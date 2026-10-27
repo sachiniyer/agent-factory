@@ -510,6 +510,28 @@ export function archiveWarningText(s: SessionData): string {
   return s.archive_warning?.trim() ?? "";
 }
 
+/** The cross-surface phrase every surface renders before the reason a session
+ *  has no af callback (#5571 W3.1) — kept as one exported constant so the rail
+ *  banner, the row tooltip and the backend picker can never spell it three ways.
+ *  Mirrors session.CallbackUnavailablePrefix. */
+export const CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+
+/** The daemon-projected callback-absence reason, rendered under the shared
+ *  prefix. "" means callback was delivered (or the backend injects none). */
+export function callbackUnavailableText(s: SessionData): string {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+
+/** Every session-level notice the persistent pane banner carries — the
+ *  incomplete-archive warning and the callback-absence advisory — joined so a
+ *  row carrying both cannot drop either. "" means there is nothing to show. */
+export function sessionWarningText(s: SessionData): string {
+  return [archiveWarningText(s), callbackUnavailableText(s)]
+    .filter((t) => t !== "")
+    .join(" · ");
+}
+
 /** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short
  *  note a re-created root carries when it did not demonstrably come back on its
  *  prior conversation (#2629). The switch is exhaustive over the values af writes
