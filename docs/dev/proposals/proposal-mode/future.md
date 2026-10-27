@@ -25,7 +25,9 @@ For example, one session for each step in `goals.md`.
 
 ## Remote and sandboxed agents
 
-Docker, ssh and sandbox sessions cannot read the host disk.
+Docker, ssh and sandbox sessions cannot read the host disk. For now, `start`
+and `attach` refuse these sessions, because the rules tell the agent to edit
+files at a host path.
 
 - `cat` and `write` already give them access through the CLI.
 - When the CLI moves to the daemon routes (step 2), `--daemon-url` works too.
