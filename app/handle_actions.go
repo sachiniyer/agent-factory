@@ -879,6 +879,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
+	case session.TabKindDocs:
+		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}
@@ -925,9 +927,12 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	target := captureSessionActionTarget(instance, repoID)
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
-		// misroute the full-screen stream; empty falls back to the ordinal.
+		// misroute the full-screen stream; empty falls back to the ordinal. The
+		// session axis is addressed the same way — by stable id when the record
+		// has one — so a same-title replacement between keypress and dial does
+		// not receive the user's keystrokes.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
+		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
