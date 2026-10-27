@@ -42,6 +42,13 @@ const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 // must not hang the archive forever). Credentials are the sandbox image's/host's
 // responsibility — the same `origin` the sandbox cloned from must be pushable
 // (documented in docs/backends.md).
+//
+// Every git-subprocess failure is annotated with a Go-side write probe over
+// the worktree and common-dir filesystems: inside a sandbox these calls are
+// subprocesses, so a disk-full failure arrives as an *exec.ExitError whose
+// errno survives only as stderr text. The probe re-verifies the environment
+// so the archive RPC's error envelope can carry the resource-exhaustion class
+// across the wire (#5295 review).
 func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	if g.externalWorktree {
 		return "", fmt.Errorf("cannot push an in-place/external worktree branch (it is user-owned)")
@@ -50,6 +57,23 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	if branch == "" {
 		return "", fmt.Errorf("cannot push worktree %s: branch name is empty", g.worktreePath)
 	}
+
+	// Probe the worktree itself — the destination filesystem these git writes
+	// actually hit. Probing the parent would read the wrong answer when the
+	// worktree is its own mount point, and probing inside the tracked tree is
+	// safe because the probe unlinks its file before writing a single byte:
+	// the name never coexists with content, so `git add -A` can never stage
+	// it (#5295 review).
+	probeDir := g.worktreePath
+
+	// One debris edge survives the unlink-before-write contract: on the
+	// named-fallback path (no O_TMPFILE) a double unlink failure leaves a
+	// .af-add-probe-* name in this tree — the probe reports it in its error
+	// text and the file is left alone. It is treated exactly as user
+	// content — never deleted on a name match, and snapshotted like any
+	// other file: a committed stray is a cosmetic wart, strictly better
+	// than discarding user work a name filter cannot distinguish (#5295
+	// review).
 
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to
@@ -67,14 +91,18 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// beneath it, which is the same answer for less work on a big tree.
 	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
-		return "", fmt.Errorf("failed to check worktree status before archive push: %w", err)
+		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
 	}
 	if strings.TrimSpace(status) != "" {
+		// No name exclusions here: whatever the sweep could not prove it
+		// created is user content and must be snapshotted like everything
+		// else — filtering probe-shaped names out of `add` would silently
+		// drop a user file whose only sin is its name (#5295 review).
 		if _, err := g.runGitCommand(g.worktreePath, "add", "-A"); err != nil {
-			return "", fmt.Errorf("failed to stage uncommitted work before archive push: %w", err)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to stage uncommitted work before archive push: %w", err), probeDir)
 		}
 		if _, err := g.runGitCommand(g.worktreePath, "commit", "--no-verify", "-m", archiveSnapshotMessage); err != nil {
-			return "", fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err)
+			return "", g.annotateGitWriteError(fmt.Errorf("failed to snapshot uncommitted work before archive push: %w", err), probeDir)
 		}
 	}
 
@@ -87,8 +115,8 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// here too, with git's stderr folded in.
 	refspec := "HEAD:refs/heads/" + branch
 	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
-		return "", fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
-			branch, strings.TrimSpace(out), err)
+		return "", g.annotateGitWriteError(fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
+			branch, strings.TrimSpace(out), err), probeDir)
 	}
 	return branch, nil
 }

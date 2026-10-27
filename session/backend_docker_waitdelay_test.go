@@ -89,9 +89,9 @@ func installExecStragglerFake(t *testing.T, name, line string, toStderr bool) {
 		redir = " 1>&2"
 	}
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' " + shSingleQuoteExec(line) + redir + "\n" +
+		"printf '%s\\n' " + shellQuote(line) + redir + "\n" +
 		"sleep " + strconv.Itoa(dockerStragglerSleep) + " &\n" +
-		"echo $! > " + shSingleQuoteExec(pidFile) + "\n" +
+		"echo $! > " + shellQuote(pidFile) + "\n" +
 		"exit 0\n"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake %s: %v", name, err)
@@ -106,10 +106,6 @@ func installExecStragglerFake(t *testing.T, name, line string, toStderr bool) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-}
-
-func shSingleQuoteExec(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // returnsWithinExec runs fn in a goroutine and reports whether it returned within

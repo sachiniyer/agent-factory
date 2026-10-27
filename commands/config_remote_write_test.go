@@ -235,7 +235,7 @@ func TestConfigSetRoutesTheGlobalWriteToTheTargetedDaemon(t *testing.T) {
 }
 
 func TestConfigUnsetRoutesTheGlobalClearToTheTargetedDaemon(t *testing.T) {
-	// One of the three globally unsettable migrated backend settings, so the key
+	// One of the globally unsettable migrated alias settings, so the key
 	// is one the real handler would accept rather than reject before writing.
 	const unsettable = "ssh.host_key_verification"
 

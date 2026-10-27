@@ -279,3 +279,56 @@ func TestCommandMutatesAccountEnvironment_XargsEmptyReplaceMarker(t *testing.T) 
 			"command %q", test.command)
 	}
 }
+
+// A bare --replace / -i (no attached marker) defaults the replace marker to {},
+// like --replace= / -I "", and fully supersedes any earlier -I marker. The walk
+// reading used to keep the prior marker (e.g. -I@) and refuse commands GNU xargs
+// runs (#4980 follow-up to #5054): bare and = forms are semantically identical
+// but got opposite verdicts. The bare form now defaults the walk marker to {}
+// too, so it matches its = / "" counterpart while the dangerous direction stays
+// refused.
+func TestCommandMutatesAccountEnvironment_XargsBareReplaceOverride(t *testing.T) {
+	names := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		names[name] = struct{}{}
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		// A bare --replace / -i after a different -I marker: GNU xargs 4.9
+		// defaults the marker to {} and the prior marker stays literal, so
+		// the leaked marker no longer reaches the xargs-input scans. Each
+		// bare form matches its = / "" counterpart exactly.
+		{"xargs -I@ --replace env @ codex", false},
+		{"xargs -I@ --replace= env @ codex", false},
+		{"xargs -I@ -i env @ codex", false},
+		{`xargs -I@ -I "" env @ codex`, false},
+		// The bare override with a replace-canceller: GNU appends input (the
+		// defaulted {} is ignored) and still runs the command, matching the
+		// = counterpart that TestCommandMutatesAccountEnvironment_XargsEmpty
+		// ReplaceMarker pins at false.
+		{"xargs -I@ --replace -L1 env @ codex", false},
+		{"xargs -I@ -i -L1 env @ codex", false},
+		{"xargs -I@ --replace -L1 strace -f echo", false},
+		// A prior marker that itself sets an env-looking operand stays
+		// literal under the bare override, so it is accepted where the stale
+		// marker used to refuse.
+		{"xargs -I@ --replace env @=1 codex", false},
+		// The bare override keeps refusing when the defaulted {} reaches a
+		// dangerous spot, exactly as --replace= / -I "" do.
+		{"xargs -I@ --replace strace --env={} codex", true},
+		{"xargs -I@ -i strace --env={} codex", true},
+		{"xargs -I@ --replace nohup {} CODEX_HOME=/x codex", true},
+		{"xargs -I@ --replace strace {} codex", true},
+		// A scoped-name assignment is refused by the static env-assignment
+		// scan regardless of marker state, so the bare override cannot let a
+		// marker that spells a scoped name through. A marker that spells the
+		// binary name (not a scoped env name) correctly flips to accept.
+		{"xargs -I CODEX_HOME --replace env CODEX_HOME=/x codex", true},
+		{"xargs -I codex --replace env codex=/x codex", false},
+	} {
+		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
+			"command %q", test.command)
+	}
+}

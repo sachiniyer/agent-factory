@@ -209,11 +209,49 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	}
 }
 
-func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
+func TestConfigSetHelpListsEveryProjectAdmittedKey(t *testing.T) {
 	want := "(default_program, program_overrides, program_overrides.<agent>, default_accounts, " +
-		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command)"
+		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, " +
+		"limit_account_candidates)"
 	if !strings.Contains(configSetCmd.Long, want) {
-		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
+		t.Fatalf("config set help omits a valid per-project key form; want %q in:\n%s", want, configSetCmd.Long)
+	}
+	// The parenthetical enumerates every key the manifest admits to the personal
+	// per-project layer — the same set resolveProjectSettable enforces. Check the
+	// parenthetical itself, not the whole Long (an admitted key already appears in
+	// the global "Settable keys" list, so a Long-wide search can never catch one
+	// missing here), and compare both directions at top-level-key granularity so a
+	// key that loses the layer cannot linger in help (#3869 added
+	// limit_account_candidates to the layer and this list lagged).
+	start := strings.Index(configSetCmd.Long, "are accepted there\n(")
+	if start < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	rest := configSetCmd.Long[start+len("are accepted there\n("):]
+	end := strings.Index(rest, ")")
+	if end < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	listed := map[string]bool{}
+	for _, tok := range strings.Split(rest[:end], ", ") {
+		top, _, _ := strings.Cut(tok, ".")
+		listed[top] = true
+	}
+	admitted := map[string]bool{}
+	for _, entry := range config.Manifest() {
+		if entry.Sources.Has(config.SourceProjectPersonal) {
+			admitted[entry.Key] = true
+		}
+	}
+	for key := range admitted {
+		if !listed[key] {
+			t.Errorf("config set help's per-project list omits admitted key %q", key)
+		}
+	}
+	for key := range listed {
+		if !admitted[key] {
+			t.Errorf("config set help's per-project list claims key %q the manifest does not admit per project", key)
+		}
 	}
 }
 
