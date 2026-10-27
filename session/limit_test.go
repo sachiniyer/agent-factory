@@ -207,11 +207,64 @@ func TestLimitReached_PersistRoundTrip(t *testing.T) {
 }
 
 // TestToInstanceData_NoLimitResetForNormalSession: a Ready session never persists
-// a reset time, so omitempty drops the field for every normal row.
+// a reset time, so omitzero drops the field for every normal row.
 func TestToInstanceData_NoLimitResetForNormalSession(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "normal", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	i.SetStatusForTest(Ready)
 	data := i.ToInstanceData()
 	require.True(t, data.LimitResetAt.IsZero(), "a non-limit session must not carry a reset time")
+}
+
+// TestLimitResetAt_OmittedFromJSONWhenZero pins the wire contract documented in
+// both the field comment and web/src/types.ts: the "limit_reset_at" key MUST be
+// absent from marshaled JSON whenever LimitResetAt is the zero time.Time. Go's
+// encoding/json treats a struct as non-empty for omitempty, so the field must
+// use omitzero (the TabExitData.At precedent, #4506); a regression to omitempty
+// would re-leak "0001-01-01T00:00:00Z" onto every session row, snapshot, and
+// /v1/events payload, and the web would render a fabricated "resets Jan 1 12am"
+// badge for a limit row with no parseable reset time.
+func TestLimitResetAt_OmittedFromJSONWhenZero(t *testing.T) {
+	t.Run("non-limit session omits the key", func(t *testing.T) {
+		i, err := NewInstance(InstanceOptions{Title: "normal", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		i.SetStatusForTest(Ready)
+		raw, err := json.Marshal(i.ToInstanceData())
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "limit_reset_at",
+			"a non-limit session must not emit limit_reset_at (omitzero on a zero time.Time)")
+		require.NotContains(t, string(raw), "0001-01-01",
+			"the invented zero timestamp must never reach the wire")
+	})
+	t.Run("limit session with unknown reset time omits the key", func(t *testing.T) {
+		i, err := NewInstance(InstanceOptions{Title: "limited", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		i.SetLimitReached(time.Time{}) // banner matched, reset time did not parse
+		require.True(t, i.LimitReached())
+		raw, err := json.Marshal(i.ToInstanceData())
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "limit_reset_at",
+			"a limit row with an unknown reset window must not emit limit_reset_at")
+		require.NotContains(t, string(raw), "0001-01-01",
+			"the invented zero timestamp must never reach the wire")
+	})
+	t.Run("ForStorage projection omits the key for a normal session", func(t *testing.T) {
+		i, err := NewInstance(InstanceOptions{Title: "normal", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		i.SetStatusForTest(Ready)
+		raw, err := json.Marshal(i.ToInstanceData().ForStorage())
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "limit_reset_at",
+			"instances.json must not carry limit_reset_at for a non-limit row")
+	})
+	t.Run("limit session with a reset time still emits the key", func(t *testing.T) {
+		reset := time.Date(2026, 7, 5, 14, 30, 0, 0, time.UTC)
+		i, err := NewInstance(InstanceOptions{Title: "limited", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		i.SetLimitReached(reset)
+		raw, err := json.Marshal(i.ToInstanceData())
+		require.NoError(t, err)
+		require.Contains(t, string(raw), `"limit_reset_at":"2026-07-05T14:30:00Z"`,
+			"a limit row with a known reset time must still emit limit_reset_at")
+	})
 }

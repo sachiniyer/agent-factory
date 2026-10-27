@@ -54,7 +54,10 @@ type ProjectConfig struct {
 	// so "this project runs as my work codex" is a statement about one machine and
 	// one person, never about the repository.
 	DefaultAccounts map[string]string `toml:"default_accounts,omitempty"`
-	// BranchPrefix overrides the git branch prefix for this project's sessions.
+	// BranchPrefix stays decodable so a stored per-project value keeps this
+	// file valid, but it is NOT applied (#4539): the manifest gives
+	// branch_prefix global-only precedence, so the field never wins resolution
+	// and branch names always come from the global prefix.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
 	// OnArchiveCommand overrides the operator-authored archive hook for this
 	// project. This file is machine-local under the AF home, never checked in.
@@ -143,7 +146,21 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		}
 		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
 	}
-	return parseProjectConfig(data, path)
+	cfg, err := parseProjectConfig(data, path)
+	if err != nil {
+		return nil, err
+	}
+	// A stored per-project branch_prefix is inert until #4539 — say so once per
+	// file per process rather than on every daemon-driven reload. Not every
+	// consumer resolves (the daemon's root-agent snapshot reads this file
+	// directly), so the warning lives at the load itself; the global value it
+	// names comes from a strictly read-only load, never a materializing one.
+	// The resolver is passed lazily so the once-per-file memo answers before a
+	// repeated load re-reads the global config (#5026).
+	if cfg.IsSet("branch_prefix") {
+		warnProjectBranchPrefixIgnored(path, globalBranchPrefixForLoadWarning)
+	}
+	return cfg, nil
 }
 
 // parseProjectConfig decodes and validates personal-project TOML bytes. It is

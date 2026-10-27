@@ -540,3 +540,43 @@ func TestLinkCopiedFile_RefusesALinkThatLandedOnAnotherInode(t *testing.T) {
 		"third.txt", filepath.Join(staging, "third.txt"), actual)
 	require.NoError(t, err, "a link onto the recorded inode must be accepted")
 }
+
+// TestLinkCopiedFile_IdentityFailureAfterLinkCreateOmitsEntry verifies the fix
+// for the identity-failure branch: when identityAt fails after Linkat succeeds,
+// linkCopiedFile must return copiedEntry{} (no name) so the caller does not
+// record a manifest entry with a zero destination identity — matching the
+// sibling helpers (copyDirectoryEntry, copySymlinkEntry, copyRegularFileAtWithIdentity),
+// which all return copiedEntry{} on their post-create identity failures.
+//
+// The copyTreeAfterLinkCreate seam (the only pre-identity seam in the suite)
+// removes the freshly-linked node between Linkat and identityAt, manufacturing
+// the ENOENT racer subcase: the link is gone from disk, and the entry must be
+// gone from the manifest so the name-set check in validateCopiedDirectoryLevel
+// passes and the staging root can be cleaned up.
+func TestLinkCopiedFile_IdentityFailureAfterLinkCreateOmitsEntry(t *testing.T) {
+	staging := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(staging, "first.txt"), []byte("first"), 0644))
+
+	root, _, err := openDirectoryPath(staging, "destination")
+	require.NoError(t, err)
+	defer root.Close()
+
+	actual, err := identityAt(root, "first.txt")
+	require.NoError(t, err)
+
+	// The seam simulates a racer that unlinks the freshly-linked node inside
+	// the microsecond window between Linkat and the following identityAt.
+	originalHook := copyTreeAfterLinkCreate
+	copyTreeAfterLinkCreate = func(path string) error {
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { copyTreeAfterLinkCreate = originalHook })
+
+	entry, err := linkCopiedFile(root, root, copiedFileLink{path: "first.txt", identity: actual},
+		"second.txt", filepath.Join(staging, "second.txt"), actual)
+	require.Error(t, err, "identityAt must fail when the linked node was removed")
+	assert.Contains(t, err.Error(), "failed to identify hard link")
+	assert.Empty(t, entry.name,
+		"the entry must be omitted when the destination identity cannot be learned, "+
+			"matching the sibling helpers so the manifest stays consistent with the on-disk tree")
+}

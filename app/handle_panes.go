@@ -1,12 +1,15 @@
 package app
 
 import (
+	"errors"
+
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -63,17 +66,35 @@ func (m *home) focusedOpenPane() *store.OpenPane {
 	return nil
 }
 
-// paneSelectionHint names the current tree/sidebar selection when a visible
-// pane is bound elsewhere. Panes are explicit workspace bindings, not
-// selection-driven previews; showing the selected title in the header makes
+// paneSelectionHint names the row under the tree cursor when a visible pane
+// is bound elsewhere. Panes are explicit workspace bindings, not
+// selection-driven previews; showing the cursor's title in the header makes
 // that divergence visible instead of letting the tree highlight and pane
 // content appear to disagree (#1289).
+//
+// The label is "cursor:", so the value must be the sidebar's CURSOR-derived
+// selection — nil while the cursor rests on a section header — never the
+// store's sticky display binding (#5154 review): pushSelection deliberately
+// leaves that binding in place on a header click, and a title still naming it
+// would claim a cursor position the tree is not showing.
 func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if p == nil {
 		return ""
 	}
-	selected := m.store.GetSelectedInstance()
+	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
+		return ""
+	}
+	if selected.IsArchived() || selected.GetInFlightOp() == session.OpRestoring {
+		// The sticky binding keeps an archived session marked (▾) so the
+		// footer's restore verb can act on it (#4755), but no pane can ever
+		// show it. Lost and dead rows are different — tab_pane.go renders
+		// their fallback content, so the hint there names a real divergence,
+		// not a stale claim. Read the liveness axis (IsArchived, not
+		// ShownArchived — the eager re-home flips that predicate false the
+		// moment OpRestoring starts) plus the restoring op, so the whole
+		// restore window stays suppressed while no pane can serve (#4755
+		// review).
 		return ""
 	}
 	if m.paneMatchesSelection(p) {
@@ -148,11 +169,25 @@ func (m *home) focusOpenPane(p *store.OpenPane) {
 // handleSplitPane dispatches the `S` key: commit the active preview alongside
 // its owner pane. The owner returns to its original committed binding, then
 // the preview target is opened as a new pane or, if already open, focused.
+// With no preview there is nothing to keep, and the key says so rather than
+// doing nothing where the user cannot tell whether it acted (#4957).
 func (m *home) handleSplitPane() (tea.Model, tea.Cmd) {
 	if m.panePreviewTxn == nil {
-		return m, nil
+		return m, m.handleNotice(m.splitPaneUnavailableNotice())
 	}
 	return m, m.commitPanePreviewAlongside()
+}
+
+// splitPaneUnavailableNotice explains a dead `S`. The common case is a
+// selection whose tab already has a pane — there is no preview because the
+// tab is showing for real — so that case names it; every other way to reach
+// here has no preview either, and says only that.
+func (m *home) splitPaneUnavailableNotice() error {
+	if selected := m.store.GetSelectedInstance(); selected != nil &&
+		m.store.FindOpenPane(selected, m.store.ActiveTab()) != nil {
+		return errors.New("The pane is already open")
+	}
+	return errors.New("No preview to keep")
 }
 
 // handleHidePane dispatches the `x` key: hide the FOCUSED pane back to the
@@ -440,16 +475,25 @@ func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
 // opened). Re-resolving the pre-change key is what makes the selection move WITH
 // its tab instead.
 //
-// The caller remaps a tab-row cursor after this returns. That separation is
-// load-bearing for a same-title replacement: ReplaceInstanceByTitle may re-sort
-// the projection, so the sidebar's flattened indices are stale until the final
-// selection assertion rebuilds them. Syncing here would read a neighbor through
-// the stale index and overwrite the durable last-cursor identity.
+// And when the selection's own tab is really gone — the `w` close, or an
+// out-of-band delete arriving through the snapshot reconcile — the answer is
+// the nearest remaining sibling: the tab that slid into the vacated slot, else
+// the new last tab. The selection must stay INSIDE the session: the sidebar's
+// flat-index clamp would otherwise land the cursor on whatever row now occupies
+// its stale slot — the FOLLOWING session's instance row when the deleted tab
+// was the last child — and pushSelection commits that as the display
+// selection (#5298).
+//
+// The caller re-pins a tab-row cursor (SyncCursorToActiveTab) as soon as this
+// returns true, BEFORE any sidebar-reading work in the same mutation — the
+// pane reconcile's relayout resolves the footer's row-verb target through a
+// sidebar sync, and a rebuild running ahead of the re-pin commits the drifted
+// row first. The one caller that must NOT sync is the same-title session swap:
+// ReplaceInstanceByTitle can re-sort the projection, so the flattened indices
+// are stale until the reconcile's final SelectInstance assertion rebuilds them.
 //
 // Only the STORE's selected instance has an active tab to carry (the same
-// question handleCloseTab answers with treeIsSelected), and a tab that is truly
-// gone is left to the existing clamp — this fixes where the selection LANDS under
-// a permutation, and deliberately does not change what an out-of-band close does.
+// question handleCloseTab answers with treeIsSelected).
 func (m *home) remapActiveTabForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
 	if instance == nil || instance != m.store.GetSelectedInstance() {
 		return false
@@ -459,8 +503,19 @@ func (m *home) remapActiveTabForTabs(instance *session.Instance, oldKeys []tabSl
 		return false
 	}
 	idx, ok := newTabSlotResolver(instance, domain).resolve(oldKeys[slot])
-	if !ok || idx == slot {
+	switch {
+	case ok && idx == slot:
+		// The selection's own tab survived unmoved; nothing to re-point.
 		return false
+	case !ok:
+		// The selected tab itself is gone. Land on the sibling now occupying
+		// the vacated slot, else the new last tab — index arithmetic alone
+		// cannot name the right session-relative row, and the flat-list clamp
+		// answers with a DIFFERENT session (#5298).
+		idx = slot
+		if n := len(tree.TabLabels(instance)); idx >= n {
+			idx = n - 1 // TabLabels never returns empty (placeholder slot)
+		}
 	}
 	m.store.SetActiveTab(idx)
 	m.clampSelectionTab()

@@ -8,9 +8,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,8 +46,8 @@ func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 
 	out := a.View()
 	require.Contains(t, out, "Automations")
-	assert.Contains(t, out, "[✓]  nightly-sweep", "an enabled task shows its glyph and title")
-	assert.Contains(t, out, "[✗]  ci-watch", "a disabled task shows its glyph and title")
+	assert.Contains(t, out, "[✓] nightly-sweep", "an enabled task shows its glyph and title")
+	assert.Contains(t, out, "[✗] ci-watch", "a disabled task shows its glyph and title")
 	assert.NotContains(t, out, "0 3 * * *", "the collapsed row hides the cron trigger")
 	assert.NotContains(t, out, "next Jul 02 03:00", "the collapsed row hides the next-run detail")
 	assert.NotContains(t, out, "watch: tail -f ci.log", "the collapsed row hides the watch command")
@@ -83,7 +85,7 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "▾[✓]  nightly-sweep", "the focused row is marked expanded")
+	assert.Contains(t, out, "▾  [✓] nightly-sweep", "the focused row is marked expanded")
 	assert.Contains(t, out, "0 3 * * *", "the expanded row reveals its cron trigger")
 	// "from cron:" because this fixture is a plain disk read with no arming
 	// observation on it, so the time is what the expression implies rather than
@@ -96,7 +98,7 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 
 	a.ScrollDown()
 	out = a.View()
-	assert.Contains(t, out, "▾[✗]  ci-watch", "expansion follows the cursor")
+	assert.Contains(t, out, "▾  [✗] ci-watch", "expansion follows the cursor")
 	assert.Contains(t, out, "watch: tail -f ci.log", "the newly expanded row reveals its command")
 	assert.NotContains(t, out, "0 3 * * *", "the previously expanded row re-collapses")
 }
@@ -178,11 +180,11 @@ func TestAutomationsFocusShowsCursorNotManager(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 100, H: 3}, "focused section")
-	assert.Contains(t, out, "▾[✓]", "the cursor marks (and expands) the selected row")
+	assert.Contains(t, out, "▾  [✓]", "the cursor marks (and expands) the selected row")
 	assert.NotContains(t, out, "Tasks", "the manager must not render in-rail")
 
 	a.ScrollDown()
-	assert.Contains(t, a.View(), "▾[✗]", "the cursor follows ScrollDown")
+	assert.Contains(t, a.View(), "▾  [✗]", "the cursor follows ScrollDown")
 	assert.Equal(t, 1, a.SelectedTaskIndex())
 
 	a.Blur()
@@ -211,10 +213,12 @@ func TestAutomationsStripKeyRouting(t *testing.T) {
 	assert.False(t, consumed, "q bubbles so the root can quit")
 }
 
-// TestAutomationsTitleWidthAware pins the #1096 play-test fix: the header's
-// hint segments drop right-to-left (hooks first) and the name shrinks with an
-// ellipsis so the manage affordance survives even the 22-col rail minimum —
-// never a bare hard clamp.
+// TestAutomationsTitleWidthAware pins the #1096 play-test fix as re-ordered by
+// #5372: the header's hint segments drop right-to-left (hooks first), the
+// manage affordance outlives the secondary count, and the NOUN is the last
+// fragment the ladder may shed — never a bare hard clamp. At the 22-col rail
+// minimum the affordance is what goes, leaving " Automations: 2 (1 on)": the
+// label survives so the counts are no longer orphaned.
 func TestAutomationsTitleWidthAware(t *testing.T) {
 	tasks := stripTasks()
 	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
@@ -238,8 +242,11 @@ func TestAutomationsTitleWidthAware(t *testing.T) {
 	narrow.SetRect(layout.Rect{W: 22, H: 3})
 	out = narrow.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "22-col section")
-	assert.Contains(t, out, manageHint, "22-col rail still shows the manage affordance")
-	assert.Contains(t, out, "…", "the shrunk name marks its cut with an ellipsis")
+	assert.Contains(t, out, "Automations: 2 (1 on)",
+		"the rail floor keeps the section's name — the affordance sheds ahead of it (#5372)")
+	assert.NotContains(t, out, manageHint,
+		"at the rail floor the affordance is what sheds before the noun")
+	assert.NotContains(t, out, "…", "the noun is kept whole or clipped — never shrunk mid-token")
 
 	// The 1-line degraded summary applies the same policy.
 	compact := newTestAutomations(tasks)
@@ -247,7 +254,8 @@ func TestAutomationsTitleWidthAware(t *testing.T) {
 	compact.SetCompact(true)
 	out = compact.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "22-col compact summary")
-	assert.Contains(t, out, manageHint, "the compact summary keeps the manage affordance")
+	assert.Contains(t, out, "Automations: 2 (1 on)",
+		"the compact summary also keeps the section's name (#5372)")
 }
 
 func TestAutomationsHintsReflectKeymapRebinds(t *testing.T) {
@@ -297,7 +305,7 @@ func TestAutomationsCursorScrollsIntoView(t *testing.T) {
 	}
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 40, H: 3}, "scrolled section")
-	assert.Contains(t, out, "▾[✓]  task-f", "the cursor's row scrolled into view")
+	assert.Contains(t, out, "▾  [✓] task-f", "the cursor's row scrolled into view")
 }
 
 // TestAutomationsStripExactRectWithOverflow: more tasks than rows must
@@ -365,44 +373,238 @@ func TestAutomationsHeaderNeverEllipsizesIntoTheSeparator(t *testing.T) {
 	}
 }
 
-// The header's only information is how many tasks exist. The width fallback used
-// to replace the whole title with an ellipsized constant, so at every width below
-// 110 columns the header with two tasks was byte-identical to the header with
-// none (#3630).
+// The header's core information is how many tasks exist. The width fallback
+// used to replace the whole title with an ellipsized constant, so at every
+// width below 110 columns the header with two tasks was byte-identical to the
+// header with none (#3630). The count itself may change spelling across rungs
+// — the compact "2 (2 on)" or the bare primary "2" beside the noun (#5372) —
+// but it never truncates and never disappears while it can still say
+// something.
+//
+// Its floor is the count's own fit beside the name: " Automations: 2" needs
+// 15 cells. Below that the noun is all that remains — the same line for two
+// tasks as for none — a clip-only band the rail's 22-cell floor never reaches.
 func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
-	for w := 8; w <= 45; w++ {
+	for w := 15; w <= 45; w++ {
 		empty := railHeaderLine(t, nil, w)
 		busy := railHeaderLine(t, nSimpleTasks(2), w)
 		require.NotEqualf(t, empty, busy,
 			"width %d: a header that cannot say how many tasks exist is the same line either way: %q", w, busy)
-		if w >= 15 {
-			require.Containsf(t, busy, "(2)",
-				"width %d: the count survives every form down to the rail minimum — it is the only information the header carries: %q", w, busy)
-		}
+		require.Containsf(t, busy, "2",
+			"width %d: the count survives every form down to the rail minimum — beside the noun now: %q", w, busy)
+	}
+	for w := 8; w < 15; w++ {
+		require.Equalf(t, railHeaderLine(t, nil, w), railHeaderLine(t, nSimpleTasks(2), w),
+			"width %d: below the count's floor only the noun remains — a band the rail floor never reaches", w)
 	}
 }
 
-// The ladder itself: what is shed, and in what order. The manage affordance is
-// the last thing cut — the shipped contract TestAutomationsTitleWidthAware pins
-// — so at the 22-column rail minimum the noun ellipsizes beside it, with the
-// separator and the count both intact.
+// The ladder itself: what is shed, and in what order. Since #5372 the noun is
+// the LAST fragment cut — the affordance, the secondary count, and the count
+// all go before "Automations:" does — so every supported width still names
+// what is being counted. The affordance retains its old rank among the rest:
+// it outlives the secondary number, so "2 · m manage" holds to 26 cells, and
+// when it falls the fuller "2 (2 on)" fills the freed room beside the noun.
 func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 	for _, tc := range []struct {
 		w    int
 		want string
 	}{
-		{40, " Automations (2) · m manage · e hooks"}, // everything
-		{37, " Automations (2) · m manage · e hooks"}, // exactly
-		{36, " Automations (2) · m manage"},           // hooks drops first
-		{27, " Automations (2) · m manage"},           // exactly
-		{26, " Automatio… (2) · m manage"},            // then the noun shrinks, counts intact
-		{22, " Autom… (2) · m manage"},                // the 22-col rail minimum (#1090)
-		{20, " Aut… (2) · m manage"},                  // …and it keeps shrinking
-		{15, " (2) · m manage"},                       // the noun goes, counts and hint stay
+		{43, " Automations: 2 (2 on) · m manage · e hooks"}, // everything
+		{36, " Automations: 2 (2 on) · m manage"},           // hooks drops first
+		{33, " Automations: 2 (2 on) · m manage"},           // full counts beside the affordance, exactly
+		{32, " Automations: 2 · m manage"},                  // the secondary count sheds before the affordance
+		{26, " Automations: 2 · m manage"},                  // exactly
+		{25, " Automations: 2 (2 on)"},                      // the affordance sheds before the noun (#5372)
+		{22, " Automations: 2 (2 on)"},                      // the 22-col rail minimum (#1090) keeps its label
+		{21, " Automations: 2"},                             // the counts step down to the primary
+		{15, " Automations: 2"},                             // the count beside the name is the floor pair
+		{14, " Automations:"},                               // the noun is the last fragment standing
+		{13, " Automations:"},                               // exactly
+		{12, " Automation…"},                                // below the noun's own fit — unreachable (rail ≥ 22)
 	} {
 		require.Equalf(t, tc.want, railHeaderLine(t, nSimpleTasks(2), tc.w),
 			"rail width %d", tc.w)
 	}
+}
+
+// TestAutomationsRailFieldsAreWholeOrOmitted is #5153's property at every rail
+// width the grid can produce (TreeMinWidth–TreeMaxWidth, clamp(22,25%·W,36)):
+// the header and the expanded row's detail show each field whole or omit it
+// entirely — a timestamp is never cut to "Oct…" and the noun never becomes
+// "Autom…". #5372 then made the noun the last fragment the header sheds: the
+// affordance and the counts step down ahead of it. The issue's 80x24 example
+// is the w=22 endpoint: the field budget is rail minus the fixed 7-cell
+// indent, so only the trigger fits and the last run surfaces from w=24 up.
+func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
+	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
+	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
+	last := time.Date(2026, time.October, 5, 11, 56, 0, 0, time.UTC)
+	proj := store.NewProjection()
+	proj.SetTasks([]task.Task{{
+		ID: "t", Name: "hello-cron", CronExpr: "0 3 * * *", Enabled: true,
+		Arming: task.ArmingArmed, NextRunAt: &next, LastRunAt: &last,
+	}})
+	pane := NewAutomationsPane(proj)
+	pane.SetNowForTest(func() time.Time { return now })
+	pane.Focus()
+
+	wholeFields := []string{"next Oct 06 03:00", "last Oct 05 11:56", "0 3 * * *"}
+	for w := 22; w <= 36; w++ {
+		pane.SetRect(layout.Rect{W: w, H: 4})
+		out := stripANSI(pane.View())
+		lines := strings.Split(out, "\n")
+		header := strings.TrimRight(lines[0], " ")
+		detail := strings.TrimSpace(lines[2])
+
+		require.NotContainsf(t, out, "…", "width %d: a field is cut mid-token:\n%s", w, out)
+		require.Containsf(t, header, "Automations:",
+			"width %d: the section's noun is the last thing the header sheds (#5372): %q", w, header)
+		switch {
+		case w >= 33:
+			require.Containsf(t, header, "Automations: 1 (1 on)",
+				"width %d: the noun fits beside the full counts, so it shows: %q", w, header)
+			require.Containsf(t, header, "m manage",
+				"width %d: the affordance survives beside the full counts: %q", w, header)
+		case w >= 26:
+			require.Containsf(t, header, "Automations: 1",
+				"width %d: the primary count keeps the affordance's slot: %q", w, header)
+			require.Containsf(t, header, "m manage",
+				"width %d: the affordance outranks the secondary count: %q", w, header)
+		default:
+			require.Equalf(t, " Automations: 1 (1 on)", header,
+				"width %d: with the affordance shed, the noun and the full counts remain", w)
+		}
+
+		// Every surviving piece of the detail line is one of the complete
+		// fields; nothing partial ever renders.
+		for _, piece := range strings.Split(detail, " · ") {
+			require.Containsf(t, wholeFields, piece,
+				"width %d: the detail shows only whole fields: %q", w, detail)
+		}
+		if strings.Contains(detail, "next") {
+			require.Containsf(t, detail, "last",
+				"width %d: next-run must shed before last-run: %q", w, detail)
+		}
+	}
+
+	// The reported frame itself: at the 22-col rail the field budget is 15
+	// cells (rail minus the fixed indent), so the detail is the trigger — the
+	// only field that fits; the last run appears from width 24 up.
+	pane.SetRect(layout.Rect{W: 22, H: 4})
+	lines := strings.Split(stripANSI(pane.View()), "\n")
+	require.Equal(t, " Automations: 1 (1 on)", strings.TrimRight(lines[0], " "))
+	require.Equal(t, "0 3 * * *", strings.TrimSpace(lines[2]))
+}
+
+// TestAutomationsDetailIndentIsFixed: the detail hangs under the row title at
+// exactly itemPrefixWidth cells at every rail width — the indent is layout,
+// not budget. The first #5153 play-test caught it yielding to buy room for a
+// field (4 cells at rail 22, 0 at rail 30 — a "detail" line starting at column
+// 0 reads as a top-level row). Fields fit in W-itemPrefixWidth or drop; the
+// indent never moves.
+func TestAutomationsDetailIndentIsFixed(t *testing.T) {
+	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
+	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
+	last := time.Date(2026, time.October, 5, 11, 56, 0, 0, time.UTC)
+	indent := strings.Repeat(" ", itemPrefixWidth)
+	for _, tc := range []struct {
+		name string
+		tsk  task.Task
+	}{
+		{"healthy", task.Task{
+			ID: "t", Name: "hello-cron", CronExpr: "0 3 * * *", Enabled: true,
+			Arming: task.ArmingArmed, NextRunAt: &next, LastRunAt: &last,
+		}},
+		{"overdue", overdueStripTask()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proj := store.NewProjection()
+			proj.SetTasks([]task.Task{tc.tsk})
+			pane := NewAutomationsPane(proj)
+			pane.SetNowForTest(func() time.Time { return now })
+			pane.Focus()
+			for w := 22; w <= 36; w++ {
+				pane.SetRect(layout.Rect{W: w, H: 4})
+				line := strings.TrimRight(strings.Split(stripANSI(pane.View()), "\n")[2], " ")
+				require.Truef(t, strings.HasPrefix(line, indent) && len(line) > itemPrefixWidth && line[itemPrefixWidth] != ' ',
+					"%s width %d: the detail must start with exactly %d cells of indent: %q", tc.name, w, itemPrefixWidth, line)
+			}
+		})
+	}
+}
+
+// TestAutomationsDetailBudgetsByUpperBound is the #5153 review finding: the
+// field budget is priced in CellsUpperBound — the same measure the rectangle
+// contract clamps with — because a trigger/watch command is user data, and
+// Cells under-reports a chained ZWJ family (2 where tmux can advance 4).
+// Accepting such a field on the optimistic count let ClampToRect tighten it
+// afterwards, cutting the family mid-sequence — the exact mid-token clip the
+// whole-or-omit contract exists to remove.
+func TestAutomationsDetailBudgetsByUpperBound(t *testing.T) {
+	trigger := strings.Repeat("👨‍👩‍👧‍👦", 4)
+	optimistic, bound := layout.Cells(trigger), layout.CellsUpperBound(trigger)
+	require.Less(t, optimistic, bound, "the fixture must be a case where the two measures diverge")
+
+	build := func(w int) *AutomationsPane {
+		a := newTestAutomations([]task.Task{{
+			ID: "emoji", Name: "emoji-trigger", CronExpr: trigger, Enabled: false,
+		}})
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		return a
+	}
+	// avail = w - itemPrefixWidth: one cell short of the bound admits the
+	// optimistic count but not the honest one, so the field must be omitted —
+	// not admitted and then clipped.
+	tight := build(itemPrefixWidth + bound - 1)
+	out := stripANSI(tight.View())
+	require.NotContains(t, out, trigger,
+		"a field whose upper-bound width does not fit must be omitted, never clipped mid-token")
+	wide := build(itemPrefixWidth + bound)
+	require.Contains(t, stripANSI(wide.View()), trigger,
+		"the same field renders whole the moment its bound fits")
+}
+
+// TestAutomationsScrollReservesDetailOnlyWhenItRenders is the #5153 review
+// finding: the scroll window reserves the expanded row's second line only when
+// the detail has fields to show, and the bottom-clamp uses the reserved window
+// so the reservation cannot be undone at the fold. A disabled task whose sole
+// trigger is wider than the field budget has no detail — reserving for it
+// scrolled a fully-visible row away for nothing.
+func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
+	// "0 3 * * *" prices 9 cells: inside a 16-cell rail it fits the W−7
+	// budget exactly, at 15 nothing does and the expanded row stays one line.
+	tasks := make([]task.Task, 8)
+	for i := range tasks {
+		tasks[i] = task.Task{ID: fmt.Sprintf("t%d", i), Name: fmt.Sprintf("task-%d", i),
+			CronExpr: "0 3 * * *"}
+	}
+	bottom := func(w int) *AutomationsPane {
+		a := newTestAutomations(tasks)
+		a.SetRect(layout.Rect{W: w, H: 8})
+		a.Focus()
+		for i := 0; i < len(tasks)-1; i++ {
+			a.ScrollDown()
+		}
+		return a
+	}
+
+	// Detail renders: the window reserves its line, so one fewer title row
+	// shows and the selected task's detail is on-screen at the fold.
+	withDetail := stripANSI(bottom(16).View())
+	require.Contains(t, withDetail, "0 3 * * *",
+		"the selected row's detail must be visible, not pushed below the fold")
+	require.NotContains(t, withDetail, "task-2",
+		"the reserved detail line takes a real row's place")
+	require.Contains(t, withDetail, "task-7")
+
+	// Detail empty: no line is reserved, so the same scroll position keeps the
+	// extra title row a phantom reservation would have scrolled away.
+	noDetail := stripANSI(bottom(15).View())
+	require.NotContains(t, noDetail, "0 3 * * *")
+	require.Contains(t, noDetail, "task-2",
+		"with no detail to reveal the window must not sacrifice a visible row")
 }
 
 // The compact one-liner (#2.6, <80 cols) rides the same ladder and keeps its own
@@ -416,13 +618,68 @@ func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
 	require.NotContains(t, line, "…·", "and must not ellipsize into the separator")
 }
 
-// TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount answers the Codex
-// review on #3641. The compact summary carries TWO numbers, and at three digits
-// "100 (100 on)" is 12 cells — the counts plus the guaranteed hint needed 24 of
-// a 22-column rail, so the fallback clipped and truncated "m manage" itself. The
-// 22-column rail is the supported minimum (#1090), not a size below it, so that
-// broke the contract that the affordance is the last thing cut at exactly the
-// width the contract is about.
+// TestRailRowsLeaveTheMarkerCellBlank is #5350: the rail's selection marker
+// occupies the same slot on every row kind — the marker, then a blank cell
+// before any row content. An automation row dropped the gap and fused the ▾ to
+// its checkbox ("▾[✓]"), reading as one glyph, while session rows render
+// "▾  name". The pin is cell-accurate for both row kinds.
+func TestRailRowsLeaveTheMarkerCellBlank(t *testing.T) {
+	// The session row: an expandable instance rendered expanded, so its title
+	// line carries the ▾ tree arrow.
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "session-row", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	r := tree.NewInstanceRenderer()
+	r.SetWidth(24)
+	sessionLine := ""
+	for _, line := range strings.Split(stripANSI(r.Render(inst, 1, true, false, true)), "\n") {
+		if strings.Contains(line, "▾") {
+			sessionLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, sessionLine, "an expanded session row must carry its ▾ arrow")
+	assertMarkerCellBlank(t, "session", sessionLine)
+
+	// The automation row, at every rail width the grid can produce (22-36).
+	// The extra cell the marker gap costs must come out of the title budget,
+	// not out of a field — nothing else may newly truncate.
+	for w := 22; w <= 36; w++ {
+		a := newTestAutomations(stripTasks())
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		out := stripANSI(a.View())
+		autoLine := ""
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "▾") {
+				autoLine = line
+				break
+			}
+		}
+		require.NotEmptyf(t, autoLine, "width %d: the focused row must carry its ▾ marker", w)
+		assertMarkerCellBlank(t, fmt.Sprintf("automation w=%d", w), autoLine)
+		require.NotContainsf(t, out, "…", "width %d: a row or field is newly cut mid-token:\n%s", w, out)
+	}
+}
+
+// assertMarkerCellBlank pins the marker slot: the cell immediately after the
+// ▾ is blank, so the marker can never fuse to the row content it introduces.
+func assertMarkerCellBlank(t *testing.T, kind, line string) {
+	t.Helper()
+	i := strings.Index(line, "▾")
+	require.GreaterOrEqualf(t, i, 0, "%s row carries no ▾ marker: %q", kind, line)
+	require.Lessf(t, i+len("▾"), len(line), "%s row ends at its marker: %q", kind, line)
+	require.Equalf(t, " ", line[i+len("▾"):i+len("▾")+1],
+		"%s row fuses the marker to the row content: %q", kind, line)
+}
+
+// TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount answered the Codex
+// review on #3641, and #5372 moved its invariant: the last fragment standing
+// at the 22-column rail minimum is now the section's NOUN, not the manage
+// affordance. The affordance still sheds whole (never mid-token), and the
+// count still survives — beside "Automations:", which is what the degraded
+// line was missing when it read "1 (1 on) · m manage".
 func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
 	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
 	for _, n := range []int{0, 2, 9, 10, 99, 100, 999} {
@@ -431,11 +688,13 @@ func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
 		a.SetRect(layout.Rect{W: 22, H: 1})
 		line := strings.TrimRight(stripANSI(a.View()), " ")
 
-		require.Containsf(t, line, manageHint,
-			"%d tasks: the manage affordance is the last thing cut, and 22 is the supported rail minimum: %q", n, line)
+		require.Containsf(t, line, "Automations:",
+			"%d tasks: the noun is the last thing cut, and 22 is the supported rail minimum (#5372): %q", n, line)
+		require.NotContainsf(t, line, manageHint,
+			"%d tasks: the affordance sheds ahead of the noun at the floor: %q", n, line)
 		require.NotContainsf(t, line, "…"+railHintSeparator,
 			"%d tasks: the separator must stay intact: %q", n, line)
-		require.Containsf(t, line, fmt.Sprintf("%d", n),
-			"%d tasks: the task count survives: %q", n, line)
+		require.Containsf(t, line, fmt.Sprintf(" %d", n),
+			"%d tasks: the task count survives beside the noun: %q", n, line)
 	}
 }

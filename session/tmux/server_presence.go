@@ -253,6 +253,32 @@ func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 	return names, nil
 }
 
+// SessionCreatedUnix returns the server's recorded creation time for one tmux
+// session — per-launch temporal evidence the env markers alone cannot carry
+// (#5503): a same-named session killed and respawned gets a fresh timestamp, so
+// a leftover created at-or-after a recorded intent can be attributed to that
+// attempt. Any failure — absent session, wedged server, unparseable answer —
+// is an error; the caller must not read it as "not ours". Second granularity
+// is all tmux records; callers comparing against a finer bound should compare
+// at whole seconds.
+func SessionCreatedUnix(cmdExec cmd.Executor, sanitizedName string) (time.Time, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-t", exactTarget(sanitizedName), "-p", "#{session_created}")
+	timedOut := ctx.Err() != nil
+	cancel()
+	if err != nil {
+		if timedOut {
+			return time.Time{}, fmt.Errorf("%w: display-message for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		}
+		return time.Time{}, fmt.Errorf("could not read %s's creation time: %w", sanitizedName, err)
+	}
+	sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if perr != nil {
+		return time.Time{}, fmt.Errorf("could not parse %s's creation time %q: %w", sanitizedName, strings.TrimSpace(string(out)), perr)
+	}
+	return time.Unix(sec, 0), nil
+}
+
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
 // whitespace-collapsed onto one line, or "" when there is nothing to report.
 //
@@ -417,8 +443,21 @@ func absentTmuxSocketPath(diagnostic string) string {
 // was not disproved. An empty table answers "unclaimed" outright.
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
+	unprobedOwnerPossible := false
 	for _, pid := range pids {
-		if pid <= 0 || !proctree.IsTmuxServer(pid) {
+		if pid <= 0 {
+			continue
+		}
+		if !proctree.IsTmuxServer(pid) {
+			// The pid passed the liveTmuxServerPIDs comm prefilter but
+			// could not be positively identified as a server (proctree.
+			// IsTmuxServer is strict: an unreadable command line, a
+			// darwin foreground `tmux -D`, or a same-uid client all fail).
+			// Skip signalling it — SIGUSR1's default disposition is
+			// TERMINATE — but remember it: it occupies a slot the prefilter
+			// admitted, and a skipped owner is never disproved, so a
+			// socket that stays absent is NOT evidence against it.
+			unprobedOwnerPossible = true
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
@@ -434,7 +473,16 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			return true
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			// A prefilter-passing pid was skipped as not positively a
+			// server. It could be the live owner of this unlinked socket
+			// (a darwin `tmux -D` foreground server, a sidUnknown daemon,
+			// or a client the comm prefilter admitted). Socket absence
+			// after signalling the *other* servers does not disprove it,
+			// so the safe direction — the one the doc comment and the
+			// module's "a failed read is not an empty result" invariant
+			// both demand — is "claimed" (unknown), refusing the
+			// destructive cleanup that a false "unclaimed" would license.
+			return unprobedOwnerPossible
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

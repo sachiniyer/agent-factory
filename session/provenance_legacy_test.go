@@ -51,7 +51,7 @@ func TestLegacyNilProvenance_CleanupPreservesReusedUserBranch(t *testing.T) {
 	// A NORMAL AF linked worktree built on the user's PRE-EXISTING branch. This
 	// is exactly what setupFromExistingBranch produces: not external, and the
 	// branch is not ours.
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := existingDir(t, filepath.Join(t.TempDir(), "wt"))
 	gitOut(t, repoRoot, "worktree", "add", "-q", wt, "user-feature")
 	require.True(t, legacyBranchExists(t, repoRoot, "user-feature"))
 
@@ -105,7 +105,7 @@ func TestLegacyNilProvenance_RestoreDoesNotClaimBranchOwnership(t *testing.T) {
 		{"explicit false is honored", false, boolPtrForTest(false), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wt := filepath.Join(t.TempDir(), "wt")
+			wt := existingDir(t, filepath.Join(t.TempDir(), "wt"))
 			require.NoError(t, os.MkdirAll(wt, 0755))
 			restored, err := FromInstanceData(InstanceData{
 				Title:    "t",

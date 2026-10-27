@@ -542,26 +542,37 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	description := branch
 	restoreFailed := false
-	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
+	restoreWaiting := false
+	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
 			restoreFailed = true
 			descS = descS.Foreground(archiveWarningColor)
 		}
+		if reason == session.IdleReasonRestoreWaitingOnEnvironment && restoreWait != nil {
+			// A waiting row is not terminal — it keeps the plain color and
+			// clears itself the moment a restore attempt goes through or the
+			// failure turns structural — but its detail is as long as the
+			// gave-up one, so it takes the same detail-first layout: trailed
+			// behind the branch it would never fit at real rail widths.
+			detail = restoreWait.Detail()
+			restoreWaiting = true
+		}
 		if branch == "" {
 			description = detail
-		} else if restoreFailed {
-			// A restore-gave-up row exists to report the failure — it renders
-			// warning-colored and stays visible even unselected — so the
-			// actionable detail leads and the branch trails it, the one
-			// exception to the branch-first order.
+		} else if restoreFailed || restoreWaiting {
+			// A restore-outcome row exists to report that outcome — the
+			// gave-up row warning-colored and permanent, the waiting row in
+			// the plain color until it resolves — so the actionable detail
+			// leads and the branch trails it, the exception to the
+			// branch-first order.
 			description = detail + " · " + branch
 		} else {
 			// The branch leads so right-truncation eats the idle detail
 			// first: this row exists to name the branch, and a leading
 			// detail truncated the branch away entirely (#4174).
-			description = branch + " · " + detail
+			description = fitIdleDetail(branch, detail, remainingWidth)
 		}
 	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
@@ -570,7 +581,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && !restoreFailed {
+	if !selected && !expanded && archiveWarning == "" && !restoreFailed && !restoreWaiting {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)
@@ -640,6 +651,32 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 // idleReasonDetail renders only the mechanically established vocabulary from
 // session.IdleReason. The elapsed suffix is explicitly since the last OBSERVED
 // pane churn; it does not claim the agent answered, finished, or became wedged.
+// idleDetailSeparator joins the branch to its idle detail, and the idle
+// detail's own segments to each other (see idleReasonDetail).
+const idleDetailSeparator = " · "
+
+// fitIdleDetail composes the branch-led row "branch · detail" within width
+// cells, but trims the idle detail by whole " · "-separated segments rather
+// than by rune: the reason label ("pane changed") is the smallest unit that
+// still says something, and cutting inside one produced a bare "· …" or a
+// one-word "pane …" that reads as a rendering glitch (#4956). The longest run
+// of leading segments that fits is kept; when not even the label fits, the
+// detail is dropped and the branch renders alone, left to the caller's
+// ordinary truncation.
+func fitIdleDetail(branch, detail string, width int) string {
+	if detail == "" {
+		return branch
+	}
+	segments := strings.Split(detail, idleDetailSeparator)
+	for keep := len(segments); keep > 0; keep-- {
+		candidate := branch + idleDetailSeparator + strings.Join(segments[:keep], idleDetailSeparator)
+		if runewidth.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return branch
+}
+
 func idleReasonDetail(reason session.IdleReason, churnAt, now time.Time) string {
 	label := reason.Label()
 	if label == "" {

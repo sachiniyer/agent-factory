@@ -104,9 +104,69 @@ func TestSSHProvisionRefusesAnUnreadableIdentityFile(t *testing.T) {
 		"and name the setting, so the operator knows which key to fix")
 }
 
-// Composition must be a pure function of its arguments. restoreRuntimeCleanup
-// calls it while persisted instances are being LOADED, under a contract that I/O
-// happens only inside the returned teardown closure.
+// The % class is the one the stat/open guard CANNOT catch: when the literal path
+// EXISTS and is readable, the guard above passes — and ssh then percent-expands
+// the same -i value to a different path and silently authenticates as someone
+// else. So the create path must refuse a % identity through the SAME verify call,
+// BEFORE any dial — driven through Provision, not the validator alone, so the
+// guarantee is on the path that actually runs.
+func TestSSHProvisionRefusesAPercentTokenExpandedIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repo := initTempGitRepo(t)
+	// A real file at a literal %d path — stat-able, open-able, regular. WITHOUT the
+	// fix this sails through verifySSHIdentityFile (the literal file is fine), and
+	// Provision proceeds to dial. WITH the fix the % refusal lands before any dial,
+	// so no sshd is needed and the assertion is the refusal message, not a connect.
+	pctDir := filepath.Join(t.TempDir(), "%d")
+	require.NoError(t, os.Mkdir(pctDir, 0o700))
+	percentKey := filepath.Join(pctDir, "client_key")
+	require.NoError(t, os.WriteFile(percentKey, []byte("a-real-readable-file"), 0o600))
+	writeInRepoConfig(t, repo, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "build-box", "identity_file": percentKey},
+	})
+
+	_, err := sshRuntime{}.Provision(ProvisionSpec{RepoRoot: repo, Title: "s", CloneURL: "file:///x"})
+
+	require.Error(t, err,
+		"a create with a % identity must be refused before ssh expands the path and authenticates "+
+			"as the wrong identity")
+	assert.Contains(t, err.Error(), percentKey,
+		"the error must NAME the path — a silent wrong-identity auth is the thing nobody can see")
+	assert.Contains(t, err.Error(), "%",
+		"and say WHY: ssh expands % as a token in identity paths")
+	assert.Contains(t, err.Error(), "backend=ssh")
+}
+
+// Composition must keep building the LITERAL command for a % identity — neither
+// escaping it (the wrong fix) nor refusing it. Escaping (% -> %%) is measured to
+// be WORSE for -i: ssh's startup pre-stat sees the literal %%d path (nonexistent),
+// warns, and drops the identity, which is the silent fallback again; and refusing
+// in composition would capture a permanently dead teardown the moment a key is
+// briefly unavailable, because restoreRuntimeCleanup composes while persisted
+// handles are loading. The refusal lives in verifySSHIdentityFile (provision path
+// only) — so composition carries the literal % through and the two shells'
+// shell-quoting protects everything BUT ssh's own expansion.
+func TestSSHCommandCompositionDoesNotEscapePercentInIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	percentKey := filepath.Join(filepath.Join(t.TempDir(), "%d"), "client_key")
+
+	cmd, err := sshCommandPinnedTo(
+		config.SSHConfig{Host: "h.example.com", IdentityFile: percentKey}, config.SSHHostKeyStrict, "", 0)
+
+	require.NoError(t, err,
+		"composition is a pure function of its arguments; a % identity is refused at verify time, "+
+			"never at composition time, so a persisted handle stays reapable")
+	// The identity reaches ssh with its SINGLE literal % intact — composition does
+	// not call escapeSSHPercent here (contrast the ProxyCommand value, which it does).
+	assert.Contains(t, cmd, "-i '"+percentKey+"'")
+	assert.NotContains(t, cmd, "%%",
+		"composition must NOT double % for the identity: measured, that makes ssh's pre-startup "+
+			"stat fail and silently fall back to default identities")
+}
+
+// Composition must not touch the filesystem, whatever the identity file says.
 func TestSSHCommandCompositionCreatesNothing(t *testing.T) {
 	afHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
@@ -226,8 +286,16 @@ func TestSharedTransportErrorsCarryTheOwningBackend(t *testing.T) {
 	assert.Contains(t, sandboxP.sandboxErr(errors.New("clone failed")).Error(), "backend=sandbox:",
 		"the zero value must keep meaning sandbox, so no existing construction site changes meaning")
 
+	hookP := newHookSandboxProvisioner(ProvisionSpec{Title: "t"}, "ssh host", "", "")
+	assert.Contains(t, hookP.sandboxErr(errors.New("clone failed")).Error(), "backend=hook:",
+		"a provision_cmd session's transport errors must name the hook backend, not sandbox")
+	assert.Equal(t, string(BackendHook), hookP.label(),
+		"the hook provisioner must carry the hook label so its transport errors do not default to sandbox")
+
 	assert.Contains(t, sandboxTransportConfigKey(string(BackendSandbox)), "sandbox.ssh")
 	assert.Contains(t, sandboxTransportConfigKey(string(BackendSSH)), "ssh.host")
+	assert.Contains(t, sandboxTransportConfigKey(string(BackendHook)), "remote_hooks.provision_cmd",
+		"a tunnel timeout on the hook path must point at the config surface it actually uses, not sandbox.ssh")
 }
 
 // THE ANSWERED-FAILURE LATCH. `rm && respond` conflates "the far side executed"

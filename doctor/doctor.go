@@ -77,6 +77,7 @@ type CheckStatus string
 
 const (
 	StatusPass  CheckStatus = "PASS"
+	StatusInfo  CheckStatus = "INFO"
 	StatusWarn  CheckStatus = "WARN"
 	StatusFail  CheckStatus = "FAIL"
 	StatusFixed CheckStatus = "FIXED"
@@ -102,7 +103,7 @@ type CheckResult struct {
 type Report struct {
 	// Header holds the key environment facts printed before the sections.
 	Header []HeaderItem
-	// Checks holds sectioned PASS/WARN/FAIL rows that are not Finding-backed.
+	// Checks holds sectioned PASS/INFO/WARN/FAIL rows that are not Finding-backed.
 	Checks []CheckResult
 	// OK holds informational healthy lines, grouped by section.
 	OK []string

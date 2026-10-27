@@ -116,6 +116,10 @@ daemon does not emit those gateway statuses. The marker is a
 protocol convention, not authentication against a proxy that deliberately copies
 it.
 
+`error.code: "proposal_conflict"` is the one failure that also carries `data`:
+a `409` from `SaveProposalDoc` puts the three versions of the doc there so the
+editor can show the conflict. Every other failure keeps `data: null`.
+
 `error.code: "mutation_committed"` is the existing, separate outcome marker for a
 mutation that reached durable storage before a follow-up failed. It takes
 precedence over `daemon_rejected` if both occur: surface the detail without
@@ -131,6 +135,7 @@ shape without the HTTP provenance marker.
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
+| `409 Conflict` | Only `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
@@ -240,12 +245,34 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `sent-unverified` means the paste and Enter were accepted while a readable pane
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
+`PruneSessions` returns
+`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "candidates": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
+the read-only dry run for the archived-session reclaim — it lists in
+`candidates` each archived session a reclaim would remove —
+`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
+while af writes nothing: no deletion, no record update, no git write. (The apply
+half lands in the follow-up to #5142.) `skipped` entries
+(`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
+worktree still holding uncommitted or ignored files is **refused**, not
+counted: the kept branch does not contain them and they are the only copy —
+restore the session or clean the tree first. `older_than` is required and
+must be a positive Go duration measured from each session's archive time;
+the request needs a scope — `repo_id` or `all: true`, which are mutually
+exclusive. `reclaimable_bytes` counts **allocated** disk
+blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
+hard-linked file is credited only when deleting the tree removes its last
+link. It is an upper bound on what a deletion frees, not apparent file size:
+extents shared with a copy-on-write reflink clone outside the tree are still
+counted, so on Btrfs/XFS the free space recovered can be less than the total. A
+session whose recorded origin repository
+is gone is refused — with the repo deleted there is no kept branch, so the
+archived worktree may be the last copy of the work;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
-`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
+`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
 `{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
 (the merged record); the rest return `{ "ok": true }`. The `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
@@ -270,6 +297,7 @@ RFC 3339 timestamps:
 | --- | --- |
 | `created_at` | When the session was created. |
 | `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
+| `archived_at` | When the session's archive move committed; `--older-than` for `PruneSessions` is measured from it. Omitted on live sessions; records archived before the field existed report nothing and prune falls back to `updated_at`. |
 
 `updated_at` survives saves and restarts. Older records retain their last save
 time; a missing or zero stored value falls back to `created_at` when loaded.
@@ -362,7 +390,8 @@ work. The vocabulary is closed:
 |-------|---------------------|
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
-| `restore-gave-up` | The process is gone and automatic Lost-session recovery exhausted its attempt budget. See `lost_restore_failure` below. |
+| `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |
@@ -375,6 +404,36 @@ session remains Lost, and the daemon does not automatically retry it again. An
 explicit restore remains available; a successful runtime replacement clears the
 field. Because it is stored on the session record, daemon restarts and the TUI,
 web, and HTTP clients retain the same last error.
+
+What `attempts` counts depends on which verdict ended the loop, and `error` is
+the discriminator — there is no separate field naming the verdict:
+
+- **Failed-attempt exhaustion** — `attempts` counts consecutive FAILED restore
+  attempts that spent the structural budget (6 by default), and `error` is the
+  last attempt's failure: the spawn died before it could be confirmed alive,
+  the preserve push failed, and so on.
+- **Confirmed-flap give-up** — `attempts` counts CONFIRMED SUCCESSFUL restores
+  (4 inside a 30-minute window) that each went lost again anyway, and `error`
+  begins `the session was confirmed restored N times in 30m0s and went lost
+  again each time`. Four successes are not four failures: a consumer that
+  renders this as "4 attempts failed" inverts the evidence — every one of
+  those spawns worked, and the agent exited after it was confirmed up.
+
+The confirmed-flap count is in-memory evidence only: it does not survive a
+daemon restart the way this record does, and a restart re-opens the count at
+zero while the durable verdict stands.
+
+**`lost_restore_wait`** (object, omitted unless automatic recovery is waiting on
+the environment) — the non-terminal counterpart of `lost_restore_failure`:
+`{ "attempts": 3, "error": "..." }`. `attempts` counts consecutive environmental
+failures in the current episode and `error` is the last observed environmental
+error, sanitized the same way. The session remains Lost and the daemon keeps
+retrying on a capped backoff — these attempts do NOT draw down the budget
+`lost_restore_failure` reports against. A successful restore, a runtime
+replacement, a structural failure, or a kill tombstone clears the field, and a
+row that reloads inert — one no automatic retry can ever reach, such as a
+sandbox session after a daemon restart — drops it on load rather than report
+an armed retry that does not exist.
 
 **`last_pane_churn_at`** (RFC 3339 timestamp, omitted when no churn is on
 record) — when the daemon last observed the session's pane **render different

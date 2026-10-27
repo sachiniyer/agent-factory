@@ -524,6 +524,17 @@ func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []R
 	return result, skipped, err
 }
 
+// LoadAllRepoInstancesReportingSkipDetailsSilent is the no-log form of
+// LoadAllRepoInstancesReportingSkipDetails for read paths whose contract is
+// that af writes nothing: inside the daemon, WarningLog.Printf appends to
+// agent-factory.log, which is still an AF-home write attributable to the read
+// (#5136 Codex round 12). Skips carry the same detail through the caller's
+// warnings instead.
+func LoadAllRepoInstancesReportingSkipDetailsSilent() (map[string]json.RawMessage, []RepoInstancesSkip, error) {
+	result, skipped, _, err := loadAllRepoInstancesReportingMissing(nil)
+	return result, skipped, err
+}
+
 // LoadAllRepoInstancesReportingMissing is LoadAllRepoInstancesReportingSkipDetails
 // plus the repos whose directory exists but whose instances.json does not. Those
 // load as an empty "[]" like every other form reports them, and missing is the
@@ -531,6 +542,12 @@ func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []R
 // The daemon needs the difference: only a real read may clear a repo it skipped
 // at startup, and a deleted file is an omission, not a repair (#4783).
 func LoadAllRepoInstancesReportingMissing() (map[string]json.RawMessage, []RepoInstancesSkip, map[string]bool, error) {
+	return loadAllRepoInstancesReportingMissing(log.WarningLog.Printf)
+}
+
+// loadAllRepoInstancesReportingMissing is the shared body; warnf reports a
+// per-repo load failure (nil = silent — see the Silent variant above).
+func loadAllRepoInstancesReportingMissing(warnf func(string, ...any)) (map[string]json.RawMessage, []RepoInstancesSkip, map[string]bool, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
 		return nil, nil, nil, err
@@ -553,7 +570,9 @@ func LoadAllRepoInstancesReportingMissing() (map[string]json.RawMessage, []RepoI
 		repoID := entry.Name()
 		data, fileMissing, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
-			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
+			if warnf != nil {
+				warnf("failed to load instances for repo %s: %v", repoID, err)
+			}
 			// Best-effort: repoInstancesPath only fails on a repoID that is not
 			// a legal directory name, and String() falls back to the id then.
 			path, _ := repoInstancesPath(repoID)

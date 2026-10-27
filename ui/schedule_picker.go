@@ -584,13 +584,17 @@ func (p *schedulePicker) renderContextLines() []string {
 	}
 }
 
+// renderTimeLine reads exactly like the summary under it — "At 3:00 AM" — so
+// its cells are unpadded and the plain text carries the only spacing. Padded
+// chips put a space either side of the colon and doubled the one before the
+// meridiem (#4958).
 func (p *schedulePicker) renderTimeLine(plain lipgloss.Style) string {
 	meridiem := "AM"
 	if p.meridiemPM {
 		meridiem = "PM"
 	}
-	return plain.Render("At") + p.chip(cellHour, p.hourStr) + plain.Render(":") +
-		p.chip(cellMinute, p.minuteStr) + p.chip(cellMeridiem, meridiem)
+	return plain.Render("At ") + p.tightChip(cellHour, p.hourStr) + plain.Render(":") +
+		p.tightChip(cellMinute, p.minuteStr) + plain.Render(" ") + p.tightChip(cellMeridiem, meridiem)
 }
 
 func (p *schedulePicker) renderWeekdayRow() string {
@@ -617,15 +621,29 @@ func (p *schedulePicker) renderWeekdayRow() string {
 // chip renders one value cell, highlighting it when it is the focused cell of a
 // focused picker (matching the form's focused-button treatment).
 func (p *schedulePicker) chip(cell scheduleCell, text string) string {
+	return p.cellStyle(cell).Render(" " + chipText(text) + " ")
+}
+
+// tightChip is chip without the surrounding padding, for a line whose own text
+// already spaces its cells. A blank value still keeps one cell, so the focused
+// highlight never collapses to nothing while the user is typing.
+func (p *schedulePicker) tightChip(cell scheduleCell, text string) string {
+	return p.cellStyle(cell).Render(chipText(text))
+}
+
+func (p *schedulePicker) cellStyle(cell scheduleCell) lipgloss.Style {
 	t := CurrentTheme()
-	if strings.TrimSpace(text) == "" {
-		text = " "
-	}
-	style := lipgloss.NewStyle().Foreground(t.Ink)
 	if p.focused && p.activeCell() == cell {
-		style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+		return lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	}
-	return style.Render(" " + text + " ")
+	return lipgloss.NewStyle().Foreground(t.Ink)
+}
+
+func chipText(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return " "
+	}
+	return text
 }
 
 // hint is the picker's one-line internal-navigation help, tailored to the

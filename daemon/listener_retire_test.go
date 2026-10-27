@@ -423,6 +423,44 @@ func TestRetiredListenerClosesAClientThatNeverDrains(t *testing.T) {
 		"a client past the retirement deadline must be CLOSED, not left holding the retired server open")
 }
 
+// TestTeardownFreesThePortBeforeServeStarts pins the hole behind #5140's
+// darwin failure. http.Server closes only the listeners its Serve goroutine has
+// already REGISTERED (trackListener), and Serve is spawned — not started — at
+// bind time, so a teardown landing before that goroutine is scheduled frees
+// nothing: the socket stays bound until Serve runs and its own deferred close
+// fires. On the loaded macOS runner that scheduling delay outlasted two bind
+// attempts — a same-port move's post-release bind met the socket retire() had
+// supposedly freed, and the rollback met it too (EADDRINUSE on both). The
+// handle therefore closes the listener itself, on the caller's goroutine.
+//
+// This test stands at the extreme of the race — a Serve that never runs at
+// all — which is also the only deterministic version of it: wrapping the
+// listener in a handle with a never-Served http.Server reproduces exactly what
+// the unscheduled goroutine left behind, on every platform.
+func TestTeardownFreesThePortBeforeServeStarts(t *testing.T) {
+	for _, teardown := range []struct {
+		name string
+		stop func(*tcpListenerHandle) error
+	}{
+		{name: "close", stop: (*tcpListenerHandle).close},
+		{name: "retire", stop: func(h *tcpListenerHandle) error { h.retire(); return nil }},
+	} {
+		t.Run(teardown.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			addr := ln.Addr().String()
+
+			h := &tcpListenerHandle{srv: &http.Server{}, ln: ln, addr: addr}
+			require.NoError(t, teardown.stop(h))
+
+			rebound, err := net.Listen("tcp", addr)
+			require.NoError(t, err,
+				"a %s that lands before Serve ever ran must still free the port — http.Server only closes listeners Serve registered", teardown.name)
+			require.NoError(t, rebound.Close())
+		})
+	}
+}
+
 // TestRetireCapturesTheGraceBeforeItsDrainStarts is #3772, made deterministic.
 //
 // The drain goroutine outlives the call that spawned it — that is the whole

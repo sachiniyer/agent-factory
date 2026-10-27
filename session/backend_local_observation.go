@@ -12,7 +12,25 @@ func (b *LocalBackend) HasUpdatedWithBaseline(i *Instance) (updated bool, hasPro
 	if !s || ts == nil {
 		return false, false, "", false
 	}
-	return ts.HasUpdatedWithBaseline()
+	return ts.HasUpdatedWithBaselineExpectingTeardown(i.teardownExpected)
+}
+
+// HasUpdatedObserved additionally reports whether the probe actually captured
+// the pane (#5221 review): a wedged/dead monitor and a failed capture-pane
+// all collapse to the all-false observation, which bookkeeping that measures
+// observed silence must not count. Only this backend can make the
+// distinction, so localAgentServer consults it before falling back to the
+// narrower contracts.
+func (b *LocalBackend) HasUpdatedObserved(i *Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool) {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
+		return false, false, "", false, false
+	}
+	return ts.HasUpdatedObserved(i.teardownExpected)
 }
 
 // resetAgentBrokerCaptures is the single post-replacement hook for every local
