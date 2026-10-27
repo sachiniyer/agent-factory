@@ -154,6 +154,14 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.pendingCreate = true
 			s.creating = false
 		} else {
+			// A discard that removed the form's row closes the form, so this
+			// branch should never run with the cursor out of range. The guard
+			// keeps a future row-removal path from writing the form's stale
+			// buffers into whatever row the cursor re-clamped onto (#4798
+			// follow-up): consume the keystroke without saving.
+			if !s.selectedTaskInRange() {
+				return true
+			}
 			// Mirror the create path (app.handleTaskCreate): expand a
 			// leading ~ then resolve to an absolute form so an empty or
 			// relative value behaves the same when the scheduler fires
@@ -365,7 +373,7 @@ func (s *TaskPane) renderEditMode() string {
 
 	if s.creating {
 		b.WriteString(editTitleStyle.Render("New task"))
-	} else {
+	} else if s.selectedTaskInRange() {
 		tsk := s.tasks[s.selectedIdx]
 		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit task %s", tsk.ID)))
 	}
