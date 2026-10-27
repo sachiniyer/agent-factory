@@ -64,7 +64,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
-	program = injectSystemPrompt(program, resolveSkillTarget(i, program))
+	program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
 	return program, accountLaunchProof(declarationBase, program, trustBase)
 }
 
@@ -335,7 +335,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, accountNamespace, name))
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name), i.CallbackUnavailable() != "")
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the

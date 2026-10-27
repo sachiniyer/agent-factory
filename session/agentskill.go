@@ -346,7 +346,20 @@ func ensureDevinSkillDir() (string, error) {
 // exactly as claude uses --plugin-dir. It is plain markdown (aider adds it to
 // the chat as a read-only file), not a SKILL.md, so it needs no frontmatter; the
 // afSkillMarker rides in a leading HTML comment for ownership.
+//
+// aiderReadDocFor picks between the full reference and the callbackless variant
+// (#5571 W3.1): a session with no af callback must not be taught af verbs it
+// cannot use, and --read is a per-instance seam, so the variant lands here.
 var aiderReadDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
+
+var aiderReadDocCallbackless = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReferenceCallbackless + "\n"
+
+func aiderReadDocFor(callbackUnavailable bool) string {
+	if callbackUnavailable {
+		return aiderReadDocCallbackless
+	}
+	return aiderReadDoc
+}
 
 // aiderReadFilePath returns the path of the af-owned aider context file, under the
 // af config dir (config.GetConfigDir()). It is NOT written into the user's worktree
@@ -365,12 +378,12 @@ func aiderReadFilePath() (string, error) {
 // file exists but is NOT af-managed — the caller must then skip injecting --read
 // rather than point it at a file we do not own. A non-af file at our own path is
 // nearly impossible (af owns the dir), but the marker guard is honored uniformly.
-func ensureAiderReadFile() (string, error) {
+func ensureAiderReadFile(callbackUnavailable bool) (string, error) {
 	path, err := aiderReadFilePath()
 	if err != nil {
 		return "", err
 	}
-	wrote, err := writeAfMarkedFile(path, aiderReadDoc)
+	wrote, err := writeAfMarkedFile(path, aiderReadDocFor(callbackUnavailable))
 	if err != nil {
 		return "", err
 	}

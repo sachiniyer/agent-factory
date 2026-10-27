@@ -176,6 +176,11 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Why this session has no af callback — the mint refusal recorded when its
+   *  sandbox provisioned without one (#5571 W3.1). Surfaces render it under the
+   *  "af callback unavailable:" prefix; absent means callback was delivered or
+   *  the backend never injects one. */
+  callback_unavailable?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;

@@ -40,39 +40,74 @@ func TestMintForProvision_OnlyForKindsThatInjectACallback(t *testing.T) {
 	// A local kind must not mint: minting unconditionally would make every local
 	// create inherit a sandbox-only refusal.
 	var spec ProvisionSpec
-	cred, err := mintForProvision(&spec, BackendLocal, creds)
-	require.NoError(t, err)
+	cred := mintForProvision(&spec, BackendLocal, creds)
 	assert.False(t, cred.Granted())
+	assert.Empty(t, cred.UnavailableReason)
 	assert.Equal(t, 0, creds.mints)
 	assert.Empty(t, spec.CallbackToken)
 
 	// An injecting kind mints and populates the spec.
-	cred, err = mintForProvision(&spec, BackendSSH, creds)
-	require.NoError(t, err)
+	cred = mintForProvision(&spec, BackendSSH, creds)
 	assert.True(t, cred.Granted())
+	assert.Empty(t, cred.UnavailableReason)
 	assert.Equal(t, 1, creds.mints)
 	assert.Equal(t, "http://10.0.0.5:8443", spec.CallbackURL)
 	assert.Equal(t, "secret", spec.CallbackToken)
 
 	// No minter at all (a local session, a test, the in-sandbox agent-server) is a
-	// no-op rather than an error.
+	// no-op rather than an error — but the ABSENCE is still named, so a kind that
+	// would take a credential cannot lose one silently (#5571 W3.1).
 	var bare ProvisionSpec
-	cred, err = mintForProvision(&bare, BackendSSH, nil)
-	require.NoError(t, err)
+	cred = mintForProvision(&bare, BackendSSH, nil)
 	assert.False(t, cred.Granted())
+	assert.NotEmpty(t, cred.UnavailableReason, "a kind that injects a callback must explain not getting one")
 	assert.Empty(t, bare.CallbackToken)
 }
 
-// A refusal must FAIL the provision, not quietly produce a sandbox that cannot
-// call back — the mint refuses exactly when a credential could not be enforced or
-// could not be dialled.
-func TestMintForProvision_PropagatesARefusal(t *testing.T) {
+// A refusal must DEGRADE the provision, not fail it: the sandbox still
+// provisions — a callback-less session is more useful than none — but the
+// refusal text is carried out loud so the surfaces can say why the agent cannot
+// call af (#5571 W3.1). The mint refuses exactly when a credential could not be
+// enforced or could not be dialled.
+func TestMintForProvision_DegradesARefusal(t *testing.T) {
 	refusal := errors.New("refusing to give this sandbox a callback credential: require_token is false")
 	creds := &fakeCreds{mintErr: refusal}
 	var spec ProvisionSpec
-	_, err := mintForProvision(&spec, BackendSSH, creds)
-	require.ErrorIs(t, err, refusal)
+	cred := mintForProvision(&spec, BackendSSH, creds)
+	assert.False(t, cred.Granted())
+	assert.Equal(t, refusal.Error(), cred.UnavailableReason,
+		"the degraded reason must be the refusal's own text — surfaces render it verbatim")
 	assert.Empty(t, spec.CallbackToken, "a refused mint must leave the spec without a credential")
+	assert.Empty(t, spec.CallbackURL)
+}
+
+// failingRuntime is a Runtime whose Provision always errors — the shape behind
+// "the sandbox never came up" for the credential-lifetime test below.
+type failingRuntime struct{ err error }
+
+func (r failingRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
+	return ProvisionResult{}, r.err
+}
+
+// A minted credential must not outlive a sandbox that never came up: when
+// Provision fails the grant dies with it — the same fail-closed rule the
+// replacement path's replacementLive defer enforces (#5571 W3.1).
+func TestDefaultBackendFactory_ProvisionFailureRevokesTheMint(t *testing.T) {
+	rt := failingRuntime{err: errors.New("provision blew up")}
+	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
+	defer restoreRuntime()
+
+	creds := &fakeCreds{}
+	_, err := defaultBackendFactoryForKind(InstanceOptions{
+		Title:              "s",
+		Program:            "claude",
+		SandboxCredentials: creds,
+	}, t.TempDir(), BackendSandbox)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, creds.mints, "the mint ran before provisioning")
+	assert.Equal(t, 1, creds.revokes,
+		"the grant must die with the sandbox that never existed — not linger against a session that will not be created")
 }
 
 func TestRevalidateAfterProvision_RunsOnlyWhenSomethingWasGranted(t *testing.T) {

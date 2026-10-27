@@ -412,6 +412,13 @@ type InstanceData struct {
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
 	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// CallbackUnavailable is the reason this session has no af callback (#5571
+	// W3.1) — the mint refusal recorded when its sandbox provisioned without one,
+	// or the in-sandbox agent-server's undelivered-credential notice. Persisted
+	// like the LostRestoreFailure durability class: it survives restarts so the
+	// surfaces never silently drop the explanation, and it is additive +
+	// omitempty so older binaries read and rewrite the row untouched.
+	CallbackUnavailable string `json:"callback_unavailable,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live

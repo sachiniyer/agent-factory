@@ -39,6 +39,7 @@ import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
@@ -54,6 +55,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
@@ -2399,7 +2401,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -2938,7 +2940,7 @@ export class AppShell {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -3431,6 +3433,7 @@ export function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
   // A managed-but-inert row keeps its Kill button but cannot be opened; its
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
@@ -3438,10 +3441,11 @@ export function sessionRow(
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`,
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -3472,7 +3476,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }

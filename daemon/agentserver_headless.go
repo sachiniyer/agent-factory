@@ -236,6 +236,12 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Program:               program,
 		ProgramResolved:       opts.ProgramResolved && opts.Program != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
+		// The outer daemon hands the callback pair to this process's environment
+		// through the provisioner's env file; a sandbox provisioned WITHOUT one
+		// (mint refused, or remote forwarding off) can never serve an af verb —
+		// say so on the instance so the injected guidance stops teaching them
+		// (#5571 W3.1).
+		CallbackUnavailable: os.Getenv("AF_DAEMON_URL") == "" || os.Getenv("AF_DAEMON_TOKEN") == "",
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,

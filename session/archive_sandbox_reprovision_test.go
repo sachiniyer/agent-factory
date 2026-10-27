@@ -208,16 +208,14 @@ func assertUnknownCleanupSurvivesRestart(t *testing.T, i *Instance) {
 	require.NotNil(t, restored.runtimeTeardown, "unknown cleanup restored without a retryable teardown")
 }
 
-// TestReprovisionRemote_RetainsNewRuntimeWhenRevalidationFailureCleanupUnknown
-// covers the third post-provision failure window, and the one that drifted
-// (#3475): the replacement came up, but the credential minted for it was
-// invalidated while it was being provisioned, and the reap that follows could
-// not establish whether the sandbox is gone.
-//
-// Same condition as the bind-failure sibling above, so it must reach the same
-// answer — an unconfirmed teardown never drops the only handle on a sandbox that
-// may still be running.
-func TestReprovisionRemote_RetainsNewRuntimeWhenRevalidationFailureCleanupUnknown(t *testing.T) {
+// TestReprovisionRemote_RevalidationFailureDegradesAndBindsReplacement covers
+// the post-provision credential window under #5571 W3.1: the replacement came
+// up, but the credential minted for it was invalidated while it was being
+// provisioned. That used to reap the sandbox; now it DEGRADES — a callback-less
+// session beats no session — so the dead grant is revoked for tidiness, the
+// reason lands on the instance, and the live replacement is bound like any
+// other.
+func TestReprovisionRemote_RevalidationFailureDegradesAndBindsReplacement(t *testing.T) {
 	creds := &fakeCreds{invalid: errors.New("the listener moved while the sandbox was being provisioned")}
 	freshBackend := &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
 		SSHCommand: "ssh sandbox.invalid",
@@ -229,60 +227,6 @@ func TestReprovisionRemote_RetainsNewRuntimeWhenRevalidationFailureCleanupUnknow
 		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
 		Teardown: func() error {
 			teardowns++
-			return fmt.Errorf("%w: cleanup timed out", ErrWorkspaceStateUnknown)
-		},
-	}}
-	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
-	defer restoreRuntime()
-
-	i := &Instance{
-		Title:   "s",
-		Path:    t.TempDir(),
-		Branch:  "root/s",
-		backend: newInertSandboxBackend("sandbox"),
-	}
-	i.SetSandboxCredentials(creds)
-
-	err := i.reprovisionRemote()
-	require.ErrorContains(t, err, "callback credential was invalidated")
-	require.ErrorIs(t, err, ErrWorkspaceStateUnknown)
-	assert.Equal(t, 1, teardowns, "an unusable replacement must still be reaped")
-	assert.NotZero(t, creds.revokes, "the credential minted for an unusable sandbox must not outlive it")
-
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	assert.Same(t, freshBackend, i.backend, "the identity of the sandbox that may still be running must be retained")
-	assert.Nil(t, i.remoteClient, "the replacement is unusable; only its cleanup handle is kept")
-	assert.NotNil(t, i.runtimeTeardown, "unknown cleanup must keep the new sandbox's handle for retry")
-	assert.True(t, i.runtimeCleanupStateUnknown, "the unknown outcome must be recorded, not assumed settled")
-	assertUnknownCleanupSurvivesRestart(t, i)
-}
-
-// TestReprovisionRemote_RevalidationFailureRetryReapsBeforeProvisioningAgain is
-// the user-visible harm behind #3475, asserted directly: a retry after that
-// failure must reap the sandbox it could not confirm gone BEFORE provisioning a
-// replacement, so one restore attempt cannot leave two sandboxes running.
-//
-// Without the retained handle the retry sees nothing to reap and provisions a
-// second sandbox alongside the first — a leaked container/remote workspace with
-// no handle anywhere that can ever reach it.
-func TestReprovisionRemote_RevalidationFailureRetryReapsBeforeProvisioningAgain(t *testing.T) {
-	creds := &fakeCreds{invalid: errors.New("the listener moved while the sandbox was being provisioned")}
-	var events []string
-	teardowns := 0
-	freshBackend := &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
-		SSHCommand: "ssh sandbox.invalid",
-		SessionDir: "/remote/af-sessions/fresh",
-	}}
-	rt := &orderedReprovisionRuntime{events: &events, res: ProvisionResult{
-		Backend:  freshBackend,
-		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
-		Teardown: func() error {
-			teardowns++
-			events = append(events, "teardown")
-			if teardowns == 1 {
-				return fmt.Errorf("%w: cleanup timed out", ErrWorkspaceStateUnknown)
-			}
 			return nil
 		},
 	}}
@@ -297,18 +241,69 @@ func TestReprovisionRemote_RevalidationFailureRetryReapsBeforeProvisioningAgain(
 	}
 	i.SetSandboxCredentials(creds)
 
-	require.Error(t, i.reprovisionRemote())
-	require.Equal(t, []string{"provision", "teardown"}, events)
+	require.NoError(t, i.reprovisionRemote())
+	assert.Equal(t, 0, teardowns, "a healthy sandbox is never reaped for a callback-only failure")
+	assert.Equal(t, 1, creds.revokes, "the dead grant is revoked, but the sandbox it was minted for stays")
 
-	// The listener settles and the restore is retried.
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	assert.Same(t, freshBackend, i.backend)
+	assert.NotNil(t, i.remoteClient, "the replacement binds live; only its callback is absent")
+	assert.NotNil(t, i.runtimeTeardown)
+	assert.False(t, i.runtimeCleanupStateUnknown, "no teardown ran, so there is no outcome to doubt")
+	assert.Equal(t, "the listener moved while the sandbox was being provisioned", i.callbackUnavailable,
+		"the revalidation refusal must override the mint reason — it is the more specific cause")
+}
+
+// TestReprovisionRemote_RetryAfterRevalidationDegradationReapsFirst pins the
+// ordering the degrade must not relax: a degraded (callback-less) replacement
+// is still an owned sandbox, so the NEXT reprovision reaps it BEFORE
+// provisioning again — one restore attempt can never leave two sandboxes
+// running (#3475). A healthy second provision also clears the recorded reason.
+func TestReprovisionRemote_RetryAfterRevalidationDegradationReapsFirst(t *testing.T) {
+	creds := &fakeCreds{invalid: errors.New("the listener moved while the sandbox was being provisioned")}
+	var events []string
+	freshBackend := &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh sandbox.invalid",
+		SessionDir: "/remote/af-sessions/fresh",
+	}}
+	rt := &orderedReprovisionRuntime{events: &events, res: ProvisionResult{
+		Backend:  freshBackend,
+		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
+		Teardown: func() error {
+			events = append(events, "teardown")
+			return nil
+		},
+	}}
+	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
+	defer restoreRuntime()
+
+	i := &Instance{
+		Title:   "s",
+		Path:    t.TempDir(),
+		Branch:  "root/s",
+		backend: newInertSandboxBackend("sandbox"),
+	}
+	i.SetSandboxCredentials(creds)
+
+	// The first restore comes up callback-less: revalidation failed, the dead
+	// grant was revoked, and the sandbox was kept rather than reaped.
+	require.NoError(t, i.reprovisionRemote())
+	require.Equal(t, []string{"provision"}, events)
+	assert.Equal(t, 1, creds.revokes)
+	assert.NotEmpty(t, i.CallbackUnavailable())
+
+	// The listener settles and the restore is retried: the degraded sandbox is
+	// reaped before the replacement provisions.
 	creds.invalid = nil
 	require.NoError(t, i.reprovisionRemote())
 
-	assert.Equal(t, []string{"provision", "teardown", "teardown", "provision"}, events,
-		"the retry must retry the unconfirmed cleanup first; a second provision without it leaves two sandboxes running")
+	assert.Equal(t, []string{"provision", "teardown", "provision"}, events,
+		"the retry must reap the degraded sandbox first; provisioning without it leaves two running")
 
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	assert.NotNil(t, i.remoteClient, "the settled retry must bind a live replacement")
-	assert.False(t, i.runtimeCleanupStateUnknown, "a confirmed reap must clear the unknown marker")
+	assert.Empty(t, i.callbackUnavailable, "a healthy reprovision clears the recorded reason")
+	assert.False(t, i.runtimeCleanupStateUnknown)
 }

@@ -134,6 +134,14 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
+	// CallbackUnavailable carries the reason no callback credential was
+	// delivered to this sandbox (#5571 W3.1): the mint refused, or the grant
+	// died while provisioning. A non-empty value means the runtime deliberately
+	// still provisioned — a callback-less session is more useful than none —
+	// but the reason must reach the instance's durable record so every surface
+	// can render it rather than leaving the agent to discover af silently
+	// fails. Empty when a credential was delivered (or the kind injects none).
+	CallbackUnavailable string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session

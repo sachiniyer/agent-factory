@@ -42,6 +42,15 @@ type SandboxCredential struct {
 	// URL and Token are injected into the sandbox as AF_DAEMON_URL and
 	// AF_DAEMON_TOKEN. Empty when no credential was granted.
 	URL, Token string
+	// UnavailableReason says WHY no credential was granted, in the mint's own
+	// refusal text. A sandbox whose credential could not be issued still
+	// provisions — a session without callback is strictly more useful than no
+	// session — but the reason is not allowed to die here: it rides
+	// ProvisionResult onto the instance's durable record, where every surface
+	// shows it as "af callback unavailable: <reason>". Empty when a credential
+	// was granted (or when the kind never injects one — nothing was lost, so
+	// there is nothing to explain).
+	UnavailableReason string
 	// Revalidate reports whether the grant still holds. Provisioning is the long
 	// window — an ssh clone and a binary copy — and a listener move or an auth
 	// posture change inside it revokes the credential and closes its URL while the
@@ -86,14 +95,18 @@ type SandboxCredentials interface {
 // site, that site immediately drifted on live-config, ordering, and revalidation.
 //
 // A kind that does not inject a callback, or a session with no daemon behind it,
-// returns a zero credential and leaves spec untouched. A mint that REFUSES is
-// propagated: the refusals exist for postures where a credential could not be
-// enforced or could not be dialled, and provisioning a sandbox that will silently
-// fail to call back is the outcome this feature exists to prevent.
-func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCredentials) (SandboxCredential, error) {
+// returns a zero credential and leaves spec untouched. A mint that REFUSES
+// degrades rather than failing the create: the refusals exist for postures where
+// a credential could not be enforced or could not be dialled, but a session with
+// no callback is still the better outcome than no session (#5571 W3.1). What
+// must NOT survive is the silence — provisioning a sandbox that quietly cannot
+// call back is the outcome this feature exists to prevent — so the refusal text
+// comes back in UnavailableReason and the caller records it on the instance,
+// where every surface renders it.
+func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCredentials) SandboxCredential {
 	if !kind.InjectsSandboxCallback() {
 		// This kind never had a callback; nothing is lost and nothing to say.
-		return SandboxCredential{}, nil
+		return SandboxCredential{}
 	}
 	if creds == nil {
 		// A kind that WOULD take a credential, with nothing able to mint one. Said
@@ -107,14 +120,14 @@ func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCreden
 		// the log is the difference between "this build has no callback here" and
 		// "this session silently lost one".
 		log.WarningLog.Printf("provisioning a %s sandbox with no callback credential: nothing is available to mint one, so its agent will not be able to call af", kind)
-		return SandboxCredential{}, nil
+		return SandboxCredential{UnavailableReason: "the daemon attached no callback credential minter to this session"}
 	}
 	cred, err := creds.Mint()
 	if err != nil {
-		return SandboxCredential{}, err
+		return SandboxCredential{UnavailableReason: err.Error()}
 	}
 	spec.CallbackURL, spec.CallbackToken = cred.URL, cred.Token
-	return cred, nil
+	return cred
 }
 
 // revalidateAfterProvision re-checks a credential once the sandbox it was minted
