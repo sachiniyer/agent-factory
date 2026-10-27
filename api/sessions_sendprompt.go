@@ -231,9 +231,16 @@ can inspect per-session results.`,
 			return jsonOut(sendPromptResult{OK: true, Status: status})
 		}
 
-		exists, err := instanceTitleExistsInScope(repoID, title)
-		if err != nil {
-			return jsonError(err)
+		// Against a remote target the existence check would read THIS machine's
+		// disk and refuse a session that lives only on the daemon; the daemon's
+		// SendPrompt resolves the title itself and reports not-found.
+		exists := true
+		if !apiclient.IsRemoteTarget() {
+			var err error
+			exists, err = instanceTitleExistsInScope(repoID, title)
+			if err != nil {
+				return jsonError(err)
+			}
 		}
 		if !exists {
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
