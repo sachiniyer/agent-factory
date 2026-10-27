@@ -32,27 +32,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Debounce workflow_run triggers
+        id: debounce
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // Inline: no checkout yet. Skips a workflow_run-triggered run when
+            // another auto-merge run started in the last 3 minutes.
+            if (context.eventName !== 'workflow_run') return core.setOutput('skip', 'false');
+            const { owner, repo } = context.repo;
+            const res = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: 'auto-merge.yml', per_page: 10,
+            });
+            const recent = res.data.workflow_runs.find((r) =>
+              r.id !== context.runId && r.conclusion !== 'cancelled' &&
+              Date.now() - Date.parse(r.run_started_at || r.created_at) < 3 * 60 * 1000);
+            if (recent) core.notice(`Debounced: run ${recent.id} started within the last 3 minutes.`);
+            core.setOutput('skip', recent ? 'true' : 'false');
+
       - name: Check out master
+        if: steps.debounce.outputs.skip != 'true'
         uses: actions/checkout@v6
         with:
           ref: master
 
       - name: Check for a broken-master halt
         id: halt
+        if: steps.debounce.outputs.skip != 'true'
         uses: actions/github-script@v8
         with:
           script: |
             await require('./.github/scripts/auto-merge.js').checkHalt({ github, core, context });
 
       - name: Set up Go
-        if: steps.halt.outputs.broken == 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Re-check master composition
         id: recheck
-        if: steps.halt.outputs.broken == 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         continue-on-error: true
         run: |
           go build ./...
@@ -61,7 +81,7 @@ jobs:
 
       - name: Settle the broken-master issue
         id: settle
-        if: steps.halt.outputs.broken == 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         uses: actions/github-script@v8
         env:
           BROKEN_NUMBER: ${{ steps.halt.outputs.broken_number }}
@@ -76,7 +96,7 @@ jobs:
 
       - name: Merge ready PRs
         id: merge
-        if: steps.settle.outputs.halted != 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true')
         uses: actions/github-script@v8
         with:
           script: |
@@ -84,21 +104,21 @@ jobs:
 
       - name: Move to the new master head
         id: head
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
         run: |
           git fetch --quiet origin master
           git checkout --quiet --detach origin/master
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go (post-merge)
-        if: steps.merge.outputs.merged == 'true' && steps.halt.outputs.broken != 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.halt.outputs.broken != 'true')
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Post-merge composition check
         id: compose
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
         continue-on-error: true
         run: |
           go build ./...
@@ -106,7 +126,7 @@ jobs:
           scripts/lint-file-length.sh
 
       - name: Report broken master
-        if: steps.merge.outputs.merged == 'true' && steps.compose.outcome != 'success'
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.compose.outcome != 'success')
         uses: actions/github-script@v8
         env:
           MASTER_SHA: ${{ steps.head.outputs.sha }}

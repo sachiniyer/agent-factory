@@ -23,17 +23,19 @@ const MASTER_WORKFLOWS = [
 ];
 const DOCS_WORKFLOW = "docs.yml";
 
-const QUERY = `
+// Phase 1: cheap, for every open master PR. No review threads here.
+const CANDIDATE_QUERY = `
 query($owner: String!, $repo: String!, $base: String!, $after: String) {
+  rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $repo) {
-    pullRequests(states: OPEN, baseRefName: $base, first: 25, after: $after) {
+    pullRequests(states: OPEN, baseRefName: $base, first: 50, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
         headRefOid
         isDraft
         mergeable
-        labels(first: 50) { nodes { name } }
+        labels(first: 20) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
           pageInfo { hasNextPage }
           nodes {
@@ -41,17 +43,33 @@ query($owner: String!, $repo: String!, $base: String!, $after: String) {
             ... on CheckRun { name status conclusion }
           }
         } } } } }
-        reviewThreads(first: 50) {
-          pageInfo { hasNextPage }
-          nodes { comments(first: 20) {
-            pageInfo { hasNextPage }
-            nodes { author { login } body }
-          } }
-        }
       }
     }
   }
 }`;
+
+// Phase 2: review threads, only for PRs that survived phase 1 (one aliased query).
+function threadsQuery(numbers) {
+  const fields = numbers
+    .map(
+      (n) => `
+    p${n}: pullRequest(number: ${Number(n)}) {
+      reviewThreads(first: 50) {
+        pageInfo { hasNextPage }
+        nodes { comments(first: 20) {
+          pageInfo { hasNextPage }
+          nodes { author { login } body }
+        } }
+      }
+    }`,
+    )
+    .join("");
+  return `query($owner: String!, $repo: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $repo) {${fields}
+  }
+}`;
+}
 
 function isCodex(login) {
   return (login || "").replace(/\[bot\]$/, "") === CODEX_LOGIN;
@@ -96,25 +114,50 @@ function evaluate(pr) {
   if (held) return `label ${held}`;
   if (pr.mergeable !== "MERGEABLE") return `mergeable=${pr.mergeable}`;
   if (!checksGreen(pr)) return "Build/Lint not green on current head";
-  if (hasUnansweredP1(pr)) return "unanswered P1 Codex finding";
   return null;
 }
 
-function selectMergeable(prs) {
+// Phase-1 selection (no review data needed). Reasons are null for candidates.
+function selectCandidates(prs) {
   return prs
     .map((pr) => ({ pr, reason: evaluate(pr) }))
     .sort((a, b) => a.pr.number - b.pr.number);
 }
 
-async function fetchOpenPrs(github, owner, repo) {
+// Full selection once reviewThreads are attached (tests use this directly).
+function selectMergeable(prs) {
+  return selectCandidates(prs).map((e) =>
+    e.reason === null && hasUnansweredP1(e.pr)
+      ? { pr: e.pr, reason: "unanswered P1 Codex finding" }
+      : e,
+  );
+}
+
+function noteRateLimit(core, label, rl) {
+  core.notice(`GraphQL ${label}: cost ${rl.cost}, remaining ${rl.remaining}, resets ${rl.resetAt}`);
+}
+
+async function fetchOpenPrs(github, core, owner, repo) {
   const prs = [];
   let after = null;
   for (;;) {
-    const data = await github.graphql(QUERY, { owner, repo, base: BASE, after });
+    const data = await github.graphql(CANDIDATE_QUERY, { owner, repo, base: BASE, after });
+    noteRateLimit(core, "candidates", data.rateLimit);
     const page = data.repository.pullRequests;
     prs.push(...page.nodes);
     if (!page.pageInfo.hasNextPage) return prs;
     after = page.pageInfo.endCursor;
+  }
+}
+
+async function attachThreads(github, core, owner, repo, prs) {
+  if (!prs.length) return;
+  const data = await github.graphql(threadsQuery(prs.map((p) => p.number)), { owner, repo });
+  noteRateLimit(core, "threads", data.rateLimit);
+  for (const pr of prs) {
+    const node = data.repository[`p${pr.number}`];
+    // Missing data fails closed: hasUnansweredP1 treats hasNextPage as unanswered.
+    pr.reviewThreads = node ? node.reviewThreads : { pageInfo: { hasNextPage: true }, nodes: [] };
   }
 }
 
@@ -153,10 +196,14 @@ async function settleBroken({ github, core, context, passed, number }) {
 // Step 3: merge everything selectable, then re-raise master verification once.
 async function mergeAll({ github, core, context }) {
   const { owner, repo } = context.repo;
-  const prs = await fetchOpenPrs(github, owner, repo);
+  const prs = await fetchOpenPrs(github, core, owner, repo);
+  const phase1 = selectCandidates(prs);
+  await attachThreads(github, core, owner, repo, phase1.filter((e) => !e.reason).map((e) => e.pr));
   const merged = [];
   let lastSha = "";
-  for (const { pr, reason } of selectMergeable(prs)) {
+  for (const { pr, reason } of phase1.map((e) =>
+    e.reason === null && hasUnansweredP1(e.pr) ? { pr: e.pr, reason: "unanswered P1 Codex finding" } : e,
+  )) {
     if (reason) {
       core.info(`#${pr.number}: skip (${reason})`);
       continue;
@@ -216,6 +263,6 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
-  selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
 };
