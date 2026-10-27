@@ -66,16 +66,22 @@ func (m *home) focusedOpenPane() *store.OpenPane {
 	return nil
 }
 
-// paneSelectionHint names the current tree/sidebar selection when a visible
-// pane is bound elsewhere. Panes are explicit workspace bindings, not
-// selection-driven previews; showing the selected title in the header makes
+// paneSelectionHint names the row under the tree cursor when a visible pane
+// is bound elsewhere. Panes are explicit workspace bindings, not
+// selection-driven previews; showing the cursor's title in the header makes
 // that divergence visible instead of letting the tree highlight and pane
 // content appear to disagree (#1289).
+//
+// The label is "cursor:", so the value must be the sidebar's CURSOR-derived
+// selection — nil while the cursor rests on a section header — never the
+// store's sticky display binding (#5154 review): pushSelection deliberately
+// leaves that binding in place on a header click, and a title still naming it
+// would claim a cursor position the tree is not showing.
 func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if p == nil {
 		return ""
 	}
-	selected := m.store.GetSelectedInstance()
+	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
 		return ""
 	}

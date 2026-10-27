@@ -1,5 +1,11 @@
 package sessionenv
 
+import (
+	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
+)
+
 // GeneratedArgsBetween reports the argument words a launcher appended to base to
 // reach final, for Account.GeneratedArgs (#3083).
 //
@@ -62,4 +68,150 @@ func GeneratedArgsBetween(base, final string) ([]string, bool) {
 	out := make([]string, len(added))
 	copy(out, added)
 	return out, true
+}
+
+// GeneratedArgsByInsertion is GeneratedArgsBetween's sibling for rewrites that
+// are not positional extensions: an af rewrite that lands words mid-command —
+// the shape an earlier codex resume splice produced (`codex -c k=v` becoming
+// `codex resume --last -c k=v`), and the shape any future mid-command edit
+// takes — cannot be described as "appended to the end" (#5238 review). Without
+// it the rewrite would be "undescribable" — the declaration cleared, the
+// account-scoped resume refused, the pane dead.
+//
+// The claim it certifies is narrower than a generic diff, on purpose. It answers
+// yes only when EVERY word of base after the executable is already declared —
+// so the inserted block lands among words af authored — and the rewrite is a
+// pure insertion: a contiguous block of new words with every base word kept, in
+// order. The merged declaration then still enumerates the whole final command.
+//
+// "The executable" is the real agent's word, located the way the account
+// boundary locates it: after a stripped `exec` builtin, or at the command
+// operand of a modelled `env` wrapper — the shapes callOverridesName proves
+// (#5238 review). A wrapper prefix is the operator's word and only has to be
+// IDENTICAL in base and final; `exec codex -c k=v` splicing its `resume
+// --last` mid-command certifies the same insertion `codex` alone does.
+// Anything the model cannot place — `exec --`, an `env` with no command — is
+// a refusal, not a guess.
+//
+// Same fail-closed contract as GeneratedArgsBetween: a rewrite that replaces,
+// drops, or reorders a word, or a base carrying words af never declared, gets a
+// refusal — never a guess about which words were af's.
+func GeneratedArgsByInsertion(base, final string, declared []string) ([]string, bool) {
+	baseCall, ok := singleSimpleCall(base)
+	if !ok || !callIsLiteral(baseCall) || len(baseCall.Assigns) > 0 {
+		return nil, false
+	}
+	finalCall, ok := singleSimpleCall(final)
+	if !ok || !callIsLiteral(finalCall) || len(finalCall.Assigns) > 0 {
+		return nil, false
+	}
+	execIdx, ok := commandExecutableIndex(baseCall.Args)
+	if !ok {
+		return nil, false
+	}
+	baseWords, ok := literalCommandArgs(baseCall.Args)
+	if !ok || len(baseWords) == 0 {
+		return nil, false
+	}
+	finalWords, ok := literalCommandArgs(finalCall.Args)
+	if !ok || len(finalWords) <= len(baseWords) {
+		return nil, false
+	}
+	// Everything up through the executable is not negotiable, and every
+	// post-executable word of base must be a declared one — an insertion among
+	// USER words is unprovable the same way the extension path already treats
+	// them.
+	for i := 0; i <= execIdx; i++ {
+		if finalWords[i] != baseWords[i] {
+			return nil, false
+		}
+	}
+	if len(baseWords)-execIdx-1 != len(declared) {
+		return nil, false
+	}
+	for i, want := range declared {
+		if baseWords[execIdx+1+i] != want {
+			return nil, false
+		}
+	}
+	// The insertion point is the first divergence after the executable; every
+	// base word after it must survive verbatim as final's tail (insertion only —
+	// a rewrite that also replaces or drops words is not describable this way).
+	p := execIdx + 1
+	for p < len(baseWords) && baseWords[p] == finalWords[p] {
+		p++
+	}
+	tail := len(baseWords) - p
+	for i := 0; i < tail; i++ {
+		if finalWords[len(finalWords)-tail+i] != baseWords[p+i] {
+			return nil, false
+		}
+	}
+	inserted := finalWords[p : len(finalWords)-tail]
+	if len(inserted) == 0 {
+		return nil, false
+	}
+	// Splice the inserted block into the declaration at the point it landed:
+	// declared[:p-execIdx-1] are the base words before the gap, the rest after.
+	out := make([]string, 0, len(declared)+len(inserted))
+	out = append(out, declared[:p-execIdx-1]...)
+	out = append(out, inserted...)
+	out = append(out, declared[p-execIdx-1:]...)
+	return out, true
+}
+
+// commandExecutableIndex returns the index of the command's executable word —
+// the position af and the shell agree the real program starts — for the
+// wrapper shapes the account boundary models. A leading `exec` builtin is
+// stripped (its `--` separator refuses: dash cannot run it, #3557) and an
+// `env` invocation contributes its command operand, located through the same
+// envcommand.Parse the boundary uses rather than a second grammar. A bare
+// command's executable is its first word.
+func commandExecutableIndex(words []*syntax.Word) (int, bool) {
+	rest, execSeparator := stripExecPrefix(words)
+	if execSeparator || len(rest) == 0 {
+		return -1, false
+	}
+	offset := len(words) - len(rest)
+	if isBareName(rest[0], "env") {
+		literals, ok := literalCommandArgs(rest[1:])
+		if !ok {
+			return -1, false
+		}
+		invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 {
+			return -1, false
+		}
+		return offset + 1 + invocation.CommandIndex, true
+	}
+	return offset, true
+}
+
+// CommandExecutableIndex answers "which word is the executable" for callers
+// outside this package, through the same parse the account boundary proves
+// launches with — a single simple literal call — and the same modeled
+// wrapper grammar as commandExecutableIndex above: shell-parsed leading
+// assignments, one bare `exec` (its `--` separator refuses), an `env`
+// invocation whose operands envcommand.Parse walks. The result is an index
+// into the command's flat word sequence — Assigns then Args, in source
+// order — which is also the sequence a whitespace tokenizer produces for a
+// literal call, so a caller can index its own token list with it.
+//
+// -1 means the executable is not provably placed and the caller must leave
+// the command alone. That covers every shape the boundary refuses or does
+// not model — a compound command, a non-literal word, a redirect — and the
+// spellings that merely LOOK like the wrappers: `./env codex` and
+// `/tmp/exec codex` run a path-qualified file, not GNU env or the exec
+// builtin, so their first word IS the executable and a later `codex` is its
+// argument (#5238 review).
+func CommandExecutableIndex(command string) int {
+	call, ok := singleSimpleCall(command)
+	if !ok || !callIsLiteral(call) {
+		return -1
+	}
+	idx, ok := commandExecutableIndex(call.Args)
+	if !ok {
+		return -1
+	}
+	return len(call.Assigns) + idx
 }

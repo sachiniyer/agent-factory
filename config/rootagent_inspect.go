@@ -70,18 +70,6 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
 }
 
-// ResolveRootAgentForInspectionWithConfigContext is the bounded diagnostic
-// form used by non-interactive inspections. Unlike the human-invoked explain
-// path above, every repository probe shares the caller's deadline and an
-// unanswered legacy lookup is returned as an error rather than read as absent.
-func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
-	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
-	if err != nil {
-		return ResolvedValue{}, err
-	}
-	return snapshot.ResolvedRootAgent(), nil
-}
-
 // RootAgentInspectionSnapshot binds a resolved root-agent profile to the exact
 // personal-project config document read while producing it. Diagnostics that
 // subsequently resolve program_overrides through ResolveConfigForRepoContext
@@ -528,6 +516,153 @@ func ProjectFailClosedRootAgentLeaf(parent ResolvedValue, keyPath string) (Resol
 			candidate.Value = leafValue
 		} else {
 			candidate.Value = nil
+		}
+		projected.Candidates[i] = candidate
+	}
+	return projected, true
+}
+
+// RootAgentValueHasIgnoredGlobal reports whether rv is the ignored-global
+// rendering of `af config get root_agent --explain`: a present global
+// [root_agent] that the daemon drops because the inspected project is not
+// registered and has no legacy root_agents entry (markRootAgentGlobalIneligible).
+// The recognizing marker is a global candidate carrying Allowed:false — the
+// only path that sets Allowed:false on a root_agent candidate, because the
+// root_agent manifest entry DOES admit the global layer, so a normal
+// resolution never marks it disallowed.
+//
+// The marker that asks for the cause-preserving dotted-leaf projector
+// (ProjectIgnoredGlobalRootAgentLeaf) is distinct from
+// RootAgentValueFailsClosed: a fail-closed parent carries no Origins (no
+// config source decided the verdict) and routes through
+// ProjectFailClosedRootAgentLeaf; an ignored-global parent carries Origins
+// (the surviving built-in base supplied `enabled`) and routes through its
+// own projector. The two shapes are disjoint.
+func RootAgentValueHasIgnoredGlobal(rv ResolvedValue) bool {
+	if rv.Key != "root_agent" || RootAgentValueFailsClosed(rv) {
+		return false
+	}
+	for _, candidate := range rv.Candidates {
+		if candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Present && candidate.Result == "ignored" {
+			return true
+		}
+	}
+	return false
+}
+
+// ignoredGlobalCandidateHadLeaf reports whether the ignored-global candidate
+// (the present global [root_agent] row the daemon dropped) actually carried
+// the requested leaf. The candidate's Value is the per-leaf map
+// rootAgentCandidateLeaves builds, so a leaf the global table never set (e.g.
+// `program` when the table sets only `enabled`) is absent from that map and
+// reports false here — distinguishing "the leaf was configured but its origin
+// was dropped" from "the leaf was never configured at all".
+func ignoredGlobalCandidateHadLeaf(parent ResolvedValue, leaf string) bool {
+	for _, candidate := range parent.Candidates {
+		if candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Present && candidate.Result == "ignored" {
+			_, present := configLeafValue(candidate.Value, leaf)
+			return present
+		}
+	}
+	return false
+}
+
+// ProjectIgnoredGlobalRootAgentLeaf projects one leaf of an ignored-global
+// root_agent table for a dotted read (`af config get root_agent.enabled` on
+// an unregistered project). Mirrors ProjectFailClosedRootAgentLeaf in the way
+// that matters for --explain: each candidate row keeps its Result/Reason
+// verbatim with only the leaf value substituted. The generic ResolvedValuePath
+// path relabels every Allowed:false candidate as
+// "disallowed · manifest policy does not allow this key at this source", and
+// markRootAgentGlobalIneligible sets Allowed:false to encode the registry
+// cause — so routing this shape through the generic projector clobbers the
+// true cause ("project is not registered and has no legacy root_agents entry")
+// with a factually false one, since the root_agent manifest DOES admit the
+// global layer. Same shape class as the fail-closed projector's #3264
+// precedent: the cause this rendering exists to surface must survive the
+// dotted read, so the two reads of the same repository cannot disagree.
+//
+// Unlike a fail-closed parent (which carries no Origins), an ignored-global
+// parent carries Origins (the surviving built-in base supplied `enabled`).
+// A dotted read projects ONE leaf, so the projector drops the parent table's
+// per-leaf Origins — otherwise the surviving built-in `enabled` origin would
+// leak into an unrelated `root_agent.program` dotted read — and surfaces
+// the projected leaf's own origin as the single-leaf Winner when one
+// survives. The projector does NOT gate on Origins alone (cf.
+// ResolvedValuePath's `parent.Origins[leaf]` lookup that reports an unknown
+// key when the leaf's origin did not survive), so `root_agent.program`, whose
+// origin the global-layer drop removed, still answers with the cause and an
+// empty program rather than "unknown config key" — but only when the ignored
+// global candidate actually carried the leaf. When the global table never set
+// the leaf at all (e.g. a table that sets only `enabled`, queried for
+// `root_agent.program`), there is no cause to surface for that leaf and the
+// projector returns false, matching the registered-project and generic
+// `unknown config key` lookup. ProjectFailClosedRootAgentLeaf established the
+// same no-fail contract for the fail-closed shape.
+func ProjectIgnoredGlobalRootAgentLeaf(parent ResolvedValue, keyPath string) (ResolvedValue, bool) {
+	leaf, ok := strings.CutPrefix(keyPath, "root_agent.")
+	if !ok || leaf == "" {
+		return ResolvedValue{}, false
+	}
+	effective, ok := configLeafValue(parent.Value, leaf)
+	if !ok {
+		return ResolvedValue{}, false
+	}
+	projected := parent
+	projected.Key = keyPath
+	projected.Value = effective
+	projected.Default = ""
+	// Drop the parent table's per-leaf Origins: a dotted read projects ONE
+	// leaf, and the same-host full-table trace carries Origins for fields
+	// other than the projected one (e.g. the built-in `enabled` survives a
+	// `root_agent.program` read) — leaking them into a single-leaf dotted
+	// read would contradict every other dotted read, which clears Origins.
+	// Surface the projected leaf's own surviving origin as the single-leaf
+	// Winner, matching the generic dotted-read shape. Never fail just
+	// because the global-layer drop removed the leaf's origin: the cause is
+	// what this rendering exists to surface, so a now-unknown leaf still
+	// answers (mirrors ProjectFailClosedRootAgentLeaf's no-Origin-gate
+	// contract).
+	projected.Origins = nil
+	projected.Winner = nil
+	if origin, present := parent.Origins[leaf]; present {
+		origin.KeyPath = keyPath
+		projected.Winner = &origin
+	} else if !ignoredGlobalCandidateHadLeaf(parent, leaf) {
+		// No surviving origin for this leaf, and the ignored global candidate
+		// never carried it either (e.g. a global [root_agent] that sets only
+		// `enabled`, queried for `root_agent.program`). The generic
+		// ResolvedValuePath path — and the same lookup for a registered project
+		// whose global layer was not dropped — reports `unknown config key` for
+		// such an absent optional field, because its zero value has no real
+		// source. Only bypass the origin requirement when the ignored global
+		// candidate actually contained the requested leaf (the cause this
+		// rendering exists to surface); otherwise return false so the
+		// ignored-global dotted read does not present an absent optional field
+		// as an effective configured value.
+		return ResolvedValue{}, false
+	}
+	projected.Candidates = make([]CandidateTrace, len(parent.Candidates))
+	for i, candidate := range parent.Candidates {
+		candidate.KeyPath = keyPath
+		if leafValue, present := configLeafValue(candidate.Value, leaf); present && candidate.Present {
+			candidate.Value = leafValue
+		} else {
+			candidate.Value = nil
+			if candidate.Present && candidate.Layer == string(RootAgentSourceGlobal) && !candidate.Allowed && candidate.Result == "ignored" {
+				// The ignored-global candidate never carried this leaf (e.g. a
+				// global [root_agent] that set only `program`, queried for
+				// `root_agent.enabled`): mark the leaf absent so the trace does
+				// not present a never-configured field as an effective value the
+				// source ignored. Mirrors ResolvedValuePath's
+				// `candidate.Present && present` for this candidate; the
+				// ignored-global candidate that actually carried the leaf keeps
+				// Present/Result/Reason verbatim via the branch above, preserving
+				// the registry cause this rendering exists to surface.
+				candidate.Present = false
+				candidate.Result = "absent"
+				candidate.Reason = "leaf is not present at this source"
+			}
 		}
 		projected.Candidates[i] = candidate
 	}
