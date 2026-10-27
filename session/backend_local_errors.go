@@ -117,7 +117,7 @@ func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) e
 	}
 	for _, session := range sessions {
 		if _, err := session.CloseAndWaitForPaneExit(); err != nil {
-			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %v)", setupErr, err)
+			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %w)", setupErr, err)
 		}
 	}
 	return setupErr

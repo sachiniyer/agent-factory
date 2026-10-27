@@ -1,0 +1,195 @@
+package git
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Deletion-boundary guards for `af sessions prune` (#5136 review). Prune
+// deletes an archived worktree by the RECORD's pathname, which is not
+// identity: an out-of-band move frees the path for an unrelated occupant, and
+// a same-repo replacement survives even the bidirectional pointer binding —
+// it points into the right metadata root and its registration answers back.
+// These helpers add the checks the first cut lacked:
+//
+//   - the occupant's registered BRANCH must be the session's recorded branch
+//     (repo-present mode; a repo-gone row is refused before either check),
+//     and
+//   - the worktree must carry no uncommitted content — the only copy of that
+//     work, which the tombstone's kept-branch promise does not cover. That
+//     includes IGNORED files: a gitignored .env in the archive exists nowhere
+//     else either (#5136 Codex round 5).
+
+// WorktreeDirtyFiles runs a bounded `git status --porcelain
+// --untracked-files=normal --ignored` inside worktreePath and returns how many
+// porcelain entries the tree carries. `normal` is the flag SnapshotAndPushBranch
+// trusts for the untracked half (#2101): bare --porcelain honors
+// status.showUntrackedFiles, and a worktree shares .git/config with its
+// origin, so a user who hides untracked files would otherwise read a dirty
+// tree as clean. --ignored adds the `!!` entries: an ignored file is still
+// the only copy of itself — the kept branch cannot restore what it never
+// tracked (#5136 Codex round 5). Any error — a dead gitdir, a stalled mount —
+// is returned, so the caller fails closed instead of treating "unknown" as
+// "clean".
+func WorktreeDirtyFiles(worktreePath string) (int, error) {
+	// --no-optional-locks makes the probe a pure read: without it `git
+	// status` opportunistically rewrites the worktree index's stat cache,
+	// which would break slice 1's "af writes nothing anywhere" promise
+	// (#5136 — the AF-home/archive byte-identical guarantee extends to the
+	// repo's .git too). core.fsmonitor is unset explicitly: the lock
+	// hint does NOT stop status consulting a configured fsmonitor hook or
+	// builtin daemon, and that consultation can spawn the monitor or write
+	// its cookie — a write this probe must not cause (#5136 Codex round 6).
+	// --ignore-submodules=none overrides `submodule.<name>.ignore=all`:
+	// without it a configured ignore swallows every change inside the
+	// submodule, including unrecoverable work the kept branch does not have
+	// (#5136 Codex round 7).
+	// combined=true folds stderr into the read: an exit-0 status can still
+	// print `warning: could not open directory` while leaving its traversal
+	// INCOMPLETE — a read this probe must not report as clean (#5136 Codex
+	// round 13). Every porcelain line carries the two-char XY field plus a
+	// space; anything else is a diagnostic, and it means the answer is
+	// unknown — fail closed, not "clean".
+	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
+		"-c", "core.fsmonitor=",
+		"status", "--porcelain", "--untracked-files=normal", "--ignored",
+		"--ignore-submodules=none")
+	if err != nil {
+		return 0, err
+	}
+	dirty := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		if len(line) < 3 || line[2] != ' ' {
+			return 0, fmt.Errorf("git status reported an incomplete traversal of %s: %s", worktreePath, line)
+		}
+		dirty++
+	}
+	return dirty, nil
+}
+
+// VerifyRegisteredWorktreeOccupantBranch is VerifyRegisteredWorktreeOccupant
+// plus the session-identity half that check lacks: the registration binding
+// proves the occupant belongs to repoPath, and this additionally requires the
+// worktree's registered branch to be expectedBranch — the session record's
+// own branch. A same-repo worktree parked at a recycled pathname binds to the
+// right metadata but is on a different branch, and prune must refuse it:
+// deleting it would destroy another session's checkout (#5136 Codex round 2).
+// An empty expectedBranch means the record carries no branch to bind; the
+// repo-level binding alone then decides, as before.
+func VerifyRegisteredWorktreeOccupantBranch(worktreePath, repoPath, expectedBranch string) error {
+	if err := VerifyRegisteredWorktreeOccupant(worktreePath, repoPath); err != nil {
+		return err
+	}
+	expectedBranch = strings.TrimSpace(expectedBranch)
+	if expectedBranch == "" {
+		return nil
+	}
+	out, err := runBoundedWorktreeGit(repoPath, false, "--no-optional-locks", "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return fmt.Errorf("could not list %s's worktrees to bind the occupant's branch: %w", repoPath, err)
+	}
+	branch, matched, err := worktreeListedBranchBounded(string(out), worktreePath)
+	if err != nil {
+		return err
+	}
+	if !matched {
+		return worktreeIdentityMismatchf(
+			"worktree %s binds into %s's metadata but is not in its registration listing — the occupant cannot be matched to a worktree record",
+			worktreePath, repoPath)
+	}
+	if branch != "refs/heads/"+expectedBranch {
+		return worktreeIdentityMismatchf(
+			"registered occupant of %s is on branch %s, not this session's %s — the occupant belongs to a different session",
+			worktreePath, strings.TrimPrefix(branch, "refs/heads/"), expectedBranch)
+	}
+	return nil
+}
+
+// VerifyWorktreeRegistrationPredates adds the temporal half of the identity
+// binding: repo, path, and branch are all REUSABLE spellings — after the
+// original archive is removed, `git worktree add <path> <branch>` recreates
+// all three and satisfies every check above while being a different worktree
+// (#5136 Codex round 4). What it cannot recreate is the registration leaf's
+// age: a fresh leaf under <repo>/.git/worktrees gets a fresh directory mtime,
+// while the original's was created at `git worktree add` long before the
+// archive (the archive's repair rewrites only file CONTENTS inside the leaf,
+// which does not advance the directory's mtime). Bound is the record's
+// provable archive time; a leaf created after it cannot be the original.
+func VerifyWorktreeRegistrationPredates(worktreePath string, bound time.Time) error {
+	return boundedPointerCheck("regpredate\x00"+bound.Format(time.RFC3339Nano), worktreePath, func(path string) error {
+		target, err := verifyWorktreePointerShape(path)
+		if err != nil {
+			return err
+		}
+		st, err := BoundedLstat(target)
+		if err != nil {
+			return fmt.Errorf("could not stat worktree registration %s: %w", target, err)
+		}
+		if st.ModTime().After(bound) {
+			return worktreeIdentityMismatchf(
+				"worktree %s was registered at %s, after this session's archive time %s — a re-created worktree at the same path is not the archived original",
+				path, st.ModTime().Format(time.RFC3339), bound.Format(time.RFC3339))
+		}
+		return nil
+	})
+}
+
+// WorktreeRegistrationIsNewer answers the temporal question
+// VerifyWorktreeRegistrationPredates inverts: whether the worktree's
+// registration leaf under the owning repo's .git/worktrees was created AFTER
+// bound — evidence that the occupant was registered during an attempt that
+// began no earlier than bound. The prune guard needed only a refusal; the
+// interrupted-create reconcile (#5503) needs the tri-state a guard error cannot
+// express: newer, older, or could-not-tell (err — including a malformed or
+// missing pointer, which must never read as "newer").
+func WorktreeRegistrationIsNewer(worktreePath string, bound time.Time) (newer bool, err error) {
+	err = boundedPointerCheck("regnewer\x00"+bound.Format(time.RFC3339Nano), worktreePath, func(path string) error {
+		target, err := verifyWorktreePointerShape(path)
+		if err != nil {
+			return err
+		}
+		st, err := BoundedLstat(target)
+		if err != nil {
+			return fmt.Errorf("could not stat worktree registration %s: %w", target, err)
+		}
+		newer = st.ModTime().After(bound)
+		return nil
+	})
+	return newer, err
+}
+
+// WorktreeCommitsBeyondRepo counts commits reachable from the worktree's HEAD
+// that are not reachable from the repo's current HEAD — the "did an agent
+// already commit work here" question for a leftover whose recorded base commit
+// af never persisted (#5503). The merge-base with the repo's HEAD stands in for
+// the unrecorded cut point: a worktree still exactly where the create left it
+// counts zero, one whose agent committed counts the new work, and one whose
+// base moved out from under it (rebase, force-push) counts more than zero and
+// therefore errs toward preservation. Every failure is an error out — the
+// caller fails closed rather than reading "could not count" as "clean".
+func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
+	head, err := runBoundedWorktreeGit(repoRoot, false, "--no-optional-locks", "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return 0, fmt.Errorf("could not resolve %s's HEAD: %w", repoRoot, err)
+	}
+	base, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
+		"merge-base", "HEAD", strings.TrimSpace(string(head)))
+	if err != nil {
+		return 0, fmt.Errorf("could not merge-base %s against %s's HEAD: %w", worktreePath, repoRoot, err)
+	}
+	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
+		"rev-list", "--count", strings.TrimSpace(string(base))+"..HEAD")
+	if err != nil {
+		return 0, fmt.Errorf("could not count commits in %s beyond its merge-base: %w", worktreePath, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("could not parse commit count for %s: %w", worktreePath, err)
+	}
+	return n, nil
+}
