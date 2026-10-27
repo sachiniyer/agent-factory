@@ -216,10 +216,10 @@ func TestBuiltInProgramOverride_ColonTildePathRoundTrips(t *testing.T) {
 	}
 
 	resolved := overrideResolution("claude",
-		"x=a:~/claude --dangerously-skip-permissions", detected)
+		"/opt/other/x=a:~/claude --dangerously-skip-permissions", detected)
 	require.False(t, builtInProgramOverride(resolved, "claude",
-		"x=a:~/claude --dangerously-skip-permissions"),
-		"x=a:~/claude is literal to /bin/sh too — it just is not the detected word")
+		"/opt/other/x=a:~/claude --dangerously-skip-permissions"),
+		"a different argv word is a different command — literal or not")
 }
 
 // The end-to-end repro from #5487: a config written by an older af carries the
