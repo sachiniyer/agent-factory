@@ -263,7 +263,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 		// URL rides along for a web tab (a vscode tab has none by design — its target
 		// is resolved at proxy time), or the pane would have nothing to iframe.
-		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal, Exit: tabExitFromData(td.Exit),
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode, Exit: tabExitFromData(td.Exit),
 			accountScope: td.AccountScope, tmux: ts}
 		// Adopt under the write lock, re-checking BOTH the already-present dedupe (a
 		// concurrent reconcile/AddTab may have added this tab while we reconnected

@@ -6647,11 +6647,11 @@ async function restoreSession(id, title, token2, expectedDaemonBootId) {
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
@@ -7127,6 +7127,25 @@ var PanelsTopLeft = [
   ["path", { d: "M9 21V9" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/pencil.mjs
+var Pencil = [
+  [
+    "path",
+    {
+      d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"
+    }
+  ],
+  ["path", { d: "m15 5 4 4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/play.mjs
+var Play = [
+  [
+    "path",
+    { d: "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" }
+  ]
+];
+
 // node_modules/lucide/dist/esm/icons/plus.mjs
 var Plus = [
   ["path", { d: "M5 12h14" }],
@@ -7154,6 +7173,15 @@ var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
 var Terminal = [
   ["path", { d: "M12 19h8" }],
   ["path", { d: "m4 17 6-6-6-6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/trash-2.mjs
+var Trash2 = [
+  ["path", { d: "M10 11v6" }],
+  ["path", { d: "M14 11v6" }],
+  ["path", { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" }],
+  ["path", { d: "M3 6h18" }],
+  ["path", { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }]
 ];
 
 // node_modules/lucide/dist/esm/icons/triangle-alert.mjs
@@ -7191,11 +7219,14 @@ var ICONS = {
   menu: Menu,
   "octagon-x": OctagonX,
   panels: PanelsTopLeft,
+  pencil: Pencil,
+  play: Play,
   plus: Plus,
   reload: RefreshCw,
   square: Square,
   "square-check": SquareCheckBig,
   terminal: Terminal,
+  trash: Trash2,
   "triangle-alert": TriangleAlert,
   x: X
 };
@@ -7280,7 +7311,7 @@ function placeMenu(trigger, panel) {
 }
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
-}) {
+}, emptyFocus = () => null) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
@@ -7291,20 +7322,35 @@ function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"
   menu.panel.id = "af-appbar-tools";
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
+  const hasContent = () => Array.from(menu.panel.children).some((child) => !child.hidden);
+  const syncTrigger = () => {
+    const empty = !hasContent();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
+    menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
+  };
   const sync = () => {
     beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
-    menu.trigger.hidden = !phone.matches;
+    syncTrigger();
     menu.panel.hidden = phone.matches;
-    if (phone.matches && hadFocus) menu.trigger.focus();
+    if (phone.matches && hadFocus && !menu.trigger.hidden) menu.trigger.focus();
   };
+  const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(syncTrigger);
+  observer?.observe(menu.panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   phone.addEventListener("change", sync);
   sync();
-  return { ...menu, dispose: () => {
-    phone.removeEventListener("change", sync);
-    menu.dispose();
-  } };
+  return {
+    ...menu,
+    dispose: () => {
+      observer?.disconnect();
+      phone.removeEventListener("change", sync);
+      menu.dispose();
+    }
+  };
 }
 function isSessionFirst(phone, view, kind) {
   return phone && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
@@ -7409,6 +7455,7 @@ function viewNavigation(onSelect) {
   }
   return { el: el2, tabs };
 }
+var activeModalTrap = null;
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
   const errorLine = h("div", { class: "af-modal-error", role: "alert" });
@@ -7427,7 +7474,10 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
-  card.addEventListener("keydown", (event) => {
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event) => {
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll(
       "button, input, select, textarea, a[href], summary, [tabindex]"
@@ -7440,14 +7490,21 @@ function modalChrome(opts) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     }
-  });
+  };
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {
     el: backdrop,
     setBusy(busy) {
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -7456,6 +7513,9 @@ function modalChrome(opts) {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
@@ -7463,6 +7523,9 @@ function modalChrome(opts) {
     },
     close() {
       backdrop.remove();
+    },
+    reactivate() {
+      installTrap();
     }
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
@@ -7651,6 +7714,16 @@ function rebuildKeepingScroll(el2, previous, next, rebuild) {
 
 // src/config.ts
 var CONFIG_LIST_TOKEN = "config";
+function themeLabel(choice) {
+  switch (choice) {
+    case "system":
+      return "System";
+    case "light":
+      return "Light";
+    case "dark":
+      return "Dark";
+  }
+}
 function tiersInOrder(entries) {
   const seen = /* @__PURE__ */ new Map();
   for (const e of entries) {
@@ -7678,7 +7751,10 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 }
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
@@ -7718,6 +7794,7 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  theme = "system";
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -7736,10 +7813,11 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+  update(entries, path, status, accounts, theme = this.theme) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastTheme === theme) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -7751,6 +7829,8 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastTheme = theme;
+    this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
@@ -7788,7 +7868,8 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
+    const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7801,9 +7882,16 @@ var ConfigPane = class {
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
-      this.el.querySelector(
+      const restored = this.el.querySelector(
         `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
-      )?.focus({ preventScroll: true });
+      );
+      restored?.focus({ preventScroll: true });
+      if (restored instanceof HTMLInputElement && restored.type === "text" && focusedConfigTextCaret?.start != null) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
+        );
+      }
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7900,9 +7988,47 @@ var ConfigPane = class {
     ];
     this.el.replaceChildren(
       head,
-      h("div", { class: "af-config-list" }, ...content),
+      h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
     );
+  }
+  /** Theme and the saved token live in this browser's localStorage, not in
+   *  config.toml, so neither goes through `save`. */
+  renderBrowser() {
+    const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, "This browser"));
+    const select = h("select", { class: "af-input af-config-input af-theme-select" });
+    select.setAttribute("aria-label", "Theme");
+    for (const choice of THEME_CHOICES) {
+      const opt = h("option", { value: choice }, themeLabel(choice));
+      opt.selected = choice === this.theme;
+      select.append(opt);
+    }
+    select.addEventListener("change", () => this.actions.setTheme(select.value));
+    const row = h(
+      "div",
+      { class: "af-config-row af-theme-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Theme"),
+        h("span", { class: "af-config-purpose" }, "Color scheme for this browser. System follows your device setting.")
+      ),
+      h("div", { class: "af-config-control" }, select)
+    );
+    const disconnect2 = h("button", { type: "button", class: "af-ghost af-config-disconnect" }, "Log out");
+    disconnect2.addEventListener("click", () => this.actions.disconnect());
+    const tokenRow = h(
+      "div",
+      { class: "af-config-row af-disconnect-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Saved token"),
+        h("span", { class: "af-config-purpose" }, "Forget the token saved in this browser and go back to the login screen.")
+      ),
+      h("div", { class: "af-config-control" }, disconnect2)
+    );
+    return [heading, row, tokenRow];
   }
   /** One key: its name, purpose, control, and — when it is the row just written
    *  or just refused — the echo or the error. */
@@ -15633,6 +15759,20 @@ function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   }
   return "";
 }
+function controlKey(el2) {
+  return { name: el2.getAttribute("aria-label") || el2.textContent || "", surface: el2.parentElement?.className ?? "" };
+}
+function sameControlKey(a, b) {
+  return a.name === b.name && a.surface === b.surface;
+}
+function taskVerbs(t, actions2) {
+  const triggerBlocked = canTrigger(t) ? void 0 : !t.enabled ? "Enable the task to trigger it" : "Only scheduled tasks can be triggered";
+  return [
+    { label: "Edit", glyph: "pencil", run: () => actions2.edit(t) },
+    { label: "Trigger", glyph: "play", run: () => actions2.trigger(t), blocked: triggerBlocked },
+    { label: "Remove", glyph: "trash", run: () => actions2.remove(t) }
+  ];
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -15663,7 +15803,7 @@ var TasksPane = class {
     const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.closest("[data-task-id]")?.dataset.taskId));
     const active = document.activeElement;
     const focusedId = active?.closest("[data-task-id]")?.dataset.taskId;
-    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    const focused = active ? controlKey(active) : null;
     for (const menu of this.menus) menu.dispose();
     this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
@@ -15671,9 +15811,9 @@ var TasksPane = class {
     for (const menu of this.menus) {
       if (openIds.has(menu.el.closest("[data-task-id]")?.dataset.taskId)) menu.open();
     }
-    if (focusedId && focusedName) {
+    if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
-      const control = [...row?.querySelectorAll("button") ?? []].find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+      const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
   }
@@ -15724,7 +15864,7 @@ var TasksPane = class {
     const enabledDot = h(
       "span",
       { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
-      icon(mark ? mark.icon : t.enabled ? "square-check" : "square")
+      ...mark ? [icon(mark.icon)] : []
     );
     enabledDot.setAttribute("aria-hidden", "true");
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
@@ -15748,28 +15888,46 @@ var TasksPane = class {
     if (t.last_run_status?.startsWith("errored:")) {
       main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
-    const toggleBtn = h(
+    const toggle = h(
       "button",
-      { type: "button", class: "af-ghost af-task-action" },
-      t.enabled ? "Disable" : "Enable"
+      { type: "button", class: `af-task-switch${t.enabled ? " af-task-switch-on" : ""}`, role: "switch" },
+      h("span", { class: "af-task-switch-track" }, h("span", { class: "af-task-switch-thumb" }))
     );
-    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
-    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
-    editBtn.addEventListener("click", () => this.actions.edit(t));
+    toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
+    toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
+    toggle.addEventListener("click", () => this.actions.toggle(t));
+    const verbs = taskVerbs(t, this.actions);
+    const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
+      btn.setAttribute("aria-label", label);
+      if (blocked) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    });
     const menu = actionsDisclosure(`Actions for ${t.name}`);
     this.menus.push(menu);
-    const actionEls = [toggleBtn];
-    if (canTrigger(t)) {
-      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
-      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
-      actionEls.push(triggerBtn);
-    }
-    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
-    removeBtn.addEventListener("click", () => this.actions.remove(t));
-    actionEls.push(removeBtn);
-    menu.panel.append(...actionEls);
+    menu.panel.append(...verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
+      if (blocked) {
+        btn.disabled = true;
+        btn.title = blocked;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    }));
     menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
-    const actions2 = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+    const actions2 = h(
+      "div",
+      { class: "af-task-actions" },
+      h("div", { class: "af-task-icons" }, ...iconBtns),
+      menu.el,
+      toggle
+    );
     const row = h("li", { class: "af-task-row" }, enabledDot, main, actions2);
     row.dataset.taskId = t.id;
     return row;
@@ -16327,6 +16485,12 @@ var TAB_PRESS_LIMITS = { holdMs: 500, slopPx: 10 };
 function pressDistance(fromX, fromY, toX, toY) {
   return Math.hypot(toX - fromX, toY - fromY);
 }
+function tabDragFeedbackRegion(overBar, overPane) {
+  if (overBar) {
+    return "bar";
+  }
+  return overPane ? "pane" : "none";
+}
 
 // src/keyed-rows.ts
 var KeyedRows = class {
@@ -16497,16 +16661,6 @@ function tabIdentity(tab) {
 function tabRealId(tab) {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
-function themeLabel(choice) {
-  switch (choice) {
-    case "system":
-      return "System";
-    case "light":
-      return "Light";
-    case "dark":
-      return "Dark";
-  }
-}
 function orderedSessions(sessions) {
   return [...sessions].sort(compareSessionsForRail);
 }
@@ -16521,6 +16675,9 @@ function renderLogin(root2, state, actions2) {
   root2.replaceChildren(loginView(state, actions2));
   const input = root2.querySelector("#af-token");
   if (input) input.value = draft;
+}
+function clearLoginDraft(root2) {
+  loginDrafts.set(root2, "");
 }
 function loginView(state, actions2) {
   if (state.loginCondition === "unavailable") {
@@ -16579,7 +16736,7 @@ function loginView(state, actions2) {
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you log out."),
     form
   ];
   if (state.loginError) {
@@ -16672,19 +16829,6 @@ var AppShell = class {
     this.termHost = termHost2;
     this.modalHost = modalHost2;
     this.installEl = installEl;
-    const disconnect2 = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
-    disconnect2.setAttribute("title", "Disconnect and forget the saved token");
-    const themeToggle = h("div", { class: "af-theme-toggle" });
-    themeToggle.setAttribute("role", "group");
-    themeToggle.setAttribute("aria-label", "Theme");
-    for (const choice of THEME_CHOICES) {
-      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
-      opt.setAttribute("data-theme-opt", choice);
-      opt.setAttribute("title", `${themeLabel(choice)} theme`);
-      opt.addEventListener("click", () => this.actions.setTheme(choice));
-      this.themeOpts.set(choice, opt);
-      themeToggle.append(opt);
-    }
     const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
@@ -16722,18 +16866,12 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
     this.appControls = appbarControls([
-      ...this.installEl ? [this.installEl] : [],
-      themeToggle,
-      disconnect2
+      ...this.installEl ? [this.installEl] : []
     ], this.phone, this.captureNewTabCancelReturn, () => {
       const slot = this.terminalChrome?.newTabSlot;
       if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
-    });
+    }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
-    disconnect2.addEventListener("click", () => {
-      this.appControls.close();
-      this.actions.disconnect();
-    });
     const header = h(
       "header",
       { class: "af-appbar" },
@@ -16747,7 +16885,7 @@ var AppShell = class {
     this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", (event) => {
       const target = event.target.closest("button, a");
-      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
+      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-viewnav")) this.appControls.dismiss();
     });
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -16810,7 +16948,9 @@ var AppShell = class {
       accounts: {
         register: (agent, name) => this.actions.registerAccount(agent, name),
         login: (agent, name) => this.actions.openAccountLogin(agent, name)
-      }
+      },
+      setTheme: (choice) => this.actions.setTheme(choice),
+      disconnect: () => this.actions.disconnect()
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
     this.toast = h("div", { class: "af-toast" });
@@ -16832,8 +16972,6 @@ var AppShell = class {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   viewTabs;
-  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
-  // the active one highlighted in update().
   phone = window.matchMedia("(max-width: 768px)");
   header;
   viewNav;
@@ -16889,8 +17027,6 @@ var AppShell = class {
     this.actions.layoutChanged();
   }
   appControls;
-  themeOpts = /* @__PURE__ */ new Map();
-  lastThemeChoice = null;
   sessionsBody;
   tasksPane;
   configPane;
@@ -17126,21 +17262,13 @@ var AppShell = class {
       this.el.classList.toggle("af-view-sessions", state.view === "sessions");
       this.setNav(false);
     }
-    if (this.lastThemeChoice !== state.themeChoice) {
-      this.lastThemeChoice = state.themeChoice;
-      for (const [choice, opt] of this.themeOpts) {
-        const active = choice === state.themeChoice;
-        opt.classList.toggle("af-theme-opt-active", active);
-        opt.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    }
     if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
       this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -18130,10 +18258,13 @@ var AppShell = class {
         return;
       }
       e.preventDefault();
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
     bar.addEventListener("pointerup", (e) => {
@@ -18874,6 +19005,7 @@ async function fetchRegisteredProjects(tok) {
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
@@ -19103,6 +19235,7 @@ function openModal(m, focusCard = false, explicitInvoker) {
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    m.reactivate?.();
     if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
   });
 }
@@ -20545,11 +20678,14 @@ lucide/dist/esm/icons/link.mjs:
 lucide/dist/esm/icons/menu.mjs:
 lucide/dist/esm/icons/octagon-x.mjs:
 lucide/dist/esm/icons/panels-top-left.mjs:
+lucide/dist/esm/icons/pencil.mjs:
+lucide/dist/esm/icons/play.mjs:
 lucide/dist/esm/icons/plus.mjs:
 lucide/dist/esm/icons/refresh-cw.mjs:
 lucide/dist/esm/icons/square-check-big.mjs:
 lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
+lucide/dist/esm/icons/trash-2.mjs:
 lucide/dist/esm/icons/triangle-alert.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:

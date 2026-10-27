@@ -520,6 +520,11 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings from the writer itself (e.g. an unregistered
+   *  default_accounts.<agent> name). A channel distinct from the response's
+   *  apply-time `warnings`: the daemon fills this even when the live apply
+   *  produced none (#5266). */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
