@@ -131,10 +131,13 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	hooks := *resolved.RemoteHooks
 	p := &hookProvisioner{
-		hooks:   hooks,
-		spec:    spec,
-		slug:    Slugify(spec.Title),
-		program: config.ResolveProgram(&resolved.Config, spec.Program),
+		hooks: hooks,
+		spec:  spec,
+		slug:  Slugify(spec.Title),
+		// The wire program is the configured name and flags — never af's
+		// auto-detected daemon path. The hook's agent-server resolves it on
+		// the host's login PATH (#5571).
+		program: remoteProgramForHost(resolved, spec.Program),
 		// sandbox.binary reaches the provision_cmd path, which provisions over
 		// the sandbox transport (#5571 W2.2).
 		sandboxBinary: strings.TrimSpace(resolved.Config.SandboxBinary),

@@ -11,13 +11,13 @@ import (
 // resumeFromLimitViaDaemon is the same daemon action the TUI's `c` key and the
 // web's Retry button call. Keeping the CLI seam at the request boundary makes
 // the daemon the sole owner of respawn, prompt delivery, and liveness changes.
-var resumeFromLimitViaDaemon = daemon.ResumeFromLimit
+var resumeFromLimitViaDaemon = routedResumeFromLimit
 
 // confirmHandoffDeliveryViaDaemon is the --delivered half (#4429): the
 // operator's attestation that the pending mission already landed, retiring the
 // obligation without a resend. A separate seam — not a field on the resume
 // request — so a pre-verb daemon refuses loudly instead of resending.
-var confirmHandoffDeliveryViaDaemon = daemon.ConfirmHandoffDelivery
+var confirmHandoffDeliveryViaDaemon = routedConfirmHandoffDelivery
 
 var sessionsRetryLimitDelivered bool
 
@@ -51,7 +51,7 @@ Example:
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
