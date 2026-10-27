@@ -35,8 +35,8 @@ func extractInstancesArrayTwoDecodeOracle(raw []byte, path string) (json.RawMess
 // bytes, same error text, same error CLASS. The class matters as much as the
 // text here — loadRepoInstancesForAll branches on *UnsupportedSchemaVersionError
 // to decide whether to surface the error or fall back to raw bytes, and
-// MigrateAllRepoInstancesForDaemonLoad branches on errInstancesSchemaContent to
-// decide skip-and-warn versus abort.
+// RepoInstancesFileCache.migrateAndExtract branches on errInstancesSchemaContent
+// to decide skip-and-warn versus abort.
 //
 // It runs over the same corpus #3724 added, for the same reason: a fixture that
 // exercises the fast path, the migrator chain, or a rejection is exactly where a

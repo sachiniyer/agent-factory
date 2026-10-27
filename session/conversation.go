@@ -119,11 +119,23 @@ func (i *Instance) noteAgentRuntimeReplaced() {
 	i.clearAgentModelChangeLocked()
 }
 
+// resolvedAgentLocked detects the agent from the command the session actually
+// runs. Two forms of that evidence, in precedence order: the live pane's
+// program locally, and the launch-boundary runtime record — which is what a
+// REMOTE session has instead of a local tmux binding (#5108). Either way a
+// known command decides the answer outright, even when the answer is "no
+// known agent": a program_overrides entry pointing an agent name at a plain
+// shell must not resurrect the enum and start waiting on that agent's prompt
+// glyph. Only with no recorded command at all does detection fall back to the
+// configured enum.
 func (i *Instance) resolvedAgentLocked() string {
 	if ts := i.tmuxLocked(); ts != nil {
 		if program := ts.Program(); strings.TrimSpace(program) != "" {
 			return tmux.DetectAgentFromCommand(program)
 		}
+	}
+	if program := strings.TrimSpace(i.runtimeProgram); program != "" {
+		return tmux.DetectAgentFromCommand(program)
 	}
 	return tmux.DetectAgentFromCommand(i.Program)
 }

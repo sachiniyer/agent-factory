@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestDialStreamErrorDoesNotExposeAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	_, err = c.DialStream(context.Background(), "probe", "", "", 0, 0)
+	_, err = c.DialStream(context.Background(), StreamSession{Title: "probe"}, "", 0, 0)
 	if err == nil {
 		t.Fatal("dial against a closed port returned nil error")
 	}
@@ -162,7 +163,7 @@ func TestDialStream_HandshakeCarriesQueryAndStartSeq(t *testing.T) {
 	c := NewWithSocket(sockPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "repo-x", "", 3, 7)
+	sc, err := c.DialStream(ctx, StreamSession{Title: "alpha", RepoID: "repo-x"}, "", 3, 7)
 	if err != nil {
 		t.Fatalf("DialStream: %v", err)
 	}
@@ -183,5 +184,55 @@ func TestDialStream_HandshakeCarriesQueryAndStartSeq(t *testing.T) {
 	}
 	if !msg.Binary || string(msg.Frame.Data) != "hello" {
 		t.Fatalf("want PTY_OUT 'hello', got %+v", msg)
+	}
+}
+
+// TestDialStream_StableIDDialsIDOnly pins the #4760 review contract: a
+// StreamSession carrying a stable id dials that id with by=id and NO repo_id, so
+// the daemon resolves it in the id namespace only and refuses a miss instead of
+// falling back to a same-bytes title. The title and repo scope must not leak
+// onto the wire, since either would re-open the title namespace.
+func TestDialStream_StableIDDialsIDOnly(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	var gotPath string
+	var gotQuery url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.PathValue("id")
+		gotQuery = r.URL.Query()
+		conn, aerr := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if aerr != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := NewWithSocket(sockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sc, err := c.DialStream(ctx, StreamSession{ID: "sess-123", Title: "worker", RepoID: "repo-x"}, "tab-9", 0, 0)
+	if err != nil {
+		t.Fatalf("DialStream: %v", err)
+	}
+	_ = sc.Conn.Close(websocket.StatusNormalClosure, "")
+
+	if gotPath != "sess-123" {
+		t.Fatalf("stream path segment = %q, want the stable id %q", gotPath, "sess-123")
+	}
+	if got := gotQuery.Get(agentproto.StreamAddressQueryParam); got != agentproto.StreamAddressByID {
+		t.Fatalf("%s = %q, want %q", agentproto.StreamAddressQueryParam, got, agentproto.StreamAddressByID)
+	}
+	if gotQuery.Has("repo_id") {
+		t.Fatalf("an id-addressed dial must not send repo_id; query = %v", gotQuery)
+	}
+	if got := gotQuery.Get("tab_id"); got != "tab-9" {
+		t.Fatalf("tab_id = %q, want tab-9", got)
 	}
 }

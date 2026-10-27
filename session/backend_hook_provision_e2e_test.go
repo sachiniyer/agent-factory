@@ -216,7 +216,7 @@ func withIdentity(cmd string) string {
 // honours TMPDIR: whitespace or a metacharacter there would otherwise split the
 // argument and hand ssh something other than one identity file.
 func fixtureSSHOptions(identity string) string {
-	return "-F none -i " + shellQuoteSandbox(identity) + " -o IdentitiesOnly=yes "
+	return "-F none -i " + shellQuote(identity) + " -o IdentitiesOnly=yes "
 }
 
 // fixtureLoginWorks reports whether the calling account can authenticate to the
@@ -415,7 +415,7 @@ func runPinnedSSHAndReportPrompt(t *testing.T, record *hookProvisionRecord, batc
 	marker := filepath.Join(dir, "askpass-was-invoked")
 	askpass := filepath.Join(dir, "askpass.sh")
 	require.NoError(t, os.WriteFile(askpass,
-		[]byte("#!/usr/bin/env bash\ntouch "+shellQuoteSandbox(marker)+"\necho wrong-password\n"), 0o755))
+		[]byte("#!/usr/bin/env bash\ntouch "+shellQuote(marker)+"\necho wrong-password\n"), 0o755))
 
 	knownHosts, err := hookProvisionKnownHosts(dir, record.Host, record.Port, record.HostKey)
 	require.NoError(t, err)

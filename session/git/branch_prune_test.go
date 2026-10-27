@@ -179,6 +179,21 @@ func TestLocalBranchExists_DeterminateVersusUnknown(t *testing.T) {
 	}
 }
 
+// TestLocalBranchExists_IgnoresAmbientGitDir pins the repository-selector
+// sanitization (#5136 Codex round 12): a GIT_DIR inherited by the daemon —
+// a process launched inside a hook, say — must not redirect the probe at a
+// foreign repository that coincidentally holds the branch name, fabricating
+// a recovery handle the real origin does not have.
+func TestLocalBranchExists_IgnoresAmbientGitDir(t *testing.T) {
+	foreign := branchRepo(t, "af-shared")
+	root := branchRepo(t, "af-target")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	exists, err := LocalBranchExists(root, "af-shared")
+	require.NoError(t, err)
+	assert.False(t, exists, "the ambient GIT_DIR repo holds af-shared; the probed repo must be the answer")
+}
+
 // TestDeleteLocalBranch_UnreadableLooseRefIsErrorNotAbsence closes the hole the
 // PR review caught: git itself folds an EACCES on a LOOSE ref file into the
 // same silent exit 1 as "no such ref" (git 2.43; git ≥2.45 grew
@@ -362,4 +377,204 @@ func TestDeleteLocalBranch_LinkedWorktreeExistingBranchIsDeleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assert.False(t, refExists(t, main, "af-normal"))
+}
+
+// refExistsSanitized probes the repo at root with the repository-selector
+// environment filtered out, so a GIT_DIR set by an enclosing t.Setenv does not
+// redirect the verification probe at a different repo. branch_prune_test.go's
+// refExists inherits the ambient environment, which is exactly the redirect
+// the threat model exists to filter out, so it cannot say which repo a
+// sanitized command actually touched.
+func refExistsSanitized(t *testing.T, root, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", root, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	return cmd.Run() == nil
+}
+
+// TestDeleteLocalBranch_IgnoresAmbientGitDir pins the DESTRUCTIVE half of the
+// repository-selector threat model (#5136). LocalBranchExists sanitizes its
+// probe's environment so an ambient GIT_DIR cannot redirect existence at a
+// foreign repository, but the `git branch -D` it gates historically set no
+// cmd.Env and inherited the ambient environment, so the probe verified the
+// intended repo while the delete executed against the foreign one the ambient
+// GIT_DIR selected. The function still reported (true, nil), so `af reset`
+// force-deleted a same-named branch AF never created in the foreign repo, left
+// the intended AF branch untouched, and erased the session records that named
+// it — permanently orphaning the branch the reset was supposed to delete. The
+// delete MUST run under the same sanitized environment the probe produced its
+// verdict under, so a "deleted" answer corresponds to the intended branch
+// actually being gone.
+func TestDeleteLocalBranch_IgnoresAmbientGitDir(t *testing.T) {
+	foreign := branchRepo(t, "af-shared")
+	root := branchRepo(t, "af-shared")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	deleted, err := DeleteLocalBranch(root, "af-shared")
+	require.NoError(t, err)
+	assert.True(t, deleted, "the branch the probe verified in the probed repo must be reported deleted")
+
+	assert.False(t, refExistsSanitized(t, root, "af-shared"),
+		"the intended repo's branch — the one LocalBranchExists verified — must be the one deleted")
+	assert.True(t, refExistsSanitized(t, foreign, "af-shared"),
+		"the foreign repo's same-named branch must never be deleted through an ambient GIT_DIR redirect")
+}
+
+// bareCloneRepo builds a THROWAWAY bare clone in t.TempDir() — `git init` a
+// source repo, commit, `git clone --bare` it — then creates `branch` off the
+// default branch directly in the bare repo and returns the bare root. A bare
+// repository carries no .git child (its metadata lives at the root: HEAD,
+// config, objects/, refs/), the exact layout LocalBranchExists must NOT
+// classify as determinate absence.
+func bareCloneRepo(t *testing.T, branch string) string {
+	t.Helper()
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	require.NoError(t, os.MkdirAll(source, 0o755))
+	runGit(t, source, "init", "-q", "-b", "master")
+	runGit(t, source, "commit", "-q", "--allow-empty", "-m", "initial")
+	runGit(t, parent, "clone", "-q", "--bare", source, bare)
+	runGit(t, bare, "branch", branch)
+	return bare
+}
+
+// TestLocalBranchExists_BareCloneExistingBranchIsPresent is the #5136 and
+// bare-clone regression: a bare clone carries no .git child (its metadata lives
+// directly at the root), so the missing-.git fast return must NOT fabricate
+// determinate absence for a branch that verifiably exists in the bare origin.
+// Prune's recovery-branch promise resolves through this probe; without
+// bare-aware handling `af sessions prune` skips every bare-clone session with a
+// misleading "branch no longer exists" refusal even though `git show-ref
+// --verify` exits 0 in the same directory.
+func TestLocalBranchExists_BareCloneExistingBranchIsPresent(t *testing.T) {
+	bare := bareCloneRepo(t, "af-bare")
+	// Sanity: the bare layout has no .git child, and git confirms the branch.
+	_, statErr := os.Stat(filepath.Join(bare, ".git"))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"sanity: a bare clone has no .git child for Stat to find")
+	assert.True(t, refExists(t, bare, "af-bare"),
+		"sanity: the branch verifiably exists in the bare origin")
+
+	exists, err := LocalBranchExists(bare, "af-bare")
+	require.NoError(t, err)
+	assert.True(t, exists,
+		"a branch verifiably present in a bare origin must not read as determinate absence")
+}
+
+// TestLocalBranchExists_BareCloneMissingBranchIsAbsent is the bare-layout
+// counterpart of the determinate-absence contract: a branch git confirms GONE
+// in a bare origin is (false, nil), so the fall-through probe is not an
+// "always-exists" shortcut that would over-reclaim and defeat the kept-branch
+// promise prune exists to enforce.
+func TestLocalBranchExists_BareCloneMissingBranchIsAbsent(t *testing.T) {
+	bare := bareCloneRepo(t, "af-present")
+
+	exists, err := LocalBranchExists(bare, "af-never-existed")
+	require.NoError(t, err,
+		"a silent show-ref exit 1 is determinate absence for a bare origin too")
+	assert.False(t, exists)
+}
+
+// TestDeleteLocalBranch_BareCloneExistingBranchIsDeleted proves the shared
+// helper's fix carries through the destructive path too: DeleteLocalBranch
+// (af reset's sole branch-deletion path, #1736) over a bare origin deletes the
+// branch that verifiably exists, rather than treating a healthy bare root as
+// "nothing left to prune".
+func TestDeleteLocalBranch_BareCloneExistingBranchIsDeleted(t *testing.T) {
+	bare := bareCloneRepo(t, "af-bare")
+
+	deleted, err := DeleteLocalBranch(bare, "af-bare")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExists(t, bare, "af-bare"))
+}
+
+// refExistsGitDir asks git directly (bypassing the code under test and any
+// ambient GIT_DIR inherited via t.Setenv) whether a branch resolves in the repo
+// whose git dir is `gitDir` (a bare root, or a non-bare repo's `.git`).
+func refExistsGitDir(t *testing.T, gitDir, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir", gitDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+// TestDeleteLocalBranch_BareCloneIgnoresAmbientGitDir pins the deletion-side
+// counterpart of TestLocalBranchExists_IgnoresAmbientGitDir: a GIT_DIR inherited
+// by the daemon (a process launched inside a hook, say) must not redirect
+// `git branch -D` at a foreign repository that coincidentally holds the branch
+// name. The existence probe already strips and re-pins GIT_DIR; the deletion
+// must run with the same sanitized environment, or a same-named branch in the
+// foreign repo is deleted while the intended bare branch survives and the reset
+// reports success.
+func TestDeleteLocalBranch_BareCloneIgnoresAmbientGitDir(t *testing.T) {
+	bare := bareCloneRepo(t, "af-shared-name")
+	foreign := branchRepo(t, "af-shared-name")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	deleted, err := DeleteLocalBranch(bare, "af-shared-name")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExistsGitDir(t, bare, "af-shared-name"),
+		"the bare origin's branch must be the one deleted")
+	assert.True(t, refExistsGitDir(t, filepath.Join(foreign, ".git"), "af-shared-name"),
+		"the ambient GIT_DIR repo's branch must never be touched by the deletion")
+}
+
+// TestDeleteLocalBranch_NestedBareRootNeverDeletesEnclosingRepo pins the
+// deletion-side counterpart of TestLocalBranchExists_DeGittedNestedRootNeverProbesEnclosingBareRepo:
+// a bare root nested inside another repo must not let `git branch -D` discover
+// the enclosing repo and delete its same-named branch. The bare pin (GIT_DIR
+// pinned to the bare root) keeps the deletion scoped to the recorded root.
+func TestDeleteLocalBranch_NestedBareRootNeverDeletesEnclosingRepo(t *testing.T) {
+	parent := branchRepo(t, "af-shared-name")
+	bare := filepath.Join(parent, "bare.git")
+	runGit(t, parent, "clone", "-q", "--bare", parent, bare)
+
+	deleted, err := DeleteLocalBranch(bare, "af-shared-name")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExistsGitDir(t, bare, "af-shared-name"),
+		"the bare root's branch must be deleted")
+	assert.True(t, refExists(t, parent, "af-shared-name"),
+		"the enclosing repo's branch must never be deleted through a nested bare root")
+}
+
+// TestLocalBranchExists_DeGittedNonBareRootIsDeterminateAbsence pins the arm
+// the bare-aware change MUST NOT regress: a non-bare root whose .git was
+// removed is STILL determinate absence. The bare layout check is required to
+// fire before the fall-through, so a mere de-git'd directory never reaches
+// `git -C` (which would discover an enclosing repo and answer on AF's behalf).
+// This is the direct-LocalBranchExists form of
+// TestDeleteLocalBranch_DeGittedRepoIsCleanNoOp.
+func TestLocalBranchExists_DeGittedNonBareRootIsDeterminateAbsence(t *testing.T) {
+	root := branchRepo(t, "af-degitted")
+	require.NoError(t, os.RemoveAll(filepath.Join(root, ".git")))
+	// Sanity: a de-git'd ordinary root is NOT a bare layout.
+	assert.True(t, bareMetadataDirectory(root) == false,
+		"sanity: a de-git'd ordinary root has no bare metadata layout")
+
+	exists, err := LocalBranchExists(root, "af-degitted")
+	require.NoError(t, err, "a de-git'd non-bare root is determinate absence, not a failed probe")
+	assert.False(t, exists)
+}
+
+// TestLocalBranchExists_DeGittedNestedRootNeverProbesEnclosingBareRepo pins
+// that the bare-aware fall-through does not re-open the nested-discovery hole
+// the .git check exists to close (#3243 adjacent fix): a de-git'd root nested
+// inside a BARE parent must NOT fall through to `git -C` (which would discover
+// the bare parent and report its branch as the nested root's own). The bare
+// layout check fires only for a root that IS the bare metadata, so a
+// bare-metadata-less sub stays determinate absence and the enclosing bare
+// branch is unreachable.
+func TestLocalBranchExists_DeGittedNestedRootNeverProbesEnclosingBareRepo(t *testing.T) {
+	bare := bareCloneRepo(t, "af-shared-name")
+	sub := filepath.Join(bare, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+
+	exists, err := LocalBranchExists(sub, "af-shared-name")
+	require.NoError(t, err, "a nested de-git'd root is determinate absence")
+	assert.False(t, exists)
+	assert.True(t, refExists(t, bare, "af-shared-name"),
+		"the enclosing bare repo's branch must never be discovered through a nested de-git'd root")
 }

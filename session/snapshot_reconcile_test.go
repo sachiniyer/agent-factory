@@ -36,7 +36,7 @@ func newReconcileTestInstanceWithExec(t *testing.T, agentName string, exec cmd_t
 
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
-	worktreePath := filepath.Join(t.TempDir(), "wt")
+	worktreePath := existingDir(t, filepath.Join(t.TempDir(), "wt"))
 	gw, err := git.NewGitWorktreeFromStorage(
 		"/tmp/snap-reconcile-repo", worktreePath, "snap",
 		"snap-branch", "", false, true)

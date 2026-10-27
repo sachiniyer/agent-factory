@@ -168,7 +168,7 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion,
 //
 // The set is derived from the daemon-load migrators themselves — every per-repo
 // instances.json (config.RepoInstancesMigrateOnLoadPaths, the same directory walk
-// config.MigrateAllRepoInstancesForDaemonLoad runs) and tasks.json
+// the per-repo file cache's LoadAll migrates) and tasks.json
 // (task.MigrateOnLoadPath) — so it cannot drift from what actually gets rewritten.
 // A new migrate-on-load store must add its path here. TUI state is excluded on
 // purpose: it migrates in memory only (config.decodeTUIStateFile via

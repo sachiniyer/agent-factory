@@ -155,6 +155,19 @@ type sessionStartRequest struct {
 	// create` applies with no --account. It is a directory name in the DAEMON's
 	// account registry and never carries credential material.
 	Account string
+	// ProgramChosen records whether Program was a user CHOICE — a picker pick
+	// or launch --program — rather than a wire value the account-pairing or
+	// implicit-resolution rules produced. A failed-create draft needs the
+	// distinction the wire string alone cannot carry: a non-empty Program may
+	// only be the account-pinned echo of the displayed default, which must
+	// restore config-following rather than chosen (#4889 review).
+	ProgramChosen bool
+	// AccountChosen is the same distinction for Account: an explicit "Ambient
+	// identity" pick and an untouched field both serialize as "", but only
+	// the untouched one may be re-preselected with the daemon's default on
+	// restore — overwriting a deliberate ambient pick would lose the user's
+	// input (#4889 review).
+	AccountChosen bool
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {

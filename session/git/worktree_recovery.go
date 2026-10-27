@@ -334,8 +334,16 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	if primary == "" {
 		return RelocationClaim{}, fmt.Errorf("cannot claim an empty worktree path")
 	}
+	// An identity-unknown stall over a path that is now conclusively absent
+	// guards nothing; discharge it so this claim gives the plain record-free
+	// ENOENT every caller already routes, instead of the same unknown forever.
+	g.settleAbsentIdentityUnknownStallLocked()
 	recovery := g.relocationRecovery
 	if recovery == nil {
+		// A record-free claim owns no durable fence; a failed settle of it has
+		// no pre-claim shape to restore, so clear any stale origin from a prior
+		// claim rather than leave it dangling for a later restore.
+		g.relocationRecoveryOrigin = nil
 		identity, err := boundedRelocationPathIdentity(primary)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -351,6 +359,13 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 
 	normalized := normalizeRecovery(*recovery)
 	g.relocationRecovery = &normalized
+	// Retain the pre-claim fence shape so a failed settle restores it rather
+	// than the identity the claim's retry probe may have freshly observed. The
+	// durable record is the only authority on whether the original stall was
+	// identity-unknown; the claim_stale fence a failed settle leaves behind can
+	// carry a newly resolved identity the durable record never had (#5555).
+	originSnapshot := normalized
+	g.relocationRecoveryOrigin = &originSnapshot
 	switch normalized.State {
 	case RelocationRecoveryCleanupFinalizing:
 		expected := normalized.identity()
@@ -498,12 +513,12 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		}
 		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 			return RelocationClaim{}, errors.Join(fmt.Errorf(
-				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %v)",
+				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 				primary, primaryErr, recovery.AlternatePath, alternateFailure,
 			), ErrRelocateStateUnknown)
 		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
-			"cannot resolve interrupted relocation: neither candidate was established (%s: %v; %s: %v)",
+			"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 			primary, primaryFailure, recovery.AlternatePath, alternateFailure,
 		), ErrRelocateStateUnknown)
 	}
@@ -892,7 +907,7 @@ func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, set
 			g.recordStaleClaimLocked(claim)
 		}
 		return errors.Join(fmt.Errorf(
-			"worktree path %s changed after identity resolution: %v", claim.Path, err,
+			"worktree path %s changed after identity resolution: %w", claim.Path, err,
 		), ErrRelocateStateUnknown)
 	}
 	if !claim.identity.same(identity) {
@@ -978,4 +993,7 @@ func (g *GitWorktree) checkpointRelocationPublication(
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
+	// A proof about the previous location says nothing about this one.
+	g.adoptedWorktree = nil
+	g.absentStallSettled = false
 }

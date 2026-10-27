@@ -27,6 +27,7 @@ green PR into a week-old PR.
    Local gates (cheap only, before opening the PR):
    - gofmt -l .
    - go build ./...
+   - go vet ./...
    - golangci-lint run --timeout=3m --fast
    - scripts/lint-file-length.sh
    - go test ./<only the package you changed>/...  (skip if it is daemon/ or app/)

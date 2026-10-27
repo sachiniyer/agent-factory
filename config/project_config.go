@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +55,10 @@ type ProjectConfig struct {
 	// so "this project runs as my work codex" is a statement about one machine and
 	// one person, never about the repository.
 	DefaultAccounts map[string]string `toml:"default_accounts,omitempty"`
-	// BranchPrefix overrides the git branch prefix for this project's sessions.
+	// BranchPrefix stays decodable so a stored per-project value keeps this
+	// file valid, but it is NOT applied (#4539): the manifest gives
+	// branch_prefix global-only precedence, so the field never wins resolution
+	// and branch names always come from the global prefix.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
 	// OnArchiveCommand overrides the operator-authored archive hook for this
 	// project. This file is machine-local under the AF home, never checked in.
@@ -68,6 +72,10 @@ type ProjectConfig struct {
 	// it can enable, disable, or reprogram a root the global default or a legacy
 	// root_agents entry set — see config.ResolveRootAgent.
 	RootAgent RootAgent `toml:"root_agent,omitempty"`
+
+	// unknownLeaves lists the [root_agent] leaves the typed decode dropped
+	// because no RootAgent field matches them; see UnknownLeaves.
+	unknownLeaves []InRepoUnknownLeaf
 
 	// setKeys records which top-level keys were present in the file so the
 	// resolver can distinguish "set to an empty value" from "absent", exactly as
@@ -96,11 +104,42 @@ func (c *ProjectConfig) RootAgentLayer() *RootAgentLayer {
 	return rootAgentLayerFromShape(c.RootAgent, shape)
 }
 
+// UnknownLeaves reports the [root_agent] leaves the personal config's typed
+// decode dropped because no RootAgent field matches them, sorted by table then
+// key. Empty for a clean file. Mirrors InRepoConfig.UnknownLeaves so af doctor
+// and tests can list personal unknown leaves the same way they list in-repo
+// [docker]/[ssh] ones; unlike the warning, which is emitted once per process,
+// this is reported on every load.
+func (c *ProjectConfig) UnknownLeaves() []InRepoUnknownLeaf {
+	if c == nil {
+		return nil
+	}
+	return append([]InRepoUnknownLeaf(nil), c.unknownLeaves...)
+}
+
 // projectPersonalAllowedKeys is the manifest-derived allowlist of keys a
 // personal project file may declare — the single source of truth, exactly like
 // inRepoAllowedKeys. Adding SourceProjectPersonal to a manifest entry admits its
 // key here with no second list to maintain.
 var projectPersonalAllowedKeys = manifestKeysForSource(SourceProjectPersonal)
+
+// projectPersonalAllowedTableLeaves mirrors inRepoAllowedTableLeaves for the
+// structured [root_agent] table this loader admits. root_agent is the only
+// structured (struct-typed) table whose Sources admit SourceProjectPersonal —
+// program_overrides and default_accounts are free-form maps keyed by agent
+// name, so their leaves are dynamic, not struct fields — so this map has one
+// entry. The set is derived from RootAgent's struct tags the same way
+// inRepoAllowedTableLeaves derives DockerConfig/SSHConfig leaves, so adding a
+// field to RootAgent automatically admits it here. An unknown/typo'd leaf
+// (e.g. "enabld" for "enabled") earns a loud warn-only warning in
+// parseProjectConfig via the shared #4599 warnUnknownTableLeaf machinery,
+// matching the in-repo [docker]/[ssh] surface and the global strict probe —
+// before this map existed a typo'd leaf was silently dropped with no
+// diagnostic on the one root-agent surface (personal) that has no other
+// leaf-validation path.
+var projectPersonalAllowedTableLeaves = map[string]map[string]bool{
+	"root_agent": tableLeavesForType(reflect.TypeOf(RootAgent{})),
+}
 
 // projectDir returns the per-project directory <AF home>/<registry>/<id>,
 // validating the id first so it is always safe as a path component.
@@ -143,7 +182,21 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		}
 		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
 	}
-	return parseProjectConfig(data, path)
+	cfg, err := parseProjectConfig(data, path)
+	if err != nil {
+		return nil, err
+	}
+	// A stored per-project branch_prefix is inert until #4539 — say so once per
+	// file per process rather than on every daemon-driven reload. Not every
+	// consumer resolves (the daemon's root-agent snapshot reads this file
+	// directly), so the warning lives at the load itself; the global value it
+	// names comes from a strictly read-only load, never a materializing one.
+	// The resolver is passed lazily so the once-per-file memo answers before a
+	// repeated load re-reads the global config (#5026).
+	if cfg.IsSet("branch_prefix") {
+		warnProjectBranchPrefixIgnored(path, globalBranchPrefixForLoadWarning)
+	}
+	return cfg, nil
 }
 
 // parseProjectConfig decodes and validates personal-project TOML bytes. It is
@@ -176,6 +229,42 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		}
 	}
 
+	// Warn on unknown/typo'd leaves under the personal [root_agent] table —
+	// the same #4599 machinery the in-repo loader uses for [docker]/[ssh].
+	// The top-level allowlist above admits [root_agent], but the typed decode
+	// below uses Go's non-strict unmarshalling, which silently discards any
+	// leaf not on RootAgent. A hand-edited `enabld = true` or
+	// `prograam = 'claude'` would otherwise parse with err = nil and yield a
+	// present-but-contributing-nothing layer (EnabledSet=false, zero-value
+	// profile) with no diagnostic: the global root-agent surface already
+	// warns via its strict DisallowUnknownFields probe, and root_agent admits
+	// no in-repo layer, so the personal layer was the only root-agent surface
+	// with no leaf-level check. Walk the shape's [root_agent] sub-table and
+	// warn via warnUnknownTableLeaf for any leaf not in the struct-tag-derived
+	// allowlist. Per the owner's "warn now, reject later" decision the config
+	// still loads; only the silent drop of genuine typos is removed. The
+	// memoized one-per-(file,table,leaf) warning avoids repeating on the
+	// daemon's repeated loads. Case folding matches the typed decoder: the
+	// shape key's casing is preserved from the file, the lookup lowercases
+	// it so a spelling the decode accepts (e.g. Enabled) loads cleanly and
+	// the warning lands on genuine typos (e.g. "enabld", "prograam").
+	var unknownLeaves []InRepoUnknownLeaf
+	for table, allowed := range projectPersonalAllowedTableLeaves {
+		raw, present := metadata.shape[table]
+		if !present {
+			continue
+		}
+		sub, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for leaf := range sub {
+			if !allowed[strings.ToLower(leaf)] {
+				unknownLeaves = append(unknownLeaves, warnUnknownTableLeaf("personal project config", "personal", prettyPath, table, leaf, allowed))
+			}
+		}
+	}
+
 	var cfg ProjectConfig
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, tomlParseError("personal project config "+prettyPath, err)
@@ -186,6 +275,7 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	}
 	cfg.setKeys = presentKeys
 	cfg.source = metadata
+	cfg.unknownLeaves = sortInRepoUnknownLeaves(unknownLeaves)
 
 	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(

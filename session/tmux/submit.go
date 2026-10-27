@@ -37,6 +37,15 @@ var (
 	// mid-render (#1982), so a millisecond-scale retry re-enters the very render
 	// that just stranded the first paste. A package var so tests can tighten it.
 	redeliverAfterAbsentDelay = 5 * time.Second
+	// strandedSubmitGrace is how long the submit path waits after Enter before
+	// checking whether the draft is still staged in the composer — the #4200
+	// case, where a composer still rendering the paste absorbs Enter and the
+	// prompt sits unsubmitted. Long enough for a healthy submit to clear the
+	// composer on a busy render; short enough that a create barely notices it.
+	strandedSubmitGrace = 800 * time.Millisecond
+	// strandedSubmitSettle is the shorter wait after the one remedy Enter,
+	// before deciding whether that keystroke submitted the staged draft.
+	strandedSubmitSettle = 350 * time.Millisecond
 )
 
 // minDistinctiveFragment is the shortest payload fragment treated as
@@ -46,10 +55,7 @@ var (
 // length the delivery check additionally requires the completion to be seen in
 // TWO consecutive captures, so a one-frame coincidence cannot confirm delivery
 // early and let Enter race the paste after all.
-const (
-	minDistinctiveFragment   = 8
-	deliveryBoundarySentinel = "__af_delivery_enter_sent_v1__"
-)
+const minDistinctiveFragment = 8
 
 // deliveryOutcome keeps two different kinds of uncertainty separate. "The pane
 // did not show the prompt" is an observed absence only when the terminal capture
@@ -90,7 +96,9 @@ type deliveryObservation struct {
 // disjoint prefix whose appearance proves the pane DID render this payload and
 // can therefore support a terminal negative when completion is still absent.
 // payload is the whole normalized text and baselineText the normalized baseline
-// frame; only the positional newest-render check reads them (#4884). Baselines
+// frame; the positional newest-render check reads them (#4884), and the #4200
+// staged-draft remedy reads baselineText to bind its evidence to this paste.
+// Baselines
 // prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
 // in scrollback cannot be mistaken for evidence from this paste. If neither
@@ -104,6 +112,13 @@ type deliveryProbe struct {
 	renderWitnessBaseline int
 	payload               string
 	baselineText          string
+	// pasteRunes and pasteLines are this payload's own size in the units the
+	// collapsed-paste chips declare ("[Pasted Content N chars]", "[Pasted text
+	// #k +N lines]"). The #4200 remedy's chip binding uses them to exclude a
+	// chip drawn by a concurrent user paste: a chip whose declared size is not
+	// this payload's cannot be ours (#4530 review).
+	pasteRunes int
+	pasteLines int
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -339,7 +354,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// to service pane output, so the captured frame includes delivery-driven
 	// composer state but cannot swallow a response that completes before the next
 	// daemon poll.
-	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
+	boundary, boundaryGrid, boundaryOK, err := t.sendEnterAndCaptureBoundary()
 	if err != nil {
 		return PromptCouldNotConfirm, nil, err
 	}
@@ -347,6 +362,28 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		t.seedDeliveryBaseline(boundary)
 	} else {
 		t.deferDeliveryBaseline()
+	}
+
+	// Enter is fire-and-forget: a composer still rendering the paste can absorb
+	// it as a literal newline, leaving the whole prompt staged but unsubmitted
+	// while the observation above already reads landed (#4200). The remedy looks
+	// once more after a short grace and sends ONE more Enter — never a re-paste —
+	// only when that Enter provably submits the same draft our first Enter was
+	// sent to submit; remedyStrandedSubmit states the property.
+	var boundaryText string
+	var bound stagedEvidence
+	if boundaryOK {
+		boundaryText = normalizeDelivery(xansi.Strip(boundary))
+		bound = probe.boundEvidence(boundaryText, boundaryGrid)
+	}
+	// Observed-absent is excluded only when the boundary cannot bind the
+	// completed draft: the absent frame is pre-Enter evidence, and the boundary
+	// is the pane as of the submit — if the remainder drained into the gap, the
+	// bound draft the remedy reads IS the whole prompt, not the partial the
+	// stale classification describes (#4530 review). A still-partial boundary
+	// binds nothing and keeps the #3293 redelivery path.
+	if observation.outcome != deliveryObservedAbsent || bound.any() {
+		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK)
 	}
 
 	var proof *absenceProof
@@ -410,10 +447,15 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		// caller that re-sends on not-delivered would otherwise re-open the same
 		// double submit one layer up.
 		if boundaryOK && probe.baselineCaptured {
-			boundaryText := normalizeDelivery(xansi.Strip(boundary))
 			proof = probe.absenceAt(boundaryText)
-			if proof != nil && strings.Count(boundaryText, probe.completion) >
-				strings.Count(normalizeDelivery(observation.pane), probe.completion) {
+			// bound evidence is the same veto generalized: the absent frame is
+			// pre-Enter, so anything this delivery visibly introduced by the
+			// Enter boundary — including a chip, which carries no literal tail —
+			// means the prompt was whole at the submit and must never authorize
+			// a redelivery (#4530 review).
+			if proof != nil && (bound.any() ||
+				strings.Count(boundaryText, probe.completion) >
+					strings.Count(normalizeDelivery(observation.pane), probe.completion)) {
 				proof = nil
 			}
 		}
@@ -424,58 +466,6 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		}
 	}
 	return observation.outcome.promptDeliveryStatus(), proof, nil
-}
-
-// sendEnterAndCaptureBoundary submits whatever is pending and captures the pane
-// in the same tmux command queue. display-message emits a sentinel between the
-// two commands: if capture-pane fails after Enter was accepted, partial stdout
-// still proves the send succeeded and we preserve the existing best-effort
-// delivery contract without inventing a send failure. Only a complete capture
-// can seed the status monitor.
-//
-// Bounded by tmuxCommandTimeout (#2099): it is the last step of a submit the
-// daemon drives while holding the per-session op lock, so an unbounded stall
-// here leaves the session unpromptable rather than merely dropping one Enter.
-func (t *TmuxSession) sendEnterAndCaptureBoundary() (string, bool, error) {
-	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	target := exactTarget(t.sanitizedName)
-	out, err := t.outputTmuxBounded(ctx,
-		"send-keys", "-t", target, "Enter", ";",
-		"display-message", "-p", deliveryBoundarySentinel, ";",
-		"capture-pane", "-p", "-e", "-J", "-t", target,
-	)
-	boundary, enterSent := deliveryBoundaryOutput(out)
-	if err != nil && !enterSent {
-		if ctx.Err() != nil {
-			return "", false, fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
-		}
-		return "", false, err
-	}
-	if !enterSent {
-		// A successful command queue proves both commands completed. Keeping this
-		// fallback also lets executor-level tests return only capture-pane output;
-		// the sentinel is load-bearing only on the partial-output error path.
-		return string(out), true, nil
-	}
-	if err != nil {
-		log.WarningLog.Printf("submit: Enter reached session %q, but its delivery-boundary capture failed; the next successful pane capture will establish the baseline: %v",
-			t.sanitizedName, err)
-		return "", false, nil
-	}
-	return boundary, true, nil
-}
-
-func deliveryBoundaryOutput(out []byte) (string, bool) {
-	s := string(out)
-	if s == deliveryBoundarySentinel {
-		return "", true
-	}
-	prefix := deliveryBoundarySentinel + "\n"
-	if !strings.HasPrefix(s, prefix) {
-		return "", false
-	}
-	return strings.TrimPrefix(s, prefix), true
 }
 
 // clearComposerDraft best-effort removes any text stranded in the pane's
@@ -687,7 +677,8 @@ func newDeliveryProbe(text string) deliveryProbe {
 	// capture — a fully drained paste would read as absent, and with #3293
 	// that misread would authorize a redelivery of an instruction whose Enter
 	// may already have submitted it.
-	n := []rune(normalizeDelivery(xansi.Strip(text)))
+	stripped := xansi.Strip(text)
+	n := []rune(normalizeDelivery(stripped))
 	const (
 		completionRunes = 32
 		witnessRunes    = 24
@@ -707,7 +698,12 @@ func newDeliveryProbe(text string) deliveryProbe {
 		}
 	}
 
-	probe := deliveryProbe{completion: string(n[len(n)-completionLen:]), payload: string(n)}
+	probe := deliveryProbe{
+		completion: string(n[len(n)-completionLen:]),
+		payload:    string(n),
+		pasteRunes: len([]rune(stripped)),
+		pasteLines: strings.Count(stripped, "\n") + 1,
+	}
 	if availablePrefix >= minDistinctiveFragment {
 		if availablePrefix > witnessRunes {
 			availablePrefix = witnessRunes
