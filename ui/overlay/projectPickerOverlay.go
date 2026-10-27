@@ -645,7 +645,7 @@ func (p *ProjectPickerOverlay) RegisterZones(reg *zones.Registry, origin layout.
 	textRect := overlayTextRect(fit, style)
 	start, end, showAbove, _ := p.listRowWindow(textRect.H)
 	firstRowLine := 2 // title + blank
-	if p.degraded {
+	if p.degraded || p.snapshotDegraded {
 		firstRowLine++
 	}
 	if showAbove {
