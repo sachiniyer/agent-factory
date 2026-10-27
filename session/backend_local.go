@@ -320,9 +320,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// tmux name that survived a routine daemon restart is the EXPECTED
 			// same-runtime case, so a row carrying no recorded identity — a legacy
 			// record — has nothing to distrust and stays a pure reattach. Only a
-			// recorded claim that fails verification says the pane under the af
-			// name is not the launch af made.
-			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
+			// recorded claim that fails verification — retires it — says the pane
+			// under the af name is not the launch af made.
+			if _, claimRetired := i.settleReattachVerification(tmuxSession); claimRetired {
 				i.markLoadRuntimeReplaced()
 				i.markAgentRuntimeReplaced(true)
 			}

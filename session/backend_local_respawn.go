@@ -315,8 +315,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// there was no claim left to retire (legacy record, or evidence an
 		// earlier unverified reattach cleared before its recovery failed), so
 		// the verdict must not be read off whether the clear had work to do.
-		i.markAgentRuntimeReplaced(!i.reattachRuntimeVerified(ts))
-		i.clearRuntimeProgramForUnverifiedReattach(ts)
+		// One probe settles both so they cannot disagree about the pane.
+		verified, _ := i.settleReattachVerification(ts)
+		i.markAgentRuntimeReplaced(!verified)
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

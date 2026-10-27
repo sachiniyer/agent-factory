@@ -310,6 +310,17 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		if !matched {
 			continue
 		}
+		// A row whose task run was interrupted by a runtime replacement is not
+		// this fire's delivered product (#4222 review): the prompted process is
+		// gone and its replacement was never replayed the prompt, so the
+		// recorded occurrence is still owed. Adopting it would stamp "started"
+		// over the interrupted run's aborted status and discharge a delivery
+		// that never landed. The row stays — its interrupted work is kept —
+		// while the fire falls through to a fresh delivery, and the leftover
+		// path below already declines to reap an identity this row still owns.
+		if data.TaskRunInterrupted {
+			continue
+		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
 		// failure machinery — the fire is consumed, not restarted underneath it.
 		status := "started"

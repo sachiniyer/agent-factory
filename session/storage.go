@@ -147,6 +147,17 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterrupted records that the run ended interrupted by a runtime
+	// replacement — Lost-restore respawn or load-time re-spawn — rather than on
+	// an agent-idle completion edge (#4222). Persisted because the daemon's
+	// startup reconcile must recognize the row: a pending fire marker that
+	// still names it describes an occurrence that was never delivered to the
+	// replacement runtime, so adopting the row as the fire's product would
+	// misreport the interrupted run as started and discharge a prompt that was
+	// never replayed. omitempty + additive: an older record decodes to false —
+	// indistinguishable from a normally-ended run, which is the pre-fix
+	// reading and matches it.
+	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.

@@ -344,6 +344,59 @@ func TestRunTask_ReplayAdoptedTombstoneIsAborted(t *testing.T) {
 	}
 }
 
+// TestRunTask_ReplayDoesNotAdoptAnInterruptedRow is the #4222 crash window at
+// the fire-marker axis: a create committed its row and bound the marker, the
+// daemon died before the outcome cleared, and on restart the row's runtime had
+// to be respawned — a replacement that was never replayed the prompt. The
+// pending marker is still owed its delivery; reconcile must not adopt the
+// interrupted row as the fire's product and misreport the undelivered
+// occurrence "started".
+func TestRunTask_ReplayDoesNotAdoptAnInterruptedRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7100", repoPath)
+	creates, _ := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:                 "inst-int1",
+		TaskID:             "ab0r7100",
+		Title:              "nightly-4",
+		Path:               repoPath,
+		Program:            "claude",
+		Status:             session.Ready,
+		Liveness:           session.LiveReady,
+		TaskRunInterrupted: true,
+		CreatedAt:          intendedAt.Add(2 * time.Second),
+		UpdatedAt:          intendedAt.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed session row: %v", err)
+	}
+	seedPendingFire(t, taskFireMarker{
+		TaskID:     "ab0r7100",
+		IntendedAt: intendedAt,
+		Title:      "nightly-4",
+		InstanceID: "inst-int1",
+	})
+
+	if err := runTaskDelivery("ab0r7100", task.ProjectExpectation{}, replayMarker("ab0r7100", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("an interrupted row is not the fire's product — the still-owed occurrence must deliver fresh; creates = %d", len(*creates))
+	}
+	if got := lastRunStatus(t, "ab0r7100"); got != "started" {
+		t.Fatalf("LastRunStatus = %q, want started (the fresh delivery's own run)", got)
+	}
+	if markerExists(t, "ab0r7100") {
+		t.Fatal("the fresh delivery discharges the marker")
+	}
+}
+
 // TestRunTask_ReplayResidueDischarges: the marker survived but the run's status
 // already landed — the replay consumes it without delivering.
 func TestRunTask_ReplayResidueDischarges(t *testing.T) {

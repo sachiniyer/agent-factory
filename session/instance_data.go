@@ -120,6 +120,10 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	// Not gated on taskRunActive like the held flags below it: an interrupted
+	// run has already spent its active marker, and the interruption is exactly
+	// the fact startup reconcile needs after a restart (#4222 review).
+	data.TaskRunInterrupted = i.taskRunInterrupted
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
 	if i.taskRunActive {
@@ -402,6 +406,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:       data.TaskRunActive,
+		taskRunInterrupted:  data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
 		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and

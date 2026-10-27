@@ -83,16 +83,18 @@ func TestTaskRunRespawnConfirmLiveDoesNotInterrupt(t *testing.T) {
 
 // The verification verdict itself: a reattach can only be trusted when the
 // pane identity the launch recorded still resolves to the runtime — a missing
-// pane, or a launch that never recorded one, is unverified and the caller must
-// treat the reattach as a replacement (#4222 review). The verdict stands alone
-// because whether clearing that evidence changed durable state is the wrong
-// question — a launch with no recorded PID has nothing to clear, yet nothing
-// to trust either.
-func TestReattachRuntimeVerifiedRequiresProvenIdentity(t *testing.T) {
+// pane, or a launch that never recorded one, is unverified and the restore
+// caller must treat the reattach as a replacement (#4222 review). The verdict
+// and the claim clear come from the same probe, so a no-claim row reports
+// (unverified, nothing-retired): unverified without falsely claiming state
+// changed.
+func TestReattachVerificationRequiresProvenIdentity(t *testing.T) {
 	inst := taskRunSession(t)
 
-	// No pane handle at all → nothing to verify against.
-	require.False(t, inst.reattachRuntimeVerified(nil))
+	// No pane handle and no recorded identity → unverified, nothing to retire.
+	verified, retired := inst.settleReattachVerification(nil)
+	require.False(t, verified)
+	require.False(t, retired)
 }
 
 // The load path's sibling: a daemon restart that had to respawn the runtime
