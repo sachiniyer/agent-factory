@@ -146,7 +146,7 @@ var automationsMenuOptions = []keys.KeyName{
 // verbs here (as the pre-#1620 fall-through footer did) would advertise keys that
 // do nothing.
 var projectsMenuOptions = []keys.KeyName{
-	keys.KeySwitchProjectRow, keys.KeyDeleteProject, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+	keys.KeySwitchProjectRow, keys.KeySearch, keys.KeyDeleteProject, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
 
 // projectsRowVerbs are the entries of projectsMenuOptions that act on the
