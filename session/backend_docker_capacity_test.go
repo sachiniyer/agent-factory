@@ -97,6 +97,13 @@ func peerTableOn(dev string) string {
 	return "24 1 " + dev + " / / rw,relatime - ext4 /dev/sda1 rw\n"
 }
 
+// peerTableSubvol is a mountinfo whose data-root covering mount has the
+// fs-internal subtree root a mounted subvolume reports (Btrfs `/@`):
+// legitimately non-"/", yet still the whole local filesystem.
+func peerTableSubvol(dev, root, mp string) string {
+	return "24 1 " + dev + " " + root + " " + mp + " rw,relatime - btrfs /dev/sda1 rw\n"
+}
+
 // dockerInfoAnswer is the fake `docker info` payload for capacity-evidence
 // tests. The production evidence path issues one `docker info --format
 // '{{json .}}'` snapshot and reads DockerRootDir, Name and SecurityOptions;
@@ -506,6 +513,72 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
 			"a readable peer table showing another device vetoes the fallback: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
+	t.Run("a denied route accepts two tables agreeing on a subvolume", func(t *testing.T) {
+		// Btrfs `/@`: the data root sits on a mounted subvolume whose
+		// mountinfo root is legitimately non-"/". af's own table cannot
+		// tell that from a foreign bind — the peer's READABLE table saying
+		// the same subtree of the same device is the positive witness.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		subvol := peerTableSubvol("8:1", "/@", "/var/lib/docker")
+		stubPeerDataRoot(t, 0, "8:1", subvol, subvol, nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "denied-subvol"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"both tables agreeing on the /@ subtree of af's stat device is co-location proof: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
+	t.Run("a denied route rejects when the tables disagree on the subtree", func(t *testing.T) {
+		// Same device, different covering root — af sees a subvolume mount
+		// the peer does not share (or vice versa): the views disagree, so
+		// the cross-check cannot carry the verdict.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableSubvol("8:1", "/@", "/var/lib/docker"), nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "denied-root-mismatch"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"disagreeing subtree roots keep the non-/ self mount unproven: %v", err)
+		assert.Equal(t, 0, *calls)
+	})
+
+	t.Run("an unreadable peer table cannot rescue a subvolume view", func(t *testing.T) {
+		// Without the peer's table nothing cross-checks the non-"/" root:
+		// a mounted subvolume stays indistinguishable from a foreign
+		// partial bind and the fallback stays closed.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		stubPeerDataRoot(t, 0, "8:1", "", peerTableSubvol("8:1", "/@", "/var/lib/docker"), nil)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "blind-subvol"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"a non-/ self root with no peer table to corroborate stays unproven: %v", err)
 		assert.Equal(t, 0, *calls)
 	})
 
@@ -1354,4 +1427,101 @@ func TestAccountRuntimeVerify_ExecFailureNeverBorrowsBavail(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, syscall.ENOSPC),
 		"dockerd's own exec bookkeeping is a privileged write — the Bavail window is not its ENOSPC: %v", err)
+}
+
+// TestPrepareAccountUser_OwnerReadCarriesDaemonWriteClass pins the #5382
+// finding: the `stat -c %u:%g` owner read is a read-only exec — an image
+// missing `stat` fails without attempting an unprivileged write under the
+// account bind. Its only data-root writes are dockerd's privileged exec
+// bookkeeping, so the failure must carry the daemon-write class and never
+// become eligible for the Bavail window.
+func TestPrepareAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
+	dir := t.TempDir()
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "stat -c %u:%g") {
+			return nil, fmt.Errorf("exit status 127") // the image has no stat
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+	p := &dockerProvisioner{
+		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
+		containerID: "cid",
+	}
+	err := p.prepareAccountUser()
+	require.Error(t, err)
+	var se *dockerStepError
+	require.True(t, errors.As(err, &se), "the owner-read failure must carry an operation class")
+	assert.Equal(t, dockerOpDaemonWrite, se.op,
+		"a failed owner READ attempted no unprivileged write — it is dockerd bookkeeping, not a session writer")
+}
+
+// TestPrepareAccountUser_OwnerParseIsLocal pins the other half: a stat
+// output af cannot parse is af's own failure — nothing reached a writer,
+// so the error stays local.
+func TestPrepareAccountUser_OwnerParseIsLocal(t *testing.T) {
+	dir := t.TempDir()
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "stat -c %u:%g") {
+			return []byte("not-a-uid-gid\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+	p := &dockerProvisioner{
+		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
+		containerID: "cid",
+	}
+	err := p.prepareAccountUser()
+	require.Error(t, err)
+	var se *dockerStepError
+	require.True(t, errors.As(err, &se), "the owner-parse failure must carry an operation class")
+	assert.Equal(t, dockerOpLocal, se.op,
+		"unparseable stat output is af's failure, never a filesystem verdict")
+}
+
+// TestAccountOwnerRead_NeverBorrowsBavail is the finding's scenario end to
+// end: userns-remapped engine, account bind, an image without `stat`, and
+// the reserved-block window open (Bavail==0, Bfree>0). The owner read is a
+// daemon-side bookkeeping write, so the window must NOT produce a verdict.
+func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+	t.Setenv("DOCKER_CONTEXT", "")
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), "", nil)
+
+	info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(info, &raw))
+	raw["SecurityOptions"] = []string{"name=seccomp,profile=builtin", "name=userns"}
+	info, err = json.Marshal(raw)
+	require.NoError(t, err)
+
+	fakeDockerCapacityProbe(t, info, func(args []string) ([]byte, error) {
+		switch {
+		case args[0] == "run":
+			return []byte("cid\n"), nil
+		case args[0] == "inspect":
+			return []byte(cleanInspect(dir)), nil
+		case args[0] == "exec" && strings.HasSuffix(strings.Join(args, " "), "/proc/self/mountinfo"):
+			return []byte(cleanMountinfoFor(dir)), nil // the boundary check passes
+		case args[0] == "exec": // no `stat` in the image — the owner read fails
+			return nil, fmt.Errorf("exit status 127")
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})
+	oldPriv, oldUnpriv := statfsFull, statfsFullUnprivileged
+	statfsFull = func(string) (bool, error) { return false, nil }
+	statfsFullUnprivileged = func(string) (bool, error) { return true, nil }
+	defer func() { statfsFull, statfsFullUnprivileged = oldPriv, oldUnpriv }()
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		spec: ProvisionSpec{Title: "scoped",
+			Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
+	}
+	_, err = p.provision()
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, syscall.ENOSPC),
+		"a read-only exec failure cannot borrow the reserved-block window: %v", err)
 }

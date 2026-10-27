@@ -509,8 +509,25 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	if err != nil {
 		return false
 	}
-	root, ok := coveringMountRoot(self, rootDir)
-	return ok && root == "/"
+	selfRoot, ok := coveringMountRoot(self, rootDir)
+	if !ok {
+		return false
+	}
+	if selfRoot == "/" {
+		return true
+	}
+	// A mounted subvolume legitimately reports a non-"/" root (Btrfs `/@`)
+	// while still being the whole local filesystem the daemon writes to —
+	// on af's table alone that is indistinguishable from a foreign partial
+	// bind, so the only positive witness left is agreement with the peer's
+	// table. Two independent mount tables naming the same subtree of the
+	// device af's stat reports is that witness; with no readable peer
+	// table a non-"/" root stays unproven.
+	if peerInfo == nil {
+		return false
+	}
+	peerRoot, ok := coveringMountRoot(peerInfo, rootDir)
+	return ok && peerRoot == selfRoot
 }
 
 // coveringMountEntry finds the mount entry covering path in a mountinfo
