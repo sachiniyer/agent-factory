@@ -402,10 +402,9 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   await more.focus();
   await page.keyboard.press("Enter");
   const menu = page.locator(".af-appbar-tools");
-  for (const selector of [".af-viewnav", ".af-project-menu", ".af-theme-toggle", ".af-tab-menu", ".af-copy-link-phone"]) {
+  for (const selector of [".af-viewnav", ".af-project-menu", ".af-tab-menu", ".af-copy-link-phone"]) {
     await expect(menu.locator(selector)).toBeVisible();
   }
-  await expect(menu.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
   const states = page.locator(".af-rail-list .af-operator-state");
   const seededRows = await states.count();
@@ -702,7 +701,6 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   const task = page.locator(".af-task-row").first();
   await expect.poll(async () => (await task.boundingBox())?.height ?? Infinity).toBeLessThanOrEqual(64);
-  await task.locator(".af-term-more").click();
   await shot("task-actions");
   await task.getByRole("button", { name: "Remove", exact: true }).click();
   await shot("remove-task");

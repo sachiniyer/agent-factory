@@ -100,7 +100,8 @@ func TestHookProvisionSSHCommandPinsVerification(t *testing.T) {
 		Host: "10.0.0.7", User: "af", Port: 2222, HostKey: provisionKey,
 	})
 
-	assert.Contains(t, cmd, "UserKnownHostsFile='/af/known_hosts'", "verification must use the pinned file")
+	assert.Contains(t, cmd, `UserKnownHostsFile="/af/known_hosts"`,
+		"verification must use the pinned file, double-quoted at the ssh config layer so a spaced path stays one file")
 	assert.Contains(t, cmd, "StrictHostKeyChecking=yes", "with strict checking, or the pin decides nothing")
 	assert.Contains(t, cmd, "GlobalKnownHostsFile=/dev/null",
 		"or a system-wide entry for a recycled address could satisfy the check instead of our key")

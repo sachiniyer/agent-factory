@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // aliasOutputRegex extracts the command value from a shell alias-probe line.
@@ -29,6 +30,15 @@ import (
 //     like "Type help -> for assistance" no longer captures garbage (#1003)
 //   - "^[^/=\s]+\s*= ..." — a "name=value" alias assignment at the line start
 var aliasOutputRegex = regexp.MustCompile(`(?:^\S+:\s*aliased to|^\S+\s+is\s+aliased to|^\S+\s*->|^[^/=\s]+\s*=)\s*(.+)`)
+
+// aliasedToRegex matches the bash `type` ("... is aliased to ...") and zsh
+// `which` ("...: aliased to ...") alternatives of aliasOutputRegex, whose alias
+// value is wrapped in a `...' or ‘...’ re-quoting wrapper handled by
+// stripAliasValueWrapper. The "name=value" and "name -> value" alternatives do
+// not match this (their value is serialized with an ASCII " or ' pair handled
+// by stripAssignmentFormQuotes), so distinguishing the form routes each value
+// to the wrapper stripper that matches its quoting (#5526).
+var aliasedToRegex = regexp.MustCompile(`^(?:\S+:\s*aliased to|\S+\s+is\s+aliased to)`)
 
 // probeWaitDelay bounds how long the claude shell probe's Output() call keeps
 // waiting for stdout/stderr EOF after the probe shell has exited (or the
@@ -58,7 +68,21 @@ type claudeProbeResult struct {
 var (
 	claudeProbeMu    sync.Mutex
 	claudeProbeCache = map[string]*claudeProbeResult{}
+	// missingClaudeWarned dedupes warnMissingClaudeOverride to one emission
+	// per probe environment, keyed on the same SHELL/PATH/HOME triple as the
+	// probe cache: a changed environment is a fresh answer worth a fresh
+	// notice.
+	missingClaudeWarned sync.Map
 )
+
+// claudeProbeEnvKey is the cache and warning-dedup key for everything derived
+// from a claude probe: the resolution is a pure function of SHELL, PATH, and
+// HOME (HOME selects the rc file that can define a claude alias), so any
+// caller — or test — that changes those vars gets a fresh probe under a new
+// key.
+func claudeProbeEnvKey() string {
+	return os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+}
 
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
 // It checks in the following order:
@@ -77,12 +101,14 @@ var (
 // pure function of SHELL, PATH, and HOME (HOME selects the rc file that can
 // define a claude alias), so caching on that triple collapses the four probes
 // into one while staying correct: any caller — or test — that changes those
-// vars gets a fresh probe under a new key. When a real probe does not find the
-// optional binary, this cache-miss path emits one actionable warning; callers
-// of the cached error do not repeat it (#3999). The per-key Once also coalesces
-// concurrent first callers so they cannot duplicate the probe or its warning.
+// vars gets a fresh probe under a new key. The per-key Once also coalesces
+// concurrent first callers so they cannot duplicate the probe. A failed probe
+// no longer warns here: whether the missing-claude advice applies depends on
+// the effective program_overrides.claude, which exists only after the
+// operator's file is merged over the probed defaults — warnMissingClaudeOverride
+// owns that decision (#5588; the probe-side dedup it replaces was #3999).
 func GetClaudeCommand() (string, error) {
-	key := os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+	key := claudeProbeEnvKey()
 	claudeProbeMu.Lock()
 	cached, ok := claudeProbeCache[key]
 	if !ok {
@@ -93,11 +119,30 @@ func GetClaudeCommand() (string, error) {
 
 	cached.once.Do(func() {
 		cached.path, cached.err = probeClaudeCommand()
-		if cached.err != nil {
-			log.WarningLog.Print(missingClaudeWarning)
-		}
 	})
 	return cached.path, cached.err
+}
+
+// warnMissingClaudeOverride emits missingClaudeWarning when the probe found no
+// claude command AND overrides does not already point program_overrides.claude
+// at a program — the case where advising "set program_overrides.claude" would
+// tell the operator to do something they already did (#5588). The probe cannot
+// gate the advice itself: DefaultConfig runs it before the operator's file is
+// decoded, so a configured override is invisible at probe time. The sites that
+// resolve an effective config call here instead — validateConfig for the parsed
+// files, and the no-file load paths for their in-memory defaults. Deduped to
+// once per probe environment, on the #3999 precedent.
+func warnMissingClaudeOverride(overrides map[string]string) {
+	if overrides[tmux.ProgramClaude] != "" {
+		return
+	}
+	if _, err := GetClaudeCommand(); err == nil {
+		return
+	}
+	if _, seen := missingClaudeWarned.LoadOrStore(claudeProbeEnvKey(), struct{}{}); seen {
+		return
+	}
+	log.WarningLog.Print(missingClaudeWarning)
 }
 
 // shellQuoteDetectedCommand quotes the filesystem-backed executable at the
@@ -237,9 +282,38 @@ func parseCommandProbeOutput(output string) string {
 		// Capture everything after the alias marker so paths containing
 		// spaces (e.g. "/Applications/Claude Code.app/.../claude") are
 		// preserved. bash's `type` wraps the alias value in `...' (or, in
-		// some locales, Unicode ‘...’) quotes — strip those.
+		// some locales, ‘...’) quotes — strip exactly ONE such wrapper
+		// pair. A cutset trim (strings.Trim with "`'‘’\"") was used here,
+		// but it strips ANY leading/trailing character in the set
+		// repeatedly on both sides, so when the alias VALUE itself begins
+		// or ends with a quote — e.g. `alias claude="claude --prompt
+		// 'hi'"`, which bash re-quotes and emits as
+		// `claude is aliased to `claude --prompt "'hi'"' — the cutset eats
+		// the value's own boundary quotes as if they were the shell's
+		// wrapper, leaving an unbalanced quote (here `claude --prompt
+		// "'hi`) in the persisted ProgramOverrides entry. That override is
+		// then executed verbatim via /bin/sh -c in every claude session
+		// pane and dies with `Syntax error: Unterminated quoted string`,
+		// making sessions unlaunchable with no fallback to the bare
+		// program name. Removing only the shell's wrapper pair preserves
+		// quote characters that belong to the value itself.
+		//
+		// The wrapper-stripping depends on which aliasOutputRegex alternative
+		// matched: the "aliased to" forms (bash `type`, zsh `which`) wrap the
+		// value in a `...' or ‘...’ re-quoting wrapper, so stripAliasValueWrapper
+		// removes exactly that pair; the "name=value" and "name -> value" forms
+		// serialize the value with an optional ASCII " or ' pair that is also a
+		// wrapper (e.g. claude="/opt/claude --model opus"), so
+		// stripAssignmentFormQuotes removes one matching pair. Applying the
+		// wrong stripper either eats a quote that belongs to the value (the
+		// cutset bug) or leaves a serialization wrapper that makes /bin/sh
+		// treat the whole value as one quoted executable name (#5526).
 		if matches := aliasOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
-			return strings.TrimSpace(strings.Trim(strings.TrimSpace(matches[1]), "`'‘’\""))
+			value := strings.TrimSpace(matches[1])
+			if aliasedToRegex.MatchString(line) {
+				return stripAliasValueWrapper(value)
+			}
+			return stripAssignmentFormQuotes(value)
 		}
 		if matches := bashTypeOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
 			return matches[1]
@@ -249,4 +323,72 @@ func parseCommandProbeOutput(output string) string {
 		}
 	}
 	return ""
+}
+
+// stripAliasValueWrapper removes a single shell-probe wrapper pair that the
+// `type`/`which` builtin puts around an alias value, without touching quote
+// characters that belong to the value itself.
+//
+// bash's `type` emits the alias value wrapped as `...' — a leading backtick
+// and a trailing apostrophe — re-quoting embedded single quotes as `"'...'"
+// (e.g. `alias claude="claude --prompt 'hi'"` is reported as
+// `claude is aliased to `claude --prompt "'hi'"'`). Some locales render the
+// wrapper as curly ‘...’ quotes. zsh's `which` adds no wrapper of its own.
+//
+// A two-sided cutset trim (`strings.Trim` with "`'‘’\"") was used here
+// historically, but it eats ANY leading/trailing character in the set
+// repeatedly on both sides, so when the alias value itself begins or ends
+// with a quote it also strips the value's own boundary quotes, leaving an
+// unbalanced quote. Stripping exactly one recognized wrapper pair preserves
+// them.
+func stripAliasValueWrapper(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 {
+		return v
+	}
+	// bash `type`: leading backtick + trailing apostrophe (ASCII), or
+	// trailing right single quote in some locales.
+	if v[0] == '`' {
+		switch {
+		case strings.HasSuffix(v, "'"):
+			return v[1 : len(v)-1]
+		case strings.HasSuffix(v, "’"):
+			return v[1 : len(v)-len("’")]
+		}
+		return v
+	}
+	// Curly wrapper: leading ‘ + trailing ’ (some locales).
+	if strings.HasPrefix(v, "‘") && strings.HasSuffix(v, "’") {
+		return v[len("‘") : len(v)-len("’")]
+	}
+	return v
+}
+
+// stripAssignmentFormQuotes removes a single ASCII double- or single-quote
+// wrapper pair that the "name=value" and "name -> value" alias-probe
+// alternatives serialize an alias value in (e.g. claude="/opt/claude
+// --model opus" or claude -> '/opt/claude'). These quotes are a serialization
+// wrapper, not part of the value: leaving them intact makes /bin/sh treat the
+// whole value as one quoted executable name, so the persisted override is
+// valid shell syntax yet launches a nonexistent command. Strip exactly one
+// matching pair; a value that does not begin and end with the same quote
+// character (or is too short to be a wrapper) is returned unchanged. This
+// restores the wrapper decoding the cutset trim performed for these forms
+// without touching the bash/zsh "aliased to" value-boundary quotes
+// stripAliasValueWrapper preserves.
+func stripAssignmentFormQuotes(v string) string {
+	if len(v) < 2 {
+		return v
+	}
+	switch v[0] {
+	case '"':
+		if v[len(v)-1] == '"' {
+			return v[1 : len(v)-1]
+		}
+	case '\'':
+		if v[len(v)-1] == '\'' {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }

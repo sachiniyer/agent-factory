@@ -62,16 +62,39 @@ the web does.
 |---|---|---|---|
 | Title, program | yes | yes | yes |
 | Initial prompt | yes | yes | yes |
-| Backend (docker/ssh/hook) | yes | partial | yes |
-| Force-remote (hook) | yes | partial | yes |
+| Backend (docker/ssh/hook) | yes | yes | yes |
+| Force-remote (hook) | yes | yes | yes |
 | Account (`--account`) | yes | yes | yes |
 | In-place (`--here`) | **no** | **no** | yes |
 
-The web's two `partial` cells are not missing controls: the browser sends
-`backend` and can select `hook`, but no one has yet shown a **working** remote
-session created from it (#1968 watched provisioning succeed and the session then
-time out waiting for its program). Reachable is not the same as proven — see
-"Known blind spots".
+The web's backend and force-remote cells sat at `partial` for a long stretch —
+not for missing controls, but because nobody had shown a **working** remote
+session created over the browser's request path (#1968 watched provisioning
+succeed and the session then time out waiting for its program). The proof is
+now executable at both seams: `TestWebCreateSessionOnHookBackend`
+(`integration/web_remote_hook_test.go`) drives the browser's exact endpoints —
+the modal's `CreateSession` body with `backend:"hook"`, the events rail, the
+`{id}/stream` attach, `KillSession` — through a real `af agent-server` stood up
+by a mock `launch_cmd`, and reads typed input echoed back off the remote pane.
+And the seam that wire-level test cannot see — the modal actually sending the
+picked backend — is covered by the web-driver selftest: `web-driver.spec.ts`'s
+create test submits the + New modal with `hook` selected against a real
+`coder-launch.sh` provisioner (`scripts/container/web-selftest-entry.sh`) and
+attaches the resulting remote session through the browser UI.
+
+Running that browser proof is what finally pinned #1933's mechanism: a remote
+session's settled projection carried an **empty** `Worktree.RepoPath` (no local
+`gitWorktree` exists for an off-box backend), so the web rail's project scope
+filtered the row out of every project and the selection reconciler dropped it —
+the session worked, and the web could not even show it. `ToInstanceData` now
+keeps the create-scoped repo on `Worktree.RepoPath` for sandbox backends, the
+same convention the pending-create row already published. A second latent bug
+surfaced along the way — remote readiness falls back to the program *name* when
+an override resolves to a non-agent command — filed as
+[#5108](https://github.com/sachiniyer/agent-factory/issues/5108); it is shared
+daemon code, so all three surfaces are equally affected and it is reported
+rather than scored as a parity gap. Reachable is not
+the same as proven — see "Known blind spots".
 
 So when this check fails, the question is never "does the web need to catch up?"
 It is "which surfaces should have this, and which deliberately should not?" —

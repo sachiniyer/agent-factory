@@ -188,6 +188,16 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
 	}
+	// A send that affirmatively failed while the run's boundary was still
+	// unbound is the run's INITIAL delivery proven undelivered (#5278): the
+	// prompt demonstrably never reached the pane and no earlier send could
+	// have delivered it. The run ends here, failed — left open, its unarmed
+	// gate lets the first idle edge read as a completion and hand on_complete
+	// a session that never received its prompt.
+	if status == PromptNotDelivered && i.taskRunActive && i.taskRunPromptAttemptAt.IsZero() {
+		i.endTaskRunFailedLocked()
+		i.taskRunFailedStamp = true
+	}
 	i.touchLocked()
 	i.stateEpoch++
 	return true
@@ -432,6 +442,29 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 	replaced := i.loadRuntimeReplaced
 	i.loadRuntimeReplaced = false
 	return replaced
+}
+
+// TaskRunFailed reports whether this session's task run ended failed — a
+// proven-undelivered initial delivery (#5278) — rather than on an agent-idle
+// completion edge. Sticky for the process's lifetime; the load path re-derives
+// it from the persisted verdict. Used by the daemon's completion predicate to
+// tell the ways the run marker clears apart.
+func (i *Instance) TaskRunFailed() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunFailed
+}
+
+// ConsumeTaskRunFailed reports once that a task run just ended failed (#5278).
+// The daemon consumes it at its run-end observation sites to stamp the owning
+// task's run status; one-shot per process, and the load path re-arms it from
+// the same persisted verdict, so the stamp is idempotent across restarts.
+func (i *Instance) ConsumeTaskRunFailed() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	failed := i.taskRunFailedStamp
+	i.taskRunFailedStamp = false
+	return failed
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
