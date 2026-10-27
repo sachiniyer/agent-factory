@@ -116,6 +116,16 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
+	// daemon's observation stopped being answered at Since, and Error is the
+	// last transport failure — collapsed, bounded, and token-redacted before it
+	// was stored on the record, so it is safe to ride every client surface. It
+	// is an observation flag, not a liveness: it coexists with Running/Ready/
+	// Lost and suppresses the destructive lifecycle verbs for the flag's
+	// duration. Projection-only like IdleReason above: ForStorage scrubs it so
+	// a restarted daemon re-derives the claim from its own probes rather than
+	// inheriting an outage it never observed.
+	Unreachable *UnreachableData `json:"unreachable,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is

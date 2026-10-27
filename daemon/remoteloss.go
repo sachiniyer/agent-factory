@@ -287,10 +287,25 @@ func (m *Manager) clearRemoteLossAtGeneration(
 //
 // Bounded, so a wedged remote cannot stall the poll goroutine here either.
 func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProbe {
+	return m.remoteSandboxLivenessWithin(instance, remoteLostConfirmTimeout)
+}
+
+// remoteSandboxLivenessForOperator is the operator-RPC form: the manual
+// restore path's pre-replacement probe. It rides remoteConfirmProbeTimeout for
+// the reason probeLivenessForOperator does — no prior failed 30s call was
+// spent, no serial walk of other sessions needs protecting, and no debounce
+// tie is being broken, so the poll loop's 5s budget would cut a cold-but-live
+// remote off before it could answer (#5203). The automatic loop above keeps
+// the tight budget because it runs inside RefreshStatuses's serial walk.
+func (m *Manager) remoteSandboxLivenessForOperator(instance *session.Instance) livenessProbe {
+	return m.remoteSandboxLivenessWithin(instance, remoteConfirmProbeTimeout)
+}
+
+func (m *Manager) remoteSandboxLivenessWithin(instance *session.Instance, timeout time.Duration) livenessProbe {
 	if !isRemoteWorkspace(instance) {
 		return probeAbsent // a local session has no remote sandbox to preserve
 	}
-	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout)
+	return aliveWithin(instance.AgentServer(), timeout)
 }
 
 // noteRuntimeReplaced retires observations owned by the prior runtime after a
@@ -332,6 +347,10 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	instance.ClearIdleEvidence()
 	instance.ClearLostRestoreFailure()
 	instance.ClearLostRestoreWait()
+	// The outage flag is an observation OF THE OLD RUNTIME: a fresh sandbox has
+	// earned no silence yet, and keeping it would mark a just-provisioned
+	// runtime unreachable before its first probe (#5571 W1.3).
+	instance.ClearUnreachable()
 	key := stableSessionKey(repoID, instance)
 	m.clearRemoteLoss(key)
 	// A replaced runtime is a fresh pane: the task-run turn watcher's prev
@@ -408,11 +427,24 @@ func (m *Manager) settleRemoteProbeFailure(
 	before session.Liveness,
 	beforeReset time.Time,
 	epoch uint64,
+	probeErr error,
 ) {
 	if !isRemoteWorkspace(instance) {
 		// A local agent-server's Snapshot never errors; if that ever changes,
 		// an unexplained local error is not evidence of death. Leave it be.
 		return
+	}
+	// Record the outage on the row FIRST (#5571 W1.3): the flag is an
+	// observation, not a verdict, so it belongs to every unanswered remote
+	// probe — including the Lost row's below (Lost+unreachable is the honest
+	// pair: the mark cannot be re-confirmed right now) and the pre-durable blip
+	// the debounce is still absorbing. The generation gate does for the flag
+	// what it does for the count below: a stale predecessor failure must not
+	// claim a fresh runtime's outage. The not-provisioned sentinel is excluded
+	// because it is definitive absence — af KNOWS there is no runtime to reach,
+	// and flagging it "unreachable" would invert the word's meaning.
+	if instance.AgentObservationCurrent(generation) && !errors.Is(probeErr, session.ErrRemoteSandboxNotProvisioned) {
+		instance.SetUnreachable(probeErr)
 	}
 	if before == session.LiveLost {
 		// Already settled where a failing probe would put it. There is nothing to
@@ -438,12 +470,19 @@ func (m *Manager) settleRemoteProbeFailure(
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
+		// An answered probe ends the outage claim too — under the same
+		// generation gate, so a stale answer cannot un-mark a successor's.
+		instance.ClearUnreachableAtObservation(generation)
 		m.info().Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
 		return
 	case probeAbsent, probeAnsweredDead:
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
+		// Answered either way — reachable server reporting death or absence.
+		// The transport works, so the outage flag retires even as the agent is
+		// marked Lost below.
+		instance.ClearUnreachableAtObservation(generation)
 		// The server answered: reachable, agent gone. The snapshots were failing
 		// for some other reason. An answer of any kind ends the transport episode.
 		m.warn().Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)

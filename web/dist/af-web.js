@@ -12029,6 +12029,17 @@ function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
 function idleReasonLabel(reason) {
   return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
 }
+function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
+}
 function formatPaneChurnAge(churn, now) {
   return formatDuration(now.getTime() - churn.getTime());
 }
@@ -12196,6 +12207,9 @@ function rowTitle(s) {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;
@@ -18918,14 +18932,18 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
   ];
-  if (selected && idleDetail) {
+  if ((selected || outageDetail !== "") && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
@@ -18984,6 +19002,23 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   return row;
 }
 function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
+  for (const idle of root2.querySelectorAll(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError }
+      },
+      now
+    );
+    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    const row = idle.closest(".af-row");
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+      );
+    }
+  }
   for (const idle of root2.querySelectorAll(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {
