@@ -150,7 +150,7 @@ func TestEveryTransportStepRidesTheOnePinnedCommand(t *testing.T) {
 	// own. Since #5564 the spawn lives in sandbox_tunnel.go.
 	src, err := os.ReadFile("sandbox_tunnel.go")
 	require.NoError(t, err)
-	assert.Contains(t, string(src), `p.sshCmd + `+"`"+` -o ExitOnForwardFailure=yes -N -L "$1"`+"`",
+	assert.Contains(t, string(src), `p.sshCmd + `+"`"+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`+"`",
 		"spawnTunnel must extend the ONE pinned command; a tunnel that composed its own ssh invocation would "+
 			"re-resolve the name and could forward to a different machine than the workspace is on (#3086)")
 }

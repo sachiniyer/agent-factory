@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,45 +191,94 @@ func StopAllSandboxTunnels() {
 	})
 }
 
-// provisionTunnelChild is the spawn+publish half of startTunnel, held under
-// reapMu so a daemon-exit StopAllSandboxTunnels can never interleave between a
-// born child and its publication. The post-spawn stopped check is what makes
-// that airtight at the other end: a provisioner whose stop already ran —
-// including one whose registry entry is already gone — kills its own newborn
-// and fails the provision rather than publish a tunnel no remaining stop can
-// reach. The caller owns registration: registerSandboxTunnel before this,
-// stopTunnel via reap on every failure after.
-func (p *sandboxProvisioner) provisionTunnelChild(forward string) (*exec.Cmd, *tunnelLifeline, error) {
+// errTunnelOwnerStopped distinguishes "the provisioner was already stopped" —
+// the spawn-after-stop race — from an ordinary spawn failure, so the transport
+// supervisor can tell a re-dial that must abort from one that should retry.
+var errTunnelOwnerStopped = errors.New("the tunnel's owner is already stopping")
+
+// tunnelChild is one generation of the supervised ssh transport: the spawned
+// child, its lifeline pipes when it runs under the watch lifeline, and the
+// reaper broadcast announcing its single cmd.Wait() result.
+//
+// The reaper goroutine is the ONLY Waiter because os/exec does not support two
+// callers of Cmd.Wait — a second one fails with "waitid: no child processes"
+// and, worse, leaves the real exit status unobserved. done is CLOSED rather
+// than sent on so every Waiter — the supervisor parked on the exit and a
+// killTunnel joining teardown — wakes off one delivery; err is written before
+// the close, so any goroutine that observes done sees it (close is the
+// happens-before edge). Every kill path joins `done` instead of waiting the
+// process itself.
+type tunnelChild struct {
+	cmd  *exec.Cmd
+	ll   *tunnelLifeline
+	done chan struct{} // closed by the reaper once cmd.Wait() returns
+	err  error         // the Wait result; valid once done is closed
+	born time.Time
+}
+
+// newTunnelChild wraps an already-started child with its reaper.
+func newTunnelChild(cmd *exec.Cmd, ll *tunnelLifeline) *tunnelChild {
+	t := &tunnelChild{cmd: cmd, ll: ll, done: make(chan struct{}), born: time.Now()}
+	go func() { t.err = cmd.Wait(); close(t.done) }()
+	return t
+}
+
+// provisionTunnelChild is the spawn+publish half of a tunnel (re)dial, held
+// under reapMu so a daemon-exit StopAllSandboxTunnels can never interleave
+// between a born child and its publication. The post-spawn stopped check is
+// what makes that airtight at the other end: a provisioner whose stop already
+// ran — including one whose registry entry is already gone — kills its own
+// newborn and fails the provision rather than publish a tunnel no remaining
+// stop can reach. The caller owns registration: registerSandboxTunnel before
+// this, stopTunnel via reap on every failure after.
+//
+// The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty for
+// this slice — so every re-dial re-establishes the same endpoint contract.
+func (p *sandboxProvisioner) provisionTunnelChild() (*tunnelChild, error) {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	cmd, ll, err := p.spawnTunnel(forward)
+	cmd, ll, err := p.spawnTunnel(p.forward, p.reverseFwds...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	child := newTunnelChild(cmd, ll)
 	if p.stopped {
-		killTunnel(cmd, ll)
-		return nil, nil, errors.New("the tunnel's owner is already stopping")
+		killTunnel(child)
+		return nil, errTunnelOwnerStopped
 	}
-	p.tunnel = cmd
-	p.lifeline = ll
-	return cmd, ll, nil
+	p.tunnel = child
+	return child, nil
 }
 
 // killTunnel is the destructive half of stopTunnel: the whole group —
 // lifeline+sh+ssh together under the lifeline, sh+ssh directly — so a
 // ProxyCommand helper does not outlive the client it was opened for, then the
 // lifeline pipe ends, whose keepW close would EOF the lifeline into the same
-// group kill had it survived. startTunnel uses it for a child born after its
-// provisioner's stop already ran.
-func killTunnel(cmd *exec.Cmd, ll *tunnelLifeline) {
-	if cmd != nil && cmd.Process != nil {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
+// group kill had it survived. It is also how the transport supervisor clears a
+// generation that already exited on its own: the group kill on a dead pid
+// reports ESRCH into the ignored fallback, the join returns instantly off the
+// already-closed done, and the lifeline ends are still closed.
+//
+// The join waits on the reaper's broadcast rather than calling cmd.Wait() —
+// the reaper is the only Waiter (see tunnelChild). It is BOUNDED: a process
+// that survived group SIGKILL would otherwise park teardown forever, and at
+// that point the best af can do is log that the reap never confirmed.
+func killTunnel(t *tunnelChild) {
+	if t == nil {
+		return
 	}
-	if ll != nil {
-		ll.close()
+	if t.cmd != nil && t.cmd.Process != nil {
+		if err := syscall.Kill(-t.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			_ = t.cmd.Process.Kill()
+		}
+		select {
+		case <-t.done:
+		case <-time.After(sandboxTunnelReapJoinTimeout):
+			log.WarningLog.Printf("sandbox runtime: tunnel pid %d still unreaped %s after group SIGKILL", t.cmd.Process.Pid, sandboxTunnelReapJoinTimeout)
+		}
+	}
+	if t.ll != nil {
+		t.ll.close()
 	}
 }
 
@@ -236,18 +286,39 @@ func killTunnel(cmd *exec.Cmd, ll *tunnelLifeline) {
 // when this process's own binary can serve as one and directly otherwise.
 //
 // The inner command text is identical on both paths —
-// `<sandbox_ssh> -o ExitOnForwardFailure=yes -N -L "$1"` run by `sh -c` with
-// $0=af-sandbox — because the flag is load-bearing rather than hygiene: the
-// local port is reserved by binding :0 and closing it, so another process can
-// win it in the gap. OpenSSH defaults ExitOnForwardFailure to NO (`ssh -G`
-// confirms), which would leave this -N child alive after a FAILED bind — and
-// the readiness probe would then connect to whatever DID win the port and
-// report a healthy tunnel owned by an unrelated process. With it, ssh exits on
-// the failed forward and the probe times out honestly.
-func (p *sandboxProvisioner) spawnTunnel(forward string) (*exec.Cmd, *tunnelLifeline, error) {
-	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -N -L "$1"`
+// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
+// run by `sh -c` with $0=af-sandbox — because each flag is load-bearing rather
+// than hygiene:
+//
+//   - ExitOnForwardFailure: the local port is reserved by binding :0 and
+//     closing it, so another process can win it in the gap. OpenSSH defaults
+//     the option to NO (`ssh -G` confirms), which would leave this -N child
+//     alive after a FAILED bind — and the readiness probe would then connect
+//     to whatever DID win the port and report a healthy tunnel owned by an
+//     unrelated process. With it, ssh exits on the failed forward and the
+//     probe times out honestly. The same option covers the -R reverse binds
+//     W3.4 will add: a refused remote bind is fatal, never silently absent.
+//   - ServerAliveInterval/CountMax: the protocol-level keepalive (#5571 W1.2).
+//     Without it a dead peer — a host that vanished, a NAT mapping that
+//     expired — is indistinguishable from a quiet tunnel until TCP gives up
+//     (~2h by default). ssh exits after 3 unanswered 15s probes (~45s bound)
+//     and the transport supervisor re-dials. These land AFTER p.sshCmd, so the
+//     operator's own -o values keep precedence: OpenSSH takes the FIRST
+//     setting it reads.
+//
+// `reverse` is W3.4's slot for -R forwards (the in-sandbox callback): each
+// element is composed as `-R "$N"` after the -L spec, so it gets the same
+// ExitOnForwardFailure fatality, the same process-group teardown, and the same
+// supervision on every re-dial. Empty today.
+func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
+	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
+	args := []string{forward}
+	for i := range reverse {
+		args = append(args, reverse[i])
+		script += fmt.Sprintf(` -R "$%d"`, len(args))
+	}
 	if exe := sandboxTunnelLifelineExe(); exe != "" && !sandboxTunnelLifelineUnavailable.Load() {
-		cmd, ll, direct, err := spawnTunnelViaLifeline(exe, script, forward)
+		cmd, ll, direct, err := spawnTunnelViaLifeline(exe, script, args...)
 		if err == nil {
 			return cmd, ll, nil
 		}
@@ -258,7 +329,7 @@ func (p *sandboxProvisioner) spawnTunnel(forward string) (*exec.Cmd, *tunnelLife
 	}
 	// Its own group so stopTunnel can kill the ssh client and any ProxyCommand
 	// helper together, not just the `sh` that launched them.
-	cmd := exec.Command("sh", "-c", script, "af-sandbox", forward)
+	cmd := exec.Command("sh", append([]string{"-c", script, "af-sandbox"}, args...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// No stdin payload here, so WaitDelay is correct and wanted: a tunnel that
 	// ignores its kill must not hold af's pipes open forever. This is the child
@@ -281,7 +352,7 @@ func (p *sandboxProvisioner) spawnTunnel(forward string) (*exec.Cmd, *tunnelLife
 // reason for the once-per-daemon warning), false when the lifeline spoke and
 // reported the SHELL could not start — a direct spawn hits the same wall, so
 // that error must fail the provision rather than be retried around.
-func spawnTunnelViaLifeline(exe, script, forward string) (cmd *exec.Cmd, ll *tunnelLifeline, direct bool, err error) {
+func spawnTunnelViaLifeline(exe, script string, args ...string) (cmd *exec.Cmd, ll *tunnelLifeline, direct bool, err error) {
 	lifelineR, keepW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, true, fmt.Errorf("creating the lifeline pipe: %w", err)
@@ -293,7 +364,7 @@ func spawnTunnelViaLifeline(exe, script, forward string) (cmd *exec.Cmd, ll *tun
 		return nil, nil, true, fmt.Errorf("creating the lifeline ack pipe: %w", err)
 	}
 
-	cmd = exec.Command(exe, watchlifeline.Argv(sandboxTunnelLifelineGrace, "sh", "-c", script, "af-sandbox", forward)...)
+	cmd = exec.Command(exe, watchlifeline.Argv(sandboxTunnelLifelineGrace, "sh", append([]string{"-c", script, "af-sandbox"}, args...)...)...)
 	// The lifeline must lead the group it kills; it refuses to run otherwise.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = sandboxTunnelWaitDelay
@@ -461,5 +532,220 @@ func SweepOrphanSandboxTunnels(homeID string) {
 			"Inspect them with `ps -o pid,ppid,command -p %s` and, if they are stale af ssh tunnels holding forwarded ports, "+
 			"stop them by hand with `kill %s`%s",
 			len(unmarked), sandboxTunnelHomeEnv, list, strings.Join(pids, " "), extra)
+	}
+}
+
+// --- the supervised connection (#5571 W1.2) ---
+//
+// superviseTunnel keeps one session's ssh transport established until teardown.
+// Without it a dead `ssh -N -L` child is never even reaped (nobody called Wait
+// before #5565's teardown paths), so a host blip or a killed client left the
+// forward down forever — LG-03/topo:T5.
+//
+// The loop is one goroutine per provisioner, started by startTunnel after the
+// first generation proves ready. Each iteration either waits on the published
+// generation's reaper channel, or re-dials through provisionTunnelChild — the
+// same spawn+publish path as the first provision, so the stopped-check kills a
+// re-dial that raced teardown and the -L/-R spec is identical every time.
+//
+// Logging follows the maintainer's rule: transitions, not ticks. `down` opens
+// an episode at the first observed death; every tunnelSuperviseLogEvery-th
+// failed event during it gets one line; a generation that survives
+// redialHealthySpan closes it (via the timer the monitor arms per generation,
+// so a repair that holds gets its "restored" line even if nothing ever dies
+// again). A flapping link — dial ok, dead before the span — stays inside the
+// episode and is covered by the every-Nth counter rather than a line per flap.
+
+// sandboxTunnelReapJoinTimeout bounds how long a kill path waits for the
+// reaper to collect a group-SIGKILL'd child. The kernel reaps in milliseconds;
+// the bound exists only so a wedged reap cannot park teardown forever.
+const sandboxTunnelReapJoinTimeout = 5 * time.Second
+
+// tunnelSuperviseLogEvery is the maintainer-asked "every Nth attempt" knob for
+// the supervisor's still-down line: events are generation deaths plus failed
+// re-dials, so at the ~30s backoff ceiling this is roughly one line per ten
+// minutes of sustained outage rather than one per tick.
+const tunnelSuperviseLogEvery = 20
+
+// tunnelRedialJitter smears the shared redialDelay ladder ±25% so a fleet of
+// sandboxes that lost the same host does not re-dial in lockstep.
+const tunnelRedialJitter = 0.25
+
+// tunnelRedialRand is the jitter source — a var so a test can pin it.
+var tunnelRedialRand = rand.Float64
+
+// tunnelRedialDelay is the nth re-dial's wait: redialDelay's doubling ladder
+// (shared with the PTY recovery path, and shrunken by the same test seam)
+// smeared by the jitter factor. The smear can land slightly above the nominal
+// cap — that is the point of jitter — while staying order-of-cap bounded.
+func tunnelRedialDelay(attempt int) time.Duration {
+	d := redialDelay(attempt)
+	jitter := 1 + (tunnelRedialRand()*2-1)*tunnelRedialJitter
+	return max(time.Duration(float64(d)*jitter), time.Millisecond)
+}
+
+// stoppedChanLocked returns the channel stopTunnel closes exactly once. It is
+// built lazily — callers hold reapMu — because reap-only provisioners (the
+// persisted-handle reload path, most test literals) construct the type without
+// one and never spawn a tunnel.
+func (p *sandboxProvisioner) stoppedChanLocked() chan struct{} {
+	if p.stoppedCh == nil {
+		p.stoppedCh = make(chan struct{})
+	}
+	return p.stoppedCh
+}
+
+// tunnelMonitor is the supervisor goroutine's episode state. The healthy-timer
+// callback and the loop itself both touch it, so its fields sit behind mu; the
+// loop reads the published generation from the provisioner under reapMu — the
+// two locks never nest (the timer takes only mu and checks the generation it
+// captured at arm time).
+type tunnelMonitor struct {
+	p *sandboxProvisioner
+
+	mu        sync.Mutex
+	current   *tunnelChild // the generation the loop is parked on; nil while re-dialing
+	attempt   int          // backoff ladder position; reset when a generation crosses redialHealthySpan
+	down      bool         // an outage episode is open
+	downSince time.Time
+	events    int // deaths + failed re-dials inside this episode
+}
+
+// armHealthyTimer starts the generation's healthy-span clock: if the child is
+// still the published generation when it fires, the connection held — the
+// backoff ladder resets and an open outage episode closes with one "restored"
+// line. A generation that dies first fails the identity check and leaves the
+// episode running.
+func (m *tunnelMonitor) armHealthyTimer(child *tunnelChild) {
+	time.AfterFunc(redialHealthySpan, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.current != child {
+			return
+		}
+		m.attempt = 0
+		if m.down {
+			m.down = false
+			log.InfoLog.Printf("sandbox runtime: session %q: ssh transport re-established after %s down (%d events)",
+				m.p.spec.Title, time.Since(m.downSince).Round(time.Second), m.events)
+		}
+	})
+}
+
+// noteEvent counts a death or a failed re-dial and emits the every-Nth
+// still-down line while an episode is open.
+func (m *tunnelMonitor) noteEvent(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.down {
+		return
+	}
+	m.events++
+	if m.events%tunnelSuperviseLogEvery == 0 {
+		log.WarningLog.Printf("sandbox runtime: session %q: ssh transport still unreachable after %d events over %s (last: %v)",
+			m.p.spec.Title, m.events, time.Since(m.downSince).Round(time.Second), err)
+	}
+}
+
+// superviseTunnel is the per-session transport supervisor (#5571 W1.2). It runs
+// until the provisioner's stopped latch closes stoppedCh — teardown always
+// wins — and re-dials any generation that exits for any other reason.
+func (p *sandboxProvisioner) superviseTunnel() {
+	p.reapMu.Lock()
+	stoppedCh := p.stoppedChanLocked()
+	p.reapMu.Unlock()
+
+	m := &tunnelMonitor{p: p}
+	// A healthy-timer armed for the last generation must not fire into an
+	// exited monitor — it would read the still-published current as alive and
+	// log a "restored" that teardown already made false.
+	defer func() {
+		m.mu.Lock()
+		m.current = nil
+		m.mu.Unlock()
+	}()
+	for {
+		p.reapMu.Lock()
+		child := p.tunnel
+		stopped := p.stopped
+		p.reapMu.Unlock()
+		if stopped {
+			return
+		}
+
+		if child == nil {
+			// No live generation: back off, then re-dial through the same
+			// spawn+publish path as the first provision. Re-dial failure is
+			// just another event in the episode; the loop comes back around.
+			m.mu.Lock()
+			delay := tunnelRedialDelay(m.attempt)
+			m.attempt++
+			m.mu.Unlock()
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-stoppedCh:
+				timer.Stop()
+				return
+			}
+			next, err := p.provisionTunnelChild()
+			switch {
+			case errors.Is(err, errTunnelOwnerStopped):
+				return
+			case err != nil:
+				m.noteEvent(err)
+				continue
+			}
+			// Probe readiness outside reapMu — same contract as the first
+			// provision. A re-dial that never answers is an event, and its
+			// stillborn generation is killed before the next round.
+			if err := waitForSandboxTunnelFn(p.label(), p.localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
+				p.reapMu.Lock()
+				if p.tunnel == next {
+					killTunnel(next)
+					p.tunnel = nil
+				}
+				p.reapMu.Unlock()
+				m.noteEvent(err)
+				continue
+			}
+			m.armHealthyTimer(next)
+			continue
+		}
+
+		m.mu.Lock()
+		m.current = child
+		m.mu.Unlock()
+		select {
+		case <-stoppedCh:
+			return
+		case <-child.done:
+			err := child.err
+			// The generation is gone whatever the cause; clear it so a racing
+			// stopTunnel does not double-kill and so the loop's next iteration
+			// re-dials. killTunnel's join returns instantly — done is already
+			// closed — and closes this generation's lifeline ends.
+			p.reapMu.Lock()
+			if p.tunnel == child {
+				killTunnel(child)
+				p.tunnel = nil
+			}
+			stopped := p.stopped
+			p.reapMu.Unlock()
+			if stopped {
+				return
+			}
+			m.mu.Lock()
+			m.current = nil
+			if !m.down {
+				m.down = true
+				m.downSince = time.Now()
+				m.events = 0
+				log.WarningLog.Printf("sandbox runtime: session %q: ssh transport went down after %s up: %v; re-dialing with capped backoff",
+					p.spec.Title, time.Since(child.born).Round(time.Second), err)
+			}
+			m.mu.Unlock()
+			m.noteEvent(err)
+		}
 	}
 }
