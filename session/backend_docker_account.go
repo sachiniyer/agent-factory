@@ -823,9 +823,10 @@ func parseContainerOwner(out string) (string, error) {
 // (previously the non-account path forced HOME=/root while running every exec
 // as a non-root default user, so provisioning failed at the first
 // `git config --global`). The exception is a non-account session on a
-// root-DEFAULT image: the probe reports 0:0, no preparation is needed, and the
-// step returns early with containerUser unset so the session runs exactly as it
-// did before this step existed.
+// root-DEFAULT image: the probe reports uid 0 (0:0 for a bare `USER 0`/`root`,
+// 0:<gid> for `USER 0:<gid>`), no preparation is needed, and the step returns
+// early with containerUser unset so the session runs exactly as it did before
+// this step existed.
 func (p *dockerProvisioner) prepareContainerUser() error {
 	if p.spec.Account.Dir != "" {
 		return p.prepareAccountUser()
@@ -851,8 +852,9 @@ func (p *dockerProvisioner) prepareContainerUser() error {
 // cloneWorkspace) and the agent-server itself run as that user via
 // sessionExecOptions, with a HOME it can now write to.
 //
-// A root-default image (probe reports 0:0) is the exception: it returns early
-// with containerUser unset, because preparation would REGRESS it twice over.
+// A root-default image (probe reports uid 0, on either side of the gid) is the
+// exception: it returns early with containerUser unset, because preparation
+// would REGRESS it twice over.
 // The chown is not a no-op when docker.run_args bind-mounts a host directory at
 // /root or /workspace — it would re-own the operator's host files. And a set
 // containerUser makes sessionExecOptions force `-e HOME=/root` on every exec,
@@ -874,7 +876,11 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if err != nil {
 		return fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err)
 	}
-	if owner == "0:0" {
+	// UID 0 is root regardless of the gid — a `USER 0:<gid>` directive probes
+	// as 0:<gid>, and uid 0 needs no writable-HOME/workspace preparation. The
+	// comparison is on the uid alone so every root-default image takes the
+	// no-preparation path.
+	if uid, _, _ := strings.Cut(owner, ":"); uid == "0" {
 		return nil
 	}
 	script := fmt.Sprintf("mkdir -p %s && chown %s %s %s",

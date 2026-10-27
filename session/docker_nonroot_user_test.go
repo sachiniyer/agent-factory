@@ -246,29 +246,35 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 }
 
 // TestPrepareNonAccountUser_RootDefaultSkipsPreparation pins the unit contract
-// behind the no-regression test above: when the id probe reports 0:0 the step
+// behind the no-regression test above: when the id probe reports uid 0 the step
 // performs no second exec (no mkdir/chown that could re-own a host directory
 // bind-mounted at /root or /workspace) and leaves containerUser unset, so
 // sessionExecOptions() returns nil and every later exec inherits the
 // container's configured env — including a HOME the operator set via
-// docker.run_args.
+// docker.run_args. `USER 0:1000` is a legal Dockerfile directive and probes as
+// 0:1000, so the check is on the uid alone — a nonzero gid must not fall
+// through into the chown path.
 func TestPrepareNonAccountUser_RootDefaultSkipsPreparation(t *testing.T) {
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return []byte("0:0\n"), nil
-	}))
-	p := &dockerProvisioner{containerID: "cid"}
+	for _, probe := range []string{"0:0", "0:1000"} {
+		t.Run("probe="+probe, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string(nil), args...))
+				return []byte(probe + "\n"), nil
+			}))
+			p := &dockerProvisioner{containerID: "cid"}
 
-	require.NoError(t, p.prepareNonAccountUser())
-	require.Len(t, calls, 1,
-		"a 0:0 probe must be the only docker call — no chown/mkdir may run against a root-default image; calls=%v", calls)
-	require.Contains(t, strings.Join(calls[0], " "), "id -u",
-		"the single call must be the id probe; calls=%v", calls)
-	require.Equal(t, "", p.containerUser,
-		"containerUser must stay unset on a root-default image so sessionExecOptions adds no --user/-e HOME")
-	require.Empty(t, p.sessionExecOptions(),
-		"an unset containerUser must yield no exec overrides — execs inherit the container env, run_args HOME included")
+			require.NoError(t, p.prepareNonAccountUser())
+			require.Len(t, calls, 1,
+				"a uid-0 probe must be the only docker call — no chown/mkdir may run against a root-default image; calls=%v", calls)
+			require.Contains(t, strings.Join(calls[0], " "), "id -u",
+				"the single call must be the id probe; calls=%v", calls)
+			require.Equal(t, "", p.containerUser,
+				"containerUser must stay unset on a root-default image so sessionExecOptions adds no --user/-e HOME")
+			require.Empty(t, p.sessionExecOptions(),
+				"an unset containerUser must yield no exec overrides — execs inherit the container env, run_args HOME included")
+		})
+	}
 }
 
 // TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate pins the fail-
