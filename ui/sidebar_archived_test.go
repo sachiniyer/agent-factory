@@ -732,7 +732,7 @@ func TestSidebar_ArchiveClearsTabCollapse(t *testing.T) {
 
 	s.proj.SelectInstance(inst) // cursor + binding on the soon-to-be-archived row
 	s.syncFromStore()
-	s.treeCollapsed = inst.Title
+	s.treeCollapsed = inst
 	require.False(t, s.instanceExpanded(inst),
 		"precondition: the collapse override suppresses the ▾ marker")
 
@@ -771,7 +771,7 @@ func TestSidebar_RowVerbTarget_CollapsedMarkerNotAdopted(t *testing.T) {
 	require.Same(t, lostInst, s.proj.GetSelectedInstance())
 
 	// The fold the user set while the row was live survives the transition.
-	s.treeCollapsed = lostInst.Title
+	s.treeCollapsed = lostInst
 	require.False(t, s.instanceExpanded(lostInst),
 		"precondition: the bound row renders ▸, not the ▾ marker")
 

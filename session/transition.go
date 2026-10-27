@@ -813,6 +813,18 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
+}
+
+// endTaskRunFailedLocked ends an in-flight task run as failed: the run's own
+// prompt was proven undelivered, so no later idle edge may report the run
+// finished and hand on_complete a session whose prompt never landed (#5278).
+// Caller holds i.mu. The adoption baseline is pinned here for the same reason
+// the other marker-clearing edges pin it: this is one of them.
+func (i *Instance) endTaskRunFailedLocked() {
+	i.taskRunActive = false
+	i.taskRunIdleEdgeHeld = false
+	i.taskRunTurnGateHeld = false
+	i.taskRunFailed = true
 	i.touchLocked()
 	i.captureAdoptionBaselineLocked()
 }

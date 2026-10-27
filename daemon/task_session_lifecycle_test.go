@@ -638,3 +638,81 @@ func TestTaskSessionLifecycle_ParkedIntentIsReclaimedOnTitleReuse(t *testing.T) 
 	manager.mu.Unlock()
 	assert.False(t, stillParked, "a replacement session must not inherit the original's owed teardown")
 }
+
+// TestTaskSessionLifecycle_UndeliveredRunEndsFailedAndKeepsTheSession is the
+// #5278 slice-1 report end to end. A task-spawned session whose initial prompt
+// send PROVES undelivered — the pane demonstrably took nothing — ends its run
+// failed where the verdict lands, the poll stamps the task
+// "errored: prompt not delivered", and no on_complete verb is applied to a
+// session that never received its prompt.
+//
+// On master the marker stayed set after the proven-failed send, the first idle
+// edge ended the run as a completion, and on_complete=kill reaped the session:
+// applyTaskSessionLifecycleOnRunEnd passed runEndedIntoIdle below.
+func TestTaskSessionLifecycle_UndeliveredRunEndsFailedAndKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-undeliv", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-undeliv")
+	stubTaskLifecycle(t, "task-undeliv", task.OnCompleteKill)
+
+	// The verdict SendPromptWithEvidence records when the send returns a
+	// positive non-delivery: the runtime provably accepted nothing.
+	require.True(t, inst.RecordPromptAttempt(session.PromptNotDelivered, time.Now()))
+	require.False(t, inst.TaskRunActive(),
+		"the run ends where the verdict lands — before the fix it stayed in flight for the idle edge to complete")
+	require.True(t, inst.TaskRunFailed())
+
+	// The poll's run-end observation stamps the task — this consume is the
+	// same one refreshInstanceStatus and observeTaskRunWhilePaused perform.
+	require.True(t, inst.ConsumeTaskRunFailed())
+	manager.stampTaskRunFailed(inst)
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv"),
+		"the task reads failed, matching the errored: family RunTask writes")
+
+	// Now the hazard: a poll that captured the marker BEFORE the failed send
+	// (true) observes it cleared. That flip must not read as a completion —
+	// not on this tick, not on the idle edge the quiet pane produces next, and
+	// not through the paused path either.
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"a session that never received its prompt is kept")
+	assert.Nil(t, inst.OwedOnComplete(),
+		"no on_complete obligation may be filed for a run that never delivered")
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, stillRegistered, "on_complete=kill must not reap an undelivered run's session")
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv"),
+		"the failed status survives the no-op lifecycle calls")
+}
+
+// TestTaskSessionLifecycle_UndeliveredRunKeepsSessionUnderArchive is the
+// archive twin — the non-destructive verb is still a lifecycle application a
+// failed run never earned.
+func TestTaskSessionLifecycle_UndeliveredRunKeepsSessionUnderArchive(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-undeliv-arch", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-undeliv-arch")
+	stubTaskLifecycle(t, "task-undeliv-arch", task.OnCompleteArchive)
+
+	require.True(t, inst.RecordPromptAttempt(session.PromptNotDelivered, time.Now()))
+	if inst.ConsumeTaskRunFailed() {
+		manager.stampTaskRunFailed(inst)
+	}
+
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"the failed run's session is not archived")
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv-arch"))
+}

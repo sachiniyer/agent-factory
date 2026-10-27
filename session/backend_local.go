@@ -259,7 +259,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			runtimeProgram = resolution.command
 			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
 			setLaunchProgram(tmuxSession, program,
-				accountLaunchProof(resolution.command, program, resolution.trustBase))
+				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
 		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
 		// keeps a live pane bound. Through RestoreWithResult it also refreshed the
@@ -363,7 +363,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
-			proof = accountLaunchProof(base, program, resolution.trustBase)
+			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)
 
