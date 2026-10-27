@@ -531,6 +531,12 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
+	if !req.TaskOrigin {
+		// A delivered prompt is the user's answer, same as a keystroke into the
+		// pane — and the only answer a client with no PTY input can send. Task
+		// deliveries are automation, not the user.
+		m.clearAttentionOnInput(instance)
+	}
 	return status, nil
 }
 

@@ -6486,7 +6486,7 @@ function attentionSeen(state, paneExposed) {
   if (!paneExposed || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
     return null;
   }
-  if (!state.shownTabs.includes(0)) {
+  if (!state.openTabs.includes(0)) {
     return null;
   }
   const s = state.sessions.find((x) => x.id === state.selectedId);
@@ -14790,6 +14790,7 @@ var SplitView = class {
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
+    this.report();
   }
   onPaneFocus(leafId, focused) {
     if (focused) {
@@ -14822,16 +14823,17 @@ var SplitView = class {
   report() {
     this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    const openTabs = this.tree ? leaves(this.tree).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
-    const shownKey = shownTabs.join(",");
+    const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
-    this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+    this.cb.onLayout({ focusedTab, shownTabs, openTabs, paneCount });
   }
   /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
    *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
@@ -18890,6 +18892,7 @@ var store = new Store({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -18948,7 +18951,7 @@ var splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs })
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs })
 });
 var root = null;
 function mount() {
@@ -19081,6 +19084,7 @@ async function connect(candidate) {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks,
@@ -19138,6 +19142,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks: [],

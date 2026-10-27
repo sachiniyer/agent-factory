@@ -761,6 +761,12 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
 	}
+	// An attention request belongs to the agent that wrote it: a committed
+	// handoff swaps the runtime without crossing a liveness edge, so nothing
+	// else drops the outgoing agent's question for the incoming one.
+	if ev.kind == tkCommitHandoff {
+		i.attention = nil
+	}
 	// tkCommitArchive is the single commit edge every archive route converges
 	// on — local worktree relocation and remote branch-push alike — so it is the
 	// one place the durable archive timestamp can be stamped without a second

@@ -284,11 +284,14 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/SetAttention",
-		Description: "Set (with an optional reason) or clear a session's attention request — the agent's explicit ask for the user. It clears when the user types into the agent pane, opens the agent tab in the web UI, or when the agent starts work again after it went idle.",
-		requestType: reflect.TypeOf(SetAttentionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetAttention) },
+		Method:         http.MethodPost,
+		Path:           "/v1/SetAttention",
+		sandboxAllowed: true,
+		Description:    "Set (with an optional reason) or clear a session's attention request — the agent's explicit ask for the user. It clears when the user types into the agent pane, opens the agent tab in the web UI, or when the agent starts work again after it went idle.",
+		requestType:    reflect.TypeOf(SetAttentionRequest{}),
+		// rpcHandlerCtx, not rpcHandler: a sandbox caller is constrained to its
+		// own session, like Snapshot's owner narrowing (#3056).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.setAttention) },
 	},
 	{
 		Method:      http.MethodPost,

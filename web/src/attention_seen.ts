@@ -7,15 +7,18 @@ export interface AttentionView {
   sessions: SessionData[];
   selectedId: string | null;
   shownTabs: number[];
+  openTabs: number[];
 }
 
 /** The id of the session whose attention request the user is now looking at:
- *  selected, its agent tab (index 0) shown in a pane, and the pane exposed. */
+ *  selected, its agent tab (index 0) shown in a pane whose stream is open, and
+ *  the pane exposed. A connecting or reconnecting pane shows a placeholder, not
+ *  the agent's question, so openTabs — not shownTabs — is the gate. */
 export function attentionSeen(state: AttentionView, paneExposed: boolean): string | null {
   if (!paneExposed || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
     return null;
   }
-  if (!state.shownTabs.includes(0)) {
+  if (!state.openTabs.includes(0)) {
     return null;
   }
   const s = state.sessions.find((x) => x.id === state.selectedId);
