@@ -685,7 +685,7 @@ func (p *dockerProvisioner) dockerStepWriterUnprivileged(info dockerEngineInfo, 
 	user, usernsHost, boundDests := p.containerExecIdentity(dockerDataRootCandidates(info))
 	bypass := info.driver == "vfs"
 	for _, dest := range boundDests {
-		for _, w := range dockerOpWriteRoots(op) {
+		for _, w := range p.dockerOpWriteRoots(op) {
 			if mountCoversPath(dest, w) {
 				bypass = true
 			}
@@ -731,14 +731,23 @@ func dockerUserUnprivileged(user string) bool {
 // under — af's own managed mount destinations plus the workspace, the only
 // places a failed provisioning step was trying to write. The Bavail verdict
 // may only be borrowed when a data-root bind covers one of these (#5382
-// review). Root execs touch the account mounts for an account session and the
-// non-account session home (dockerContainerHome, /root) for a non-account
-// session's mkdir+chown; session execs write the workspace, the account dirs
-// a mounted session owns, and /tmp for the agent-server banner redirect.
-func dockerOpWriteRoots(op dockerOpClass) []string {
+// review). A root exec touches the account mounts and /workspace for an
+// account session (prepareAccountUser mkdir+chowns /af-home and /workspace)
+// and the non-account session home (dockerContainerHome, /root) plus
+// /workspace for a non-account session (prepareNonAccountUser mkdir+chowns
+// /root and /workspace); the non-account home is selected only for a
+// non-account session so an unrelated /root bind cannot make an account root
+// exec borrow the Bavail window (#5424 review). Session execs write the
+// workspace, the account dirs a mounted session owns, and /tmp for the
+// agent-server banner redirect.
+func (p *dockerProvisioner) dockerOpWriteRoots(op dockerOpClass) []string {
 	switch op {
 	case dockerOpRootExec:
-		return []string{dockerAccountHome, dockerAccountRuntimeHome, dockerContainerHome}
+		roots := []string{dockerAccountHome, dockerAccountRuntimeHome, dockerWorkspaceDir}
+		if p.spec.Account.Dir == "" {
+			roots = append(roots, dockerContainerHome)
+		}
+		return roots
 	case dockerOpSessionExec:
 		return []string{dockerWorkspaceDir, dockerAccountHome, dockerAccountRuntimeHome, "/tmp"}
 	}
