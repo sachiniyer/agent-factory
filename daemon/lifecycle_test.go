@@ -309,6 +309,22 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// A name suggestion is a best-effort read (no readiness gate), so it answers
 	// during probation like the other read-only lookups (#2470).
 	"SuggestSessionName": allowedDuringProbation,
+	// Proposal reads answer during probation; every route that can commit to the
+	// proposal store or change a tab waits like the other mutations.
+	"ListProposals":       allowedDuringProbation,
+	"GetProposal":         allowedDuringProbation,
+	"StartProposal":       blockedDuringProbation,
+	"AttachProposal":      blockedDuringProbation,
+	"DetachProposal":      blockedDuringProbation,
+	"AddProposalDoc":      blockedDuringProbation,
+	"ReadProposalDoc":     blockedDuringProbation,
+	"SaveProposalDoc":     blockedDuringProbation,
+	"WriteProposalDoc":    blockedDuringProbation,
+	"PullProposalChanges": blockedDuringProbation,
+	"CheckpointProposal":  blockedDuringProbation,
+	"SetProposalPushMode": blockedDuringProbation,
+	"HoldProposalPush":    blockedDuringProbation,
+	"SendProposalChanges": blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

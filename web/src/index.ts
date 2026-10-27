@@ -1207,6 +1207,10 @@ function openDeleteProject(root: string, label: string): void {
             }
             projectColorRegistrations.delete(root);
           }
+          // The registration recovery await may outlive the credential it ran
+          // under: re-fence so a disconnect or re-login cannot let the delete
+          // land with the old token.
+          if (!isCurrentConnection(connection, tok)) return;
           return deleteProject(root, tok)
             .then(() => {
               projectColorRegistrations.delete(root);
@@ -2307,12 +2311,14 @@ function commitRegisteredProjects(projects: RegisteredProject[]): void {
   // must re-register instead of failing on the stale id; an uncertain outcome the
   // registry now names is determinate and takes the recorded id.
   const byRoot = new Map(projects.map((p) => [p.root, p.id]));
-  const ids = new Set(projects.map((p) => p.id));
   for (const [root, learned] of projectColorRegistrations) {
     if ("uncertain" in learned) {
       const id = byRoot.get(root);
       if (id !== undefined) projectColorRegistrations.set(root, { id });
-    } else if (!ids.has(learned.id)) {
+    } else if (byRoot.get(root) !== learned.id) {
+      // The registry must still map THIS root to the learned id: an id that
+      // survives only under another root means this one was rebound away, and
+      // the stale mapping would write the next color onto the rebound project.
       projectColorRegistrations.delete(root);
     }
   }
