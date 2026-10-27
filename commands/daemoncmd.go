@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -126,17 +127,21 @@ type daemonStatusInfo struct {
 	HTTPSocketFile    bool                         `json:"http_socket_file"`
 	PID               int                          `json:"pid"`
 	PIDVerified       bool                         `json:"pid_verified"`
-	ServingPID        int                          `json:"serving_pid,omitempty"`
-	AutostartUnit     bool                         `json:"autostart_unit"`
-	AutostartEnabled  string                       `json:"autostart_enabled,omitempty"`
-	AutostartActive   string                       `json:"autostart_active,omitempty"`
-	UnitPID           int                          `json:"unit_pid,omitempty"`
-	Supervised        string                       `json:"serving_daemon_supervised,omitempty"`
-	SupervisionDetail string                       `json:"supervision_detail,omitempty"`
-	BootConfig        *daemon.DaemonBootConfig     `json:"boot_config,omitempty"`
-	ConfigMatches     string                       `json:"config_matches_running_daemon,omitempty"`
-	ConfigDetail      string                       `json:"config_detail,omitempty"`
-	BinaryStale       bool                         `json:"binary_stale"`
+	// PIDUnverifiable means pid names a live af daemon whose home could not
+	// be bound — inconclusive, NOT absent: it may be this home's daemon with
+	// an unreadable process frame (#5188).
+	PIDUnverifiable   bool                     `json:"pid_unverifiable,omitempty"`
+	ServingPID        int                      `json:"serving_pid,omitempty"`
+	AutostartUnit     bool                     `json:"autostart_unit"`
+	AutostartEnabled  string                   `json:"autostart_enabled,omitempty"`
+	AutostartActive   string                   `json:"autostart_active,omitempty"`
+	UnitPID           int                      `json:"unit_pid,omitempty"`
+	Supervised        string                   `json:"serving_daemon_supervised,omitempty"`
+	SupervisionDetail string                   `json:"supervision_detail,omitempty"`
+	BootConfig        *daemon.DaemonBootConfig `json:"boot_config,omitempty"`
+	ConfigMatches     string                   `json:"config_matches_running_daemon,omitempty"`
+	ConfigDetail      string                   `json:"config_detail,omitempty"`
+	BinaryStale       bool                     `json:"binary_stale"`
 	// ExposureWarning is non-empty when the config on disk serves the control API
 	// unauthenticated on a network address (#2090) — an ALLOWED posture since
 	// #2168 Phase 0, so this reports it rather than predicting a failure.
@@ -155,12 +160,12 @@ type daemonStatusInfo struct {
 // status still reports the control-plane facts.
 func collectDaemonStatus() daemonStatusInfo {
 	h := daemonHealthFn()
-	unitServesHome, unitInstalled := false, h.AutostartUnit
+	unitServesHome := false
 	var unitScopeErr error
 	if configDir, err := configDirFn(); err != nil {
 		unitScopeErr = fmt.Errorf("cannot resolve the config dir to scope the autostart unit: %w", err)
 	} else {
-		unitServesHome, unitInstalled, unitScopeErr = autostartUnitServesHomeFn(configDir)
+		unitServesHome, _, unitScopeErr = autostartUnitServesHomeFn(configDir)
 	}
 	var supervision daemon.SupervisionInfo
 	if unitScopeErr == nil && unitServesHome {
@@ -176,8 +181,9 @@ func collectDaemonStatus() daemonStatusInfo {
 		ControlSocketFile: h.SocketExists,
 		PID:               h.PIDFilePID,
 		PIDVerified:       h.PIDVerified,
+		PIDUnverifiable:   h.PIDUnverifiable,
 		ServingPID:        h.ServingPID,
-		AutostartUnit:     unitServesHome || (unitScopeErr != nil && unitInstalled),
+		AutostartUnit:     unitServesHome || (unitScopeErr != nil && h.AutostartUnit),
 		BootConfig:        h.BootConfig,
 		BinaryStale:       h.BinaryDeleted,
 	}
@@ -283,8 +289,11 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	}
 	if info.PID > 0 {
 		pidNote := "unverified"
-		if info.PIDVerified {
+		switch {
+		case info.PIDVerified:
 			pidNote = "verified"
+		case info.PIDUnverifiable:
+			pidNote = "live af daemon, home unproven"
 		}
 		fmt.Fprintf(w, "  pid:            %d (%s)\n", info.PID, pidNote)
 	} else {
@@ -409,19 +418,38 @@ func runDaemonRestart(w, errOut io.Writer) error {
 	// unit. A stale or foreign unit is irrelevant when there is no daemon to
 	// stop, and failing to parse/reload it must not turn an idempotent restart
 	// into an error (#2185). Undetermined deliberately falls through to the
-	// fail-closed refresh path; only a completed negative authorizes the no-op.
+	// fail-closed refresh path; only a completed negative authorizes the no-op —
+	// and the unproven-PID answer below is neither: it declines the unit
+	// mutation without claiming absence (#5188).
 	absent := false
+	unproven := false
+	var presenceCause error
 	daemonRestartPresenceFn().Match(
 		func() {},
 		func() { absent = true },
 		func() { absent = true },
-		func(error) {},
+		func(cause error) {
+			unproven = errors.Is(cause, errRestartPresenceUnproven)
+			presenceCause = cause
+		},
 	)
 	if absent {
 		if !daemonRestartQuiet {
 			fmt.Fprintln(w, "no running daemon to restart")
 		}
 		return nil
+	}
+	if unproven {
+		// daemon.pid names a live af daemon whose home cannot be verified.
+		// Restart is powerless here either way: this home's socket is dead
+		// (RequestShutdown would no-op) and the pid may belong to another
+		// home's daemon, so mutating the unit on its behalf is not
+		// authorized. This is an inconclusive refusal, not the documented
+		// no-daemon no-op — it must exit nonzero: install.sh and
+		// dev-install.sh run `af daemon restart --quiet` and emit their
+		// only restart warning on a nonzero status, so a nil return would
+		// silently leave an old (possibly foreign) daemon running.
+		return fmt.Errorf("a live af daemon exists but its home could not be verified; refusing to restart an unproven daemon — check `af daemon status`: %w", presenceCause)
 	}
 
 	execPath, err := osExecutableFn()
@@ -513,6 +541,14 @@ var (
 	daemonStatusSupervisionFn   = daemon.AutostartSupervision
 )
 
+// errRestartPresenceUnproven is the sentinel Undetermined cause
+// probeDaemonRestartPresence returns when the ONLY evidence is a pid file
+// naming a live af daemon whose home cannot be verified (#5188): the daemon
+// it names may serve another home, so it authorizes neither the "no daemon"
+// no-op nor the pre-shutdown unit refresh — runDaemonRestart matches on it
+// to report the inconclusive state and stop.
+var errRestartPresenceUnproven = errors.New("daemon.pid names a live af daemon whose home could not be verified")
+
 // probeDaemonRestartPresence gives the explicit restart command a three-value
 // read-only answer before it mutates an installed unit. A responding daemon or
 // a verified daemon PID is positive evidence. Only RequestShutdown's own
@@ -522,6 +558,33 @@ func probeDaemonRestartPresence() daemon.ProbeAnswer {
 	h := daemonHealthFn()
 	if h.PIDVerified {
 		return daemon.AnswerYes()
+	}
+	if h.PIDUnverifiable && h.PingErr != nil {
+		// A live af daemon exists but its home is unproven — possibly
+		// another home's daemon under this home's pid file. The sentinel is
+		// earned ONLY when the ping proved the socket absent — ENOENT or
+		// ECONNREFUSED, the same kernel answers RequestShutdown treats as
+		// daemon-absent, so the gate goes through ClassifyShutdownTarget
+		// rather than ClassifyPingFailure (which reads every non-timeout
+		// failure as No). A timeout, EACCES, or reset is indeterminate (a
+		// live-but-backlogged daemon fails Ping the same way — #2014/#2039),
+		// and on macOS the unreadable-environ unverifiable shape is the
+		// norm, so short-circuiting on an indeterminate ping would make an
+		// explicit `af daemon restart` silently skip a reachable daemon.
+		// Not "absent" (it may be this home's socket-lost daemon) and not
+		// "present" (unproven): carried as Undetermined with a sentinel
+		// cause so the caller can decline the unit mutation without
+		// declaring no daemon.
+		definiteAbsent := false
+		daemon.ClassifyShutdownTarget(h.PingErr).Match(
+			func() {},
+			func() { definiteAbsent = true },
+			func() { definiteAbsent = true },
+			func(error) {},
+		)
+		if definiteAbsent {
+			return daemon.Undetermined(fmt.Errorf("%w (pid %d)", errRestartPresenceUnproven, h.PIDFilePID))
+		}
 	}
 	return daemon.ClassifyShutdownTarget(h.PingErr)
 }
@@ -616,6 +679,13 @@ const (
 	// may not exist — or, read the other way, lets them wait for one that is
 	// already gone. Both remedies are wrong when the answer is "we could not tell".
 	restartPhaseShutdownUnknown
+	// restartPhaseShutdownIncomplete: the old daemon acknowledged Shutdown but
+	// had not finished tearing down when the wait's bound expired, so it is STILL
+	// ALIVE (draining, or wedged) and the respawn was withheld rather than raced
+	// against it (#5007). Distinct from restartPhaseShutdown (it did agree to
+	// stop, and normally exits on its own) and from restartPhaseRespawn (no
+	// respawn was attempted, and a daemon is still running).
+	restartPhaseShutdownIncomplete
 )
 
 // restartOutcome is the whole story of a shutdown-then-respawn: how the old
@@ -628,6 +698,10 @@ type restartOutcome struct {
 	// FailedPhase is restartPhaseNone unless the accompanying error is
 	// non-nil, and names which half of the sequence broke.
 	FailedPhase restartPhase
+	// OldPID is the stopped daemon's PID as RequestShutdown reported it, 0 when
+	// unknown. Carried so the report can name the process a user may need to
+	// inspect when its shutdown did not finish.
+	OldPID int
 }
 
 // restartDaemonFromPath keeps the (result, error) shape the auto-update path is
@@ -642,8 +716,8 @@ func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
-	result, shutdownErr := requestDaemonShutdownFn()
-	outcome := restartOutcome{Shutdown: result}
+	result, target, shutdownErr := requestDaemonShutdownFn()
+	outcome := restartOutcome{Shutdown: result, OldPID: target.PID}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
 		// refused to stop" — it is RequestShutdown saying it could not determine
@@ -659,10 +733,13 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	if result == daemon.ShutdownNoDaemon {
 		return outcome, nil
 	}
-	respawn, err := respawnDaemonFn(execPath)
+	respawn, err := respawnDaemonFn(execPath, target)
 	outcome.Respawn = respawn
 	if err != nil {
 		outcome.FailedPhase = restartPhaseRespawn
+		if errors.Is(err, daemon.ErrShutdownIncomplete) {
+			outcome.FailedPhase = restartPhaseShutdownIncomplete
+		}
 		return outcome, fmt.Errorf("failed to restart daemon: %w", err)
 	}
 	outcome.Respawned = true
@@ -755,18 +832,19 @@ func canonicalExec(p string) string {
 // The task gate belongs only on the cold-start path (ensureDaemonForTasks),
 // where nothing was running and "no enabled tasks" means there is nothing to
 // start.
-func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
-	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
-	// control socket can still answer pings here. Respawning into that window
-	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
-	// guard — mistake the dying daemon for a live one and skip the spawn,
-	// leaving no daemon at all once it exits (#854). Wait for the socket to
-	// die first; the SIGTERM fallback already waited for process exit, so the
-	// wait returns immediately on that path. On timeout, warn and respawn
-	// anyway: a spawn skipped against a wedged daemon is no worse than not
-	// trying, and the next af invocation retries.
-	if err := waitForShutdownCompletionFn(); err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
+func respawnDaemonAfterUpgrade(execPath string, target daemon.ShutdownTarget) (respawnResult, error) {
+	// The Shutdown RPC acks before the daemon tears down, so the old daemon can
+	// still be alive — and still answering pings — here. Respawning into that
+	// window makes EnsureDaemon — or the unit-restarted daemon's own startup
+	// ping guard — mistake the dying daemon for a live one and skip the spawn,
+	// leaving no daemon at all once it exits (#854, #5007). Wait for the old
+	// process to exit first (or, with no PID, for its socket to go quiet); the
+	// SIGTERM fallback already waited for process exit, so the wait returns
+	// immediately on that path. If the bound expires the old daemon is still
+	// alive, so withhold the respawn on BOTH the unit and ad-hoc paths rather
+	// than race it, and hand the caller the reason to report.
+	if err := waitForShutdownCompletionFn(target); err != nil {
+		return respawnResult{}, fmt.Errorf("the old daemon is %s (%w)", shutdownIncompleteHint(target.PID), err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()

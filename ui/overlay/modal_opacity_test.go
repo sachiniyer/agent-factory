@@ -322,11 +322,15 @@ func TestEveryModalOccludesBackgroundPane(t *testing.T) {
 	}
 }
 
-// TestPlaceOverlayLeavesBackgroundOutsideTheRectangle guards the other
-// direction: making the modal opaque must not widen it. Cells outside the
-// foreground rectangle still come from the background, and a foreground that
-// is already rectangular composes exactly as before.
-func TestPlaceOverlayLeavesBackgroundOutsideTheRectangle(t *testing.T) {
+// TestPlaceOverlayBlanksTheBackgroundBesideTheModal guards the #5297 contract,
+// the other direction from opacity: making the modal opaque must not widen it
+// into background territory either. On a row the modal occupies, every cell
+// outside its rectangle is BLANK backdrop — never a chopped slice of the
+// background's own text (the strip of pane-preview fragments the issue shows
+// bleeding past the modal's right edge, and the rail glyphs clipped mid-cell
+// at its left). Rows the modal does not touch still render the background, so
+// the frame keeps its faded context above and below.
+func TestPlaceOverlayBlanksTheBackgroundBesideTheModal(t *testing.T) {
 	fg := strings.Join([]string{"+---+", "|   |", "+---+"}, "\n")
 	bg := backgroundFrame(20, 5)
 
@@ -336,13 +340,23 @@ func TestPlaceOverlayLeavesBackgroundOutsideTheRectangle(t *testing.T) {
 	plainBg := rasterize(bg, 20)
 
 	for row := range composed {
+		onModalRow := row >= y && row < y+h
 		for col := 0; col < 20; col++ {
-			inModal := row >= y && row < y+h && col >= x && col < x+w
+			inModal := onModalRow && col >= x && col < x+w
 			if inModal {
 				continue
 			}
+			if onModalRow {
+				if composed[row][col] != blankCell {
+					t.Fatalf("a modal's row must be blank outside its rectangle — "+
+						"row %d col %d shows %q (chopped background beside the box is #5297)",
+						row, col, string(composed[row][col]))
+				}
+				continue
+			}
 			if composed[row][col] != plainBg[row][col] {
-				t.Fatalf("overlay overwrote background outside its rectangle at row %d col %d: got %q, want %q",
+				t.Fatalf("a row the modal does not touch must keep its background — "+
+					"row %d col %d: got %q, want %q",
 					row, col, string(composed[row][col]), string(plainBg[row][col]))
 			}
 		}
@@ -353,6 +367,71 @@ func TestPlaceOverlayLeavesBackgroundOutsideTheRectangle(t *testing.T) {
 		if string(composed[y+row][x:x+w]) != string(modal[row]) {
 			t.Fatalf("rectangular overlay row %d changed: got %q, want %q",
 				row, string(composed[y+row][x:x+w]), string(modal[row]))
+		}
+	}
+}
+
+// The backdrop a modal replaces can carry the closer for a style a row above
+// opened — a pane preview mid-colour-run or a hyperlink still open. Dropping
+// the row drops the reset too, and without one the style bleeds into the
+// blank margins, an unstyled modal, and every row below (Codex review on
+// #5297). The compositor must close backdrop state before the blank margin,
+// then restore whatever is still open on the first backdrop row below the
+// band — a closer on a dropped row is honoured, an unclosed span is not lost.
+func TestPlaceOverlayClosesBackdropStateOnModalRows(t *testing.T) {
+	tests := []struct {
+		name     string
+		bg       string
+		wantRow1 string
+		wantRow2 string // "{OPEN}" is the (faded) opener from row 0
+	}{
+		{
+			name:     "sgr span closed on the dropped row",
+			bg:       "\x1b[31mAAAA\nBBBB\x1b[0m\nCCCC",
+			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "CCCC",
+		},
+		{
+			// Codex's example: the span's reset sits BELOW the band, so the
+			// row under the modal is still inside it.
+			name:     "sgr span closed below the band",
+			bg:       "\x1b[31mAAAA\nBBBB\nCCCC\x1b[0m",
+			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "{OPEN}CCCC\x1b[0m",
+		},
+		{
+			name:     "sgr span never closed",
+			bg:       "\x1b[31mAAAA\nBBBB\nCCCC",
+			wantRow1: "\x1b[0mMM  ",
+			wantRow2: "{OPEN}CCCC",
+		},
+		{
+			name:     "hyperlink closed on the dropped row",
+			bg:       "\x1b]8;;https://x\x1b\\AAAA\nBBBB\x1b]8;;\x1b\\\nCCCC",
+			wantRow1: "\x1b]8;;\x1b\\MM  ",
+			wantRow2: "CCCC",
+		},
+		{
+			name:     "hyperlink never closed",
+			bg:       "\x1b]8;;https://x\x1b\\AAAA\nBBBB\nCCCC",
+			wantRow1: "\x1b]8;;\x1b\\MM  ",
+			wantRow2: "{OPEN}CCCC",
+		},
+	}
+	for _, tc := range tests {
+		out := strings.Split(PlaceOverlay(0, 1, "MM", tc.bg, false), "\n")
+		if len(out) != 3 {
+			t.Fatalf("%s: expected 3 rows, got %d: %q", tc.name, len(out), out)
+		}
+		if out[1] != tc.wantRow1 {
+			t.Fatalf("%s: modal row must open with the backdrop closer — got %q, want %q",
+				tc.name, out[1], tc.wantRow1)
+		}
+		// Row 0 is <opener>AAAA: everything before the text is the styling the
+		// backdrop stream left open, already faded to the backdrop colours.
+		opener := out[0][:strings.Index(out[0], "AAAA")]
+		if want := strings.ReplaceAll(tc.wantRow2, "{OPEN}", opener); out[2] != want {
+			t.Fatalf("%s: row below the band — got %q, want %q", tc.name, out[2], want)
 		}
 	}
 }

@@ -383,3 +383,46 @@ func TestTeardownTabs_WorktreeStateUnknown_SkipsFinalize(t *testing.T) {
 		t.Fatal("the tab's tmux ref was cleared; the retry has lost the session")
 	}
 }
+
+// TestPrepareKillTeardown_StartupUnknownKeepsWorkspace pins the #5503
+// quarantine rule: a startup-state-unknown record's persisted worktree was
+// never proven to be af's, so killing the record drops its tmux binding and
+// the row but leaves the workspace — the same keep-unknown rule that fences
+// `git branch -D` off a nil BranchCreatedByUs. An ordinary session in the
+// same shape must still take the full cleanup path.
+func TestPrepareKillTeardown_StartupUnknownKeepsWorkspace(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "wt")
+	require.NoError(t, os.Mkdir(worktree, 0o755))
+	gw, err := git.NewGitWorktreeFromStorage(
+		root, worktree, "ordinary", "af/ordinary", "", false, true,
+	)
+	require.NoError(t, err)
+
+	quarantined := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	quarantined.gitWorktree = gw
+	quarantined.startupStateUnknown = true
+
+	mode, _, err := quarantined.prepareKillTeardown(false)
+	require.NoError(t, err)
+	require.True(t, mode.keepWorkspace,
+		"an unproven workspace must be kept: kill drops the record and tmux binding only")
+
+	// stateKnown — the teardown succeeded; the workspace is deliberately
+	// left, not unresolvable, so the caller drops the record.
+	state, err := mode.handleWorktree(gw, "guarded")
+	require.NoError(t, err)
+	assert.Equal(t, stateKnown, state)
+	info, statErr := os.Stat(worktree)
+	require.NoError(t, statErr)
+	require.True(t, info.IsDir(), "the unproven worktree must survive the kill")
+
+	// An ordinary session with the same worktree shape keeps the ordinary
+	// cleanup path.
+	normal := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	normal.gitWorktree = gw
+	normalMode, _, err := normal.prepareKillTeardown(false)
+	require.NoError(t, err)
+	require.False(t, normalMode.keepWorkspace,
+		"ordinary kills must still clean the workspace")
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The counter's universe (#1892).
@@ -403,5 +404,702 @@ func TestGhostTaskRunClearsWhenTheRowLoadsAgain(t *testing.T) {
 	restarted.mu.Unlock()
 	if healed != 1 {
 		t.Fatalf("a row that loads again is counted once, not twice (ghost + instance); got %d", healed)
+	}
+}
+
+// TestSandboxLostGhostDoesNotHoldTaskRunSlot covers the sandbox-backed LiveLost
+// row on the raw-row path. The loaded-instance half already frees this slot:
+// FromInstanceData loads a non-archived sandbox session inert (started stays
+// false), so holdsTaskRunSlot defers to canAutoRestoreLostSession, which refuses
+// it (ValidateRuntimeAction(RecoverLost) rejects a !Started session).
+//
+// Ghost accounting reads storage directly because the row did not load, so it
+// must reach the same verdict on its own or the two halves disagree about the
+// same session. Disagreeing here is unrecoverable rather than merely wrong: no
+// in-memory Instance exists to run the lifecycle edge that would clear
+// TaskRunActive, so the cap stays wedged at its limit for as long as the row is
+// unloadable — every later event for that task parks forever. That is the same
+// wedged-cap failure the StartupStateUnknown, UserKilled, and RestoreGaveUp
+// guards exist to prevent, reached through a LiveLost row whose known
+// materialized form is started=false by design.
+//
+// The row reaches disk the moment a running sandbox session is observed Lost
+// (ObserveLiveness preserves TaskRunActive — its run ends on the Ready edge,
+// which the Lost edge never fires); the bug bites only when that row then fails
+// to load on the next daemon restart (a broken worktree path or an unresolvable
+// relocation-recovery record) — the same load-failure seam every guard above
+// uses. Each sandbox backend type is covered because LostSandboxRecord keys on
+// the backend being any re-provisionable sandbox runtime.
+func TestSandboxLostGhostDoesNotHoldTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := setupControlRepo(t)
+			repo, err := config.RepoFromPath(repoPath)
+			if err != nil {
+				t.Fatalf("RepoFromPath: %v", err)
+			}
+			title := "lost-" + backend + "-ghost"
+			// A sandbox-backed row persisted mid-run when its remote workspace died:
+			//   - Liveness=LiveLost, TaskRunActive=true (ObserveLiveness preserves the
+			//     marker — runEndsOnIdleEdge only fires on the Ready edge).
+			//   - No LostRestoreFailure (the retry loop never reached give-up), no
+			//     UserKilled, no StartupStateUnknown — none of the existing release
+			//     sentinels fire.
+			if err := appendInstanceData(repo.ID, session.InstanceData{
+				ID:            "lost-" + backend + "-id",
+				TaskID:        "task1",
+				Title:         title,
+				Path:          repoPath,
+				Status:        session.Lost,
+				Liveness:      session.LiveLost,
+				TaskRunActive: true,
+				BackendType:   backend,
+				Worktree: session.GitWorktreeData{
+					RepoPath:     repoPath,
+					WorktreePath: "/dev/null",
+					SessionName:  title,
+					BranchName:   "af/" + title,
+				},
+			}); err != nil {
+				t.Fatalf("append %s lost row: %v", backend, err)
+			}
+			failLoadFor(t, title)
+
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			if err := manager.RestoreInstances(); err != nil {
+				t.Fatalf("RestoreInstances: %v", err)
+			}
+			manager.mu.Lock()
+			_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+			counted := manager.countTaskRunsLocked(repo.ID, "task1")
+			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+			manager.mu.Unlock()
+			if live {
+				t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+			}
+			if rawTaskRunHoldsSlot(session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveLost,
+				BackendType:   backend,
+			}) {
+				t.Fatalf("rawTaskRunHoldsSlot still HOLDS for %s LiveLost; the fix must release a sandbox LiveLost row whose materialized form loads started=false", backend)
+			}
+			if counted != 0 {
+				t.Fatalf("%s lost ghost consumed %d task slot(s); a sandbox LiveLost row's materialized form releases (started=false), so its ghost must too", backend, counted)
+			}
+			if admitErr != nil {
+				t.Fatalf("%s lost ghost wedged the task's cap — no later event can ever land: %v", backend, admitErr)
+			}
+		})
+	}
+}
+
+// TestLocalLostGhostStillHoldsTaskRunSlot confirms the sandbox release is scoped:
+// a LOCAL-backed LiveLost row without LostRestoreFailure still holds. Its
+// materialized form loads started=true (a local session restart does not tear its
+// worktree down), so canAutoRestoreLostSession keeps retrying it and
+// holdsTaskRunSlot HOLDS. rawTaskRunHoldsSlot must agree — LostSandboxRecord is
+// false for a local backend, so the added release term is a no-op here. Without
+// this agreement the cap would UNDERCOUNT a Lost session the restore loop is
+// still actively reviving, letting a capped watcher admit a replacement that
+// blows the cap the moment a retry lands.
+func TestLocalLostGhostStillHoldsTaskRunSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	const title = "local-lost-ghost"
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:            "local-lost-id",
+		TaskID:        "task1",
+		Title:         title,
+		Path:          repoPath,
+		Status:        session.Lost,
+		Liveness:      session.LiveLost,
+		TaskRunActive: true,
+		BackendType:   "local",
+		Worktree:      session.GitWorktreeData{RepoPath: repoPath},
+	}); err != nil {
+		t.Fatalf("append local lost row: %v", err)
+	}
+	failLoadFor(t, title)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		t.Fatalf("RestoreInstances: %v", err)
+	}
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+	counted := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	manager.mu.Unlock()
+	if live {
+		t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+	}
+	if counted != 1 {
+		t.Fatalf("local lost ghost consumed %d task slot(s); a local LiveLost row whose restore loop can still revive it must hold the cap (the sandbox release must not over-release)", counted)
+	}
+	if admitErr == nil {
+		t.Fatalf("local lost ghost must still refuse admission; the restore loop can revive it, so the cap must bind")
+	}
+}
+
+// TestSandboxLostGhostWithPendingHandoffHoldsTaskRunSlot is the other half of the
+// sandbox LiveLost release: a LiveLost row whose materialized form does NOT release
+// must not be released by the raw arm either. A durable pending handoff
+// (PromptNotDelivered) reconstructs OpReplacing on load, so the loaded instance's
+// Activity is Pending and holdsTaskRunSlot HOLDS — even though the sandbox loaded
+// inert (started=false), the run is still in flight through the handoff, not
+// settled. Releasing the ghost here would let a replacement past
+// max_concurrent_runs while the original task transaction is still pending, so the
+// raw arm must mirror the live arm's Pending verdict rather than the inert-load
+// release. ClassifyActivity is the raw-record reader's activity oracle, so the raw
+// arm sees the same Pending a loaded Instance would.
+func TestSandboxLostGhostWithPendingHandoffHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := setupControlRepo(t)
+			repo, err := config.RepoFromPath(repoPath)
+			if err != nil {
+				t.Fatalf("RepoFromPath: %v", err)
+			}
+			title := "lost-" + backend + "-handoff-ghost"
+			// A sandbox-backed LiveLost row carrying a durable pending handoff whose
+			// delivery was never confirmed: FromInstanceData reconstructs OpReplacing
+			// from the mission, so the loaded form holds the slot through ActivityPending
+			// even though the sandbox loaded started=false. The raw arm must agree.
+			if err := appendInstanceData(repo.ID, session.InstanceData{
+				ID:                    "lost-" + backend + "-handoff-id",
+				TaskID:                "task1",
+				Title:                 title,
+				Path:                  repoPath,
+				Status:                session.Lost,
+				Liveness:              session.LiveLost,
+				TaskRunActive:         true,
+				BackendType:           backend,
+				PendingHandoffMission: "continue the exact inherited work",
+				HandoffDeliveryStatus: session.PromptNotDelivered,
+				Worktree: session.GitWorktreeData{
+					RepoPath:     repoPath,
+					WorktreePath: "/dev/null",
+					SessionName:  title,
+					BranchName:   "af/" + title,
+				},
+			}); err != nil {
+				t.Fatalf("append %s lost handoff row: %v", backend, err)
+			}
+			failLoadFor(t, title)
+
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			if err := manager.RestoreInstances(); err != nil {
+				t.Fatalf("RestoreInstances: %v", err)
+			}
+			manager.mu.Lock()
+			_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+			counted := manager.countTaskRunsLocked(repo.ID, "task1")
+			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+			manager.mu.Unlock()
+			if live {
+				t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+			}
+			if !rawTaskRunHoldsSlot(session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              session.LiveLost,
+				BackendType:           backend,
+				PendingHandoffMission: "continue the exact inherited work",
+				HandoffDeliveryStatus: session.PromptNotDelivered,
+			}) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s LiveLost row whose materialized form reconstructs OpReplacing and holds the slot; only terminal sandbox ghosts release", backend)
+			}
+			if counted != 1 {
+				t.Fatalf("%s lost handoff ghost consumed %d task slot(s); a pending-handoff LiveLost row's materialized form holds (ActivityPending), so its ghost must too", backend, counted)
+			}
+			if admitErr == nil {
+				t.Fatalf("%s lost handoff ghost must still refuse admission; the pending handoff keeps the run in flight", backend)
+			}
+		})
+	}
+}
+
+// TestLegacySandboxLostGhostReleasesTaskRunSlot covers a pre-#1195 sandbox row on
+// the raw-row path: a record written before the liveness field carries only the
+// legacy Status (Lost) and LivenessUnset. FromInstanceData rolls that status
+// forward to LiveLost and loads a non-archived sandbox row inert, so the live arm
+// releases its slot; the raw arm must reach the same verdict through the SAME
+// rollforward (EffectiveLiveness), not a direct data.Liveness read that misses
+// the legacy row and leaves its ghost wedging the task cap.
+func TestLegacySandboxLostGhostReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			// A pre-liveness row: Liveness is the zero value, Status is Lost. The
+			// loader rolls this forward to LiveLost; LostSandboxRecord must agree, or
+			// a materialization-failure ghost of this row would hold a slot its
+			// loaded form releases.
+			legacy := session.InstanceData{
+				TaskID:        "task1",
+				Title:         "legacy-lost-" + backend,
+				TaskRunActive: true,
+				Status:        session.Lost,
+				Liveness:      session.LivenessUnset,
+				BackendType:   backend,
+			}
+			if !session.LostSandboxRecord(legacy) {
+				t.Fatalf("LostSandboxRecord missed a legacy Status=Lost %s row (LivenessUnset); it must use the effective liveness the loader rolls forward to LiveLost", backend)
+			}
+			if rawTaskRunHoldsSlot(legacy) {
+				t.Fatalf("rawTaskRunHoldsSlot held a legacy Status=Lost %s row whose rolled-forward liveness is LiveLost; the raw arm must release the same sandbox ghost the loader loads inert", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithAmbiguousHandoffReleasesTaskRunSlot is the third leg of
+// the sandbox LiveLost handoff scoping: a LiveLost row whose PendingHandoffMission
+// carries an ambiguous delivery verdict — PromptCouldNotConfirm, or the missing
+// evidence a legacy record carries (no HandoffDeliveryStatus at all) — does NOT
+// reconstruct OpReplacing on load. FromInstanceData's fence reconstruction
+// (pendingHandoffMissionNeedsFence) admits only PromptNotDelivered and
+// PromptDelivered; an ambiguous verdict loads with InFlightOp=OpNone, so the
+// loaded sandbox LiveLost row is terminal and holdsTaskRunSlot releases.
+//
+// ClassifyActivity on the raw record returns ActivityPending for the non-empty
+// PendingHandoffMission regardless of the verdict, so without LoadedActivity the
+// raw arm would HOLD while the live arm releases — the same wedged-cap mismatch
+// the PR fixes. LoadedActivity mirrors LifecycleView.Activity() composed with
+// FromInstanceData's InFlightOp reconstruction, so the raw arm sees the terminal
+// verdict a loaded Instance would.
+func TestSandboxLostGhostWithAmbiguousHandoffReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []struct {
+		name    string
+		mission string
+		status  session.PromptDeliveryStatus
+	}{
+		{name: "missing-evidence", mission: "continue the inherited work", status: ""},
+		{name: "could-not-confirm", mission: "continue the inherited work", status: session.PromptCouldNotConfirm},
+		{name: "sent-unverified", mission: "continue the inherited work", status: session.PromptSentUnverified},
+	}
+	for _, backend := range sandboxBackends {
+		for _, tc := range cases {
+			t.Run(backend+"-"+tc.name, func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: tc.mission,
+					HandoffDeliveryStatus: tc.status,
+				}
+				if rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot held a %s LiveLost row with ambiguous handoff (%s); the loader does not reconstruct OpReplacing, so its materialized form is terminal and the raw arm must release", backend, tc.name)
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxRunningLostGhostReleasesTaskRunSlot covers a sandbox row persisted
+// LiveRunning that then ghosts (a legacy-ID persistence failure or relocation
+// metadata that prevents materialization). The stored liveness is NOT LiveLost,
+// so LostSandboxRecord alone would hold it; but FromInstanceData's non-archived
+// sandbox branch unconditionally rewrites every such row to inert LiveLost on
+// load, after which holdsTaskRunSlot releases it. The raw arm must reach the same
+// verdict through the loader's rewrite (session.LoadedActivity), not require the
+// stored liveness to be lost already, or the common pre-restart running record
+// wedges max_concurrent_runs indefinitely on the raw path.
+func TestSandboxRunningLostGhostReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveRunning,
+				BackendType:   backend,
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityTerminal {
+				t.Fatalf("LoadedActivity reported %v for a %s LiveRunning row; the loader rewrites a non-archived sandbox row to inert LiveLost, so its activity is terminal", activity, backend)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a %s LiveRunning row whose loaded form is rewritten to inert LiveLost and releases; the raw arm must release the same pre-restart running ghost the loader loads inert", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUnknownHandoffVerdictHoldsTaskRunSlot covers a sandbox
+// LiveLost row with a pending handoff whose HandoffDeliveryStatus this binary does
+// not recognize — a verdict a newer release wrote. The known ambiguous verdicts
+// release (TestSandboxLostGhostWithAmbiguousHandoffReleasesTaskRunSlot) because
+// nothing resends the mission automatically; an UNKNOWN future verdict may stand
+// for an obligation still in flight, and the pre-#5218 raw path held such a row
+// counted. LoadedActivity re-raises the mission so ClassifyActivity returns
+// pending for it, and the raw arm holds the slot rather than release a ghost
+// whose handoff verdict the older daemon cannot read.
+func TestSandboxLostGhostWithUnknownHandoffVerdictHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              session.LiveLost,
+				BackendType:           backend,
+				PendingHandoffMission: "continue the exact inherited work",
+				// A verdict no current build has a constant for.
+				HandoffDeliveryStatus: session.PromptDeliveryStatus("future-verdict"),
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s LiveLost row with an unrecognized handoff verdict; the future verdict may stand for an in-flight obligation, so it must hold conservatively", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s LiveLost row with an unrecognized handoff verdict; the older daemon cannot know whether the obligation is in flight, so the raw arm must hold the slot", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUnknownLivenessHoldsTaskRunSlot covers a sandbox row
+// whose liveness is a value this binary does not recognize (a future state a newer
+// release wrote). A non-archived sandbox row with a KNOWN liveness is rewritten to
+// inert LiveLost on load and releases (TestSandboxRunningLostGhostReleasesTaskRunSlot);
+// an UNKNOWN liveness may be active, so the rewrite is restricted to known values
+// and ClassifyActivity fails the unrecognized value closed to ActivityPending.
+// LoadedActivity must hold the slot rather than turn the future state into
+// permission to exceed the task cap.
+func TestSandboxLostGhostWithUnknownLivenessHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				// A Liveness value no current build has a constant for.
+				Liveness:    session.Liveness(99),
+				BackendType: backend,
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s row with an unrecognized liveness; the rewrite to inert LiveLost is restricted to known values, so an unknown liveness must stay pending", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s row with an unrecognized liveness; the older daemon cannot know whether the future state is active, so the raw arm must hold the slot", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithPendingAccountSwapHoldsTaskRunSlot covers the account-swap
+// half of the sandbox ghost scoping. ForStorage projects StartupStateUnknown=true
+// onto a pending-account-swap row and stores the real value inside the swap
+// record, so a raw reader that short-circuits on the projected StartupStateUnknown
+// releases the slot while the loaded form restores the fence and HOLDS (its
+// pending account swap is still in flight). The raw arm must delegate to
+// releasesLostSandboxGhost, which restores the fence through LoadedActivity,
+// instead of acting on the projected value before the restore runs.
+func TestSandboxLostGhostWithPendingAccountSwapHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			originalStartup := false
+			row := session.InstanceData{
+				TaskID:              "task1",
+				TaskRunActive:       true,
+				Liveness:            session.LiveLost,
+				BackendType:         backend,
+				StartupStateUnknown: true,
+				PendingAccountSwap:  &session.AccountSwapData{OriginalStartupStateUnknown: &originalStartup},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s LiveLost row with a pending account swap; restoring the fence must surface the pending swap the loader holds on", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s LiveLost row whose materialized form restores the account-swap fence and holds; the raw projected StartupStateUnknown must not short-circuit before LoadedActivity restores it", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithArchiveRollbackFenceHoldsTaskRunSlot covers an
+// unloadable sandbox LiveLost row that carries an archive rollback fence together
+// with a PromptNotDelivered handoff. The persisted StartupStateUnknown is the
+// projected true, not the session's real value; FromInstanceData calls
+// RestoreArchiveRollbackFence first, recovering false and reconstructing
+// OpReplacing, so the loaded form holds. LoadedActivity must mirror that restore
+// order or it would read the projected true, refuse to rebuild the fence, and
+// report terminal — releasing a ghost whose handoff is still in flight.
+func TestSandboxLostGhostWithArchiveRollbackFenceHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              session.LiveLost,
+				BackendType:           backend,
+				StartupStateUnknown:   true,
+				PendingHandoffMission: "continue the exact inherited work",
+				HandoffDeliveryStatus: session.PromptNotDelivered,
+				ArchiveReport: &git.ArchiveReport{
+					RollbackFence: &git.ArchiveRollbackFence{OriginalStartupStateUnknown: false},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s LiveLost row whose archive fence restores StartupStateUnknown=false and reconstructs OpReplacing; it must hold like the loaded form", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s LiveLost row whose archive fence restores a PromptNotDelivered handoff; LoadedActivity must restore the archive fence before classifying, or the projected StartupStateUnknown drops a ghost whose handoff is still in flight", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationRecoveryReleasesTaskRunSlot
+// covers a sandbox LiveLost row whose relocation-recovery metadata cannot be
+// decoded and that carries NO pending handoff, account swap, or in-flight op. The
+// loader itself would fail to materialize such a row, and the only durable field
+// the missing relocation original can change is StartupStateUnknown, which is
+// terminal either way for a non-archived sandbox row (true -> the startup-unknown
+// return; false -> the loader's inert LiveLost rewrite). A ghost with no field its
+// loaded form could be pending on therefore has no path to clear TaskRunActive —
+// holding it pending would wedge max_concurrent_runs forever on the very shape this
+// change exists to release — so LoadedActivity reports ActivityTerminal and the
+// raw arm releases it.
+func TestSandboxLostGhostWithUndecodableRelocationRecoveryReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveLost,
+				BackendType:   backend,
+				Worktree: session.GitWorktreeData{
+					// A non-nil recovery whose original ownership fields are missing
+					// is exactly the shape RestoreRelocationRecoveryOriginals refuses.
+					RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityTerminal {
+				t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and no pending transaction; the only field the missing original changes (StartupStateUnknown) is terminal either way for a sandbox, so holding it wedges the cap forever", activity, backend)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a %s row whose relocation recovery cannot be decoded and that carries no pending handoff, account swap, or op; the row can never materialize to clear TaskRunActive, so the raw arm must release it", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationAndPendingHandoffHoldsTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded but
+// that DOES carry a durable transaction field — a pending handoff. The missing
+// relocation original can change StartupStateUnknown, which decides whether the
+// handoff fence reconstructs OpReplacing, so the row's run may genuinely still be
+// in flight; LoadedActivity must hold it conservatively rather than guess
+// terminal and admit a replacement past the cap while the verdict is unknown.
+func TestSandboxLostGhostWithUndecodableRelocationAndPendingHandoffHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:                "task1",
+				TaskRunActive:         true,
+				Liveness:              session.LiveLost,
+				BackendType:           backend,
+				PendingHandoffMission: "continue the exact inherited work",
+				HandoffDeliveryStatus: session.PromptNotDelivered,
+				Worktree: session.GitWorktreeData{
+					RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and a pending handoff; the missing original can change whether the handoff fence reconstructs, so it must hold conservatively", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s row with a pending handoff and undecodable relocation recovery; the handoff may still be in flight, so the raw arm must hold the slot", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationAndUnknownLivenessHoldsTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded and
+// whose liveness is a value this binary does not recognize (a future state a newer
+// release wrote). The undecodable relocation cannot be read, and an unknown
+// liveness may be active, so LoadedActivity holds the slot conservatively
+// instead of releasing on the no-durable-fields terminal path.
+func TestSandboxLostGhostWithUndecodableRelocationAndUnknownLivenessHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				// A Liveness value no current build has a constant for.
+				Liveness:    session.Liveness(99),
+				BackendType: backend,
+				Worktree: session.GitWorktreeData{
+					RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityPending {
+				t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and an unrecognized liveness; an unknown liveness may be active, so it must hold conservatively", activity, backend)
+			}
+			if !rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot released a %s row with an unrecognized liveness and undecodable relocation recovery; the liveness may be active, so the raw arm must hold the slot", backend)
+			}
+		})
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationAndAmbiguousHandoffReleasesTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded and
+// that carries a known ambiguous handoff (PromptCouldNotConfirm,
+// PromptSentUnverified, or the missing evidence a legacy record carries). The
+// loader does not reconstruct OpReplacing for an ambiguous verdict, so with
+// either possible original StartupStateUnknown the loaded form is terminal (true
+// is the startup-unknown outcome; false does not rebuild the fence and the inert
+// sandbox becomes LiveLost). The row cannot materialize to clear TaskRunActive, so
+// holding it pending wedges the cap on a ghost whose handoff the daemon does not
+// automatically act on. LoadedActivity must release it, like a handoff-less
+// ghost, rather than treat every handoff as the in-flight kind.
+func TestSandboxLostGhostWithUndecodableRelocationAndAmbiguousHandoffReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []struct {
+		name   string
+		status session.PromptDeliveryStatus
+	}{
+		{name: "missing-evidence", status: ""},
+		{name: "could-not-confirm", status: session.PromptCouldNotConfirm},
+		{name: "sent-unverified", status: session.PromptSentUnverified},
+	}
+	for _, backend := range sandboxBackends {
+		for _, tc := range cases {
+			t.Run(backend+"-"+tc.name, func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: "continue the exact inherited work",
+					HandoffDeliveryStatus: tc.status,
+					Worktree: session.GitWorktreeData{
+						RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+					},
+				}
+				activity, _ := session.LoadedActivity(row)
+				if activity != session.ActivityTerminal {
+					t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and an ambiguous handoff (%s); the loader does not reconstruct OpReplacing, so the row is terminal and must release", activity, backend, tc.name)
+				}
+				if rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot held a %s row with an ambiguous handoff and undecodable relocation recovery; the row can never materialize to clear TaskRunActive and the handoff is not in flight, so the raw arm must release it", backend)
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationAndUnknownHandoffHoldsTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded and
+// whose handoff verdict this binary does not recognize. A fence-requiring handoff
+// (PromptNotDelivered/PromptDelivered) may reconstruct OpReplacing once the
+// relocation is decoded, and an unrecognized future verdict may stand for an
+// obligation still in flight, so LoadedActivity holds the slot conservatively
+// rather than release a ghost whose transaction may still be pending.
+func TestSandboxLostGhostWithUndecodableRelocationAndUnknownHandoffHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []session.PromptDeliveryStatus{
+		session.PromptNotDelivered,
+		session.PromptDelivered,
+		// A verdict no current build has a constant for.
+		session.PromptDeliveryStatus("future-verdict"),
+	}
+	for _, backend := range sandboxBackends {
+		for _, status := range cases {
+			t.Run(backend+"-"+string(status), func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: "continue the exact inherited work",
+					HandoffDeliveryStatus: status,
+					Worktree: session.GitWorktreeData{
+						RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+					},
+				}
+				activity, _ := session.LoadedActivity(row)
+				if activity != session.ActivityPending {
+					t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and a fence-requiring or unknown handoff (%s); the handoff may still be in flight, so it must hold conservatively", activity, backend, status)
+				}
+				if !rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot released a %s row with a fence-requiring or unknown handoff and undecodable relocation recovery; the handoff may still be in flight, so the raw arm must hold the slot", backend)
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxLostGhostWithUserKilledAndUndecodableRelocationReleasesTaskRunSlot
+// covers the kill tombstone (#1108) on a sandbox row whose relocation-recovery
+// metadata cannot be decoded. An undecodable relocation record with no other
+// durable field releases (TestSandboxLostGhostWithUndecodableRelocationRecoveryReleasesTaskRunSlot),
+// but a committed kill is terminal even earlier: it is a definitive terminal
+// marker the loader honors before any fence, so ClassifyActivity returns
+// terminal for UserKilled first and the sandbox arm of rawTaskRunHoldsSlot now
+// routes through LoadedActivity instead of the raw UserKilled guard. LoadedActivity
+// must honor the tombstone before the relocation-error early return — or the
+// tombstoned ghost holds the slot forever (it cannot materialize to run
+// finishUserKill and clear the stale TaskRunActive) even when its relocation
+// record happens to be decodable.
+func TestSandboxLostGhostWithUserKilledAndUndecodableRelocationReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveLost,
+				UserKilled:    true,
+				BackendType:   backend,
+				Worktree: session.GitWorktreeData{
+					// A non-nil recovery whose original ownership fields are missing
+					// is exactly the shape RestoreRelocationRecoveryOriginals refuses.
+					RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityTerminal {
+				t.Fatalf("LoadedActivity reported %v for a %s row with a committed kill and undecodable relocation recovery; UserKilled is terminal before the relocation verdict, so the tombstone must release", activity, backend)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a %s row with a committed kill and undecodable relocation recovery; the kill tombstone is terminal, so the raw arm must release it", backend)
+			}
+		})
 	}
 }
