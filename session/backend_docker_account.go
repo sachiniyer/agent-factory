@@ -870,7 +870,12 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", p.containerID, "sh", "-c", `echo "$(id -u):$(id -g)"`)
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot identify the image's default user: %s: %w", strings.TrimSpace(string(out)), err)
+		// The id probe is a read-only exec — the only data-root writes are
+		// dockerd's privileged exec bookkeeping, never an unprivileged
+		// container-side write — so the failure carries the daemon-write
+		// class, matching prepareAccountUser's stat probe and reserving
+		// dockerOpRootExec for the subsequent mkdir+chown.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %s: %w", strings.TrimSpace(string(out)), err), dockerOpDaemonWrite)
 	}
 	owner, err := parseContainerOwner(string(out))
 	if err != nil {

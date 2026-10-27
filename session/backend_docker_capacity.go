@@ -731,13 +731,14 @@ func dockerUserUnprivileged(user string) bool {
 // under — af's own managed mount destinations plus the workspace, the only
 // places a failed provisioning step was trying to write. The Bavail verdict
 // may only be borrowed when a data-root bind covers one of these (#5382
-// review). Root execs only touch the account mounts; session execs write
-// the workspace, the account dirs a mounted session owns, and /tmp for the
-// agent-server banner redirect.
+// review). Root execs touch the account mounts for an account session and the
+// non-account session home (dockerContainerHome, /root) for a non-account
+// session's mkdir+chown; session execs write the workspace, the account dirs
+// a mounted session owns, and /tmp for the agent-server banner redirect.
 func dockerOpWriteRoots(op dockerOpClass) []string {
 	switch op {
 	case dockerOpRootExec:
-		return []string{dockerAccountHome, dockerAccountRuntimeHome}
+		return []string{dockerAccountHome, dockerAccountRuntimeHome, dockerContainerHome}
 	case dockerOpSessionExec:
 		return []string{dockerWorkspaceDir, dockerAccountHome, dockerAccountRuntimeHome, "/tmp"}
 	}

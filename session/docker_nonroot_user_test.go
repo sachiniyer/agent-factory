@@ -354,3 +354,25 @@ func TestPrepareNonAccountUser_OwnerParseIsLocal(t *testing.T) {
 	assert.Equal(t, dockerOpLocal, se.op,
 		"unparseable id output is af's failure, never a filesystem verdict")
 }
+
+// TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass pins the same
+// contract as TestPrepareAccountUser_OwnerReadCarriesDaemonWriteClass: the
+// `id -u`/`id -g` probe is a read-only exec — an image missing `id` fails
+// without attempting an unprivileged write. Its only data-root writes are
+// dockerd's privileged exec bookkeeping, so the failure must carry the
+// daemon-write class and never become eligible for the Bavail window.
+func TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return nil, fmt.Errorf("exit status 127") // the image has no id
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+	p := &dockerProvisioner{containerID: "cid"}
+	err := p.prepareNonAccountUser()
+	require.Error(t, err)
+	var se *dockerStepError
+	require.True(t, errors.As(err, &se), "the owner-read failure must carry an operation class")
+	assert.Equal(t, dockerOpDaemonWrite, se.op,
+		"a failed owner READ attempted no unprivileged write — it is dockerd bookkeeping, not a session writer")
+}

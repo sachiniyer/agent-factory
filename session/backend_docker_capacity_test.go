@@ -1137,3 +1137,18 @@ func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
 	assert.False(t, errors.Is(err, syscall.ENOSPC),
 		"a read-only exec failure cannot borrow the reserved-block window: %v", err)
 }
+
+// TestDockerOpWriteRoots_IncludesNonAccountHome pins that a root exec's
+// write roots include the non-account session home (dockerContainerHome,
+// /root): prepareNonAccountUser's mkdir+chown runs as a root exec through
+// /root for a non-account session, so a /root bind backed by a probed
+// data-root filesystem can let the Bavail verdict fire for that failure.
+// The account mounts stay so the account path's root exec is still covered.
+func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
+	assert.Contains(t, dockerOpWriteRoots(dockerOpRootExec), dockerContainerHome,
+		"a non-account root exec writes the session home (/root); it must be a root-exec write root so a /root bind can borrow the Bavail window")
+	assert.Contains(t, dockerOpWriteRoots(dockerOpRootExec), dockerAccountRuntimeHome,
+		"the account runtime home stays a root-exec write root")
+	assert.Contains(t, dockerOpWriteRoots(dockerOpSessionExec), dockerWorkspaceDir,
+		"session execs still write the workspace")
+}
