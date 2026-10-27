@@ -135,6 +135,9 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		spec:    spec,
 		slug:    Slugify(spec.Title),
 		program: config.ResolveProgram(&resolved.Config, spec.Program),
+		// sandbox.binary reaches the provision_cmd path, which provisions over
+		// the sandbox transport (#5571 W2.2).
+		sandboxBinary: strings.TrimSpace(resolved.Config.SandboxBinary),
 	}
 	if hooks.UsesProvisionCmd() {
 		// The ssh-host contract (#2847): the script makes a machine and says how
@@ -393,6 +396,9 @@ type hookProvisioner struct {
 	hooks config.RemoteHooks
 	spec  ProvisionSpec
 	slug  string
+	// sandboxBinary is the operator's sandbox.binary override, forwarded to the
+	// sandboxProvisioner that provision_cmd's ssh transport builds (#5571 W2.2).
+	sandboxBinary string
 	// program is the resolved command used to select the environment allowlist
 	// and as the command handed to the remote agent-server.
 	program string

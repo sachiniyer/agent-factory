@@ -129,17 +129,6 @@ func (w *sandboxWorkspace) fetchRestoreBranch(branch string, timeout time.Durati
 	return nil
 }
 
-// copyAfBinary streams the daemon's own `af` binary (from binary) into
-// <sessionDir>/af over the shell's stdin and makes it executable.
-func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader) error {
-	dst := w.AfPath()
-	script := fmt.Sprintf("cat > %s && chmod +x %s", shellQuote(dst), shellQuote(dst))
-	if out, err := w.shell.Run(timeout, script, binary, true); err != nil {
-		return fmt.Errorf("streaming the af binary to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
@@ -175,8 +164,13 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
-		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	// Put the session dir — which holds the `af` symlink — on the
+	// agent-server's PATH so the agent pane inherits `af` through the env
+	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
+	// (#5571 W2.2, AR-02 PATH half). The VAR=val prefix sits inside the launch
+	// command, left of nohup, so the `& echo $!` tail is undisturbed.
+	launch := fmt.Sprintf("PATH=%s:\"$PATH\" nohup %s >%s 2>%s </dev/null & echo $!",
+		shellQuote(w.SessionDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and

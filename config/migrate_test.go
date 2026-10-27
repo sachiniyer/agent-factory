@@ -43,6 +43,7 @@ default_program = 'codex'
 ssh_host_key_verification = 'accept-new'
 docker_mount_agent_credentials = true
 sandbox_ssh = 'ssh sandbox-host'
+sandbox_binary = '/opt/af-custom'
 listen_addr = '0.0.0.0:8443'
 preview_listen_addr = '127.0.0.1:8444'
 require_token = true
