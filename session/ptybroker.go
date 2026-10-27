@@ -68,6 +68,12 @@ type clientlessChannel interface {
 	// artifact). HasCursor is false when the channel cannot report a position (the
 	// remote REST-preview snapshot), in which case the repaint omits cursor restore.
 	Snapshot() (PaneSnapshot, error)
+	// PaneDead reports whether the pane's terminal is gone and tmux holds it
+	// dead (remain-on-exit). pipe-pane refuses such a pane FOREVER — it can
+	// never produce another byte — so a dead pane is a terminal stream state,
+	// not a recoverable outage (#5330). A channel that cannot answer reports
+	// false and the ordinary capture/retry paths apply.
+	PaneDead() bool
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -297,8 +303,32 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// concurrent last-leaver teardown re-checking the count won't tear down the
 	// capture this subscriber needs.
 	if err := b.ensureCaptureStarted(); err != nil {
-		b.remove(sub.id)
-		return nil, err
+		// A held dead pane can never produce output again — pipe-pane refuses
+		// it — so the ordinary bring-up fails and the pane renders blank
+		// (#5330). Serve a repaint-only subscription instead: the channel's
+		// dead-pane snapshot carries the buffer's bottom-anchored tail and the
+		// "Pane is dead" marker through the same pendingRepaint a live pane's
+		// snapshot uses. The subscription then has no bytes, which is correct:
+		// a dead pane emits none.
+		if !b.ch.PaneDead() {
+			b.remove(sub.id)
+			return nil, err
+		}
+		b.mu.Lock()
+		genBefore := b.resizeGen
+		b.mu.Unlock()
+		if snap, snapErr := b.ch.Snapshot(); snapErr == nil {
+			b.adoptSnapshotSize(snap, genBefore)
+			if snapshotHasRepaintState(snap) {
+				rp := buildRepaintSnapshot(snap)
+				b.mu.Lock()
+				sub.cursor = b.headLocked()
+				sub.pendingRepaint = &rp
+				b.mu.Unlock()
+				sub.wake()
+			}
+		}
+		return sub, nil
 	}
 
 	// Re-evaluate the repaint decision after ensureCaptureStarted() unblocks.

@@ -2,9 +2,11 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -94,4 +96,94 @@ func TestJumpTabMissNoticeLifecycle(t *testing.T) {
 		require.False(t, isFailure,
 			"a jump miss is a deliberate decline, so E details titles it 'Last notice', not 'Last error'")
 	})
+}
+
+// TestJumpTabPromptReportsLiveMatch is #5587: the prompt used to hold its
+// answer until Enter, so a miss cost the whole jump — type, submit, get told
+// no, retype blind. Each keystroke must update the status line with where the
+// current query would land, through the same resolver Enter uses.
+func TestJumpTabPromptReportsLiveMatch(t *testing.T) {
+	typeKeys := func(h *home, s string) {
+		t.Helper()
+		for _, r := range s {
+			_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	statusOf := func(h *home) string {
+		t.Helper()
+		return xansi.Strip(h.promptOverlay.Render())
+	}
+
+	t.Run("shows the target as it becomes unique", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := freshLocalInstance(t, "jump-live-target")
+		inst.AddTabForTest("vscode", session.TabKindVSCode)
+		inst.AddTabForTest("vagrant", session.TabKindShell)
+		selectInstance(h, inst)
+
+		_, _ = h.showJumpTabPrompt()
+		require.NotNil(t, h.promptOverlay)
+		typeKeys(h, "v")
+		require.Contains(t, statusOf(h), "more than one match",
+			"a shared prefix must say so, not silently point at one tab")
+		typeKeys(h, "s")
+		require.Contains(t, statusOf(h), "→ VS Code (vscode)",
+			"the status must name the tab Enter would land on")
+	})
+
+	t.Run("says no match before Enter is pressed", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := freshLocalInstance(t, "jump-live-miss")
+		inst.AddTabForTest("vscode", session.TabKindVSCode)
+		selectInstance(h, inst)
+
+		_, _ = h.showJumpTabPrompt()
+		typeKeys(h, "zz")
+		require.Contains(t, statusOf(h), "no match")
+	})
+
+	t.Run("status tracks deletions too", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := freshLocalInstance(t, "jump-live-back")
+		inst.AddTabForTest("vscode", session.TabKindVSCode)
+		selectInstance(h, inst)
+
+		_, _ = h.showJumpTabPrompt()
+		typeKeys(h, "zz")
+		require.Contains(t, statusOf(h), "no match")
+		_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyBackspace})
+		_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyBackspace})
+		require.NotContains(t, statusOf(h), "no match",
+			"an empty query must clear the status, not keep a stale miss")
+	})
+
+	t.Run("an ordinal names its tab", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := freshLocalInstance(t, "jump-live-num")
+		inst.AddTabForTest("vscode", session.TabKindVSCode)
+		selectInstance(h, inst)
+
+		_, _ = h.showJumpTabPrompt()
+		typeKeys(h, "2")
+		require.Contains(t, statusOf(h), "→ VS Code (vscode)")
+	})
+}
+
+// TestJumpTabPromptSizesToContent is the geometry half of #5587: one line of
+// input must not render inside a screen of blank rows. The dialog stays a
+// handful of rows tall even on a large terminal.
+func TestJumpTabPromptSizesToContent(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "jump-size")
+	inst.AddTabForTest("vscode", session.TabKindVSCode)
+	selectInstance(h, inst)
+	resizeHome(h, 120, 40)
+
+	_, _ = h.showJumpTabPrompt()
+	require.NotNil(t, h.promptOverlay)
+	_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+
+	rows := strings.Count(strings.TrimRight(h.promptOverlay.Render(), "\n"), "\n") + 1
+	require.Less(t, rows, 15,
+		"a one-line jump prompt must hug its content, not fill a %d-row terminal", 40)
 }

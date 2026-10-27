@@ -250,7 +250,10 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	target := captureSessionActionTarget(inst, m.repoID)
 	tabID := tab.ID
 	rosterGeneration := inst.TabRosterGeneration()
-	tabLabel, _ := tree.TabLabelAt(inst, idx)
+	// Quote the tab's TEXT, not its decorated label: "› Terminal" would put
+	// the presentation glyph inside the quotation as if it were part of the
+	// name (#4630). The slot-number prefix still applies when texts collide.
+	tabLabel, _ := tree.TabTextAt(inst, idx)
 	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
 	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
 	if tab.Kind == session.TabKindWeb {
