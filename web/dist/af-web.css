@@ -2456,6 +2456,62 @@ button:disabled,
   border-radius: var(--af-radius-control);
   padding: var(--af-space-1) var(--af-space-2);
 }
+.af-config .af-config-explain-trigger {
+  align-self: flex-start;
+  appearance: none;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  line-height: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.af-config-explain-caret {
+  color: var(--af-ink-muted);
+  margin-right: var(--af-space-1);
+}
+.af-config-explain-trigger:hover .af-config-explain-caret {
+  color: var(--af-ink);
+}
+.af-config-explain {
+  grid-column: 1 / -1;
+}
+.af-config-explain-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  margin: var(--af-space-1) 0 var(--af-space-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  font-size: var(--af-type-caption);
+  font-family: var(--af-font-mono);
+  overflow-wrap: anywhere;
+}
+.af-config-explain-effective {
+  color: var(--af-ink);
+  font-weight: 600;
+}
+.af-config-explain-line {
+  color: var(--af-ink-muted);
+}
+.af-config-explain-layer {
+  color: var(--af-ink);
+}
+.af-config-explain-winner .af-config-explain-layer {
+  color: var(--af-accent);
+  font-weight: 600;
+}
+.af-config-explain-src {
+  color: var(--af-ink-muted);
+  padding-left: var(--af-space-4);
+}
+.af-config-explain-note {
+  color: var(--af-ink-muted);
+  margin-top: var(--af-space-1);
+}
 .af-accounts {
   display: flex;
   flex-direction: column;
