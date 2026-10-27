@@ -45,6 +45,8 @@
 #               classified ENOSPC is produced
 # Provenance (git SHAs + sha256sums) is recorded first so every capture can be
 # tied to exact code.
+# The mount this scenario needs; testbox.sh scenario reads this literal line.
+AF_TESTBOX_TMPFS_DEFAULT=/home/dev/wt-tmpfs:mode=1777,size=16m
 set -euo pipefail
 
 # shellcheck source=/dev/null
