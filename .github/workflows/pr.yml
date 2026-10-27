@@ -875,7 +875,7 @@ jobs:
       # must never pass for a verdict anywhere else: if the scope job said
       # "heavy" and a job still ended skipped, something upstream broke.
       - name: Heavy jobs must have run off-PR
-        if: github.event_name != 'pull_request' && (needs.test-macos.result != 'success' || needs.test-systemd.result != 'success' || needs.perf.result != 'success')
+        if: needs.web-selftest-scope.outputs.heavy == 'true' && (needs.test-macos.result != 'success' || needs.test-systemd.result != 'success' || needs.perf.result != 'success')
         run: |
           echo "::error::A heavy job did not succeed on ${{ github.event_name }} — failing Build rather than letting a skip stand in for a pass."
           echo "test-macos=${{ needs['test-macos'].result }} test-systemd=${{ needs['test-systemd'].result }} perf=${{ needs.perf.result }}"
@@ -912,13 +912,19 @@ jobs:
   gate-reconcile:
     name: ${{ inputs.probe && 'Request Auto Gate reconciliation (skipped by probe)' || 'Request Auto Gate reconciliation' }}
     needs: [build]
-    # forks and Dependabot never reach the runner: their tokens are read-only,
-    # so the dispatch would warn for nothing while delaying the workflow_run
-    # wakeup that is their only net. merge_group/workflow_dispatch carry no
-    # pull_request payload, so the clause short-circuits true there. actor is
-    # the trigger of THIS run — a maintainer pushing to a Dependabot branch
-    # gets a writable token and runs the job.
-    if: always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))
+    # AUTO_GATE_ENABLED (repository variable): 'true' turns this dispatch on;
+    # unset or anything else skips it, matching the disabled Auto Gate. It uses
+    # !cancelled() rather than always() so a superseded (cancelled) run ends at
+    # once instead of queueing this job for a runner and holding the pr-<N>
+    # concurrency group against the next push. Build keeps its own always(): that
+    # one only aggregates needs.
+    # Forks and Dependabot have read-only tokens, so the dispatch could never
+    # land: the step below returns early for them rather than the job's `if:`
+    # (keeping event checks out of the condition keeps this workflow admissible
+    # to the gate's workflow_dispatch re-raise scan). actor is the trigger of
+    # THIS run — a maintainer pushing to a Dependabot branch gets a writable
+    # token and runs the job.
+    if: ${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     # The only write permission in this workflow, and only for the dispatch
@@ -930,7 +936,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ACTOR: ${{ github.actor }}
         run: |
+          if [ "$FORK" = "true" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "::notice::Read-only token (fork or Dependabot); the workflow_run subscription remains."
+            exit 0
+          fi
           payload=$(printf \
             '{"event_type":"auto-gate-reconcile","client_payload":{"source_run_id":"%s","source_event":"%s","head_sha":"%s"}}' \
             "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$HEAD_SHA")
