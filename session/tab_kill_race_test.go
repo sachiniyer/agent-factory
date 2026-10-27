@@ -88,7 +88,7 @@ func raceMockInstance(t *testing.T, agentName string, onNewSession func()) (*Ins
 
 	repoPath := "/tmp/tab-kill-race-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -241,7 +241,7 @@ func TestAttachShellTab_KillRaceDropsProjection(t *testing.T) {
 
 	repoPath := "/tmp/tab-attach-race-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

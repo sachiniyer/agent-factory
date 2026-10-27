@@ -126,7 +126,7 @@ func startedAccountTabInstance(t *testing.T, m *Manager, repoID, repoPath, accou
 	pty := tabPtyFactory{t: t, cmdExec: mockExec}
 
 	gw, err := sessiongit.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), accountVSCodeTitle,
+		repoPath, existingWorktreeDir(t, filepath.Join(t.TempDir(), "wt")), accountVSCodeTitle,
 		accountVSCodeTitle+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)

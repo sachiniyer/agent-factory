@@ -83,7 +83,7 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 	// SSH_CONNECTION and ignore the script, so this exercises the real Run path
 	// without an sshd.
 	stubTransport := func(sshConnection string) string {
-		return "printf '%s' " + shellQuoteSandbox(sshConnection) + " #"
+		return "printf '%s' " + shellQuote(sshConnection) + " #"
 	}
 
 	t.Run("a different, reachable machine is pinned", func(t *testing.T) {

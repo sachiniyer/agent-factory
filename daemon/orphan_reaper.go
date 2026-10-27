@@ -12,6 +12,19 @@ import (
 // startup (#2194 slice 4). Package-level so tests can stub out the docker work.
 var sweepOrphanContainers = session.SweepOrphanContainers
 
+// sweepOrphanSandboxTunnels reaps ssh -L transport processes a previous daemon
+// generation for this home leaked (#5564). Package-level for the same reason.
+var sweepOrphanSandboxTunnels = session.SweepOrphanSandboxTunnels
+
+// stopSandboxTunnels stops every live sandbox tunnel this daemon spawned.
+// Registered as a RunDaemon defer at manager construction so every exit path —
+// SIGTERM, the Shutdown RPC, an early warm-up return — runs it. A session's own
+// teardown deliberately does not run on daemon exit (sessions must survive
+// restarts), so without this a clean exit would orphan every live ssh -L
+// tunnel exactly like a SIGKILL does. The session-side registry reaches
+// tunnels no instance points at yet (a provision still in flight).
+var stopSandboxTunnels = session.StopAllSandboxTunnels
+
 // configDirForReap resolves the AF home the orphan sweep scopes its container
 // query to. It must match the af.home label runContainer stamps.
 var configDirForReap = config.GetConfigDir
@@ -50,6 +63,28 @@ func sweepStartupOrphanContainers(manager *Manager) {
 	}
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, manager.dockerReapProtectedSlugs())
+}
+
+// sweepStartupOrphanSandboxTunnels runs beside sweepStartupOrphanContainers,
+// before the readiness barrier opens: restore only loads inert backends and
+// reprovision is a poll-loop activity, so no provision of THIS daemon can have
+// started a tunnel yet — every transport process provably stamped with this
+// home is a previous generation's leftover by position, not inference. Unlike
+// the container sweep it needs no skippedRepos defer: ownership here is proven
+// by the AF_SANDBOX_TUNNEL_HOME environment marker, never inferred from a
+// session view that could be incomplete.
+func sweepStartupOrphanSandboxTunnels() {
+	homeID, err := configDirForReap()
+	if err != nil {
+		log.WarningLog.Printf("orphan tunnel sweep: cannot resolve the AF home; skipping: %v", err)
+		return
+	}
+	canonical, err := canonicalDir(homeID)
+	if err != nil {
+		log.WarningLog.Printf("orphan tunnel sweep: cannot canonicalize the AF home; skipping: %v", err)
+		return
+	}
+	sweepOrphanSandboxTunnels(canonical)
 }
 
 // runDeferredOrphanSweepIfReady runs the startup orphan sweep that was deferred
@@ -165,4 +200,31 @@ func launchDeferredOrphanSweepIfReady(manager *Manager, stopCh <-chan struct{}, 
 		}
 		runDeferredOrphanSweepIfReady(manager)
 	}()
+}
+
+// dockerReapProtectedSlugs returns the af.session label slugs of every session
+// the manager knows about — live instances AND still-provisioning pending creates
+// (the #2549 window where a container exists but no Instance does yet) — so the
+// orphan-container sweep (#2194) never reaps a container whose session is alive or
+// mid-create. Titles are collected under the lock; slugging happens after so the
+// lock stays short.
+func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
+	m.mu.Lock()
+	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
+	for _, inst := range m.instances {
+		titles = append(titles, inst.Title)
+	}
+	for key, pending := range m.pendingCreates {
+		if _, settled := m.instances[key]; settled {
+			continue
+		}
+		titles = append(titles, pending.Title)
+	}
+	m.mu.Unlock()
+
+	slugs := make(map[string]bool, len(titles))
+	for _, t := range titles {
+		slugs[session.Slugify(t)] = true
+	}
+	return slugs
 }

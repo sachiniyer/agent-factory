@@ -13,7 +13,7 @@ import (
 
 func hookScopeInstanceData(t *testing.T, prefix string) InstanceData {
 	t.Helper()
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := existingDir(t, filepath.Join(t.TempDir(), "wt"))
 	require.NoError(t, os.MkdirAll(wt, 0o755))
 	return InstanceData{
 		ID:       "8f0e1d2c-4444-4000-8000-1a2b3c4d5e6f",

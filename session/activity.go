@@ -216,6 +216,10 @@ type LifecycleView struct {
 	// explicit restore remains legal and clears this when its replacement crosses
 	// the live boundary.
 	LostRestoreGaveUp bool
+	// RestoreWaitingOnEnvironment is the non-terminal counterpart: the last
+	// restore failure was environmental, so an automatic retry is still armed
+	// behind a capped backoff (#5295).
+	RestoreWaitingOnEnvironment bool
 }
 
 // LifecycleView snapshots the session's lifecycle state under ONE lock. Every
@@ -252,9 +256,10 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		// same non-reentrant lock would deadlock against a queued restore writer
 		// (#2096). Resolving it here also keeps the capability in the SAME critical
 		// section as the liveness axes, so the two can never disagree.
-		Recoverable:       i.capabilitiesLocked().Recover,
-		LostRestoreGaveUp: i.lostRestoreFailure.valid(),
-		TaskRunActive:     i.taskRunActive,
+		Recoverable:                 i.capabilitiesLocked().Recover,
+		LostRestoreGaveUp:           i.lostRestoreFailure.valid(),
+		RestoreWaitingOnEnvironment: i.lostRestoreWait.valid(),
+		TaskRunActive:               i.taskRunActive,
 	}
 }
 

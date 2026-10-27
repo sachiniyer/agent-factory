@@ -383,7 +383,11 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
-		return m, nil
+		// No restorable row resolves — a collapsed "▶ Archived" header, a
+		// section header whose bound row is live or off-screen, an empty rail.
+		// `r` still does nothing, but it is no longer silent (#5373); the
+		// folder stays folded and the cursor stays put.
+		return m, m.handleNotice(errors.New("No archived session under the cursor"))
 	}
 	// IsTearingDown BEFORE the LifecycleAction gate: a teardown-in-progress row now
 	// reports LifecycleAction()==None (#2500), so gating first would fold this
@@ -398,14 +402,17 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
-		return m, nil
+		// A row with no lifecycle verb — creating, replacing, fenced by
+		// startup-unknown, a kill tombstone — cannot take `r` (#5373: say so
+		// rather than no-op silently).
+		return m, m.handleNotice(fmt.Errorf("Session '%s' can't be restored", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
-	// does nothing (archive is on `a`).
+	// restores nothing (archive is on `a`) — and says so (#5373).
 	if lifecycleAction != session.LifecycleActionRestore {
-		return m, nil
+		return m, m.handleNotice(fmt.Errorf("Session '%s' is live — nothing to restore", selected.Title))
 	}
 	_ = selected.Transition(session.MarkRestoring())
 	return m, m.restoreInstanceCmd(target)
@@ -872,6 +879,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
+	case session.TabKindDocs:
+		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}
@@ -918,9 +927,12 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	target := captureSessionActionTarget(instance, repoID)
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
-		// misroute the full-screen stream; empty falls back to the ordinal.
+		// misroute the full-screen stream; empty falls back to the ordinal. The
+		// session axis is addressed the same way — by stable id when the record
+		// has one — so a same-title replacement between keypress and dial does
+		// not receive the user's keystrokes.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
+		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
