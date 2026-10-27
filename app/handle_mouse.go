@@ -698,6 +698,20 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.searchOverlay.SetSelectedIndex(idx)
 			return m.handleStateSearch(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// The project picker (ctrl+p, #1461) is a list that answered the keyboard
+	// and silently swallowed the mouse — the #1819 class — because, unlike every
+	// sibling picker, it is its own widget and was wired for the keyboard only.
+	// A click on a project row now selects and submits it like j/k + enter,
+	// dropping into add mode when the add row is the target, exactly as
+	// handleListKey does for the same row.
+	case stateSwitchProject:
+		if m.projectPickerOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.projectPickerOverlay.SetSelectedIndex(idx)
+			return m.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateNew:
 		// The naming form's status-bar hints (enter submit / tab change
 		// program) stay clickable; handleKeyPress routes them to the form.

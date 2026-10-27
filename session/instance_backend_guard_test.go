@@ -27,18 +27,38 @@ import (
 //     after releasing the lock.
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
+//   - resetRemoteRuntime — reads i.backend under i.mu to clear its discharged
+//     cleanup identity after a confirmed reap. The whole body runs under the
+//     i.mu.Lock it takes at the top, so the read is synchronized.
+//   - clearDischargedRuntimeCleanup — reads i.backend under i.mu to clear a
+//     confirmed reap's cleanup identity on the ArchiveSandbox known-failure
+//     branch, where the in-memory wiring is retained for the abort-to-Lost
+//     retry. The whole body runs under the i.mu.Lock it takes at the top, so
+//     the read is synchronized.
+//
+// owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
+// backend pointer its caller already read under i.mu as an argument and never
+// reads Instance.backend itself, so this scan cannot match it. That is the point
+// of the parameter: the receiver-style predecessor re-acquired i.mu.RLock from
+// inside the locked snapshot path (toInstanceDataLocked), which sync.RWMutex's
+// non-reentrancy turned into a permanent wedge. A helper that cannot reach the
+// field cannot re-enter the mutex, so a snapshot taken under the write lock can
+// no longer self-deadlock; if a future helper reintroduces a bare i.backend read
+// under the lock, this scan flags it.
 var backendReadersUnderLock = map[string]bool{
-	"currentBackend":               true,
-	"capabilitiesLocked":           true,
-	"SetBackend":                   true,
-	"bindProvisionResult":          true,
-	"retainProvisionResultCleanup": true,
-	"AgentServer":                  true,
-	"agentServerLocked":            true,
-	"reprovisionRemote":            true,
-	"toInstanceDataLocked":         true,
-	"PreviewTabSnapshotByID":       true,
-	"FromInstanceData":             true,
+	"currentBackend":                true,
+	"capabilitiesLocked":            true,
+	"SetBackend":                    true,
+	"bindProvisionResult":           true,
+	"retainProvisionResultCleanup":  true,
+	"AgentServer":                   true,
+	"agentServerLocked":             true,
+	"reprovisionRemote":             true,
+	"resetRemoteRuntime":            true,
+	"clearDischargedRuntimeCleanup": true,
+	"toInstanceDataLocked":          true,
+	"PreviewTabSnapshotByID":        true,
+	"FromInstanceData":              true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

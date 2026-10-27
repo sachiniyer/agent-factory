@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,6 +103,63 @@ func TestHandleStateNewMultiLinePasteKeepsTitleSingleLine(t *testing.T) {
 
 	assert.Equal(t, "alphabeta", instance.Title,
 		"a single pasted KeyRunes payload must not retain layout-breaking control characters")
+}
+
+// TestHandleStateNewChunkedPasteClampsTitle is #5481: a paste longer than the
+// 32-cell cap can arrive as SEVERAL KeyRunes messages (the terminal splits the
+// payload), so refusing each overflowing message still committed the chunks
+// that fit — the field ended at a silent prefix, the "cannot" notice claimed
+// refusal, and Enter created a session with a truncated name nobody saw
+// coming. The input path now clamps to the cap and says the rest was dropped,
+// so the field always holds exactly what a create will use.
+func TestHandleStateNewChunkedPasteClampsTitle(t *testing.T) {
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateNew,
+		appConfig: config.DefaultConfig(),
+		errBox:    ui.NewErrBox(),
+	}
+	h.errBox.SetSize(120, 1)
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = instance
+
+	// The same 40-character paste, delivered in two KeyRunes messages.
+	paste := "a-very-long-session-title-that-is-too-long"
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune(paste[:20])})
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune(paste[20:])})
+
+	assert.Equal(t, 32, runewidth.StringWidth(instance.Title),
+		"the field must hold the clamped title, not a silently extended one")
+	assert.Equal(t, paste[:32], instance.Title)
+	require.Contains(t, h.errBox.String(), "extra input was dropped",
+		"the notice must say truncation happened, not claim a refusal")
+}
+
+// TestHandleStateNewEnterRefusesOverlongTitle is the submit-time half of
+// #5481: whatever way the field came to hold an overlong title — a restored
+// failed-create draft predating the clamp — Enter must refuse and create
+// nothing rather than shipping a name the cap forbids.
+func TestHandleStateNewEnterRefusesOverlongTitle(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "a-very-long-session-title-that-is-too-long",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state, "naming flow must stay open for an overlong title")
+	require.NotNil(t, h.namingInstance, "the overlong title must not be submitted")
+	assert.Contains(t, h.errBox.String(), "title cannot be longer than 32 characters")
 }
 
 func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
@@ -703,7 +761,7 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 		require.Same(t, instance, findSidebarInstance(h, "retained"))
 	})
 
-	t.Run("validation refusal is a notice", func(t *testing.T) {
+	t.Run("validation notice is a notice", func(t *testing.T) {
 		h := newTestHome(t)
 		h.state = stateNew
 		h.errBox.SetSize(160, 1)
@@ -719,10 +777,13 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 
 		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-		require.Contains(t, info.String(), "title cannot be longer than 32 characters",
-			"the reason the keystroke was refused stays visible at INFO")
+		// The keystroke is dropped, not refused (#5481): the title already fills
+		// the cap, so the field keeps holding exactly what a create would use.
+		require.Equal(t, strings.Repeat("x", 32), naming.Title)
+		require.Contains(t, info.String(), "extra input was dropped",
+			"the reason the keystroke changed nothing stays visible at INFO")
 		require.Empty(t, errorLogs.String(),
-			"a designed input refusal must not be indistinguishable from an operation failure")
+			"a designed input clamp must not be indistinguishable from an operation failure")
 	})
 
 	t.Run("started placeholder is an error", func(t *testing.T) {

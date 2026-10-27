@@ -126,6 +126,13 @@ type HookRuntimeCleanupData struct {
 
 type runtimeCleanupProvider interface {
 	runtimeCleanupData() *RuntimeCleanupData
+	// clearRuntimeCleanupData drops the backend's immutable cleanup identity in
+	// place. It is called only after a confirmed reap (Instance.resetRemoteRuntime)
+	// so a later checkpoint cannot publish a teardown handle for a runtime af has
+	// already reaped, and a restart cannot rebuild one to act on a resource it no
+	// longer owns. The reaper itself is the provisioner's, not this field, so
+	// clearing it does not affect a teardown still bound to runtimeTeardown.
+	clearRuntimeCleanupData()
 }
 
 var (
@@ -174,12 +181,24 @@ func (b *dockerBackend) runtimeCleanupData() *RuntimeCleanupData {
 	return &RuntimeCleanupData{Docker: &v}
 }
 
+func (b *dockerBackend) clearRuntimeCleanupData() {
+	if b != nil {
+		b.cleanup = nil
+	}
+}
+
 func (b *sshBackend) runtimeCleanupData() *RuntimeCleanupData {
 	if b == nil || b.cleanup == nil || b.cleanup.SessionDir == "" {
 		return nil
 	}
 	v := *b.cleanup
 	return &RuntimeCleanupData{SSH: &v}
+}
+
+func (b *sshBackend) clearRuntimeCleanupData() {
+	if b != nil {
+		b.cleanup = nil
+	}
 }
 
 func (b *sandboxBackend) runtimeCleanupData() *RuntimeCleanupData {
@@ -190,6 +209,12 @@ func (b *sandboxBackend) runtimeCleanupData() *RuntimeCleanupData {
 	return &RuntimeCleanupData{Sandbox: &v}
 }
 
+func (b *sandboxBackend) clearRuntimeCleanupData() {
+	if b != nil {
+		b.cleanup = nil
+	}
+}
+
 func (b *HookBackend) runtimeCleanupData() *RuntimeCleanupData {
 	if b == nil || b.cleanup == nil || b.cleanup.DeleteCmd == "" || b.cleanup.Slug == "" {
 		return nil
@@ -198,6 +223,12 @@ func (b *HookBackend) runtimeCleanupData() *RuntimeCleanupData {
 	v.AuthSelectors = append([]string(nil), b.cleanup.AuthSelectors...)
 	v.SessionEnvPassthrough = append([]string(nil), b.cleanup.SessionEnvPassthrough...)
 	return &RuntimeCleanupData{Hook: &v}
+}
+
+func (b *HookBackend) clearRuntimeCleanupData() {
+	if b != nil {
+		b.cleanup = nil
+	}
 }
 
 // restoreRuntimeCleanup rebuilds only a teardown-capable backend. It does not

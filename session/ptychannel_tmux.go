@@ -214,7 +214,20 @@ func (c *tmuxClientlessChannel) SendRaw(b []byte) error {
 // on the right line regardless of the client's width (#1688); the 0-based cursor_y
 // then names the same row in the client that it named in the pane.
 func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	content, err := c.ts.CaptureVisiblePaneGrid()
+	// A held dead pane has no future output for the repaint to precede, but a
+	// subscriber still needs its screen (#5330): pipe-pane already refused it,
+	// and the visible grid alone is not the answer — tmux pushed content into
+	// history when it drew the "Pane is dead" marker, and on the lost-SIGCHLD
+	// shapes it never draws (#4682) the grid is simply the pre-death screen.
+	// Capture the full buffer and bottom-anchor it below.
+	dead := c.ts.PaneDead()
+	var content string
+	var err error
+	if dead {
+		content, err = c.ts.CapturePaneBuffer()
+	} else {
+		content, err = c.ts.CaptureVisiblePaneGrid()
+	}
 	if err != nil {
 		return PaneSnapshot{}, err
 	}
@@ -236,7 +249,32 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		// expose the mode formats.
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = row, col, true
 	}
+	if !dead {
+		return snap, nil
+	}
+	if !snap.HasSize {
+		// The buffer's tail can only be cut safely to a KNOWN height —
+		// buildRepaint places rows absolutely, so lines past the emulator's
+		// height collapse onto its last row. With no measured height the
+		// visible grid is the safe stand-in: it is pane-height by construction
+		// and already carries tmux's marker when tmux drew one.
+		content, err = c.ts.CaptureVisiblePaneGrid()
+		if err != nil {
+			return PaneSnapshot{}, err
+		}
+	}
+	snap.Screen = deadPaneScreen(content, int(snap.Rows))
+	// A dead pane has no live cursor to restore; leave the emulator's at the
+	// bottom the repaint ends on.
+	snap.CursorRow, snap.CursorCol, snap.HasCursor = 0, 0, false
 	return snap, nil
+}
+
+// PaneDead reports the pane's pane_dead flag: its terminal is gone, so
+// pipe-pane refuses it and the stream is terminal rather than recoverable
+// (#5330). See TmuxSession.PaneDead.
+func (c *tmuxClientlessChannel) PaneDead() bool {
+	return c.ts.PaneDead()
 }
 
 // Resize applies the winning size to the window (clientless resize-window). tmux
