@@ -39,6 +39,36 @@ func (t *TmuxSession) Program() string {
 	return t.programCmd()
 }
 
+// GeneratedArgs returns the af-authored argument words declared for this pane's
+// program (AccountLaunchProof.GeneratedArgs), recorded by SetLaunchProgram at
+// launch/restore and preserved across af's own program rewrites by
+// rewriteProgramCmdByAf. Callers that seed an account launch proof from the
+// pane's frozen program — rather than from a clean runtime/config base — pass
+// this as the trusted base args, so af's own injected words (e.g. the codex
+// startup-update-check flag) are declared instead of treated as undeclared
+// user arguments that fail the account boundary (#5433).
+func (t *TmuxSession) GeneratedArgs() []string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return append([]string(nil), t.generatedArgs...)
+}
+
+// TrustedExecutable returns the exact path af's built-in program detection
+// recorded for this pane's program (AccountLaunchProof.TrustedExecutable), or
+// empty when the launch did not record one. A pane launched from an untrusted
+// absolute override records an empty TrustedExecutable deliberately, so the
+// account boundary rejects the path-qualified executable rather than trusting
+// a name the launcher did not pick. Callers that seed an account launch proof
+// from the pane's frozen program pass this alongside GeneratedArgs so the
+// proof carries the pane's recorded executable provenance instead of inferring
+// the base's first word — the same rule a fresh launch follows
+// (internal/sessionenv/account.go:47-54).
+func (t *TmuxSession) TrustedExecutable() string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return t.trustedExecutable
+}
+
 // programCmd returns the pane's program command string under programMu.
 func (t *TmuxSession) programCmd() string {
 	t.programMu.RLock()

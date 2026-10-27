@@ -762,7 +762,21 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "cat", "/proc/self/mountinfo")
 	if err != nil {
-		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %s: %w", strings.TrimSpace(string(out)), err))
+		// Creating the exec's state is a daemon-side data-root write, so
+		// this failure can be capacity — carry a write-capable class so the
+		// provision boundary can join the fs verdict, unlike the local
+		// refusals around it. The class is the daemon's own: `cat
+		// /proc/self/mountinfo` writes nothing into the account bind; the
+		// only data-root writes are dockerd's privileged exec bookkeeping,
+		// so the reserved-block window never applies (#5382 review). It
+		// joins the findings rather than returning: the configured-boundary
+		// verdict already computed and the residue check still to run must
+		// both reach the operator — a container image without `cat` would
+		// otherwise hide a real refusal (and a root-created device node in
+		// the account dir) forever.
+		findings = append(findings, dockerStepErr(fmt.Errorf(
+			"cannot read the container's resolved mount table: %s: %w",
+			strings.TrimSpace(string(out)), err), dockerOpDaemonWrite))
 	} else if targets, perr := parseMountinfoTargets(out); perr != nil {
 		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %w", perr))
 	} else {

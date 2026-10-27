@@ -340,6 +340,10 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	g.settleAbsentIdentityUnknownStallLocked()
 	recovery := g.relocationRecovery
 	if recovery == nil {
+		// A record-free claim owns no durable fence; a failed settle of it has
+		// no pre-claim shape to restore, so clear any stale origin from a prior
+		// claim rather than leave it dangling for a later restore.
+		g.relocationRecoveryOrigin = nil
 		identity, err := boundedRelocationPathIdentity(primary)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -355,6 +359,13 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 
 	normalized := normalizeRecovery(*recovery)
 	g.relocationRecovery = &normalized
+	// Retain the pre-claim fence shape so a failed settle restores it rather
+	// than the identity the claim's retry probe may have freshly observed. The
+	// durable record is the only authority on whether the original stall was
+	// identity-unknown; the claim_stale fence a failed settle leaves behind can
+	// carry a newly resolved identity the durable record never had (#5555).
+	originSnapshot := normalized
+	g.relocationRecoveryOrigin = &originSnapshot
 	switch normalized.State {
 	case RelocationRecoveryCleanupFinalizing:
 		expected := normalized.identity()
