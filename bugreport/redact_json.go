@@ -200,6 +200,9 @@ var sensitiveJSONKeys = map[string]bool{
 	// masks — a record the typed decode rejected must not publish a value the
 	// accepted record would have hidden (#4703's account_scope parity rule).
 	"account_agent": true,
+	// proposal is a Docs tab's user-chosen proposal slug, which redactTabData
+	// blanks on the typed path.
+	"proposal": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home
