@@ -331,6 +331,110 @@ func ConversationSelectorArgs(program string) []string {
 	return nil
 }
 
+// CodexResumeSelection returns the arguments of command's resume subcommand —
+// every token from "resume" onward — so callers see the target AND its flags:
+// an explicit id, --last, or nothing (Codex's own picker), plus modifiers like
+// --all, which drops the working-directory scope --last normally applies. It
+// reports resume=false when command does not resume a Codex conversation.
+// ConversationSelectorArgs truncates to two words for refusal text; this form
+// preserves the tail because receipt routing must honor --all (#5471 review).
+func CodexResumeSelection(command string) (selector []string, resume bool) {
+	tokens, _ := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
+		return nil, false
+	}
+	idx := codexSubcommandIndex(tokens[agentIdx+1:])
+	if idx < 0 {
+		return nil, false
+	}
+	idx += agentIdx + 1
+	if idx < len(tokens) && (tokens[idx] == "exec" || tokens[idx] == "e") {
+		execIdx := codexExecSubcommandIndex(tokens[idx+1:])
+		if execIdx < 0 {
+			return nil, false
+		}
+		idx += execIdx + 1
+	}
+	if idx >= len(tokens) || tokens[idx] != "resume" {
+		return nil, false
+	}
+	return append([]string(nil), tokens[idx:]...), true
+}
+
+// CodexResumeTarget models the target of a CodexResumeSelection: the session
+// id positional, and the --last / --all modifiers that select the newest
+// rollout when no id is given. Under --last Codex's parser reinterprets the
+// positional as the initial prompt (cli/src/main.rs) — never a session id —
+// so it is consumed but never returned as id; a uuid-shaped prompt must not
+// pin a rollout (#5486 review). Flags may sit in any order, and resume
+// accepts the shared global options, so value-taking operands are consumed
+// before the first bare token is read as the id. It reports ok=false when
+// the selector carries an option af cannot model — including resume's own
+// --include-non-interactive — so the caller treats the target as unprovable
+// instead of guessing (#5471 review).
+func CodexResumeTarget(selector []string) (id string, last, all, ok bool) {
+	args := selector
+	if len(args) > 0 && args[0] == "resume" {
+		args = args[1:]
+	}
+	var positional string
+	for idx := 0; idx < len(args); idx++ {
+		tok := args[idx]
+		switch {
+		case tok == "--last":
+			last = true
+		case tok == "--all":
+			all = true
+		case codexGlobalOptionHasAttachedValue(tok):
+		case codexGlobalOptionTakesValue(tok):
+			idx++
+		case strings.HasPrefix(tok, "-"):
+			return "", false, false, false
+		case positional == "":
+			positional = tok
+		}
+	}
+	if last {
+		// `codex resume --last <X>` takes X as the initial prompt; the id
+		// shape is unreachable here.
+		positional = ""
+	}
+	return positional, last, all, true
+}
+
+// CodexResumeRunsRemote reports whether command routes Codex through a remote
+// app-server endpoint: `--remote <endpoint>` is a global option that converts
+// the launch into a remote client (cli/src/main.rs), so its resume writes its
+// rollout remotely — the local CODEX_HOME can never carry that receipt and a
+// remote resume must not resolve against the local store (#5486 review).
+// Global options are position-independent, so the scan walks every token
+// after the codex word — both the pre-subcommand region and the resume
+// selector — while consuming option values so `--remote` as a -c operand can
+// never be mistaken for the flag.
+func CodexResumeRunsRemote(command string) bool {
+	tokens, _ := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
+		return false
+	}
+	for idx := agentIdx + 1; idx < len(tokens); idx++ {
+		tok := tokens[idx]
+		switch {
+		case tok == "--":
+			// The option terminator ends flag parsing: everything after it is
+			// positional, so `-- --remote` is a prompt word, never the flag
+			// (#5486 review).
+			return false
+		case tok == "--remote" || strings.HasPrefix(tok, "--remote="):
+			return true
+		case codexGlobalOptionTakesValue(tok):
+			idx++
+		}
+	}
+	return false
+}
+
 // codexSubcommandIndex returns the first Codex subcommand or prompt token
 // after consuming the global options accepted before it. Value-taking options
 // are listed explicitly so a value named "resume" is never mistaken for the

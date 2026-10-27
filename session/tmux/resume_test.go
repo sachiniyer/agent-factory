@@ -777,3 +777,94 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		require.Equal(t, once, twice, "resumeProgram should be idempotent for %q", in)
 	}
 }
+
+// CodexResumeTarget reads the resume selector the way Codex's own parser
+// does: an explicit SESSION_ID positional pins a conversation, --last/--all
+// mark the unpinned selectors, and an option af cannot model is unprovable
+// rather than guessed (#5471 review). Under --last the positional slot is the
+// initial PROMPT (cli/src/main.rs) — never an id — so even a uuid-shaped
+// prompt must not pin a rollout (#5486 review).
+func TestCodexResumeTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector []string
+		wantID   string
+		wantLast bool
+		wantAll  bool
+		wantOK   bool
+	}{
+		{"explicit id", []string{"resume", "019f386f-7206-7fc2-803b-f7045e07a242"}, "019f386f-7206-7fc2-803b-f7045e07a242", false, false, true},
+		{"bare picker", []string{"resume"}, "", false, false, true},
+		{"last alone", []string{"resume", "--last"}, "", true, false, true},
+		{
+			"the --last positional is a prompt, never an id",
+			[]string{"resume", "--last", "fix the flaky test"}, "", true, false, true,
+		},
+		{
+			"a uuid-shaped --last prompt still is not an id",
+			[]string{"resume", "--last", "019f386f-7206-7fc2-803b-f7045e07a242"}, "", true, false, true,
+		},
+		{
+			"positional before --last is still the prompt",
+			[]string{"resume", "019f386f-7206-7fc2-803b-f7045e07a242", "--last"}, "", true, false, true,
+		},
+		{"all widens the pool", []string{"resume", "--last", "--all"}, "", true, true, true},
+		{"all before last", []string{"resume", "--all", "--last"}, "", true, true, true},
+		{
+			"an option value is not the id",
+			[]string{"resume", "-m", "gpt-5", "019f386f-7206-7fc2-803b-f7045e07a242"},
+			"019f386f-7206-7fc2-803b-f7045e07a242", false, false, true,
+		},
+		{
+			"an option value is not the prompt under --last",
+			[]string{"resume", "--last", "-m", "gpt-5"}, "", true, false, true,
+		},
+		{"attached option value", []string{"resume", "--model=gpt-5", "--last"}, "", true, false, true},
+		{
+			"an unmodelled flag is unprovable",
+			[]string{"resume", "--include-non-interactive", "--last"}, "", false, false, false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, last, all, ok := CodexResumeTarget(tc.selector)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.wantID, id)
+			require.Equal(t, tc.wantLast, last)
+			require.Equal(t, tc.wantAll, all)
+		})
+	}
+}
+
+// CodexResumeRunsRemote must catch `--remote` anywhere global options parse —
+// before the subcommand and inside the selector — because a remote resume's
+// rollout never lands in the local CODEX_HOME (#5486 review).
+func TestCodexResumeRunsRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"not codex", "claude --remote x resume --last", false},
+		{"local resume", "codex resume --last", false},
+		{"remote before resume", "codex --remote ws://host resume --last", true},
+		{"remote attached", "codex --remote=ws://host resume --last", true},
+		{"remote inside the selector", "codex resume --last --remote ws://host", true},
+		{"remote inside the selector attached", "codex resume --remote=ws://host --last", true},
+		{"remote on a bare launch", "codex --remote ws://host", true},
+		{
+			"a remote-looking -c value is not the flag",
+			"codex -c --remote resume --last", false,
+		},
+		{"the flag is caught before its value is walked", "codex --remote --last resume", true},
+		{"exec remote resume", "codex exec --remote ws://host resume --last", true},
+		{
+			"-- terminator makes --remote a prompt, not the flag",
+			"codex resume --last -- --remote", false,
+		},
+		{"remote-looking word after -- is positional", "codex -- --remote resume --last", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, CodexResumeRunsRemote(tc.command))
+		})
+	}
+}
