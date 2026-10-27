@@ -600,6 +600,7 @@ func (w *TabbedWindow) BeginScrollFill() {
 // glance.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
+	bound := false
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
@@ -607,14 +608,15 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
-		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s — cursor: %s ", inst.Title, label, w.selectionHint)
-		}
+		bound = true
 	} else {
 		text = " Select a session "
 	}
 	if w.interactive {
 		text = strings.TrimSuffix(text, " ") + " · keyboard "
+	}
+	if bound && w.selectionHint != "" {
+		text = strings.TrimSuffix(text, " ") + fmt.Sprintf(" — cursor: %s ", w.selectionHint)
 	}
 	if w.IsInScrollMode() {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in

@@ -197,6 +197,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if status == PromptNotDelivered && i.taskRunActive && i.taskRunPromptAttemptAt.IsZero() {
 		i.endTaskRunFailedLocked()
 		i.taskRunFailedStamp = true
+		i.taskRunFailurePending = true
 	}
 	i.touchLocked()
 	i.stateEpoch++
@@ -465,6 +466,15 @@ func (i *Instance) ConsumeTaskRunFailed() bool {
 	failed := i.taskRunFailedStamp
 	i.taskRunFailedStamp = false
 	return failed
+}
+
+// AckTaskRunFailureStamped clears the durable pending-failure flag once the
+// daemon has settled the owning task's status write (applied, or refused as
+// belonging to another run) so a restart does not re-drive it (#5646).
+func (i *Instance) AckTaskRunFailureStamped() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.taskRunFailurePending = false
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
