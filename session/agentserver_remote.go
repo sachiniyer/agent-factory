@@ -72,6 +72,8 @@ type remoteAgentServer struct {
 	// — each fans a single remote WS to N local subscribers. The channel behind
 	// each is a remoteClientlessChannel (the remote WS) rather than a tmux one.
 	brokers map[int]*ptyBroker
+	// relays are the open loopback port relays (W5.1); Kill closes them.
+	relays map[*trackedRelayConn]struct{}
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
 	// cannot lazily resurrect a broker (and dial a fresh WS to a torn-down sandbox
 	// that never gets closed) — the local runtime's #1632 guard, same reasoning.
@@ -291,6 +293,7 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
+	s.closeRelays()
 	// Kill the in-sandbox workspace over REST, THEN reap the sandbox itself. Both
 	// run even if the REST kill fails (the container must not leak because its
 	// agent-server was already down) — the errors are joined so a caller sees
