@@ -175,11 +175,13 @@ An **all-whitespace** `target_session` means the same thing as an empty one — 
 
 Run this from the git repository the task should work on. The add command
 returns JSON containing the task's `id` and `project_path`; check the project,
-then replace `<id>` below with that returned id (without angle brackets).
+then replace `<id>` below with that returned id — or just use the task's name
+(`"Daily triage"` here), which every id-taking verb also accepts.
 
 ```bash
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * 1-5"
 af tasks trigger <id>     # run a cron task immediately
+af tasks trigger "Daily triage"   # same thing, by name
 ```
 
 `af tasks trigger` (and the TUI `r` key) work for cron tasks only — a watch task has no event line to render its prompt with, so manual triggers are refused.
@@ -206,6 +208,10 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Prompt rendering**: an empty `prompt` delivers the raw line; otherwise `{{line}}` is substituted. An event whose rendered prompt is empty is dropped with an error log.
 - **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events, and replayed events (below) land before newer live ones.
 - **Process tree**: each script runs in its own process group. On stop the group gets SIGTERM, then SIGKILL after 5 seconds — backgrounded children do not outlive the watcher. Scripts should treat SIGTERM as "clean up and exit".
+- **Daemon death**: the script's lifetime is bound to the daemon that started it, even when the daemon dies uncleanly (SIGKILL, OOM, a crash). A small `af` process leads the script's process group and watches a pipe only the daemon holds; when the daemon is gone, that group gets the same SIGTERM, then SIGKILL after 5 seconds. A replacement armed inside that grace can briefly run beside a stale copy that is still ignoring its SIGTERM — bounded by the grace and ended by the SIGKILL — rather than waiting out the drain. That `af` process is the watch command's parent in `ps` (`af __watch-lifeline …`); it never reads or writes the script's output. This guarantee lapses while the daemon is running degraded — when its own binary cannot be resolved, when the resolved binary does not answer the lifeline protocol, or for up to a minute after a failed probe while the daemon waits to retry it. A run started in one of those windows is spawned directly and can outlive an unclean daemon death; the daemon log warns on each such degradation and notes when the lifeline re-arms.
+- **Deliberately detached processes**: anything the script moves out of its process group — `setsid` on Linux, or a program that daemonizes itself into its own session — is not part of the watch command, and the stop, reload and daemon-death kills above do not reach it. Two conditions apply:
+  - **Close the watcher's output.** A detached process must not keep the script's stdout or stderr: redirect both (`setsid cmd >/dev/null 2>&1 &`, or to a file of its own). While it holds either, the watcher keeps reading it, so stopping, reloading or editing the task — and a graceful daemon shutdown — waits until that process exits.
+  - **Under the installed systemd service, leave the scope too.** On Linux, when the daemon runs as `agent-factory-daemon.service`, each watch command runs in a transient scope bound to the service, and `setsid` changes the process group but not the scope. Stopping the service, or losing it to a crash, SIGKILL or OOM, stops the scope and everything in it; a restart (which `af upgrade` uses) currently leaves the old scope running with whatever escaped into it. Rely on neither: to outlive the daemon there, start the process in its own unit, for example `systemd-run --user --collect cmd`.
 - **Delivery failures are queued and replayed**: an event whose delivery fails — the target session unreachable, e.g. during a tmux outage — is appended to a durable per-task queue under `~/.agent-factory/events/` instead of dropped, and replayed **in emission order, before newer live events**, once deliveries succeed again (under the same configured rate window). The backlog survives daemon restarts and reloads. Semantics and bounds:
   - **At-least-once**: a daemon crash mid-replay redelivers at most one event. Prompts should tolerate a rare duplicate.
   - **Bounds**: at most 500 events / 256KB queued per task — overflow drops the *oldest* with a logged count; events older than **72h** are expired at replay time, also logged. Sources worth watching re-emit on their next poll, so scripts that poll should still track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
@@ -248,7 +254,7 @@ How it behaves:
 - **The cap counts runs, not sessions.** A run starts when an event creates its session and ends when the agent goes idle. Nothing that happens to the session afterwards — an outage, a failed archive, work you start in it yourself — puts it back under the task's cap.
 - **A run interrupted mid-flight keeps its slot** while the daemon is still trying to restore it. Freeing it sooner would let the task admit replacements and then exceed its cap once the originals came back. The restore loop retries with exponential backoff and gives up after a bounded number of failures, releasing the slot at that terminal give-up; `af sessions kill` is the manual off-ramp to free it sooner.
 - **Archiving a session releases its slot**, even mid-run: you parked it deliberately, and holding the slot until someone restored it would wedge the task.
-- **A session that fails to load still counts.** If the daemon restarts and cannot rebuild a session (its worktree vanished, say), the agent may still be running — so its run keeps its slot rather than quietly freeing one. `af sessions kill` on the broken session releases it. The log names the task and session when this happens.
+- **A session that fails to load still counts.** If the daemon restarts and cannot rebuild a session, the agent may still be running — so its run keeps its slot rather than quietly freeing one. `af sessions kill` on the broken session releases it. The log names the task and session when this happens.
 - **The cap is scoped to the task and its repo**, keyed on the task id recorded on each session it spawns — not on a session-title prefix.
 - **A parked task is healthy**, not failing: it logs quietly and never raises the delivery-failure alarm.
 
@@ -384,7 +390,7 @@ Those times come from the audit trail below, so they are bounded too: a restart 
 
 A record with **none** of those — no last run, no creation time, no trail — is reported as `unassessable` rather than healthy. Every create is stamped, so only a hand-edited row can get there, but "on schedule" would be a clean bill for a task that may never have fired. The same verdict covers a reference the schedule cannot be evaluated against, which a long-gap expression reaches (see below). `af doctor` treats both as unknowns: named in the row, never an alarm, and the rail marks the row `[?]`.
 
-A task **the scheduler cannot fire** is reported in its own right, as `unschedulable`. That covers three shapes, classified once in `task.UnschedulableReason` so every surface words the same verdict: a record enabled with **no trigger at all**, an expression that **does not parse**, and one that parses but **matches no date** within the scheduler's five-year search horizon — `0 0 31 2 *` is February 31st, which it happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `[!]` (its detail reads `No upcoming run`, or `Invalid cron expression` when it does not parse), and `af tasks show` and the `af doctor` row say so instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
+A task **the scheduler cannot fire** is reported in its own right, as `unschedulable`. That covers three shapes, classified once in `task.UnschedulableReason` so every surface words the same verdict: a record enabled with **no trigger at all**, an expression that **does not parse**, and one that parses but **matches no date** within the scheduler's five-year search horizon — `0 0 31 2 *` is February 31st, which it happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `[!]` (its detail reads `No upcoming run`, or `Invalid cron expression` when it does not parse, where the verdict fits the column), and `af tasks show` and the `af doctor` row say so instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
 
 The verdict is deliberately a claim about the **scheduler**, not about the calendar: the scheduler is what will or will not run the task, and it consults the same horizon. `0 0 29 2 *` asked in 2096 finds no match before 2104 — 2100 is not a leap year — so the daemon will not fire it during that window even though the calendar eventually would. "Cannot be scheduled" is true and actionable in both cases; "can never fire" would be false in the second.
 
@@ -397,14 +403,14 @@ Watch tasks are never overdue: they fire when their command emits a line, which 
 **Every mutation leaves a line.** `audit` records who created, updated, enabled, or disabled the task, when, and which fields moved, bounded to the last 20 entries. The store writes it inside the same locked operation that commits the change, diffed against the record actually replaced, so it cannot describe a change that did not happen.
 
 ```bash
-af tasks show <id>              # trigger, arming, next run, overdue verdict, audit trail
+af tasks show <id-or-name>      # trigger, arming, next run, overdue verdict, audit trail
 af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error}: use .data[]
 af doctor                       # WARN row naming overdue and unarmed tasks
 ```
 
 `af doctor` raises one row under **Automations**: `N enabled tasks have not fired on schedule; oldest missed <time> — <id> "<name>" (missed N)`, plus any task that is enabled but not armed, plus any whose expression the scheduler cannot fire. It exits non-zero on those, so a health probe on a box nobody watches catches a task that quietly stopped. Tasks whose health could not be established are named in the row but never raise an alarm, and only cron tasks are counted as "firing on schedule" — a watch task has no schedule, so an armed watcher proves its process is supervised and nothing more.
 
-In the TUI, an automation that has stopped firing — or whose expression the scheduler cannot fire — carries a static `[!]` in place of its enabled tick, and its expanded row leads with the reason (`overdue · missed N`, or `Invalid cron expression`). One whose health could not be established carries `[?]` and reads `Health unknown`: an unknown is not a failure, so it is marked but never counted as one.
+In the TUI, an automation that has stopped firing — or whose expression the scheduler cannot fire — carries a static `[!]` in place of its enabled tick, and its expanded row leads with the reason (`overdue · missed N`, or `Invalid cron expression`) where the reason fits the column. One whose health could not be established carries `[?]` and reads `Health unknown`: an unknown is not a failure, so it is marked but never counted as one.
 
 ## Daemon lifecycle
 
@@ -434,15 +440,17 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
-af tasks get <id>
-af tasks show <id>             # human-readable: schedule health and audit trail
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
-af tasks restart <id>          # enabled watch tasks only; reloads an edited script
-af tasks trigger <id>          # cron tasks only
-af tasks remove <id>
+af tasks get <id-or-name>
+af tasks show <id-or-name>     # human-readable: schedule health and audit trail
+af tasks update <id-or-name> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks restart <id-or-name>  # enabled watch tasks only; reloads an edited script
+af tasks trigger <id-or-name>  # cron tasks only
+af tasks remove <id-or-name>
 ```
 
-Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
+`<id-or-name>` accepts a task's id or its exact name. An id match always wins — a name that collides with another task's id still resolves to the id — while a name resolves only when exactly one task in scope carries it: several in-scope matches are refused with their ids listed, so a shared name can never act on a task at random.
+
+Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id or name belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
 
 On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--on-complete keep` explicitly reverts to leaving sessions in place; omitting the flag leaves the current policy untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 

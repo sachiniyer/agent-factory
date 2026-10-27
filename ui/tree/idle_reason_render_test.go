@@ -151,6 +151,31 @@ func TestInstanceRendererRestoreFailureDetailLeadsBranch(t *testing.T) {
 		"at this width the branch is what the marker drops")
 }
 
+// TestInstanceRendererRestoreWaitDetailLeadsBranch: an environmental-wait row
+// exists to report that af is still retrying on the environment, so its detail
+// leads like the gave-up one — trailed behind the branch it could never fit at
+// real rail widths (#5295 play-test: the Lost row rendered `dev/wait-row` alone
+// while the wait was armed, indistinguishable from a session af had stopped on).
+func TestInstanceRendererRestoreWaitDetailLeadsBranch(t *testing.T) {
+	t.Parallel()
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.Branch = "feature"
+	inst.SetStatusForTest(session.Lost)
+	require.True(t, inst.SetLostRestoreWait(3, errors.New("no space left on device")))
+
+	r := NewInstanceRenderer()
+	r.SetWidth(30)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, "restore is waiting",
+		"the wait detail survives truncation while the branch elides")
+	assert.NotContains(t, out, "feature",
+		"at this width the branch is what the marker drops")
+}
+
 // TestInstanceRendererWideSidebarKeepsBranchWithPaneChurn pins the wide-terminal
 // half of #4174: at 200 columns the sidebar is 36 cells, and the old
 // detail-first row `⎇-pane changed · 2m ago · dev…` still cut the branch. With

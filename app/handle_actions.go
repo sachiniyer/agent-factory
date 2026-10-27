@@ -157,12 +157,14 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	}
 }
 
-// handleKill handles the kill/delete session action. The confirmation only
+// handleKill handles the kill/delete session action against the sidebar's
+// row-verb target — the cursor's row, or the ▾-marked resting row while the
+// cursor rests on its section header (#4755). The confirmation only
 // flips the row to Deleting; the slow teardown (remote delete_cmd over ssh,
 // tmux kill, worktree removal) runs in killInstanceCmd's background goroutine
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
 		return m, nil
 	}
@@ -200,75 +202,31 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return nil
 	}
 
-	// Assess what killing this session would destroy. Two independent losses,
-	// each with its own copy: a dirty worktree (uncommitted changes, #815) and
-	// local-only commits (committed-but-unmerged-and-unpushed work, #2022). The
-	// second is unrecoverable — kill force-deletes the branch with `git branch
-	// -D` — so it escalates the confirmation to the critical-content guarantee
-	// (#1973) AND a distinct confirm key, exactly as the reserved-root kill
-	// (#1238) does. A session can be both dirty and carry unmerged commits, so
-	// the warnings accumulate rather than replace one another. Both checks skip
-	// for backends without a local worktree (e.g. remote hook sessions).
+	// Kill force-removes the worktree and may force-delete the branch, so the
+	// confirmation names what that destroys (killLossAssessment). The git reads
+	// behind it take tens of ms and up to ~30s when git is wedged, so they never
+	// run here, on the event loop (#4848): the dialog opens at once with a static
+	// pending note and its confirm withheld, and killLossCheckedMsg completes it.
+	// Both checks skip for backends without a local worktree (e.g. remote hook
+	// sessions), which get their final dialog straight away.
+	reserved := session.IsReservedTitle(selectedTitle)
 	var cleanupImpact *session.WorktreeCleanupImpact
-	var warnings []string
-	severeLine := ""
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
-		// Both loss checks run under the SAME worktree-path gate so they cover the
-		// same session states. GetWorktreeCleanupImpact is intentionally not
+		// GetWorktreeCleanupImpact is an in-memory snapshot, intentionally not
 		// gated on started (unlike GetGitWorktree), so a session that HAS a
-		// worktree but was never started — e.g. a restore-failed session — still gets
-		// the unmerged-work warning the old GetGitWorktree gate skipped for it
-		// (#2029). The cleanup-impact snapshot is the authority for ownership:
-		// external worktrees survive kill, and a reused user branch survives even
-		// when its linked worktree does not.
+		// worktree but was never started — e.g. a restore-failed session — still
+		// gets the unmerged-work warning (#2029). It is the authority for
+		// ownership: external worktrees survive kill, and a reused user branch
+		// survives even when its linked worktree does not.
 		impact, hasWorktree := selected.GetWorktreeCleanupImpact()
 		if hasWorktree {
 			cleanupImpact = &impact
 		}
 		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
-			wt := impact.Path
-			if w := killConfirmationWarning(wt); w != "" {
-				warnings = append(warnings, w)
-			}
-			if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, impact.DeleteBranch); line != "" {
-				if severe {
-					severeLine = line
-				} else {
-					// Fail-closed (unverifiable): warn, but do not force the extra
-					// keystroke — we have not established that work is being lost.
-					warnings = append(warnings, line)
-				}
-			}
+			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, killAction)
 		}
 	}
-
-	reserved := session.IsReservedTitle(selectedTitle)
-
-	if severeLine != "" {
-		// The severe consequence and any dirty-worktree warning are the critical
-		// content the user is consenting to; they must render in full or the
-		// overlay refuses the confirm (#1973). Only the recovery hint — genuine
-		// elaboration — goes in the clippable detail.
-		critical := killConfirmMessage(selectedTitle, joinWarnings(append([]string{severeLine}, warnings...)), reserved, cleanupImpact)
-		archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
-		detail := fmt.Sprintf("Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.", archiveKey)
-		cmd := m.confirmActionWithDetail(critical, detail, killAction)
-		if m.confirmationOverlay != nil {
-			m.confirmationOverlay.SetConfirmKey(unmergedKillConfirmKey)
-		}
-		return m, cmd
-	}
-
-	message := killConfirmMessage(selectedTitle, joinWarnings(warnings), reserved, cleanupImpact)
-	cmd := m.confirmAction(message, killAction)
-	if reserved && m.confirmationOverlay != nil {
-		// Break the muscle-memory D+y reflex on the daemon-managed singleton
-		// (#1238): a distinct confirm key means a reflexive 'y' — the ordinary
-		// kill confirmation — is ignored, so the user has to read the warning
-		// and press the named key before root is torn down.
-		m.confirmationOverlay.SetConfirmKey(rootKillConfirmKey)
-	}
-	return m, cmd
+	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, killLossAssessment{}, killAction)
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
@@ -387,14 +345,33 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		if inst == nil {
 			return nil
 		}
-		_ = inst.Transition(session.BeginArchive())
+		// BeginArchive is non-total (s.op == OpNone && s.liveness != LiveArchived),
+		// so a background snapshot settling the row to LiveArchived while this
+		// overlay is open refuses here. The row is already where the user asked it
+		// to go — the row's own press-time gate (lifecycleAction != Archive ⇒
+		// no-op) reaches the same answer for an Archived row — so a refused
+		// transition on LiveArchived is a silent no-op: suppress the redundant
+		// archive RPC the daemon would reject with ErrAlreadyArchived (the
+		// contradictory "Cannot archive session … already archived" recovery
+		// modal). The busy-op refusal (OpRestoring/OpKilling/OpRespawning from
+		// another client) still falls through and lets the daemon authoritatively
+		// refuse with its "busy; try again" modal — that feedback is accurate, not
+		// contradictory, so its UX is preserved unchanged.
+		if err := inst.Transition(session.BeginArchive()); err != nil {
+			if inst.GetLiveness() == session.LiveArchived {
+				return nil
+			}
+		}
 		return startArchiveMsg{target: target}
 	})
 }
 
 // handleRestore is the restore verb (`r`, #1605): on an Archived/Lost/Dead row it
-// restores the session (non-destructive — no confirm). On a live row there is
-// nothing to restore, so `r` is a no-op — archive stays on `a` (handleArchive).
+// restores the session (non-destructive — no confirm). The target is the
+// sidebar's row-verb target — the cursor's row, or the ▾-marked resting row
+// while the cursor rests on the expanded Archived header (#4755). On a live
+// row there is nothing to restore, so `r` is a no-op — archive stays on `a`
+// (handleArchive).
 //
 // No confirmation: restore only moves the worktree back and re-spawns the agent.
 // Raise the optimistic OpRestoring op (mirroring how archive raises OpArchiving):
@@ -404,9 +381,13 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 // rebuild/re-Start (#1203). The reconcile rebuild clears the op by replacing the
 // row; a restore failure clears it in handleInstanceRestored.
 func (m *home) handleRestore() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
-		return m, nil
+		// No restorable row resolves — a collapsed "▶ Archived" header, a
+		// section header whose bound row is live or off-screen, an empty rail.
+		// `r` still does nothing, but it is no longer silent (#5373); the
+		// folder stays folded and the cursor stays put.
+		return m, m.handleNotice(errors.New("No archived session under the cursor"))
 	}
 	// IsTearingDown BEFORE the LifecycleAction gate: a teardown-in-progress row now
 	// reports LifecycleAction()==None (#2500), so gating first would fold this
@@ -421,14 +402,17 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
-		return m, nil
+		// A row with no lifecycle verb — creating, replacing, fenced by
+		// startup-unknown, a kill tombstone — cannot take `r` (#5373: say so
+		// rather than no-op silently).
+		return m, m.handleNotice(fmt.Errorf("Session '%s' can't be restored", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
-	// does nothing (archive is on `a`).
+	// restores nothing (archive is on `a`) — and says so (#5373).
 	if lifecycleAction != session.LifecycleActionRestore {
-		return m, nil
+		return m, m.handleNotice(fmt.Errorf("Session '%s' is live — nothing to restore", selected.Title))
 	}
 	_ = selected.Transition(session.MarkRestoring())
 	return m, m.restoreInstanceCmd(target)
@@ -516,7 +500,7 @@ type limitRetriedMsg struct {
 // daemon RPC may re-spawn and delivers a prompt, so it runs off the event loop
 // like the kill/archive commands rather than freezing the TUI.
 func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
 		return m, nil
 	}
@@ -895,6 +879,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
+	case session.TabKindDocs:
+		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}
@@ -941,9 +927,12 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	target := captureSessionActionTarget(instance, repoID)
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
-		// misroute the full-screen stream; empty falls back to the ordinal.
+		// misroute the full-screen stream; empty falls back to the ordinal. The
+		// session axis is addressed the same way — by stable id when the record
+		// has one — so a same-title replacement between keypress and dial does
+		// not receive the user's keystrokes.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
+		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

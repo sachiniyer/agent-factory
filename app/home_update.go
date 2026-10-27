@@ -218,6 +218,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case killLossCheckedMsg:
+		// The kill confirmation's git checks finished off the event loop (#4848);
+		// complete the dialog they were started for, if it is still open.
+		return m.handleKillLossChecked(msg)
 	case daemonRestartRequestedMsg:
 		// The restart confirm was accepted; run it off the event loop (it stops a
 		// daemon and respawns one), mirroring the kill/archive async dispatch.
@@ -342,6 +346,15 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
+	case remoteDefaultMsg:
+		// A remote target's form opened with the LOCAL default as a guess; this
+		// reply carries the daemon's resolved default_program for the project
+		// (#4889 review), so the field can show the program the implicit create
+		// will actually run.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -378,10 +391,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectionChanged())
 			}
 
+			var restoreCmd tea.Cmd
 			if msg.draft != nil {
 				m.failedCreate = &msg
 				if userStillWatching {
-					m.restoreFailedCreate()
+					_, restoreCmd = m.restoreFailedCreate()
 				}
 			}
 			detail := "Your input is retained. " + msg.err.Error()
@@ -390,7 +404,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				detail += " The next create in this project reopens the failed draft."
 				action = "Press any key to continue."
 			}
-			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged())
+			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance

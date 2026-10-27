@@ -77,7 +77,10 @@ const shadowedTailOperandLimit = 64
 //
 // Each suffix judgment re-walks the rest of the tail, so the scan is quadratic
 // in its length — 8000 literal PIDs took 8s against 6ms on master — and a tail
-// past shadowedTailOperandLimit fails closed instead.
+// past shadowedTailOperandLimit fails closed instead. That bound is a property
+// of CHILDLESS tails: PIDs and permuted operands are meaningless past a handful
+// of words, so length there is a reasonable fail-closed signal. A wrapper's
+// returned child tail uses shadowedChildTailMutates instead, which drops it.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
@@ -351,6 +354,17 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		switch {
 		case option == "--":
+			// `--` ends option parsing, so the real binary's child is exactly
+			// words[1:]. The basename match cannot prove this IS real util-linux,
+			// so a shadowed `./ionice` with `shift N; exec "$@"` can discard the
+			// `--` and any prefix of the child and exec any literal suffix of it.
+			// Every suffix is judged; because these words ARE the real child's
+			// argv, the child-tail scan drops the childless PID bound — their
+			// length is not a mutation (the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case utilLinuxTerminalOption(option, "tpPu"):
 			// --help/--version exit before reaching a child on the real
@@ -405,6 +419,24 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
 		default:
+			// The child head word: option parsing has ended, so the real binary
+			// runs words as COMMAND + args. The basename match cannot prove this
+			// IS real util-linux, and a shadowed `./ionice` with
+			// `shift N; exec "$@"` can discard any prefix of the child and exec
+			// any literal suffix of it. The head itself is judged by the outer
+			// unwrapAccountCommand loop that re-enters on this return; the tail
+			// after the head is judged here, every suffix. Because this tail is
+			// the real child's argv, it uses the child-tail scan that drops the
+			// childless PID bound (a command may take any number of operands, so
+			// length is not a mutation) — the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails.
+			// This covers the non-terminal option branches (-t/--ignore, -c/-n/
+			// --class/--classdata value, and the attached -c/-n forms) whose loops
+			// land here once the real child is reached, while staying clear of
+			// their future option words (#4460/#4532 dynamic `-c"$CLASS"`).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words, false)
 		}
 	}
@@ -555,63 +587,6 @@ func ioniceProcessOnlyOption(option string) bool {
 	return false
 }
 
-// unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
-// first OPERAND is the affinity mask (or, after -c, the cpu list), and the
-// command it runs begins only after it.
-func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
-	run := memo.optionRun("taskset")
-	for len(words) > 0 {
-		if cached, seen := run.visit(words, nil); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		option, literal := literalShellWord(words[0])
-		if !literal {
-			// taskset's selector behaves as ionice's does: -p switches it to
-			// operating on an existing PID, so no expansion of an attached quoted
-			// value launches a child. Measured on util-linux 2.39.3, `taskset
-			// -p"$P" /bin/echo X` reports `invalid PID argument` for an empty and a
-			// valid $P alike, and `--pid="$P"` is rejected outright with `option
-			// '--pid' doesn't allow an argument` — every spelling exits childless,
-			// so the name is matched with any attached value cut away.
-			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
-			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
-				if shadowedOperandTailMutates(words[1:], names, memo) {
-					return run.done(nil, true)
-				}
-				return run.done(words[1:], false)
-			}
-			return run.done(nil, true)
-		}
-		switch {
-		case option == "--":
-			return run.done(tasksetCommandAfterMask(words[1:], names, memo))
-		case utilLinuxTerminalOption(option, "acp"):
-			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return run.done(nil, true)
-			}
-			return run.done(words[1:], false)
-		case tasksetProcessOnlyOption(option):
-			// -p switches taskset from command execution to inspecting or
-			// updating an existing PID, so no child environment exists to
-			// mutate on the real binary. The operand tail is still inspected:
-			// the basename match cannot distinguish taskset from a
-			// PATH-shadowed script that execs whatever follows the selector.
-			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return run.done(nil, true)
-			}
-			return run.done(words[1:], false)
-		case option == "-a" || option == "--all-tasks" ||
-			option == "-c" || option == "--cpu-list":
-			words = words[1:]
-		case strings.HasPrefix(option, "-"):
-			return run.done(nil, true)
-		default:
-			return run.done(tasksetCommandAfterMask(words, names, memo))
-		}
-	}
-	return run.done(nil, false)
-}
-
 func utilLinuxTerminalOption(option, argumentFreeShortFlags string) bool {
 	if len(option) > 2 && strings.HasPrefix(option, "--") {
 		return strings.HasPrefix("--help", option) || strings.HasPrefix("--version", option)
@@ -631,235 +606,6 @@ func utilLinuxTerminalOption(option, argumentFreeShortFlags string) bool {
 		}
 	}
 	return false
-}
-
-func tasksetProcessOnlyOption(option string) bool {
-	// util-linux uses getopt_long, so every nonempty prefix of --pid is the
-	// same process-only mode while that prefix is unambiguous. Accepting a
-	// prefix unsupported by the installed taskset is harmless: taskset exits
-	// before it could launch a child.
-	if len(option) > 2 && strings.HasPrefix("--pid", option) {
-		return true
-	}
-	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
-		return false
-	}
-	for _, flag := range option[1:] {
-		if flag == 'p' {
-			return true
-		}
-		if flag != 'a' && flag != 'c' {
-			return false
-		}
-	}
-	return false
-}
-
-func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
-	if len(words) == 0 {
-		return nil, false
-	}
-	// Same rule as ionice's class value, and for the same reason: the mask (or
-	// cpu list) names CPUs, so only its ONE-WORD-ness matters, not its content.
-	// Measured on util-linux 2.39.3, an empty or unparseable mask exits with
-	// "failed to parse CPU mask"/"CPU list" before exec, and a valid one runs the
-	// child — which the walk then inspects either way.
-	if _, literal := literalShellWord(words[0]); !literal &&
-		!isSimpleQuotedParameterWord(words[0]) {
-		return nil, true
-	}
-	// The mask word stays a candidate like any other consumed operand: a
-	// shadowed taskset need not skip it, so the mask-onward tail is judged as
-	// a command before the real binary's child is returned.
-	if wrapperOperandTailMutates(words, names, memo) {
-		return nil, true
-	}
-	return words[1:], false
-}
-
-// unwrapXargs removes a GNU `xargs` prefix so the command it execs is what
-// gets inspected. Unlike the other modeled wrappers, xargs splices content
-// this walk cannot see into the child's argv: input items are appended after
-// the initial arguments, and -I/-i/--replace substitutes every marker
-// occurrence with an input line. An env invocation whose operand region can
-// receive either is unprovable, because env re-parses the substituted word —
-// an item spelling NAME=value becomes an assignment even when the marker sat
-// in env's command slot.
-func unwrapXargs(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
-	run := memo.optionRun("xargs")
-	substituting := false
-	markerKnown := true
-	marker := "{}"
-	// substituting/markerKnown/marker keep the walk's long-standing reading,
-	// which the env operand scan below relies on. The real binaries differ,
-	// tracked separately so the xargs input checks follow them while every
-	// existing refusal stands (#4977). A bare -i/--replace means the marker {}.
-	// And GNU xargs 4.9 makes -I, -L/-l and -n mutually exclusive with the
-	// last one winning ("ignoring previous --replace value"), except -n1,
-	// while BSD xargs (macOS) keeps -I in force alongside them. So a later
-	// -L/-l/-n sets replaceCancelled, meaning input may be appended, and both
-	// readings are judged.
-	replaceCancelled := false
-	replaceMarker := "{}"
-options:
-	for len(words) > 0 {
-		state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker,
-			replaceCancelled: replaceCancelled, replaceMarker: replaceMarker}
-		if cached, seen := run.visit(words, state); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		option, literal := literalShellWord(words[0])
-		if !literal {
-			return run.done(nil, true)
-		}
-		switch {
-		case option == "--":
-			words = words[1:]
-			break options
-		case !strings.HasPrefix(option, "-") || option == "-":
-			break options
-		case strings.HasPrefix(option, "--"):
-			name, value, attached := strings.Cut(option[2:], "=")
-			switch name {
-			case "help", "version":
-				if shadowedOperandTailMutates(words[1:], names, memo) {
-					return run.done(nil, true)
-				}
-				return run.done(words[1:], false)
-			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
-				if attached {
-					return run.done(nil, true)
-				}
-				words = words[1:]
-			case "eof", "max-lines":
-				// Optional-argument long options take a value only via =.
-				if name == "max-lines" {
-					replaceCancelled = true
-				}
-				words = words[1:]
-			case "replace":
-				substituting = true
-				replaceCancelled, replaceMarker = false, "{}"
-				if attached {
-					marker, replaceMarker = value, value
-				}
-				words = words[1:]
-			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
-				arg := value
-				if !attached {
-					if len(words) < 2 {
-						return run.done(nil, true)
-					}
-					// The argument value itself is inert to this analysis on
-					// the real binary, but a shadowed xargs may exec it.
-					if wrapperOperandTailMutates(words[1:], names, memo) {
-						return run.done(nil, true)
-					}
-					arg, _ = literalShellWord(words[1])
-					words = words[1:]
-				}
-				if name == "max-args" && xargsCountCancelsReplace(arg) {
-					replaceCancelled = true
-				}
-				words = words[1:]
-			case "process-slot-var":
-				var arg string
-				var argLiteral bool
-				if attached {
-					arg, argLiteral = value, true
-				} else {
-					if len(words) < 2 {
-						return run.done(nil, true)
-					}
-					arg, argLiteral = literalShellWord(words[1])
-					if wrapperOperandTailMutates(words[1:], names, memo) {
-						return run.done(nil, true)
-					}
-					words = words[1:]
-				}
-				if !argLiteral || accountEnvironmentOperandDenied(arg, names) {
-					return run.done(nil, true)
-				}
-				words = words[1:]
-			default:
-				return run.done(nil, true)
-			}
-		default:
-			flags := option[1:]
-			for idx := 0; idx < len(flags); idx++ {
-				switch flags[idx] {
-				case '0', 'o', 'p', 'r', 't', 'x':
-				case 'e', 'l':
-					// -e/-l take an optional attached argument; whatever
-					// remains in this word is the value.
-					if flags[idx] == 'l' {
-						replaceCancelled = true
-					}
-					idx = len(flags)
-				case 'i':
-					substituting = true
-					replaceCancelled, replaceMarker = false, "{}"
-					if idx+1 < len(flags) {
-						marker, replaceMarker = flags[idx+1:], flags[idx+1:]
-					}
-					idx = len(flags)
-				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
-					var arg string
-					var argLiteral bool
-					if idx+1 < len(flags) {
-						arg, argLiteral = flags[idx+1:], true
-					} else {
-						if len(words) < 2 {
-							return run.done(nil, true)
-						}
-						arg, argLiteral = literalShellWord(words[1])
-						if wrapperOperandTailMutates(words[1:], names, memo) {
-							return run.done(nil, true)
-						}
-						words = words[1:]
-					}
-					switch flags[idx] {
-					case 'I':
-						substituting = true
-						replaceCancelled, replaceMarker = false, arg
-						if argLiteral {
-							marker = arg
-						} else {
-							markerKnown = false
-						}
-					case 'L':
-						replaceCancelled = true
-					case 'n':
-						if xargsCountCancelsReplace(arg) {
-							replaceCancelled = true
-						}
-					}
-					idx = len(flags)
-				default:
-					return run.done(nil, true)
-				}
-			}
-			words = words[1:]
-		}
-	}
-	if len(words) == 0 {
-		// With no command operand xargs runs its default echo on each input
-		// item — nothing here to unwrap.
-		return run.done(nil, false)
-	}
-	if _, literal := literalShellWord(words[0]); !literal {
-		return run.done(nil, true)
-	}
-	state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker}
-	if xargsEnvOperandsFed(words, state, names, memo) {
-		return run.done(nil, true)
-	}
-	if !substituting {
-		return run.done(xargsChild(words, false, "", names, memo))
-	}
-	replace := xargsLoopState{substituting: true, markerKnown: markerKnown, marker: marker,
-		replaceCancelled: replaceCancelled, replaceMarker: replaceMarker}
-	return run.done(xargsReplaceChild(words, replace, names, memo))
 }
 
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or
@@ -940,6 +686,14 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		}
 		parsed, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Arithmetic(strings.NewReader(expression))
 		if err != nil {
+			return true
+		}
+		// mvdan's arithmetic parser accepts a degenerate token such as `.` as a
+		// nil AST with no error, and syntax.Walk panics on a nil node. A nil AST
+		// carries nothing the walk can clear as inert, so treat it as unprovable
+		// (fail closed) rather than walking it. Buried `let .` reaches here once
+		// the child-tail suffix scan judges a `let` candidate (#4708).
+		if parsed == nil {
 			return true
 		}
 		// A command substitution (`$(...)` or backticks) inside a literal `let`

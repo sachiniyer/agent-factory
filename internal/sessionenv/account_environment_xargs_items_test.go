@@ -140,7 +140,9 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 // except after a literal env's command slot, which envCallArgvParse admits.
 func TestCommandMutatesAccountEnvironment_XargsMarkerMatchesDynamicWord(t *testing.T) {
 	names := xargsItemTestNames()
-	heads := []string{"xargs -I{}", "xargs -i", "xargs --replace"}
+	// "xargs --replace=" attaches an explicitly empty marker, which defaults
+	// to {} (#4980); it must satisfy the same "$y" parity as --replace.
+	heads := []string{"xargs -I{}", "xargs -i", "xargs --replace", "xargs --replace="}
 	tokens := []string{
 		"{}", "x{}", "{}=1", "echo", "env", "strace", "nice", "sh", "-c", "-u",
 		"CODEX_HOME=/x", "CODEX_HOME", "codex", "/tmp",
