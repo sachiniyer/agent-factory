@@ -306,6 +306,18 @@ func (s *TaskPane) DiscardDeletedDraft(id string) {
 	if len(kept) == len(s.tasks) {
 		return
 	}
+	// The edit form is bound to whichever row the cursor rested on. If the
+	// discarded row IS that one — or a prior row-removal path already left the
+	// form open over an out-of-range selection — leaving the form open here
+	// leaves its stale field buffers over a shifted/emptied list: the title
+	// lookup panics when the list emptied, and Enter would otherwise write the
+	// discarded task's values into the neighbour the cursor re-clamped onto.
+	// Close the form, mirroring DeleteTask's contract that a removed row must
+	// not leave a stale form open over a shifted selection (#4838's stated
+	// invariant, which #4798 missed for this discard path). The render and
+	// Enter-save guards in task_pane_edit.go defend the same indexing for any
+	// future path that reaches the form orphaned anyway.
+	formWasOnDiscarded := s.selectedTaskInRange() && s.tasks[s.selectedIdx].ID == id
 	if lostWork {
 		// The name the task was loaded with, not a rename the draft carries:
 		// it is the name the user last saw on the rail and in `af tasks list`.
@@ -325,6 +337,11 @@ func (s *TaskPane) DiscardDeletedDraft(id string) {
 	delete(s.originals, id)
 	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
 	s.selectTaskID(selectedID)
+	if s.editing && !s.creating && (formWasOnDiscarded || !s.selectedTaskInRange()) {
+		s.editing = false
+		s.editError = ""
+		s.editErrorField = -1
+	}
 }
 
 // TakeDiscardedDraftNotice returns one notice naming every draft
