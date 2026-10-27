@@ -33,7 +33,7 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // AfPluginUsageReference is afUsageReference reframed for an agent that is NOT
 // running inside af: the same body and the same command reference, but an
@@ -127,6 +127,20 @@ Root-agent configuration (global unless --project <id-or-path> selects a persona
 Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
+
+// afUsageProposalsInside names only the entry points; the working rules are
+// printed by af proposal start and attach, so they can change without a
+// skill update. Proposal commands need a session, so plugins do not get it.
+const afUsageProposalsInside = `Proposals: when the user asks you to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.`
+
+// afSkillDescriptionInside is AfSkillDescription for an agent inside an af
+// session, where proposal commands work.
+const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, and the daemon via the af CLI"
+
+// afProposalTrigger is the activation text for proposal requests. Agents load a
+// skill body only when the request matches its description, and "make a
+// proposal" does not match a description about sessions and tasks.
+const afProposalTrigger = "Use when the user asks to make, write, draft, or start a proposal, plan, spec, or design doc, or to work on, continue, review, or update an existing proposal"
 
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
 // self-archive, and doing so kills it.
