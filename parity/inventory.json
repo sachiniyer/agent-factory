@@ -1564,6 +1564,44 @@
       },
       "verdict": "unclear",
       "notes": "TUI-only editor over in-repo config. Same question as config.write: is editing repo config a UI concern at all?"
+    },
+    {
+      "id": "proposal.agent-workflow",
+      "title": "Start or attach a session to a proposal and sync its edits",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd → proposal.Store"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Not yet: proposal mode step 1 (docs/dev/proposals/proposal-mode/) ships only the CLI, which the agent in a session runs. Step 2 adds daemon routes and the web Docs tab, which start and attach open beside the agent and which saves as the human author; step 3 adds push from that tab. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+    },
+    {
+      "id": "proposal.docs",
+      "title": "List, read and edit the docs of a proposal",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → proposal.Store"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Not yet: proposal mode step 1 ships only the CLI. Step 2 adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over new daemon routes under /v1/repos/{repoID}/proposals, and moves this CLI onto those routes. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
     }
   ],
   "ledger": {
@@ -1606,6 +1644,16 @@
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
+      "af proposal start": "proposal.agent-workflow",
+      "af proposal attach": "proposal.agent-workflow",
+      "af proposal detach": "proposal.agent-workflow",
+      "af proposal changes": "proposal.agent-workflow",
+      "af proposal checkpoint": "proposal.agent-workflow",
+      "af proposal list": "proposal.docs",
+      "af proposal path": "proposal.docs",
+      "af proposal add-doc": "proposal.docs",
+      "af proposal cat": "proposal.docs",
+      "af proposal write": "proposal.docs",
       "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
@@ -1858,6 +1906,27 @@
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",
       "af projects --json": "cli.json-envelope",
+      "af proposal --help": "meta.discovery",
+      "af proposal --json": "cli.json-envelope",
+      "af proposal --repo": "project.switch",
+      "af proposal start --help": "meta.discovery",
+      "af proposal start --session": "proposal.agent-workflow",
+      "af proposal attach --help": "meta.discovery",
+      "af proposal attach --session": "proposal.agent-workflow",
+      "af proposal detach --help": "meta.discovery",
+      "af proposal detach --session": "proposal.agent-workflow",
+      "af proposal changes --help": "meta.discovery",
+      "af proposal changes --session": "proposal.agent-workflow",
+      "af proposal checkpoint --help": "meta.discovery",
+      "af proposal checkpoint --session": "proposal.agent-workflow",
+      "af proposal list --help": "meta.discovery",
+      "af proposal path --help": "meta.discovery",
+      "af proposal add-doc --help": "meta.discovery",
+      "af proposal add-doc --session": "proposal.docs",
+      "af proposal cat --help": "meta.discovery",
+      "af proposal write --help": "meta.discovery",
+      "af proposal write --session": "proposal.docs",
+      "af proposal start --docs": "proposal.agent-workflow",
       "af projects add --help": "meta.discovery",
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
