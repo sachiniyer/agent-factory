@@ -406,16 +406,20 @@ export function tabsRebound(
  *  really closed) keeps its ordinal and lets reconcile rebuild it against whatever
  *  now occupies that slot — the same degradation as a plain tab-count shrink — UNLESS
  *  a pure shrink left that ordinal with no slot at all (the closed tab was the
- *  highest-ordinal one and nothing was created to take its place). In that case the
- *  dead leaf is closed here: validate() would otherwise clamp it down onto the
- *  survivor's ordinal and, keeping the FIRST leaf in visual order, evict that
- *  survivor — handing the pane's live terminal to the tab that just died. The one
- *  other conflict is a dead leaf sitting on an ordinal a survivor has just claimed:
- *  the survivor wins (it is the pane that actually holds that tab) and the dead leaf
- *  is closed, since the tab it was showing no longer exists. Both priorities matter
- *  for the same reason — validate() also drops duplicates, but it keeps the FIRST
- *  leaf in visual order, which would just as easily evict the survivor and keep the
- *  pane whose tab died.
+ *  highest-ordinal one and nothing was created to take its place) AND the slot it
+ *  would clamp down onto is already claimed by a survivor. Only then is the dead
+ *  leaf closed here: validate() would otherwise clamp it down onto the survivor's
+ *  ordinal and, keeping the FIRST leaf in visual order, evict that survivor —
+ *  handing the pane's live terminal to the tab that just died. When the clamp
+ *  target is NOT claimed — a backfilled survivor whose identity string changed
+ *  (#1779) so `moved` doesn't track it, or an unshown tab whose pane a multi-pane
+ *  layout legitimately keeps — validate() rebinds the leaf to that unclaimed slot
+ *  harmlessly, so this loop leaves it alone. The one other conflict is a dead leaf
+ *  sitting on an ordinal a survivor has just claimed: the survivor wins (it is the
+ *  pane that actually holds that tab) and the dead leaf is closed, since the tab it
+ *  was showing no longer exists. Both priorities matter for the same reason —
+ *  validate() also drops duplicates, but it keeps the FIRST leaf in visual order,
+ *  which would just as easily evict the survivor and keep the pane whose tab died.
  *
  *  Node references are preserved when nothing moves, so the common no-op resync does
  *  not churn a rebuild. */
@@ -452,15 +456,25 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
     }
   }
   // Drop a dead-identity leaf whose ordinal no longer has a slot after a pure
-  // shrink (the closed tab was the highest-ordinal one, nothing replaced it). On a
-  // multi-pane tree this is the case validate() would otherwise clamp down onto the
-  // survivor's ordinal and — keeping the FIRST leaf in visual order — evict that
-  // survivor, rebinding its live terminal to the tab that just died. `ids.length` is
-  // the new tabCount; a leaf not in `moved` at `tab >= ids.length` is one whose tab is
-  // gone AND whose slot is gone. `closeLeaf` returns null for the last pane, so `?? cur`
-  // leaves a sole dead leaf in place to degrade as before (validate clamps it to max).
+  // shrink (the closed tab was the highest-ordinal one, nothing replaced it) — but
+  // ONLY when the slot it would clamp down onto is already claimed by a survivor.
+  // validate() clamps every out-of-range leaf to the last ordinal (`ids.length - 1`)
+  // and then drops duplicates keeping the FIRST in visual order; that evicts a
+  // SURVIVOR at that ordinal only when a dead leaf is also clamped onto it (and
+  // happens to come first). Closing the dead leaf here pre-empts that eviction.
+  // When the clamp target is NOT claimed, validate() rebinds the leaf to the
+  // unclaimed slot with no duplicate to drop — closing it would collapse a
+  // multi-pane layout that the new tab count still admits. That includes a leaf
+  // whose identity was backfilled (#1779): a synthesized `kind:name` that a later
+  // snapshot replaces with a real id is the SAME tab to ui.ts, but `moved` matches
+  // by identity string, so the backfill reads as "identity gone" and the leaf falls
+  // out of `moved`/`claimed` — leaving it lets reconcile rebind it to the new id at
+  // its clamped ordinal instead of closing a pane the user still has open.
+  // `closeLeaf` returns null for the last pane, so `?? cur` leaves a sole dead leaf
+  // in place to degrade as before (validate clamps it to max).
+  const max = ids.length - 1;
   for (const leaf of leaves(cur)) {
-    if (!moved.has(leaf.id) && leaf.tab >= ids.length) {
+    if (!moved.has(leaf.id) && leaf.tab >= ids.length && claimed.has(max)) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }

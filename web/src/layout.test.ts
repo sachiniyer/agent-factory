@@ -529,3 +529,71 @@ test("a SOLE dead leaf out-of-range is NOT closed by remapByIdentity — it degr
   assert.equal(leaves(out)[0].id, "Lonly", "the sole pane is retained");
   assert.equal(leaves(out)[0].tab, 0, "validate clamps it to the only surviving ordinal");
 });
+
+test("a pure shrink whose clamp target is UNCLAIMED keeps the dead pane (validate rebinds it, no eviction)", () => {
+  // A multi-pane layout showing tabs A (ordinal 0) and C (ordinal 2) while B (ordinal
+  // 1) is unshown, shrunk to [A, B] (a lower tab closed, not the highest-ordinal one).
+  // C's leaf is out-of-range (tab 2 >= ids.length 2), but the clamp target (ordinal 1)
+  // is NOT claimed by any survivor — A is at 0, no pane is at 1. Closing C here would
+  // collapse a two-pane layout that the new tab count still admits; validate() rebinds
+  // C to the unclaimed ordinal 1 with no duplicate to drop, preserving both panes.
+  // The shrink loop fires ONLY when the clamp target is claimed, so it must leave C.
+  resetIds();
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "La", tab: 0 }, // shows "id-a"
+    b: { kind: "leaf", id: "Lc", tab: 2 }, // shows "id-c" — unshown B sits at 1
+  };
+  // [A, B, C] → [A, B]: the middle tab's slot is the clamp target and it is unclaimed.
+  const out = setSessionSequence(tree, ["id-a", "id-b", "id-c"], ["id-a", "id-b"]);
+  const ls = leaves(out);
+  assert.equal(ls.length, 2, "the unshown-slot pane is NOT closed — validate rebinds it");
+  assert.deepEqual(
+    ls.map((l) => l.id).sort(),
+    ["La", "Lc"],
+    "both panes survive; neither is evicted",
+  );
+  assert.equal(
+    ls.find((l) => l.id === "Lc")!.tab,
+    1,
+    "C is clamped to the now-highest ordinal 1 (validate's harmless rebind)",
+  );
+});
+
+test("a backfilled survivor (synthesized id → real id) is NOT closed by the shrink loop", () => {
+  // A snapshot can replace a tab's synthesized `kind:name` identity with its real id
+  // — the SAME tab to ui.ts (the adoption is not a close). `moved` matches by identity
+  // string, so the backfilled survivor is NOT in `moved`/`claimed`. A pure shrink that
+  // also removes a lower tab leaves that survivor's old ordinal out of range; the
+  // shrink loop must NOT close it (its clamp target is unclaimed), or the pane the
+  // user still has open is dropped and its terminal state lost. ui.ts tracks the
+  // synthesized kind:name separately from the resolved id for exactly this case.
+  //   prevIds: [id-agent, id-a, 1:shell]  →  ids: [id-agent, id-shell]
+  //   panes:  id-agent at 0 (survivor), 1:shell at 2 (backfilled to id-shell at 1)
+  //   the agent claims 0; the shell's clamp target (1) is unclaimed, so it rebinds.
+  resetIds();
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "Lagent", tab: 0 }, // shows "id-agent"
+    b: { kind: "leaf", id: "Lshell", tab: 2 }, // shows "1:shell", backfilled to id-shell
+  };
+  const out = setSessionSequence(tree, ["id-agent", "id-a", "1:shell"], ["id-agent", "id-shell"]);
+  const ls = leaves(out);
+  assert.equal(ls.length, 2, "the backfilled shell pane is kept — its clamp target is unclaimed");
+  assert.deepEqual(
+    ls.map((l) => l.id).sort(),
+    ["Lagent", "Lshell"],
+    "both the agent and the backfilled shell survive",
+  );
+  assert.equal(
+    ls.find((l) => l.id === "Lshell")!.tab,
+    1,
+    "the shell is clamped to its tab's new ordinal (validate's rebind, not a close)",
+  );
+});
