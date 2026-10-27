@@ -19,6 +19,9 @@ const MASTER_WORKFLOWS = [
   "build.yml",
   "docs.yml",
   "lint.yml",
+  // Since slim PR CI (#5615) the heavy jobs (macOS, systemd, perf) run only on
+  // master's pr.yml, and a GITHUB_TOKEN merge fires no push to run them (#5674).
+  "pr.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];
@@ -99,31 +102,60 @@ function touchesWorkflows(files) {
   return (files.nodes || []).some((f) => f.path.startsWith(".github/workflows/"));
 }
 
-// Master's own Build/Lint workflows. Their newest COMPLETED run (cancelled and
-// skipped runs say nothing about the tree) decides: a failure halts merging
-// until a later run passes. Catches composed breaks the Go-only composition
-// check cannot see (e.g. test expectations that a sibling PR invalidated).
-const MASTER_HEALTH_WORKFLOWS = [
-  ".github/workflows/build.yml",
-  ".github/workflows/lint.yml",
-];
-const INCONCLUSIVE = new Set(["cancelled", "skipped", "neutral", "stale"]);
+// BATCH-THEN-VERIFY. Under continuous merging every master Build is cancelled by
+// the next push, so "latest completed run" reads a stale success. Instead the
+// merger only merges onto a master HEAD whose OWN build.yml and lint.yml runs
+// (queried by head_sha) have concluded success, then merges at most
+// AUTO_MERGE_BATCH_SIZE PRs before the head moves and must be verified again.
+const VERIFY_WORKFLOWS = ["build.yml", "lint.yml"];
+const DEFAULT_BATCH_SIZE = 8;
+const RED_CONCLUSIONS = new Set(["failure", "timed_out", "startup_failure"]);
 
-// `runs` is the newest-first list from one actions/runs call. Returns the failing
-// run that causes the halt, or null.
-function findRedMasterRun(runs) {
-  for (const path of MASTER_HEALTH_WORKFLOWS) {
-    const latest = runs.find((r) => r.path === path && !INCONCLUSIVE.has(r.conclusion));
-    if (latest && latest.conclusion === "failure") return latest;
-  }
-  return null;
+// Rows are the runs of ONE workflow for the master head.
+//   ok       any run succeeded
+//   red      (none succeeded) any run failed
+//   wait     any run is queued / in progress
+//   dispatch no live run at all (all cancelled, or a push that never ran it)
+function workflowState(rows) {
+  if (rows.some((r) => r.status === "completed" && r.conclusion === "success")) return "ok";
+  if (rows.some((r) => r.status === "completed" && RED_CONCLUSIONS.has(r.conclusion))) return "red";
+  if (rows.some((r) => r.status !== "completed")) return "wait";
+  return "dispatch";
 }
 
-async function masterRedRun(github, owner, repo) {
-  const res = await github.rest.actions.listWorkflowRunsForRepo({
-    owner, repo, branch: BASE, status: "completed", per_page: 30,
-  });
-  return findRedMasterRun(res.data.workflow_runs);
+// states: {workflow: state}. A failure halts even if the other workflow is still
+// running; then waiting beats dispatching; only all-ok verifies the head.
+function combineVerification(states) {
+  const vals = Object.values(states);
+  if (vals.includes("red")) return "red";
+  if (vals.includes("wait") || vals.includes("dispatch")) return "wait";
+  return "ok";
+}
+
+// Returns {status: ok|red|wait, head, states, runs: {workflow: failing/blocking run}}.
+// Dispatches workflows that have no live run. A failed read throws: no merge.
+async function verifyMasterHead(github, core, owner, repo) {
+  const branch = await github.rest.repos.getBranch({ owner, repo, branch: BASE });
+  const head = branch.data.commit.sha;
+  const states = {};
+  const runs = {};
+  for (const workflow_id of VERIFY_WORKFLOWS) {
+    const res = await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id, head_sha: head, per_page: 20,
+    });
+    const rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    states[workflow_id] = workflowState(rows);
+    runs[workflow_id] = rows.find((r) => r.status !== "completed" || RED_CONCLUSIONS.has(r.conclusion)) || null;
+  }
+  const status = combineVerification(states);
+  if (status !== "red") {
+    for (const workflow_id of VERIFY_WORKFLOWS) {
+      if (states[workflow_id] !== "dispatch") continue;
+      await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id, ref: BASE });
+      core.notice(`Dispatched ${workflow_id} on master: no live run for ${head}.`);
+    }
+  }
+  return { status, head, states, runs };
 }
 
 function isCodex(login) {
@@ -251,20 +283,28 @@ async function settleBroken({ github, core, context, passed, number }) {
 // Step 3: merge everything selectable, then re-raise master verification once.
 async function mergeAll({ github, core, context }) {
   const { owner, repo } = context.repo;
-  // Refuse to merge onto a red master. A failed read throws: no merge this run.
-  const red = await masterRedRun(github, owner, repo);
+  // Only merge onto a verified master head. A failed read throws: no merge.
+  const verdict = await verifyMasterHead(github, core, owner, repo);
+  const red = verdict.status === "red";
+  const lines = Object.entries(verdict.states).map(([wf, st]) => {
+    const run = verdict.runs[wf];
+    return `- \`${wf}\`: ${st}${run ? ` ([run ${run.id}](${run.html_url}))` : ""}`;
+  });
+  if (verdict.status !== "ok") {
+    await core.summary
+      .addHeading(red ? "Merging halted: master is red" : "Waiting for master verification", 3)
+      .addRaw(`Master head ${verdict.head.slice(0, 10)}:\n\n${lines.join("\n")}\n\n`)
+      .write();
+  }
+  if (verdict.status === "wait") {
+    core.notice(`Master ${verdict.head} not yet verified; exiting without merging.`);
+    core.setOutput("merged", "false");
+    return;
+  }
   if (red) {
     // Not a deadlock: a fix-forward PR labelled `fix-master` (Build + Lint still
     // required on its head) may land, since nothing else could turn master green.
-    core.warning(`Master ${red.name} run ${red.id} concluded failure; only ${FIX_LABEL} PRs may merge.`);
-    await core.summary
-      .addHeading("Merging halted: master is red", 3)
-      .addRaw(
-        `Latest completed master **${red.name}** run [${red.id}](${red.html_url}) ` +
-          `on ${(red.head_sha || "").slice(0, 10)} concluded \`failure\`. ` +
-          `Only PRs labelled \`${FIX_LABEL}\` merge until a later master run passes.\n`,
-      )
-      .write();
+    core.warning(`Master ${verdict.head} failed verification; only ${FIX_LABEL} PRs may merge.`);
   }
   const prs = await fetchOpenPrs(github, core, owner, repo);
   const phase1 = selectCandidates(prs);
@@ -304,9 +344,16 @@ async function mergeAll({ github, core, context }) {
       .addList(workflowSkipped.map((n) => `#${n}`))
       .write();
   }
+  const batchSize = Number(process.env.AUTO_MERGE_BATCH_SIZE) > 0
+    ? Math.floor(Number(process.env.AUTO_MERGE_BATCH_SIZE))
+    : DEFAULT_BATCH_SIZE;
   const merged = [];
   let lastSha = "";
   for (const { pr, reason } of selected) {
+    if (merged.length >= batchSize) {
+      core.info(`#${pr.number}: skip (batch of ${batchSize} reached; master head must be verified again)`);
+      continue;
+    }
     if (reason) {
       core.info(`#${pr.number}: skip (${reason})`);
       continue;
@@ -368,6 +415,6 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
-  findRedMasterRun, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
 };
