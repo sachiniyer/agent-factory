@@ -68,7 +68,7 @@ func TestPaletteRetirementRuntimeLaunch(t *testing.T) {
 	oldRun, oldTasks := runLaunchApp, launchEnsureDaemonForTasks
 	t.Cleanup(func() { runLaunchApp = oldRun; launchEnsureDaemonForTasks = oldTasks })
 	mounted := false
-	runLaunchApp = func(context.Context, string, *config.RepoContext) error { mounted = true; return nil }
+	runLaunchApp = func(context.Context, string, string, *config.RepoContext) error { mounted = true; return nil }
 	launchEnsureDaemonForTasks = func() {}
 	require.NoError(t, rootCmd.RunE(&cobra.Command{}, nil))
 	require.True(t, mounted)

@@ -542,6 +542,34 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	return false
 }
 
+// codexComposerGlyphs is the set of glyphs Codex draws at the START of its
+// composer line: "›" (U+203A) at every reasoning effort, and "»" (U+00BB)
+// while the Ultra tier is active — upstream codex-rs/tui
+// bottom_pane/effort_ignition.rs EffortTier::prompt_glyph (Max→"›",
+// Ultra→"»"), consumed by chat_composer.rs's prompt span and the ONLY place
+// "»" is rendered at rust-v0.163.0. Picker, trust-dialog, and update-dialog
+// selection markers keep "›" at every effort (bottom_pane/picker_option.rs
+// numbered_row), so a line-leading "»" never carries the selected-option
+// ambiguity a line-leading "›" can — it can only be the composer (#5383).
+const codexComposerGlyphs = "›»"
+
+// IsCodexComposerLine reports whether the line's first non-blank character is
+// a Codex composer glyph. Position is the whole contract — the composer is
+// drawn at the START of its line, so the same glyph mid-line is prose, not a
+// prompt (#3085). Distinguishing the composer from a selected option that
+// shares the "›" marker is the CALLER's job, not the glyph's: readiness runs
+// CodexTrustPromptPresent first, and the safety/update pickers gate on their
+// hidden-cursor modal state.
+func IsCodexComposerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, glyph := range codexComposerGlyphs {
+		if strings.HasPrefix(trimmed, string(glyph)) {
+			return true
+		}
+	}
+	return false
+}
+
 // CodexTrustPromptPresent reports whether content shows Codex's directory-trust
 // modal introduced by 0.144.6:
 //
@@ -805,7 +833,9 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
-	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh)
+	return RestoreReattached, t.reattach(reattachOptions{
+		answered: answered, confirmedFresh: confirmedFresh, refreshAccount: true, baseline: workDir != "",
+	})
 }
 
 // ReattachOnly performs only the live-session rebind half of
@@ -826,17 +856,58 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 // still exists, the monitor simply never fires, and the pane's retained output
 // stays previewable.
 func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
-	return t.reattach(workDir, answered, false)
+	return t.reattach(reattachOptions{answered: answered, refreshAccount: true, baseline: workDir != ""})
 }
 
-// reattach is the live-session rebind shared by restoreWithResult and
-// ReattachOnly. answered is whether the existence probe that routed here
-// answered, and confirmedFresh is restoreWithResult's.
-func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
+// ReattachInert rebinds a session that is still alive and does nothing else:
+// no definitive-absence respawn (there is no directory to spawn into) and no
+// account-environment refresh. It is the load path of a row whose worktree was
+// deleted outside af (#5102), kept only so its live pane stays bound and the
+// row stays archivable. The refresh exists to heal the scope env a later spawn
+// inherits, and nothing will spawn into a deleted worktree; running it anyway
+// is a dozen bounded tmux commands whose transient failure would load the row
+// startup-unknown — excluded from reconciliation and refused by archive, the
+// one remedy the row is being kept for. A confirmed-absent session is reported
+// exactly as RestoreWithResult("") reports it.
+//
+// Its monitor baselines like any reattach of persisted state: the pane predates
+// this process, so its first capture is not new output. A fresh monitor would
+// report it as an update across a mere daemon restart, recording false churn and
+// overwriting a persisted Ready or LimitReached with Running.
+func (t *TmuxSession) ReattachInert() error {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
+		return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+	}
+	return t.reattach(reattachOptions{answered: answered, baseline: true})
+}
+
+// reattachOptions are the choices reattach's callers make explicitly.
+type reattachOptions struct {
+	// answered is whether the existence probe that routed here answered.
+	answered bool
+	// confirmedFresh is restoreWithResult's: Start's own new-session is what
+	// answered the name.
+	confirmedFresh bool
+	// refreshAccount re-derives the pane's account environment; false only for
+	// ReattachInert.
+	refreshAccount bool
+	// baseline is whether this rebinds persisted state, whose first capture
+	// only establishes the monitor's baseline. It used to be inferred from a
+	// non-empty workDir, which is what Restore's callers with persisted state
+	// pass — but ReattachInert reattaches persisted state with no directory to
+	// name (#5102), so the choice is the caller's to state.
+	baseline bool
+}
+
+// reattach is the live-session rebind shared by restoreWithResult,
+// ReattachOnly and ReattachInert.
+func (t *TmuxSession) reattach(opts reattachOptions) error {
+	answered, confirmedFresh := opts.answered, opts.confirmedFresh
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
-	if workDir != "" {
+	if opts.baseline {
 		monitor = newReattachStatusMonitor()
 	}
 	// Bind the fresh monitor to the generation that just answered live: the
@@ -873,7 +944,7 @@ func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) er
 	// would pay the same deadline for the same non-answer — twelve times over —
 	// violating the one-bounded-has-session discipline the generation probe
 	// above and ReattachOnly's doc both promise (Codex on #4473).
-	if !confirmedFresh && answered {
+	if opts.refreshAccount && !confirmedFresh && answered {
 		if err := t.refreshRestoredAccountEnvironment(); err != nil {
 			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 		}

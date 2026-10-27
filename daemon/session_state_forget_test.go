@@ -21,6 +21,7 @@ func TestForgetSessionRuntimeState_ReturnsToBaseline(t *testing.T) {
 
 	baselineAlive := len(manager.aliveObservations)
 	baselineHandoff := len(manager.handoffRetryDue)
+	baselineUndurable := len(manager.worktreeMissingUndurable)
 
 	const sessions = 50
 	instances := make([]*session.Instance, 0, sessions)
@@ -34,6 +35,11 @@ func TestForgetSessionRuntimeState_ReturnsToBaseline(t *testing.T) {
 		key := stableSessionKey(repoID, inst)
 		manager.aliveObservations[key]++
 		manager.handoffRetryDue[key] = nowFunc()
+		// And what the worktree-missing poll does when its write cedes (#5102).
+		if manager.worktreeMissingUndurable == nil {
+			manager.worktreeMissingUndurable = make(map[string]struct{})
+		}
+		manager.worktreeMissingUndurable[key] = struct{}{}
 		manager.mu.Unlock()
 	}
 
@@ -57,6 +63,8 @@ func TestForgetSessionRuntimeState_ReturnsToBaseline(t *testing.T) {
 		"aliveObservations must return to its starting size once every session is gone; a surviving entry is the leak")
 	require.Equal(t, baselineHandoff, len(manager.handoffRetryDue),
 		"handoffRetryDue orphans the same way: its only clear runs from a loop over m.instances, which never walks a removed session")
+	require.Equal(t, baselineUndurable, len(manager.worktreeMissingUndurable),
+		"a worktree-missing retry owed to a removed session must not outlive it")
 }
 
 // The other half of a correct lifetime. A cap or an LRU would also keep the map

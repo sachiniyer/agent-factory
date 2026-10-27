@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
-  keybarPointerDown,
+  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, keybarClickIsPointerless, keybarPointerDown,
+  keybarSheetClickIsOpeningGesture, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
 
@@ -609,9 +609,57 @@ test("pointerdown prevents focus transfer before acting", () => {
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
 });
 
+test("pointerdown still cancels the focus steal when the key acts on release (#5426)", () => {
+  // Paste's action moved to pointerup so its clipboard read lands inside the
+  // touch activation the press never carries; the preventDefault that stops
+  // the tap stealing xterm's focus is unconditional.
+  let prevented = false;
+  keybarPointerDown({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+});
+
+test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)", () => {
+  // Assistive activation — a screen reader, keyboard Enter, a programmatic
+  // .click() — arrives as a detail:0 click with no pointerType. But a real
+  // tap's click is ALSO detail:0 once its pointerdown was canceled (Chromium
+  // zeroes the count with the compat mouse events), so detail alone would let
+  // a tap act twice. pointerType separates them.
+  assert.equal(keybarClickIsPointerless({ detail: 0 }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "" }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "touch" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
+});
+
+test("the paste sheet's backdrop dismiss ignores the opening gesture's click whatever its metadata (#5428)", () => {
+  const opening = { pointerId: 2, pointerType: "touch" };
+  // iOS Safari <18.2 dispatches the tap's trailing click as a plain MouseEvent
+  // — no pointer fields at all.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, opening), true);
+  // Safari 18.2 can label a touch click pointerType "mouse" (WebKit 282988).
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 1, pointerType: "mouse" }, opening), true);
+  // The Chromium shape — same pointer identity — is of course covered too.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, opening), true);
+  // A pointerless open arms nothing, so no click is ever swallowed; and once
+  // a fresh gesture's pointerdown disarms the marker, its click closes.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 1, pointerId: 9, pointerType: "touch" }, undefined), false);
+});
+
 test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {
   const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
-  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→"]]);
+  // The A−/A+ zoom pair rides the arrows page's end (#5500) — display controls,
+  // not PTY keys — keeping both pages at the seven-target budget the geometry
+  // model below already closes on.
+  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]]);
   // ≥348px of room: 44px targets + 4px gaps + padding. Below that the keybar's
   // narrow rule lets keys shrink to a 40px floor (#5380), so at 320px the same
   // model must still close.
