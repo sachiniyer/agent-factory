@@ -86,6 +86,50 @@ func TestInstanceRendererKeepsRetainedSourceAtNormalWidth(t *testing.T) {
 		"a normal-width rail must show where the complete source remains, not only the warning preamble")
 }
 
+// TestInstanceRendererShowsCallbackUnavailable is the TUI half of #5571 W3.1:
+// a sandbox whose callback credential could not be minted still runs, but its
+// row must carry the shared "af callback unavailable: …" phrase verbatim — the
+// picker's JSON, the web banner and this row all name it identically so a user
+// greps one string and finds every place af said it.
+func TestInstanceRendererShowsCallbackUnavailable(t *testing.T) {
+	const reason = "the listener moved while the sandbox was being provisioned"
+	inst, err := session.FromInstanceData(session.InstanceData{
+		ID: "callback-unavailable", Title: "feature", Branch: "af-feature",
+		Status: session.Running, Liveness: session.LiveRunning,
+		Program: "test", BackendType: "sandbox",
+		CallbackUnavailable: reason,
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer()
+	r.SetWidth(220)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, session.CallbackUnavailablePrefix+reason,
+		"the callback notice must render under the cross-surface prefix")
+}
+
+// TestInstanceRendererShowsBothWarnings is the stacking case: a session can
+// carry an incomplete archive AND a missing callback, and neither notice may
+// eat the other.
+func TestInstanceRendererShowsBothWarnings(t *testing.T) {
+	const callbackReason = "the daemon attached no callback credential minter to this session"
+	const archiveWarning = "restore completed with an incomplete archive: complete original tree retained at /retained/source"
+	inst, err := session.FromInstanceData(session.InstanceData{
+		ID: "both-warnings", Title: "feature", Branch: "af-feature",
+		Status: session.Archived, Liveness: session.LiveArchived,
+		Program: "test", BackendType: "sandbox",
+		ArchiveWarning:      archiveWarning,
+		CallbackUnavailable: callbackReason,
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer()
+	r.SetWidth(220)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, "/retained/source")
+	assert.Contains(t, out, session.CallbackUnavailablePrefix+callbackReason)
+}
+
 // TestInstanceRendererNamePlaceholder pins the autocreate-name shadow text
 // (#2470): the row of the instance being named shows the suggested name while its
 // title is empty, and only that row, and only while empty.
