@@ -150,12 +150,27 @@ func (p *PromptOverlay) Render() string {
 	textRect := overlayTextRect(fit, style)
 
 	rows := promptOverlayDefaultHeight
+	chrome := promptOverlayChrome
+	if p.status != "" {
+		chrome++ // the status line is a content row of its own
+	}
 	if p.compact {
 		if n := p.textarea.LineCount(); n > 0 {
 			rows = n
 		}
+		// Compact still answers to the frame: a pasted multi-line blob sizes
+		// the textarea to its content and would otherwise push the dialog
+		// past maxHeight — the fit's leftover after chrome is the cap.
+		if textRect.H > 0 {
+			if budget := textRect.H - chrome; rows > budget {
+				rows = budget
+			}
+			if rows < 1 {
+				rows = 1
+			}
+		}
 	} else if textRect.H > 0 {
-		rows = textRect.H - promptOverlayChrome
+		rows = textRect.H - chrome
 		if rows < 1 {
 			rows = 1
 		}

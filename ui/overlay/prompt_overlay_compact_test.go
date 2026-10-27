@@ -63,3 +63,34 @@ func TestPromptOverlayRendersStatusLine(t *testing.T) {
 		t.Errorf("clearing the status must remove the row:\n%s", got)
 	}
 }
+
+// Compact sizes to content but still answers to the frame: a pasted blob of
+// thirty lines must not grow the dialog past the fit SetMaxSize gives it —
+// the textarea scrolls instead.
+func TestPromptOverlayCompactClampsToTheFitFrame(t *testing.T) {
+	forceProfile(t, termenv.TrueColor)
+
+	var buf strings.Builder
+	for i := 1; i <= 30; i++ {
+		if i > 1 {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString("line")
+	}
+
+	p := NewPromptOverlay("Jump to tab (number or name)", buf.String())
+	p.SetHints("enter jump · esc cancel", "enter jump · esc cancel")
+	p.SetCompact()
+	p.SetMaxSize(80, 24)
+
+	if rows := strings.Count(renderedText(p.Render()), "\n") + 1; rows > 24 {
+		t.Errorf("a 30-line paste must not render a %d-row dialog on a 24-row frame", rows)
+	}
+
+	// The status line spends a chrome row of its own — the clamp must leave
+	// room for it rather than rendering one row over.
+	p.SetStatus("no match")
+	if rows := strings.Count(renderedText(p.Render()), "\n") + 1; rows > 24 {
+		t.Errorf("the status line must fit inside the frame too, got %d rows", rows)
+	}
+}
