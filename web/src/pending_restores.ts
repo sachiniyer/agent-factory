@@ -1,3 +1,5 @@
+import type { SkippedRepo } from "./types.js";
+
 type RestoreRow = {
   id?: string;
   restoreEligible: boolean;
@@ -10,6 +12,13 @@ export type RestoreEvidence =
     operationLockTimeoutMs?: number;
     operationClockMs?: number;
     daemonBootId?: string;
+    /** The daemon's startup-skipped repo set, carried on the snapshot evidence so
+     *  the rail's single commit path (applySessions) can stamp the store with the
+     *  incompleteness channel the daemon reports alongside the rows (#4742). Not
+     *  restore evidence itself — pendingRestores.observe ignores it — but it rides
+     *  the same carrier as operationLockTimeoutMs/daemonBootId because both are
+     *  snapshot-level metadata consumed at the same commit site. */
+    skippedRepos?: SkippedRepo[];
   }
   | { kind: "updated" | "restored"; id: string };
 

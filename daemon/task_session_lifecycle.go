@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -101,51 +100,6 @@ func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	return instance.GetLiveness() == session.LiveReady
 }
 
-// stampTaskRunInterrupted records "aborted: runtime replaced" on the task whose
-// run a runtime replacement interrupted (#4222) — only while the interrupted
-// run is still the task's latest recorded run. LastRunStatus is task-wide, and
-// a create-per-fire task may have run again since this session went Lost. Two
-// proofs say the stamp is not this session's to write (#4222 review): a pending
-// fire marker naming a DIFFERENT session — the occurrence in flight owns that
-// status — and a registered session a newer fire already spawned for the same
-// task. Writing over either would report a run this interrupt never touched as
-// aborted, on the preserved newer LastRunAt. peers is a snapshot of the
-// manager's registered sessions; the caller owns the lock discipline.
-//
-// Best-effort like the run path's own status write: the durable fact is the
-// cleared run marker, which the replacement's settlement already persisted.
-func stampTaskRunInterrupted(instance *session.Instance, peers []*session.Instance) {
-	taskID := instance.TaskID
-	if taskID == "" {
-		return
-	}
-	if marker, err := readTaskFireMarker(taskID); err == nil && marker != nil &&
-		marker.InstanceID != "" && marker.InstanceID != instance.ID {
-		return
-	}
-	for _, peer := range peers {
-		if peer != instance && peer.TaskID == taskID && peer.CreatedAt.After(instance.CreatedAt) {
-			return
-		}
-	}
-	if _, err := task.UpdateTaskStatus(taskID, nil, taskStatusAbortedRuntimeReplaced); err != nil {
-		log.WarningLog.Printf("could not record task %s's interrupted run (session %q): %v", taskID, instance.Title, err)
-	}
-}
-
-// taskRunPeerSnapshot copies the manager's registered sessions for
-// stampTaskRunInterrupted's newer-run guard — a slice, so the caller can take
-// the lock and the stamp can iterate after releasing it.
-func (m *Manager) taskRunPeerSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	peers := make([]*session.Instance, 0, len(m.instances))
-	for _, peer := range m.instances {
-		peers = append(peers, peer)
-	}
-	return peers
-}
-
 // taskStatusErroredPromptUndelivered is the last_run_status for a run whose
 // initial prompt delivery was proven undelivered — the pane demonstrably took
 // nothing (#5278). It carries the "errored:" prefix the TUI keys on to render
@@ -165,13 +119,49 @@ func (m *Manager) stampTaskRunFailed(instance *session.Instance) {
 		return
 	}
 	now := nowFunc()
-	updated, err := task.UpdateTaskStatus(instance.TaskID, &now, taskStatusErroredPromptUndelivered)
+	peers := m.taskRunPeerSnapshot()
+	updated, applied, err := task.UpdateTaskStatusIf(instance.TaskID, &now, taskStatusErroredPromptUndelivered,
+		func(cur task.Task) bool { return failedRunOwnsStatus(instance, peers, cur) })
 	if err != nil {
 		m.warn().Printf("could not record the failed run for task %q (session %q): %v",
 			instance.TaskID, instance.Title, err)
 		return
 	}
-	m.publishEvent(agentproto.EventTaskUpdated, updated)
+	// Settled either way: applied, or refused because the status is not this
+	// run's to write. Only a store error (above) keeps the durable flag armed.
+	instance.AckTaskRunFailureStamped()
+	if applied {
+		m.publishEvent(agentproto.EventTaskUpdated, updated)
+	}
+}
+
+// failedRunOwnsStatus is the compare-and-set guard of the failure stamp
+// (#5645): the write is this run's only while the task's status is not already
+// the failure (idempotent across restarts) and no NEWER session of the same
+// task is registered — LastRunStatus is task-wide, and a stale stamp landing
+// after a newer fire began would report that run as failed.
+func failedRunOwnsStatus(instance *session.Instance, peers []*session.Instance, cur task.Task) bool {
+	if cur.LastRunStatus == taskStatusErroredPromptUndelivered {
+		return false
+	}
+	for _, peer := range peers {
+		if peer != instance && peer.TaskID == instance.TaskID && peer.CreatedAt.After(instance.CreatedAt) {
+			return false
+		}
+	}
+	return true
+}
+
+// taskRunPeerSnapshot copies the manager's registered sessions so the guard can
+// iterate after the manager lock is released.
+func (m *Manager) taskRunPeerSnapshot() []*session.Instance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	peers := make([]*session.Instance, 0, len(m.instances))
+	for _, peer := range m.instances {
+		peers = append(peers, peer)
+	}
+	return peers
 }
 
 // deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED

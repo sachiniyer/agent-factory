@@ -40,6 +40,12 @@ on:
         default: ''
         type: string
 
+concurrency:
+  # A newer master push supersedes a stale run: the tip is the question. Keyed on
+  # workflow + ref, so PRs, merge_group entries and master never share a group.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # GITHUB_TOKEN defaults to read-only; the deploy job needs to publish the Pages
 # artifact and mint the OIDC token actions/deploy-pages exchanges.
 permissions:

@@ -64,7 +64,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
-	program = injectSystemPrompt(program, resolveSkillTarget(i, program))
+	program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
 	return program, accountLaunchProof(declarationBase, program, trustBase, nil, "")
 }
 
@@ -285,6 +285,18 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			}
 		case established != "":
 			resolution = launchProgramResolution{command: established}
+			// The recorded runtime is the base af itself resolved at launch, so
+			// when it is exactly af's detected built-in for the session's agent
+			// (same argv, same resolution snapshot) the flag af appended to it
+			// is af-authored, not undeclared (#5623). Any other command — a
+			// repo/operator override, a different path, an extra word — keeps
+			// trustBase false and stays refused.
+			if runtimeEstablished {
+				i.mu.RLock()
+				enum := i.Program
+				i.mu.RUnlock()
+				resolution.trustBase = builtInProgramOverride(resolveResolvedConfigForInstance(i), enum, established)
+			}
 		}
 		// When the resolved base IS the pane's frozen program and runtime
 		// evidence was empty, that command already carries af's injected flags
@@ -371,7 +383,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, accountNamespace, name))
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name), i.CallbackUnavailable() != "")
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -403,7 +415,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	accountScope.TrustedExecutable = proof.TrustedExecutable
 	accountScope.GeneratedArgs = proof.GeneratedArgs
 	filtered := sessionenv.FilterForCommand(
-		os.Environ(), accountScope.Agent, launchProgram, sessionEnvPassthroughForInstance(i))
+		os.Environ(), accountScope.Agent, launchProgram, SessionEnvPassthroughForInstance(i))
 	if _, err := sessionenv.ApplyAccount(filtered, launchProgram, accountScope); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
@@ -853,7 +865,7 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	}
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.Unlock()
-	passthrough := sessionEnvPassthroughForInstance(i)
+	passthrough := SessionEnvPassthroughForInstance(i)
 	for _, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue
