@@ -271,7 +271,7 @@ func errorText(err error) string {
 }
 
 // errorShape captures the classifications callers actually branch on:
-// MigrateAllRepoInstancesForDaemonLoad aborts on a newer schema version and
+// RepoInstancesFileCache.migrateAndExtract aborts on a newer schema version and
 // skips on corrupt content, so the fast path must not turn one into the other.
 func errorShape(err error) string {
 	if err == nil {

@@ -52,6 +52,14 @@ func (e *ErrBox) SetError(err error) { e.set(err, true) }
 // category — see retainedIsFailure.
 func (e *ErrBox) SetNotice(err error) { e.set(err, false) }
 
+// SetHint shows an ephemeral acknowledgment that `E details` must not be able
+// to reopen: it paints on the same bar and fades on the same Expire timer, but
+// it never lands in retained. That is the difference between answering a key
+// and creating a notice — "the store is empty" is itself not a notice, so a
+// second `E` after the hint expires must find the store still empty rather
+// than opening "Last notice" on the hint's own text (#5351 review).
+func (e *ErrBox) SetHint(err error) { e.err = err }
+
 func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
 	if err == nil {

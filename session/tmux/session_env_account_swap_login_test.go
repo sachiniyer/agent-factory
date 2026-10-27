@@ -37,6 +37,7 @@ var accountLoginBrowserNames = []string{"NO_BROWSER", "BROWSER"}
 func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
@@ -82,6 +83,7 @@ func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 func TestAccountLaunchEnvironmentStillHonorsExplicitBrowserPassthrough(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {

@@ -165,8 +165,9 @@ func TestHandleArchive_RestingRowIsNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleRestore_LiveRowIsNoOp: `r` on a live row does nothing — archive stays
-// on `a` (#1605).
+// TestHandleRestore_LiveRowIsNoOp: `r` on a live row restores nothing —
+// archive stays on `a` (#1605) — but the dead key is no longer silent: it
+// lands the #5373 transient notice instead of dispatching.
 func TestHandleRestore_LiveRowIsNoOp(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -187,7 +188,10 @@ func TestHandleRestore_LiveRowIsNoOp(t *testing.T) {
 
 			require.Equal(t, stateDefault, h.state, "`r` on a live row must not open any overlay")
 			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "`r` on a live row must not start a restore")
-			require.Nil(t, cmd, "`r` on a live row must dispatch nothing")
+			require.NotNil(t, cmd, "the notice schedules its auto-clear (#5373)")
+			text, _ := h.errBox.RetainedNotice()
+			require.Contains(t, text, "Session 'worker' is live — nothing to restore",
+				"`r` on a live row must say why nothing happened")
 		})
 	}
 }

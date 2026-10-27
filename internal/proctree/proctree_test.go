@@ -184,9 +184,9 @@ func TestSignalReapedInTOCTOUWindow(t *testing.T) {
 		t.Fatalf("child not alive at snapshot time")
 	}
 
-	orig := kill
-	t.Cleanup(func() { kill = orig })
-	kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
+	orig := Kill
+	t.Cleanup(func() { Kill = orig })
+	Kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
 
 	if err := Signal(p, syscall.SIGTERM); err != ErrIdentityChanged {
 		t.Errorf("Signal(reaped-in-window) = %v, want ErrIdentityChanged", err)
@@ -203,9 +203,9 @@ func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
 	}
 	p := snap[child.Process.Pid]
 
-	orig := kill
-	t.Cleanup(func() { kill = orig })
-	kill = func(pid int, sig syscall.Signal) error { return syscall.EPERM }
+	orig := Kill
+	t.Cleanup(func() { Kill = orig })
+	Kill = func(pid int, sig syscall.Signal) error { return syscall.EPERM }
 
 	if err := Signal(p, syscall.SIGTERM); err != syscall.EPERM {
 		t.Errorf("Signal(EPERM) = %v, want EPERM", err)
@@ -223,9 +223,9 @@ func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
 	}
 	p := snap[child.Process.Pid]
 
-	orig := kill
-	t.Cleanup(func() { kill = orig })
-	kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
+	orig := Kill
+	t.Cleanup(func() { Kill = orig })
+	Kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
 
 	var logged []string
 	logf := func(_ ReapOutcome, format string, args ...any) {

@@ -212,6 +212,7 @@ type Manager struct {
 	// reservedArchiveDestinations holds active archive moves by (repoID, path).
 	// The owning instance identifies both the refusal and the release authority.
 	reservedArchiveDestinations map[string]*session.Instance
+	worktreeMissingUndurable    map[string]struct{} // owed flag writes (#5102); guarded by mu — see worktree_missing_poll.go
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -450,6 +451,14 @@ type Manager struct {
 	// an episode describes one runtime's failures, so a later session that merely
 	// reuses the title must not inherit them (#2868).
 	lostRestoreStates map[string]*lostRestoreState
+	// lostRestoreConfirmations is the confirmed-restore flap history: the
+	// timestamps of CONFIRMED automatic lost-session restores for each session,
+	// keyed by stableSessionKey for the same reason as lostRestoreStates
+	// (#2868). It is a separate map rather than a field of lostRestoreState on
+	// purpose: the retry episode is retired at confirmation, while this is the
+	// memory that must survive that retirement so the confirmed-restore-then-
+	// died cycle can be bounded (#5238). Guarded by m.mu.
+	lostRestoreConfirmations map[string][]time.Time
 	// limitResumeStates tracks per-session retry state for the usage-limit
 	// auto-resume scheduler (#1146 PR3) — the opt-in sibling of lostRestoreStates,
 	// and keyed the same way for the same reason: by stableSessionKey (the stable
@@ -546,6 +555,14 @@ type Manager struct {
 	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time
 
+	// taskRunTurnWatches holds each in-flight task run's pane-chrome watcher —
+	// the stateful detector that folds consecutive captures into "the agent's
+	// own in-turn row is ticking" evidence (#5219). Keyed by stableSessionKey,
+	// created lazily by the poll while a run is active, rebuilt when the
+	// resolved agent changes mid-run, and reclaimed by sweepTaskRunTurnWatches
+	// once the run ends or the row is gone. Guarded by pausedMu.
+	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
+
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
 	// to clients. On the Manager (not a controlServer) because both transports
@@ -553,13 +570,13 @@ type Manager struct {
 	// Immutable after construction; the hub is internally synchronized.
 	events *eventsHub
 
-	// vscode owns the daemon-spawned VS Code editors backing TabKindVSCode tabs
-	// (one code-server per session, see vscode_server.go). On the Manager because
-	// an editor's lifetime is a SESSION's lifetime — kill/archive/close-tab stop
-	// it, and the webtab proxy resolves a vscode tab's target through it.
-	// Immutable after construction; the supervisor carries its own mutex, so
-	// spawning (seconds) never touches m.mu.
+	// vscode owns the daemon-spawned VS Code editors behind TabKindVSCode tabs, one
+	// code-server per session (vscode_server.go): kill/archive/close-tab stop it and
+	// the webtab proxy resolves a vscode tab's target through it. Immutable after
+	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// proposals runs the proposal routes and the poll-time doc scan.
+	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
@@ -790,11 +807,13 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		backgroundMutationStop:    make(chan struct{}),
 		restoresInFlight:          make(map[string]struct{}),
 		lostRestoreStates:         make(map[string]*lostRestoreState),
+		lostRestoreConfirmations:  make(map[string][]time.Time),
 		limitResumeStates:         make(map[string]*limitResumeState),
 		handoffRetryDue:           make(map[string]time.Time),
 		settleOwed:                make(map[string]settleOwedEntry),
 		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
+		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),
@@ -901,33 +920,6 @@ func (m *Manager) Ready() bool {
 	}
 }
 
-// dockerReapProtectedSlugs returns the af.session label slugs of every session
-// the manager knows about — live instances AND still-provisioning pending creates
-// (the #2549 window where a container exists but no Instance does yet) — so the
-// orphan-container sweep (#2194) never reaps a container whose session is alive or
-// mid-create. Titles are collected under the lock; slugging happens after so the
-// lock stays short.
-func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
-	m.mu.Lock()
-	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for _, inst := range m.instances {
-		titles = append(titles, inst.Title)
-	}
-	for key, pending := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		titles = append(titles, pending.Title)
-	}
-	m.mu.Unlock()
-
-	slugs := make(map[string]bool, len(titles))
-	for _, t := range titles {
-		slugs[session.Slugify(t)] = true
-	}
-	return slugs
-}
-
 // Snapshot returns the authoritative InstanceData for every session the manager
 // owns, scoped to repoID (all repos when repoID is empty). It is the read side
 // of the single-writer model (#960 PR 3): the manager's settled instance map plus
@@ -947,45 +939,4 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	instances, _ := m.SnapshotWithSkipped(repoID)
 	return instances
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
-}
-
-// opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
-// 2, #1473).
-func (m *Manager) opLockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.instanceOpLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.instanceOpLocks[key] = lock
-	}
-	return lock
 }

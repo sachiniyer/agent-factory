@@ -408,6 +408,19 @@ func (i *Instance) IsArchived() bool {
 	return i.liveness == LiveArchived
 }
 
+// IsResting reports whether the row's liveness is one of the inert,
+// restorable states — archived, lost, or dead. It is a liveness-only read:
+// unlike LifecycleAction it does NOT consult the op/startup fences, so a
+// fenced resting row (startup-unknown, restoring in flight) still reports
+// true. Callers that need the "which verb is offered" answer use
+// LifecycleAction; callers that need "owns no live runtime surface" use this
+// (#4755 review).
+func (i *Instance) IsResting() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveArchived || i.liveness == LiveLost || i.liveness == LiveDead
+}
+
 // WebTabServeBlocked is the serve-side analogue of TabSpawnBlocked: "may this
 // session's preserved web tab be resolved and proxied right now?" It answers no
 // for a settled archive AND for the teardown window that precedes one. The
@@ -514,7 +527,7 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // (its worktree was moved away), one with a teardown op in flight — an archive
 // (OpArchiving) or kill (OpKilling) — or one whose durable account replacement
 // has not completed. The archive case is the load-bearing one:
-// ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
+// ArchiveTeardownWithClaim keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
 func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.liveness == LiveArchived {

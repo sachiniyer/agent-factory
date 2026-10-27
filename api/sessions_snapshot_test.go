@@ -206,6 +206,114 @@ func TestListSessions_DiskFallbackSanitizesArchiveStorageMetadata(t *testing.T) 
 	}
 }
 
+// TestListSessions_DiskFallbackRestoresRelocationRecoveryOriginals verifies the
+// disk-fallback read path reverses the rollback-safe ownership projection that
+// ForStorage writes for a row carrying an UNRESOLVED worktree relocation
+// recovery, in both recovery shapes the persistence layer can emit:
+//
+//   - the plain shape (State = relocation_stalled), whose originals live in
+//     OriginalExternalWorktree / OriginalBranchCreatedByUs /
+//     OriginalStartupStateUnknown.
+//   - the cleanup-lifecycle shape (CleanupReady), which ForStorage projects to
+//     claim_stale + CleanupLifecycle and whose originals move into the
+//     CleanupOriginal* fields.
+//
+// For either shape a non-archived LiveLost row whose true ownership is known
+// (af-created worktree, StartupStateUnknown=false) must read back through the
+// disk fallback with its real ownership, and the fleet watch verdict must be
+// `lost` (recover with `af sessions restore`) — not `unknown` ("inspect it and
+// remove it explicitly"), which the ForStorage projection would force without
+// the restore.
+func TestListSessions_DiskFallbackRestoresRelocationRecoveryOriginals(t *testing.T) {
+	falseVal := false
+	trueVal := true
+	shapes := []struct {
+		name     string
+		recovery *session.GitWorktreeRelocationRecoveryData
+	}{
+		{
+			name: "plain",
+			recovery: &session.GitWorktreeRelocationRecoveryData{
+				State:                       sessiongit.RelocationRecoveryStalled,
+				OriginalExternalWorktree:    &falseVal,
+				OriginalBranchCreatedByUs:   &trueVal,
+				OriginalStartupStateUnknown: &falseVal,
+			},
+		},
+		{
+			name: "cleanup_lifecycle",
+			recovery: &session.GitWorktreeRelocationRecoveryData{
+				State:                       sessiongit.RelocationRecoveryCleanupReady,
+				OriginalExternalWorktree:    &falseVal,
+				OriginalBranchCreatedByUs:   &trueVal,
+				OriginalStartupStateUnknown: &falseVal,
+			},
+		},
+	}
+
+	for _, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			stubSnapshot(t, daemonUnavailable)
+
+			stored := session.InstanceData{
+				Title: "recover-me", Status: session.Lost, Liveness: session.LiveLost,
+				Worktree: session.GitWorktreeData{
+					RepoPath: "/repos/project", WorktreePath: "/wt/recover-me",
+					BranchName: "af/recover-me", ExternalWorktree: false,
+					BranchCreatedByUs:  &trueVal,
+					RelocationRecovery: tc.recovery,
+				},
+			}.ForStorage()
+			if stored.ArchiveReport != nil {
+				t.Fatal("precondition: fixture projected an archive report; this regression is for the standalone relocation fence")
+			}
+			if !stored.StartupStateUnknown || !stored.Worktree.ExternalWorktree {
+				t.Fatalf("precondition: fixture is not a relocation-recovery fenced storage projection: startup_unknown=%v external=%v",
+					stored.StartupStateUnknown, stored.Worktree.ExternalWorktree)
+			}
+			if stored.Worktree.BranchCreatedByUs == nil || *stored.Worktree.BranchCreatedByUs {
+				t.Fatal("precondition: fixture did not project branch ownership to user-owned")
+			}
+
+			raw, err := json.Marshal([]session.InstanceData{stored})
+			if err != nil {
+				t.Fatalf("marshal storage fixture: %v", err)
+			}
+			if err := config.SaveRepoInstances("repo-a", raw); err != nil {
+				t.Fatalf("save storage fixture: %v", err)
+			}
+
+			got, err := listSessions("repo-a")
+			if err != nil {
+				t.Fatalf("listSessions disk fallback: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d sessions, want 1", len(got))
+			}
+			view := got[0]
+			if view.StartupStateUnknown {
+				t.Fatalf("disk fallback leaked the compatibility-only startup_state_unknown flag for a %s recovery row", tc.name)
+			}
+			if view.Worktree.ExternalWorktree {
+				t.Fatalf("disk fallback leaked the compatibility-only external_worktree flag for a %s recovery row", tc.name)
+			}
+			if view.Worktree.BranchCreatedByUs == nil || !*view.Worktree.BranchCreatedByUs {
+				t.Fatalf("disk fallback did not restore af-created branch ownership for a %s recovery row", tc.name)
+			}
+
+			reason, detail := classifyWatchStop(view)
+			if reason != watchStopLost {
+				t.Fatalf("fleet watch verdict = %q, want %q; the disk fallback must report the row's real liveness, not the projected unknown verdict. detail=%q",
+					reason, watchStopLost, detail)
+			}
+			if !strings.Contains(detail, "af sessions restore") {
+				t.Fatalf("fleet watch lost detail = %q, want the restore instruction", detail)
+			}
+		})
+	}
+}
+
 func TestListSessions_DiskFallbackProjectsIdleReason(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	stubSnapshot(t, daemonUnavailable)
@@ -398,7 +506,7 @@ func TestWhoamiSession_DiskFallback(t *testing.T) {
 
 // --- Remote-target error surfacing (#1679, #1681) ------------------------------
 //
-// These lock in the contract from docs/remote-tcp-auth.md: when targeting a
+// These lock in the contract from docs/remote-http-auth.md: when targeting a
 // remote daemon, a snapshot error (bad token → 401, or unreachable daemon →
 // network error) is surfaced verbatim rather than being masked by a
 // same-machine disk scan (there is no local disk on the other end). The disk is
