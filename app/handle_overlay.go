@@ -158,6 +158,18 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
 	}
+	// A configured section-navigation key takes priority over the rail's
+	// hardcoded vim/cursor aliases — same rule as handleProjectsFocus. For
+	// example, next_section = "j" suppresses the global down binding, so
+	// Automations must not reclaim j as a cursor move before the global
+	// dispatcher can honor the override (#2295 left the peer Projects handler
+	// guarded; this closes the identical gap here).
+	if key.Matches(msg,
+		keys.GlobalKeyBindings[keys.KeyNextSection],
+		keys.GlobalKeyBindings[keys.KeyPrevSection],
+	) {
+		return m, nil, false
+	}
 	if _, consumed := m.automations.HandleKey(msg); consumed {
 		return m, nil, true
 	}
