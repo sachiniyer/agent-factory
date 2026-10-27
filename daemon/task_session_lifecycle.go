@@ -111,13 +111,49 @@ func (m *Manager) stampTaskRunFailed(instance *session.Instance) {
 		return
 	}
 	now := nowFunc()
-	updated, err := task.UpdateTaskStatus(instance.TaskID, &now, taskStatusErroredPromptUndelivered)
+	peers := m.taskRunPeerSnapshot()
+	updated, applied, err := task.UpdateTaskStatusIf(instance.TaskID, &now, taskStatusErroredPromptUndelivered,
+		func(cur task.Task) bool { return failedRunOwnsStatus(instance, peers, cur) })
 	if err != nil {
 		m.warn().Printf("could not record the failed run for task %q (session %q): %v",
 			instance.TaskID, instance.Title, err)
 		return
 	}
-	m.publishEvent(agentproto.EventTaskUpdated, updated)
+	// Settled either way: applied, or refused because the status is not this
+	// run's to write. Only a store error (above) keeps the durable flag armed.
+	instance.AckTaskRunFailureStamped()
+	if applied {
+		m.publishEvent(agentproto.EventTaskUpdated, updated)
+	}
+}
+
+// failedRunOwnsStatus is the compare-and-set guard of the failure stamp
+// (#5645): the write is this run's only while the task's status is not already
+// the failure (idempotent across restarts) and no NEWER session of the same
+// task is registered — LastRunStatus is task-wide, and a stale stamp landing
+// after a newer fire began would report that run as failed.
+func failedRunOwnsStatus(instance *session.Instance, peers []*session.Instance, cur task.Task) bool {
+	if cur.LastRunStatus == taskStatusErroredPromptUndelivered {
+		return false
+	}
+	for _, peer := range peers {
+		if peer != instance && peer.TaskID == instance.TaskID && peer.CreatedAt.After(instance.CreatedAt) {
+			return false
+		}
+	}
+	return true
+}
+
+// taskRunPeerSnapshot copies the manager's registered sessions so the guard can
+// iterate after the manager lock is released.
+func (m *Manager) taskRunPeerSnapshot() []*session.Instance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	peers := make([]*session.Instance, 0, len(m.instances))
+	for _, peer := range m.instances {
+		peers = append(peers, peer)
+	}
+	return peers
 }
 
 // deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED

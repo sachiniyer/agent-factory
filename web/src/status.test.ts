@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   type DotKind,
   idleReasonDetail,
@@ -26,6 +27,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  sessionWarningText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -247,6 +249,31 @@ test("archive warning retains the daemon's source location for the persistent ba
   const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
   assert.equal(archiveWarningText(sess({ archive_warning: warning })), warning);
   assert.equal(archiveWarningText(sess({ archive_warning: "   " })), "");
+});
+
+test("callback warning renders under the shared prefix (#5571 W3.1)", () => {
+  const reason = "the listener moved while the sandbox was being provisioned";
+  assert.equal(
+    callbackUnavailableText(sess({ callback_unavailable: reason })),
+    `af callback unavailable: ${reason}`,
+  );
+  assert.equal(callbackUnavailableText(sess({ callback_unavailable: "   " })), "");
+  assert.equal(callbackUnavailableText(sess({})), "");
+});
+
+test("the persistent banner joins archive and callback warnings without dropping either", () => {
+  const session = sess({
+    archive_warning: "restore completed with an incomplete archive",
+    callback_unavailable: "require_token is false",
+  });
+  assert.equal(
+    sessionWarningText(session),
+    "restore completed with an incomplete archive · af callback unavailable: require_token is false",
+  );
+  // One notice alone renders bare — no dangling separator.
+  assert.equal(sessionWarningText(sess({ callback_unavailable: "x" })), "af callback unavailable: x");
+  assert.equal(sessionWarningText(sess({ archive_warning: "y" })), "y");
+  assert.equal(sessionWarningText(sess({})), "");
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {

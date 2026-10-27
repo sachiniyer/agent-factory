@@ -752,6 +752,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
+	// The callback-absence reason is the same class of axis: a sandbox create
+	// stamps it while liveness stays Ready/Running, and it never flips a status
+	// on its own (#5571 W3.1).
+	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
+		changed = true
+	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.

@@ -39,6 +39,7 @@ import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
@@ -54,12 +55,13 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
-import { ConfigPane, type ConfigStatus } from "./config.js";
+import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
@@ -355,6 +357,11 @@ export interface Actions {
    *  close. The config pane only reports the intent; the shell owns the token and the
    *  modal host. */
   openConfigAssistant(): void;
+  /** Resolves one config key's provenance through POST /v1/ExplainConfig (#4803)
+   *  — the same config.ResolvedValue `af config get --explain` renders, computed
+   *  daemon-side so the view formats a trace it could not diverge from. Always
+   *  settles: a refusal arrives as `{ok:false}` text. */
+  explainConfig(key: string): Promise<ExplainOutcome>;
   /** Creates an agent account's credential directory on the daemon host (#3385).
    *  Idempotent; the daemon holds the name rule and its refusal is shown verbatim. */
   registerAccount(agent: string, name: string): void;
@@ -1287,6 +1294,7 @@ export class AppShell {
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key: string) => this.actions.explainConfig(key),
       accounts: {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
@@ -2409,7 +2417,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -2697,11 +2705,20 @@ export class AppShell {
       }
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
-      // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      // Three regions, mirroring the pointerup drop decision below: a pane shows its
+      // split zone, the bar shows its insertion gap, and anywhere else (the header,
+      // appbar controls, or empty space) shows nothing — a release there is a cancel,
+      // so the indicator must not track a finger that is no longer over the bar. The
+      // verdict lives in tabtouch.ts for the same reason `tabPressVerdict` does. The
+      // pane hit-test shows its hint as a side effect, so it runs only when the pointer
+      // is off the bar (short-circuit), exactly as before.
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
 
@@ -2948,7 +2965,7 @@ export class AppShell {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -3441,6 +3458,7 @@ export function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
   // A managed-but-inert row keeps its Kill button but cannot be opened; its
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
@@ -3448,10 +3466,11 @@ export function sessionRow(
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`,
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -3482,7 +3501,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }

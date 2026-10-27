@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -250,4 +251,179 @@ func TestGetSessionByTitle_ReportsEnumerationFailure(t *testing.T) {
 	if !strings.Contains(notice, "could not check any project") {
 		t.Errorf("the returned notice must carry the same enumeration-failure text; got: %q", notice)
 	}
+}
+
+// TestGetSessionByTitle_ReportsIncompleteWideningOnCorruptedRepo is the
+// parse-corruption twin of TestGetSessionByTitle_ReportsIncompleteWideningButStillResolves.
+// A repo whose instances.json could not be PARSED is the same kind of gap as one
+// whose file could not be READ (#3479): either could hold the title, so the
+// widening's exhaustiveness claim must not survive either. Before the fix the
+// bare `continue` on json.Unmarshal dropped the corrupted repo from BOTH the
+// extra-paths result AND the gaps channel, so the widening reported itself
+// exhaustive and a bare `sessions get foo` resolved clean — no notice, no stderr
+// line, no log — exactly the wrong-project resolution the widening exists to
+// prevent. Now it resolves AND caveats, naming the file so it can be repaired.
+func TestGetSessionByTitle_ReportsIncompleteWideningOnCorruptedRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	warnLog := captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	if err := config.SaveRepoInstances("corrupt-repo", json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupt-repo: %v", err)
+	}
+	path, err := config.RepoInstancesPath("corrupt-repo")
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+
+	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+	got, notice, err := getSessionByTitle("foo")
+	if err != nil {
+		t.Fatalf("a read must not break because its ambiguity widening hit a corrupted file: %v", err)
+	}
+	if got == nil || got.Path != "/repos/live" {
+		t.Fatalf("expected the live match to resolve, got: %+v", got)
+	}
+	if !strings.Contains(warn.String(), "could not check every project") {
+		t.Errorf("an incomplete widening must be reported, not silently dropped; stderr was: %q", warn.String())
+	}
+	if !strings.Contains(warn.String(), path) {
+		t.Errorf("the notice must name the corrupted file; stderr was: %q", warn.String())
+	}
+	if !strings.Contains(warn.String(), "--repo") {
+		t.Errorf("the notice should point at the scope that would settle it; stderr was: %q", warn.String())
+	}
+	if notice == "" {
+		t.Errorf("the notice must also be returned, for --json callers to carry (#3511)")
+	}
+	if !strings.Contains(notice, path) {
+		t.Errorf("the returned notice must name the corrupted file too; got: %q", notice)
+	}
+	// A parse-corrupted instances.json is a file af can READ but not parse, so
+	// "remove the file(s)" — RepoInstancesSkipRemedy's advice for an unreadable
+	// file — would discard the hidden sessions (af keeps no backup). The notice
+	// must carry the corruption-safe hint instead (#5530 review).
+	if strings.Contains(notice, "remove the file") {
+		t.Errorf("the notice for a corrupted file must not advise removing it (af keeps no backup); got: %q", notice)
+	}
+	if !strings.Contains(notice, "copy the corrupt") {
+		t.Errorf("the notice for a corrupted file must carry the corruption-safe repair hint; got: %q", notice)
+	}
+	if !strings.Contains(warnLog.String(), "corrupt-repo") {
+		t.Errorf("the corrupted repo must be logged while widening; warning log was: %q", warnLog.String())
+	}
+}
+
+// TestGetSessionByTitle_CorruptedAndUnreadableWideningBothReported pins that the
+// two gap classes the widening can hit — a file that could not be READ and one
+// whose JSON could not be PARSED — both surface in the one notice, in stable
+// repoID order, so an operator gets a single actionable caveat rather than one
+// gap silently drowning the other.
+func TestGetSessionByTitle_CorruptedAndUnreadableWideningBothReported(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	// zeta-unreadable sorts AFTER alpha-corrupted by repoID, so the order
+	// assertion below pins both the "both reported" and the stable-order
+	// contracts at once.
+	seedRows(t, "zeta-unreadable", session.InstanceData{Title: "foo", Path: "/repos/zeta"})
+	makeRecordsUnreadable(t, "zeta-unreadable")
+	unreadablePath, err := config.RepoInstancesPath("zeta-unreadable")
+	if err != nil {
+		t.Fatalf("RepoInstancesPath(zeta): %v", err)
+	}
+	if err := config.SaveRepoInstances("alpha-corrupted", json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save alpha-corrupted: %v", err)
+	}
+	corruptedPath, err := config.RepoInstancesPath("alpha-corrupted")
+	if err != nil {
+		t.Fatalf("RepoInstancesPath(alpha): %v", err)
+	}
+
+	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+	got, notice, err := getSessionByTitle("foo")
+	if err != nil {
+		t.Fatalf("the read must still resolve with both gap classes present: %v", err)
+	}
+	if got == nil || got.Path != "/repos/live" {
+		t.Fatalf("expected the live match to resolve, got: %+v", got)
+	}
+	if !strings.Contains(notice, unreadablePath) || !strings.Contains(notice, corruptedPath) {
+		t.Errorf("the notice must name BOTH gap files; got: %q", notice)
+	}
+	// Stable repoID order: alpha-corrupted before zeta-unreadable.
+	if strings.Index(notice, corruptedPath) > strings.Index(notice, unreadablePath) {
+		t.Errorf("the notice must list gaps in repoID order (alpha before zeta); got: %q", notice)
+	}
+	if !strings.Contains(warn.String(), "could not check every project") {
+		t.Errorf("the stderr notice must say it could not check every project; got: %q", warn.String())
+	}
+}
+
+// TestGetSessionByTitleInScope_JSONCarriesCorruptedWideningNotice is the
+// parse-corruption twin of TestGetSessionByTitleInScope_JSONCarriesIncompleteWideningNotice:
+// under --json the corrupted-widening notice must ride inside the envelope's
+// `data` payload (resolved session + additive `warnings` array), because stderr
+// under --json carries only the {data,error} envelope and drops a free-form line
+// (#3169). Before the fix a corrupted repo produced NO notice at all, so --json
+// resolved clean with no warnings array — the silent wrong-project resolution.
+func TestGetSessionByTitleInScope_JSONCarriesCorruptedWideningNotice(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	if err := config.SaveRepoInstances("corrupt-repo", json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupt-repo: %v", err)
+	}
+	path, err := config.RepoInstancesPath("corrupt-repo")
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+
+	withEnvelope(t, func() {
+		live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+		data, notice, err := getSessionByTitleInScope("", "foo")
+		if err != nil {
+			t.Fatalf("a read must not break because its widening hit a corrupted file: %v", err)
+		}
+
+		out := captureStdout(t, func() {
+			if err := jsonOut(sessionGetPayload(data, notice)); err != nil {
+				t.Fatalf("jsonOut: %v", err)
+			}
+		})
+
+		var envelope struct {
+			Data struct {
+				Path     string   `json:"path"`
+				Warnings []string `json:"warnings"`
+			} `json:"data"`
+			Error *string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+			t.Fatalf("stdout was not the expected envelope shape: %v\nstdout: %s", err, out)
+		}
+		if envelope.Data.Path != "/repos/live" {
+			t.Fatalf("expected the live match to resolve, got: %+v", envelope.Data)
+		}
+		if len(envelope.Data.Warnings) != 1 {
+			t.Fatalf("expected exactly one warning embedded in data, got: %+v", envelope.Data.Warnings)
+		}
+		if !strings.Contains(envelope.Data.Warnings[0], path) {
+			t.Errorf("the embedded warning must name the corrupted file %s, got: %q", path, envelope.Data.Warnings[0])
+		}
+		if warn.String() != "" {
+			t.Errorf("under --json, stderr must carry nothing — the notice belongs in data, not stderr; stderr was: %q", warn.String())
+		}
+	})
 }

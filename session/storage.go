@@ -147,6 +147,11 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunFailurePending records that the run ended failed (initial prompt
+	// proven undelivered, #5278) and the task's errored status has not yet been
+	// acknowledged as written (#5646). omitempty + additive: an older record
+	// decodes to false, the pre-fix behaviour.
+	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.
@@ -429,6 +434,13 @@ type InstanceData struct {
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
 	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// CallbackUnavailable is the reason this session has no af callback (#5571
+	// W3.1) — the mint refusal recorded when its sandbox provisioned without one,
+	// or the in-sandbox agent-server's undelivered-credential notice. Persisted
+	// like the LostRestoreFailure durability class: it survives restarts so the
+	// surfaces never silently drop the explanation, and it is additive +
+	// omitempty so older binaries read and rewrite the row untouched.
+	CallbackUnavailable string `json:"callback_unavailable,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live

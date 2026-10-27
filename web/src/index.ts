@@ -31,6 +31,7 @@ import {
   rebindProject,
   type RegisteredProject,
   errorText,
+  explainConfig,
   fetchSessionSnapshot,
   killSession,
   getConfig,
@@ -61,7 +62,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
-import { createKeyedQueue, saveNotice } from "./config.js";
+import { createKeyedQueue, type ExplainOutcome, saveNotice } from "./config.js";
 import {
   bindTerminalFontPersist,
   setTerminalFontSizes,
@@ -889,6 +890,13 @@ function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInv
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    // Reinstall this handle's Tab trap. A fresh modal already installed it in
+    // modalChrome, so this reaps and re-adds the same listener (a no-op); a
+    // retained handle remounted after a refused RPC — openModal re-inserts the
+    // existing el without rebuilding it — had its trap reaped by any modalChrome
+    // that ran in between (an intervening modal opened and closed), so the
+    // reopened error dialog would otherwise have no Tab containment.
+    m.reactivate?.();
     if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
   });
 }
@@ -2131,6 +2139,22 @@ function applyConfigValue(key: string, value: string): Promise<void> {
   return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
+/** ExplainConfig (#4803): the config view's Explain affordance. Returns the
+ *  daemon's own ResolvedValue — which on-disk layer won, which were shadowed,
+ *  absent, or disallowed — for the pane to FORMAT, never compute. A refusal
+ *  (unknown key, a daemon too old for the route) settles as `{ok:false}` with
+ *  the daemon's message already rendered, so the view never interprets errors. */
+function explainConfigValue(key: string): Promise<ExplainOutcome> {
+  const tok = token;
+  if (tok === null) {
+    return Promise.resolve({ ok: false, error: "not connected to the daemon" });
+  }
+  return explainConfig(key, tok).then(
+    (resp) => ({ ok: true, resp }) as ExplainOutcome,
+    (err: unknown) => ({ ok: false, error: errorText(err) }),
+  );
+}
+
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
@@ -2681,6 +2705,7 @@ const actions = {
   setConfigValue: applyConfigValue,
   stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
+  explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
   switchProject,
