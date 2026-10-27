@@ -75,6 +75,7 @@ export function appbarControls(
   phone = window.matchMedia("(max-width: 768px)"),
   beforeSync: () => void = () => {},
   onDismiss: () => void = () => {},
+  emptyFocus: () => HTMLElement | null = () => null,
 ) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
@@ -86,17 +87,33 @@ export function appbarControls(
   menu.panel.id = "af-appbar-tools";
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
+  const hasContent = () => Array.from(menu.panel.children).some((child) => !(child as HTMLElement).hidden);
+  const syncTrigger = () => {
+    const empty = !hasContent();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
+    menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
+  };
   const sync = () => {
     beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
-    menu.trigger.hidden = !phone.matches;
+    syncTrigger();
     menu.panel.hidden = phone.matches;
-    if (phone.matches && hadFocus) menu.trigger.focus();
+    if (phone.matches && hadFocus && !menu.trigger.hidden) menu.trigger.focus();
   };
+  // Children move in and out (session-first composition) and toggle `hidden`
+  // (install), so an empty More menu can appear at any time.
+  const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(syncTrigger);
+  observer?.observe(menu.panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   phone.addEventListener("change", sync);
   sync();
-  return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
+  return {
+    ...menu,
+    dispose: () => { observer?.disconnect(); phone.removeEventListener("change", sync); menu.dispose(); },
+  };
 }
 
 /** Session-first follows selected content, not drawer visibility or transient keyboard ownership. */
