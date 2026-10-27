@@ -1,23 +1,23 @@
 {
   "raw_bytes": {
-    "baseline": 1033575,
+    "baseline": 1053400,
     "samples": [
-      1033575,
-      1033575,
-      1033575
+      1053400,
+      1053400,
+      1053400
     ],
     "stddev": 0,
-    "margin": 51678.75
+    "margin": 52670.0
   },
   "gzip_bytes": {
-    "baseline": 231191,
+    "baseline": 236684,
     "samples": [
-      231191,
-      231191,
-      231191
+      236684,
+      236684,
+      236684
     ],
     "stddev": 0,
-    "margin": 11559.55
+    "margin": 11834.2
   },
   "first_terminal_ms": {
     "baseline": 2870.4166666666665,
