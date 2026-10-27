@@ -98,6 +98,43 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	i.runtimeTeardown = teardown
 }
 
+// owesNoRuntimeTeardownLocked reports whether a sandbox-backed instance
+// positively owes no off-box reap — i.e. its backend carries no durable cleanup
+// identity at all (the cleanup field is nil). It is the EARNED-EVIDENCE half of
+// the KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+//
+// Caller holds i.mu (read or write) and hands over the backend pointer it
+// already read. It must NOT acquire i.mu itself: sync.RWMutex is not reentrant,
+// so a nested RLock from a caller holding the read lock deadlocks the moment a
+// writer queues between the two acquisitions, and from a caller holding the
+// write lock it deadlocks unconditionally. The snapshot path (toInstanceDataLocked
+// — whose contract is that the caller already holds i.mu) calls this, so any lock
+// acquisition here would wedge snapshot, persistence, and kill behind a session
+// mutex that never releases.
+//
+// The necessity of the second condition besides `runtimeTeardown == nil` is the
+// f58ca97f wedge-fix gone wrong: a sandbox row reloaded INERT after a daemon
+// restart ALWAYS has `runtimeTeardown == nil` (the inert backend binds no live
+// teardown), regardless of whether its off-box runtime survived — so gating the
+// "nothing owed" marker on that nil alone laundered a still-live ssh workspace or
+// hook-provisioned sandbox into a no-op kill and deleted the only record that
+// pointed at it. Persisting RuntimeCleanup for ordinary sandbox rows (ForStorage)
+// and rebuilding it at load (FromInstanceData) puts a real teardown handle back on
+// a reloaded LIVE row, so this `runtimeTeardown == nil` arm stops firing for it;
+// the marker is staged only when the backend itself positively carries no
+// cleanup identity, which is the always-inert shape the original wedge fix meant
+// to admit.
+func owesNoRuntimeTeardownLocked(backend Backend) bool {
+	if backend == nil {
+		return true
+	}
+	provider, ok := backend.(runtimeCleanupProvider)
+	if !ok {
+		return true
+	}
+	return provider.runtimeCleanupData() == nil
+}
+
 // SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
 // under the same mutex GetBranch reads it with.
 //

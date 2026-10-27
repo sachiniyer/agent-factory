@@ -83,23 +83,60 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.TabRosterMutable = &rosterMutable
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
-			// ForStorage publishes it only when UserKilled or an unknown cleanup
-			// outcome makes it durable, including the persistKillTombstone copy that
-			// flips the kill flag after this read.
+			// ForStorage publishes it for a UserKilled tombstone, an unknown cleanup
+			// outcome, and now ordinary sandbox rows (so a restart can rebuild the
+			// handle and a later kill reaps for real) — including the
+			// persistKillTombstone copy that flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
 		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
-		// session whose off-box runtime owes no teardown (runtimeTeardown == nil).
-		// ForStorage publishes it only for a UserKilled tombstone, where it records
-		// that the kill was committed against an inert rebuild and the tombstone
-		// therefore carries no RuntimeCleanup handle on purpose. The marker is the
-		// durable token FromInstanceData reads to admit that "nothing owed" shape —
-		// the sandbox analog of the local branch's worktreeReaped admission (#2691)
-		// — so a handle-less tombstone that survives a daemon restart can still
-		// complete its pending record delete instead of installing a permanent
-		// fail-closed teardown. A local backend never reaches here: it has no
-		// off-box runtime, and its reaped shape is read from its worktree paths.
-		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil {
+		// session whose off-box runtime POSITIVELY owes no teardown. The two
+		// conditions are deliberately independent and BOTH must hold:
+		//
+		//   - owesNoRuntimeTeardownLocked(i.backend): positive evidence the backend
+		//     itself carries no off-box cleanup identity. This is the EARNED part. A
+		//     sandbox backend rebuilt by restoreRuntimeCleanup carries the cleanup
+		//     handle it restored from disk (its runtimeCleanupData() is non-nil),
+		//     and that handle means a runtime is still owed a reap — staging the
+		//     marker from a nil runtimeTeardown ALONE would launder that still-live
+		//     runtime into a no-op success and orphan it (the original f58ca97f
+		//     wedge fix did exactly that, because reload produced a handle-less
+		//     inert backend for every sandbox row regardless of whether its runtime
+		//     survived the restart).
+		//   - !i.runtimeCleanupStateUnknown: the cleanup state is KNOWN, not
+		//     unknown. This is what distinguishes a discharged reap (the marker is
+		//     earned — the reap answered definitively and latched, so the runtime
+		//     is gone) from a rejected or unknown cleanup handle that fail-closed
+		//     (a reload installs unavailableRuntimeCleanup and arms
+		//     runtimeCleanupStateUnknown, which must NOT stage the marker — its
+		//     reload keeps the record retained for a real retry instead of admitting
+		//     a no-op delete). The previous gate read `i.runtimeTeardown == nil` as
+		//     the "no reap is owed" signal, but the ArchiveSandbox known-failure
+		//     branch (clearDischargedRuntimeCleanup) discharges the backend's
+		//     cleanup identity after a latched definite reap while deliberately
+		//     retaining the in-memory teardown closure for the abort-to-Lost retry
+		//     (reapRemoteRuntimeForReplacement reaps through it). That closure is a
+		//     stale re-entrant path for an already-reaped runtime, not a live reap
+		//     obligation, so a kill tombstone written in that state would otherwise
+		//     carry neither RuntimeCleanup nor the marker and fail closed on a
+		//     crash-after-tombstone reload — even though the reap already answered.
+		//     Reading the cleanup state instead of the teardown pointer admits that
+		//     discharged shape while a genuinely unknown cleanup (the sentinel
+		//     teardown a rejected handle installs, or markRuntimeCleanupStateUnknown)
+		//     still refuses the marker, because its reload must keep the record
+		//     retained for a real retry.
+		//
+		// ForStorage publishes the staged marker only for a UserKilled tombstone,
+		// where it records that the kill was committed against a rebuild that owed
+		// no off-box reap and the tombstone therefore carries no RuntimeCleanup
+		// handle on purpose. The marker is the durable token FromInstanceData reads
+		// to admit that "nothing owed" shape — the sandbox analog of the local
+		// branch's worktreeReaped admission (#2691) — so a handle-less tombstone
+		// that survives a daemon restart can still complete its pending record
+		// delete instead of installing a permanent fail-closed teardown. A local
+		// backend never reaches here: it has no off-box runtime, and its reaped
+		// shape is read from its worktree paths.
+		if isSandboxBackendType(data.BackendType) && owesNoRuntimeTeardownLocked(i.backend) && !i.runtimeCleanupStateUnknown {
 			marker := true
 			data.killedWithoutLiveRuntime = &marker
 		}
@@ -338,6 +375,13 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	data = data.RestoreArchiveRollbackFence()
+	// ForStorage publishes an ordinary sandbox row's RuntimeCleanup under a
+	// projected RuntimeCleanupStateUnknown=true so a binary rolled back to the
+	// preceding release rebuilds and preserves the handle instead of loading the
+	// row inert and orphaning the runtime. Restore the real value before any
+	// cleanup-state decision reads it; the preceding release ignores the fence
+	// field, so a current reader sees the ordinary row it is.
+	data = data.RestoreRuntimeCleanupRollbackFence()
 	var err error
 	data, err = data.RestoreRelocationRecoveryOriginals()
 	if err != nil {
@@ -499,11 +543,19 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
-		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
-		// sandbox client is dialled during load. Archived sandboxes were already
-		// reaped before becoming Archived, so deleting their record needs no remote
-		// cleanup handle.
-		if (data.UserKilled || data.RuntimeCleanupStateUnknown) && liveness != LiveArchived {
+		// intent. An ordinary sandbox row carries a persisted RuntimeCleanup handle
+		// (ForStorage publishes it for sandbox backends) precisely so this branch
+		// can rebuild a real teardown after a restart — its off-box runtime
+		// SURVIVES the restart, and without the handle a later kill would stage an
+		// unearned KilledWithoutLiveRuntime marker from the inert backend's nil
+		// runtimeTeardown alone and orphan the still-live runtime. Rebuild only
+		// that teardown handle — no endpoint, tunnel, or live sandbox client is
+		// dialled during load. Archived sandboxes were already reaped before
+		// becoming Archived, so deleting their record needs no remote cleanup
+		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
+		// handle here is naturally nil for those rows.
+		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
+		if liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
@@ -525,6 +577,17 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 					// unknown-state sentinel, so finishUserKill retains the only record
 					// instead of laundering a missing handle into no-op success.
 					instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+					// The inert backend carries no cleanup identity, so the next
+					// checkpoint would otherwise publish no RuntimeCleanup AND clear the
+					// unknown flag (an ordinary row reloads with both gone). A subsequent
+					// restart would then load the row fully inert — runtimeTeardown nil
+					// and a backend that positively owes nothing — stage the nothing-owed
+					// marker, and let a no-op kill delete the only record pointing at a
+					// runtime whose fate this first reload correctly could not determine.
+					// Mark the cleanup state unknown durably so every later restart retries
+					// this same fail-closed rebuild instead of laundering the rejected
+					// handle into the orphan the marker exists to prevent.
+					instance.runtimeCleanupStateUnknown = true
 				}
 			} else {
 				instance.backend = backend
