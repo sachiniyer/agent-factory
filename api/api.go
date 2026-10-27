@@ -32,7 +32,7 @@ import (
 // error it returns:
 //   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
-//     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
+//     same-machine disk read (docs/remote-http-auth.md, #1592 Phase 3 PR4).
 //   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
@@ -501,7 +501,11 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 
 // scopedInstance is a persisted session paired with the repo ID it belongs to,
 // which the broadcast delivery path needs to address the daemon SendPrompt RPC.
+// ID is the row's stable identity: the broadcast enumerates its targets before
+// dispatching, so the send must carry it or a killed-and-recreated row could
+// inherit a prompt meant for the session the user actually listed.
 type scopedInstance struct {
+	ID     string
 	RepoID string
 	Title  string
 	Status session.Status
@@ -518,7 +522,7 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
-		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 	}
 	return out, nil
 }
@@ -552,7 +556,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 			continue
 		}
 		for i := range instances {
-			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+			out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 		}
 	}
 	return out, corrupted, nil
@@ -748,6 +752,12 @@ func init() {
 	sessionsRestoreCmd.Flags().Bool("force-reap", false,
 		"replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed)")
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
+
+	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
+		"Report sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneAllFlag, "all", false,
+		"Span every project instead of only the current/--repo one")
+	SessionsCmd.AddCommand(sessionsPruneCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 

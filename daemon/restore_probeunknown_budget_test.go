@@ -3,7 +3,6 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -199,8 +198,12 @@ func TestRestoreLostSessions_ProbeUnknownForceReapMissingBudgetReset(t *testing.
 		t.Fatal("setup: LostRestoreGaveUp = false after the preserve-push give-up passes: the preserve arm did not reach terminal state")
 	}
 	snapshot := inst.LostRestoreFailureSnapshot()
-	if snapshot == nil || snapshot.Attempts != lostRestoreMaxAttempts {
-		t.Fatalf("setup: durable failure = %#v, want %d attempts (the preserve-push give-up)", snapshot, lostRestoreMaxAttempts)
+	// Attempts is the cumulative episode count (#5295 review): the pass-1
+	// Recover failure plus the six preserve-push failures is the episode's
+	// real try count — the give-up still fires on the preserve arm's own
+	// six-failure budget.
+	if snapshot == nil || snapshot.Attempts != lostRestoreMaxAttempts+1 {
+		t.Fatalf("setup: durable failure = %#v, want %d attempts (the pass-1 Recover failure plus the preserve-push give-up)", snapshot, lostRestoreMaxAttempts+1)
 	}
 	if !strings.Contains(snapshot.Error, "refusing to replace the sandbox") {
 		t.Fatalf("setup: durable failure error = %q, want the preserve-push refusal reason", snapshot.Error)
@@ -254,10 +257,9 @@ func TestRestoreLostSessions_ProbeUnknownForceReapMissingBudgetReset(t *testing.
 	// makes lostRestoreFailed take the terminal arm on the first failure against
 	// the new sandbox, logging exactly the Recover give-up string — and diverging
 	// from the probeAnsweredDead force arm, which logs "attempt 1, retrying in".
-	wantGiveUp := fmt.Sprintf("giving up after %d attempts", lostRestoreMaxAttempts+1)
-	if strings.Contains(ownLogs.errors.String(), wantGiveUp) {
-		t.Fatalf("probeUnknown force-reap Recover failure logged %q — the maxAttempts+1 give-up the probeAnsweredDead reset exists to prevent; the new sandbox must start with a fresh budget.\n"+
-			"error logs:\n%s", wantGiveUp, ownLogs.errors.String())
+	if strings.Contains(ownLogs.errors.String(), "giving up after") {
+		t.Fatalf("probeUnknown force-reap Recover failure gave up — the terminal arm the probeAnsweredDead reset exists to prevent; the new sandbox must start with a fresh budget.\n"+
+			"error logs:\n%s", ownLogs.errors.String())
 	}
 	// Verify the retry promise is actually there (attempt 1, fresh budget).
 	if !strings.Contains(ownLogs.warnings.String(), "retrying in") {
@@ -272,9 +274,9 @@ func TestRestoreLostSessions_ProbeUnknownForceReapMissingBudgetReset(t *testing.
 	// preserve-push give-up reason with the new sandbox's provision error at a
 	// wrong attempt count.
 	postSnapshot := inst.LostRestoreFailureSnapshot()
-	if postSnapshot == nil || postSnapshot.Attempts != lostRestoreMaxAttempts {
+	if postSnapshot == nil || postSnapshot.Attempts != lostRestoreMaxAttempts+1 {
 		t.Fatalf("probeUnknown force-reap overwrote the prior durable failure: in-memory snapshot = %#v, want Attempts=%d (the preserve-push give-up must survive the force-reap)",
-			postSnapshot, lostRestoreMaxAttempts)
+			postSnapshot, lostRestoreMaxAttempts+1)
 	}
 	if !strings.Contains(postSnapshot.Error, "refusing to replace the sandbox") {
 		t.Fatalf("probeUnknown force-reap overwrote the preserve-push failure reason: in-memory error = %q, want the preserve-push refusal",
@@ -289,10 +291,10 @@ func TestRestoreLostSessions_ProbeUnknownForceReapMissingBudgetReset(t *testing.
 	if rec == nil {
 		t.Fatal("durable record vanished after the force-reap")
 	}
-	if rec.LostRestoreFailure == nil || rec.LostRestoreFailure.Attempts != lostRestoreMaxAttempts ||
+	if rec.LostRestoreFailure == nil || rec.LostRestoreFailure.Attempts != lostRestoreMaxAttempts+1 ||
 		!strings.Contains(rec.LostRestoreFailure.Error, "refusing to replace the sandbox") {
 		t.Fatalf("persisted LostRestoreFailure overwritten by the force-reap: %#v, want Attempts=%d and the preserve-push refusal",
-			rec.LostRestoreFailure, lostRestoreMaxAttempts)
+			rec.LostRestoreFailure, lostRestoreMaxAttempts+1)
 	}
 
 	// The automatic loop stays suppressed: resetRecoverBudget zeroes only the

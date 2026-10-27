@@ -104,10 +104,10 @@ func ensureOpencodeAfConfig() (string, error) {
 // opencodeCarriesConfigEnv reports whether a resolved command already sets
 // OPENCODE_CONFIG itself — e.g. a program_overrides entry like
 // `OPENCODE_CONFIG=~/mine.jsonc opencode` or `env OPENCODE_CONFIG=~/mine.jsonc
-// opencode`. Shell semantics give the LAST assignment precedence, so af prepending
-// its own would be overridden by the user's anyway and their config would win
-// either way; detecting it lets af SAY the guidance did not land rather than
-// leaving that silent.
+// opencode`. Shell semantics give the LAST assignment precedence, so an
+// af-injected OPENCODE_CONFIG on the pane environment would be overridden by
+// the user's anyway and their config would win either way; detecting it lets
+// af SAY the guidance did not land rather than leaving that silent.
 //
 // The scan stops at the command word, so an OPENCODE_CONFIG=... appearing later as
 // an ARGUMENT (`opencode --prompt 'set OPENCODE_CONFIG=x'`) is correctly not
