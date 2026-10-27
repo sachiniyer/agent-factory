@@ -42,7 +42,7 @@ func TestRecoveryActorRunnerStandsDownWhenAnotherActorWon(t *testing.T) {
 	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
 	superviseCalls := 0
 
-	err := runRecoveryActorWith(
+	result, err := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(*Transaction) (*RecoveryLease, error) { return nil, ErrRecoveryActive },
 		func(context.Context, *Transaction, *RecoveryLease) error {
@@ -54,12 +54,14 @@ func TestRecoveryActorRunnerStandsDownWhenAnotherActorWon(t *testing.T) {
 	require.NoError(t, err,
 		"a service-manager duplicate must exit successfully instead of entering Restart=on-failure")
 	require.Zero(t, superviseCalls)
+	require.False(t, result.Committed,
+		"a stand-down (another actor won the lease) must not report a positive commit signal")
 }
 
 func TestRecoveryActorRunnerStandsDownForStaleTransactionBeforeAcquiring(t *testing.T) {
 	_, home, _ := prepareFixture(t)
 	acquireCalls := 0
-	err := runRecoveryActorWith(
+	result, err := runRecoveryActorWith(
 		context.Background(),
 		RecoveryInvocation{HomeDir: home, TransactionID: "different-transaction"},
 		func(*Transaction) (*RecoveryLease, error) {
@@ -72,12 +74,14 @@ func TestRecoveryActorRunnerStandsDownForStaleTransactionBeforeAcquiring(t *test
 	require.NoError(t, err,
 		"a stale transaction job must not enter its service manager's restart policy")
 	require.Zero(t, acquireCalls)
+	require.False(t, result.Committed,
+		"a stale/foreign-transaction stand-down must not report a positive commit signal")
 }
 
 func TestRecoveryActorRunnerExitsCleanlyAfterJournalCleanup(t *testing.T) {
 	home := t.TempDir()
 	acquireCalls := 0
-	err := runRecoveryActorWith(
+	result, err := runRecoveryActorWith(
 		context.Background(),
 		RecoveryInvocation{HomeDir: home, TransactionID: "already-cleaned"},
 		func(*Transaction) (*RecoveryLease, error) {
@@ -89,15 +93,18 @@ func TestRecoveryActorRunnerExitsCleanlyAfterJournalCleanup(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Zero(t, acquireCalls)
+	require.False(t, result.Committed,
+		"ErrNoActiveTransaction is a stand-down, not a commit — nothing was handed off before")
 }
 
 func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testing.T) {
 	tests := []struct {
-		name      string
-		runErr    error
-		wantError bool
+		name          string
+		runErr        error
+		wantError     bool
+		wantCommitted bool
 	}{
-		{name: "commit", runErr: nil},
+		{name: "commit", runErr: nil, wantCommitted: true},
 		{name: "abort", runErr: ErrUpgradeAborted},
 		{name: "rollback", runErr: ErrUpgradeRolledBack},
 		{name: "rollback failed circuit breaker", runErr: ErrRollbackRecoveryFailed},
@@ -115,7 +122,7 @@ func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testi
 			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 			require.NoError(t, err)
 
-			err = runRecoveryActorWith(
+			result, err := runRecoveryActorWith(
 				context.Background(), invocation,
 				func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 				func(context.Context, *Transaction, *RecoveryLease) error { return tc.runErr },
@@ -124,6 +131,17 @@ func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testi
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
+			}
+			require.Equal(t, tc.wantCommitted, result.Committed,
+				"commit polarity: a nil supervise return is the ONLY commit signal; every terminal "+
+					"rollback/abort maps to a clean exit with Committed=false")
+			if result.Committed {
+				// The committed identity must come from the supervised transaction,
+				// so a caller never needs a second journal read to parameterize the
+				// hand-off. ID is the invocation's (our) transaction; ExecutablePath
+				// is the journal's canonical path.
+				require.Equal(t, invocation.TransactionID, result.JournalID)
+				require.Equal(t, txn.Journal().ExecutablePath, result.ExecutablePath)
 			}
 			live, liveErr := txn.RecoveryActorLive()
 			require.NoError(t, liveErr)
@@ -140,10 +158,11 @@ func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testi
 // then restart an actor for an upgrade that had already finished (#2960).
 func TestRunRecoveryActor_LeaseReleaseFailureDoesNotFailTheRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		runErr error
+		name          string
+		runErr        error
+		wantCommitted bool
 	}{
-		{name: "commit", runErr: nil},
+		{name: "commit", runErr: nil, wantCommitted: true},
 		{name: "abort", runErr: ErrUpgradeAborted},
 		{name: "rollback", runErr: ErrUpgradeRolledBack},
 		{name: "rollback failed circuit breaker", runErr: ErrRollbackRecoveryFailed},
@@ -162,13 +181,15 @@ func TestRunRecoveryActor_LeaseReleaseFailureDoesNotFailTheRecovery(t *testing.T
 			// proves this fixture actually breaks Release.
 			require.NoError(t, lease.file.Close())
 
-			err = runRecoveryActorWith(
+			result, err := runRecoveryActorWith(
 				context.Background(), invocation,
 				func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 				func(context.Context, *Transaction, *RecoveryLease) error { return tc.runErr },
 			)
 			require.NoError(t, err,
 				"a failed lease release must not turn a completed recovery into a non-zero exit")
+			require.Equal(t, tc.wantCommitted, result.Committed,
+				"the commit signal must still be reported correctly even when the lease release fails")
 		})
 	}
 }
@@ -181,7 +202,7 @@ func TestRunRecoveryActor_SupervisionFailureStillFails(t *testing.T) {
 	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 	require.NoError(t, err)
 
-	err = runRecoveryActorWith(
+	result, err := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(*Transaction) (*RecoveryLease, error) { return lease, nil },
 		func(context.Context, *Transaction, *RecoveryLease) error {
@@ -189,6 +210,7 @@ func TestRunRecoveryActor_SupervisionFailureStillFails(t *testing.T) {
 		},
 	)
 	require.Error(t, err)
+	require.False(t, result.Committed, "a supervision failure must not report a commit")
 }
 
 // Proves the fixture the test above relies on: a closed handle really does make
@@ -223,7 +245,7 @@ func TestRecoveryActorRetriesWhenThePhaseEndedWithTheJobStillArmed(t *testing.T)
 		errors.New("record the rolled-back candidate as rejected: disk full"),
 	)
 
-	err := runRecoveryActorWith(
+	_, err := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(t *Transaction) (*RecoveryLease, error) {
 			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
@@ -245,7 +267,7 @@ func TestRecoveryActorStillExitsZeroOnceTheJobIsDisarmed(t *testing.T) {
 	txn, home, _ := prepareFixture(t)
 	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
 
-	err := runRecoveryActorWith(
+	result, err := runRecoveryActorWith(
 		context.Background(), invocation,
 		func(t *Transaction) (*RecoveryLease, error) {
 			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
@@ -255,4 +277,6 @@ func TestRecoveryActorStillExitsZeroOnceTheJobIsDisarmed(t *testing.T) {
 
 	require.NoError(t, err,
 		"a terminal rollback failure reached AFTER the disarm must not restart-loop the unit")
+	require.False(t, result.Committed,
+		"a rollback failure is not a commit; a caller must not arm a post-upgrade daemon from this path")
 }

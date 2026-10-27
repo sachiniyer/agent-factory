@@ -27,9 +27,13 @@ func TestDeleteTabConsent(t *testing.T) {
 			_, _ = h.handleCloseTab()
 			require.Empty(t, *calls, "w must ask before deleting the tab")
 			require.Equal(t, stateConfirm, h.state)
-			label, ok := tree.TabLabelAt(inst, 2)
+			label, ok := tree.TabTextAt(inst, 2)
 			require.True(t, ok)
-			require.Contains(t, h.confirmationOverlay.Render(), fmt.Sprintf("Delete tab %q", label))
+			rendered := h.confirmationOverlay.Render()
+			require.Contains(t, rendered, fmt.Sprintf("Delete tab %q", label))
+			// The quotation names the tab's TEXT — the "›" kind glyph is
+			// presentation and must not land inside the quotes (#4630).
+			require.NotContains(t, rendered, `Delete tab "›`)
 			require.Contains(t, h.confirmationOverlay.Render(), "Hiding a pane")
 			_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 			require.Empty(t, *calls, "repeating w is not consent")

@@ -125,6 +125,16 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
+	// IsTearingDown BEFORE ValidateRuntimeAction: a teardown-in-progress row
+	// (OpKilling/OpArchiving, possibly pre-reconcile with userKilled=false) would
+	// otherwise fall through to the generic busy-error path in
+	// ValidateRuntimeAction and render a misleading "busy (3); try again in a
+	// moment" instead of the stable "is being deleted" message every sibling
+	// verb returns. The gate hides the keybind; this still answers a key
+	// pressed anyway.
+	if selected.IsTearingDown() {
+		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
 	if err := selected.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
 		return m, m.handleNotice(err)
 	}

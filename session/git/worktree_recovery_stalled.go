@@ -157,15 +157,42 @@ func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
 	}
 }
 
-// RestoreStalledFenceAfterFailedSettle re-materializes the identity-unknown
+// RestoreStalledFenceAfterFailedSettle re-materializes the reclaimable
 // stalled state after a failed settle of a reclaimed stalled record (#3278
 // review). The failed settle leaves an in-memory claim_stale fence that disk
 // never saw — the durable record is still the stalled fence — and that
 // mismatch makes the kill producer skip while admission refuses, stranding
 // same-process retries before any tombstone exists. Restoring the stalled
-// shape re-aligns memory with disk so the next kill reclaims and re-derives;
-// the failed identity evidence is deliberately dropped, since it just failed
-// revalidation.
+// shape re-aligns memory with disk so the next kill reclaims and re-derives.
+//
+// The reclaim gate passes any stalled record regardless of identity, so the
+// reclaimed record — and therefore the durable record — may be identity-
+// qualified (the shape recordStall captures when the timed-out claim was on
+// the recorded worktree path, persisting IdentityKnown/Device/Inode/FileType
+// and AlternatePath). A failed settle's revalidation going unknown, not
+// wrong, does not invalidate that evidence: it remains the conservative stale
+// fence the failed-settle path installs. Preserve it so the restored record
+// matches disk and claim resolution can still arbitrate both candidates on
+// the next retry. Drop to the bare identity-unknown shape only when the
+// durable record the claim consumed carried no identity and no alternate —
+// the only case the bare restore is correct for. Forcing the bare shape on
+// an identity-qualified record would misalign memory from disk and unlock
+// the ENOENT discharges that this file deliberately excludes for
+// identity-qualified records, and a subsequent persist would durably erase
+// the alternate pointer needed to arbitrate candidates after a restart.
+//
+// The claim_stale fence a failed settle leaves behind can carry an identity
+// the durable record never had: a claim over an identity-unknown stalled
+// record probes the recorded path and captures whatever answers, so the
+// claim_stale fence carries that freshly observed identity even though the
+// durable record was bare. Restoring it would diverge from disk and close
+// the identity-unknown ENOENT discharge the next same-process retry needs
+// when the archived path disappeared between claim and settle; only a
+// restart reloads the original durable shape. ClaimRelocationSource
+// therefore retains the pre-claim fence shape on relocationRecoveryOrigin,
+// and the restore uses it instead of inferring the shape from the stale
+// fence: when the durable record was identity-unknown, the bare shape is
+// restored regardless of the identity the claim observed (#5555).
 func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
@@ -173,8 +200,54 @@ func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 		g.relocationRecovery.State != RelocationRecoveryClaimStale {
 		return fmt.Errorf("no stale fence from a failed settle to restore")
 	}
+	stale := g.relocationRecovery
+	origin := g.relocationRecoveryOrigin
+	g.relocationRecoveryOrigin = nil
+	// When the durable record the claim consumed was a bare identity-unknown
+	// stalled fence, restore that bare shape even if the claim resolved a fresh
+	// identity — the durable record is the authority, and a bare stall keeps the
+	// identity-unknown ENOENT discharge armed for the next same-process retry
+	// when the archived path disappeared between claim and settle (#5555).
+	if origin != nil && origin.State == RelocationRecoveryStalled &&
+		!origin.IdentityKnown && origin.AlternatePath == "" {
+		g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+		return nil
+	}
+	if stale.IdentityKnown || stale.AlternatePath != "" {
+		g.relocationRecovery = &RelocationRecovery{
+			State:         RelocationRecoveryStalled,
+			IdentityKnown: stale.IdentityKnown,
+			Device:        stale.Device,
+			Inode:         stale.Inode,
+			FileType:      stale.FileType,
+			AlternatePath: stale.AlternatePath,
+		}
+		return nil
+	}
 	g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
 	return nil
+}
+
+// SetRelocationIdentityErrorAfterNForTest makes identity inspection of one
+// exact path return err only on the n-th probe (1-indexed) of that path after
+// the seam is installed; earlier probes fall through to the real inspector. It
+// exists for callers outside this package that must let one probe (e.g. a
+// reclaim's resolution) succeed and then fail a later probe (e.g. a settle's
+// revalidation) within a single driver call, to exercise the failed-settle
+// restore path deterministically without racing a physical directory change.
+func SetRelocationIdentityErrorAfterNForTest(path string, err error, n int) func() {
+	previous := relocationPathIdentity
+	var calls int
+	relocationPathIdentity = func(observed string) (pathIdentity, error) {
+		if observed == path {
+			calls++
+			if calls == n {
+				return pathIdentity{}, err
+			}
+		}
+		return previous(observed)
+	}
+	return func() { relocationPathIdentity = previous }
 }
 
 // SettleStalledRelocationForAbsentPath clears an identity-unknown stalled
