@@ -8,7 +8,7 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
-## Sessions stuck in `loading` after a handoff recover on upgrade (upcoming release)
+## Sessions stuck in `loading` after a handoff recover on upgrade (fixed in v1.0.298)
 
 - **Sessions stuck in `loading` recover on their own when you upgrade.** A
   cross-agent handoff whose mission delivery came back `sent-unverified` or
@@ -41,7 +41,7 @@ consult the relevant notes below when preparing the announcement.
 - `--delivered` needs the upgraded daemon. An older daemon refuses it rather
   than resending.
 
-## Warning: unknown `[docker]`/`[ssh]` keys in in-repo config (upcoming release)
+## Warning: unknown `[docker]`/`[ssh]` keys in in-repo config (added in v1.0.297)
 
 - **A typo'd leaf under `[docker]` or `[ssh]` in `.agent-factory/config.{toml,json}`
   now warns.** Before, `docker.runargs` (for `run_args`) was dropped without a
@@ -54,7 +54,20 @@ consult the relevant notes below when preparing the announcement.
   a load error, as unknown top-level in-repo keys already are (#4845). Name that
   release in its own notes when it lands.
 
-## Breaking: branch-associated PR integration removed (upcoming release)
+## A caught-up reconnect after a recovery keeps the recovered pane's output (fixed in v1.0.292)
+
+- **Fixes a regression shipped in v1.0.290 and v1.0.291.** A client that was
+  caught up at the live tail when it dropped, and reconnected after a
+  pane-replacing session recovery, could lose the recovered pane's buffered
+  output when the screen snapshot failed (or carried no repaint state): its
+  terminal stayed on the dead pane's frozen screen until unrelated output
+  arrived. The reconnect now replays the recovered pane's retained output, so
+  a failed snapshot no longer loses it (#4615).
+- A reconnect whose snapshot succeeds is unchanged (the repaint is delivered,
+  no replay), as is the case where the recovered ring is empty (live output
+  follows as before).
+
+## Breaking: branch-associated PR integration removed (removed in v1.0.284)
 
 - **Session JSON no longer includes `pr_info`.** This includes session records
   returned to API consumers and `af sessions list` users, and persisted session
@@ -77,19 +90,6 @@ consult the relevant notes below when preparing the announcement.
   action for branch-associated PRs. Before upgrading, remove this dependency
   from your automation or manage PR information outside Agent Factory. Expect
   the missing `pr_info` field and HTTP 404s, rather than a migration to new names.
-
-## A caught-up reconnect after a recovery keeps the recovered pane's output (fixed in v1.0.292)
-
-- **Fixes a regression shipped in v1.0.290 and v1.0.291.** A client that was
-  caught up at the live tail when it dropped, and reconnected after a
-  pane-replacing session recovery, could lose the recovered pane's buffered
-  output when the screen snapshot failed (or carried no repaint state): its
-  terminal stayed on the dead pane's frozen screen until unrelated output
-  arrived. The reconnect now replays the recovered pane's retained output, so
-  a failed snapshot no longer loses it (#4615).
-- A reconnect whose snapshot succeeds is unchanged (the repaint is delivered,
-  no replay), as is the case where the recovered ring is empty (live output
-  follows as before).
 
 ## `af sessions list` now tells you what its numbers mean
 

@@ -68,6 +68,17 @@ type GitWorktree struct {
 	// ownership until use completes; only absence from both means no unresolved
 	// operation is known.
 	relocationRecovery *RelocationRecovery
+	// relocationRecoveryOrigin snapshots the durable recovery record a claim
+	// consumed, so a failed settle can restore the pre-claim fence rather than
+	// inferring it from the claim's freshly observed identity. A claim over an
+	// identity-unknown stalled record may resolve a fresh identity from the
+	// recorded path; the claim_stale fence a failed settle then leaves carries
+	// that identity, and restoring it would diverge from the durable record and
+	// close the identity-unknown ENOENT discharge the next same-process retry
+	// needs when the archived path disappeared between claim and settle (#5555).
+	// Process-local: only a same-process failed settle reads it; a restart
+	// reloads the durable record directly. Guarded by relocationMu.
+	relocationRecoveryOrigin *RelocationRecovery
 	// activeRelocationClaim keeps ownership visible after a durable record is
 	// resolved and consumed. It is not itself serialized; RelocationSnapshot
 	// projects it as a stale-claim record so a concurrent checkpoint can never
@@ -79,6 +90,24 @@ type GitWorktree struct {
 	// is unlinked. The daemon installs it only for an explicit kill transaction;
 	// it is process-local and never part of the persisted worktree shape.
 	repoGoneFinalizationCheckpoint func() error
+	// adoptedWorktree is the directory identity AdoptLandedWorktreeMove proved
+	// at the path it adopted (#5102), kept so the archive can re-confirm that
+	// the same directory is still there after teardown. Process-local; it names
+	// a point-in-time proof, not durable state. Cleared whenever the recorded
+	// path changes. Guarded by relocationMu.
+	adoptedWorktree *adoptedWorktreeIdentity
+	// absentStallSettled records that this process discharged an identity-unknown
+	// stall because the recorded path conclusively answered ENOENT (#5102). The
+	// row then carries no record and, unless the worktree-missing poll got there
+	// first, no flag either, yet whatever appears at the path afterwards is as
+	// unverified as an occupant of a flagged row; kill teardown reads it to keep
+	// the deletion-boundary recheck armed. Process-local and never persisted: a
+	// restarted daemon has only the durable record, which the discharge already
+	// removed, and re-derives absence at teardown entry instead. Cleared whenever
+	// af itself places a worktree at the recorded path or moves the record to
+	// another one, because the proof was about the path's previous occupant.
+	// Guarded by relocationMu.
+	absentStallSettled bool
 	// archiveReport is durable metadata for every archive copy that deliberately
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.
@@ -316,6 +345,17 @@ func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (t
 // repo. The base path is validated to sit strictly inside worktreeDir (#461) and
 // a numeric suffix is appended when it is already occupied.
 func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
+	basePath, err := preferredWorktreePlacement(cfg, repoRoot, worktreeDir, sessionName, branchName)
+	if err != nil {
+		return "", err
+	}
+	return firstFreeWorktreePath(basePath)
+}
+
+// preferredWorktreePlacement is resolveWorktreePlacement before the collision
+// suffix: the validated base path the placement mode derives, whether or not
+// something already occupies it. It is a pure function of its inputs.
+func preferredWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
 	var basePath string
 	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
 		// Subdirectory mode nests the branch name under the worktrees root. A
@@ -359,7 +399,7 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
 	}
-	return firstFreeWorktreePath(basePath)
+	return basePath, nil
 }
 
 // DerivedWorktreePathTitleSegment returns the user-title-derived part of the

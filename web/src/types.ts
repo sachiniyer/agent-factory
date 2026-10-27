@@ -39,6 +39,9 @@ export const TabKind = {
    *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
    *  lockstep with the Go enum. */
   VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
@@ -63,6 +66,7 @@ export type IdleReason =
   | "usage-limit"
   | "process-exited"
   | "restore-gave-up"
+  | "restore-waiting-on-environment"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -77,6 +81,13 @@ export interface AgentModelChange {
 
 /** Durable terminal result of the daemon's automatic Lost-session restore loop. */
 export interface LostRestoreFailure {
+  attempts: number;
+  error: string;
+}
+
+/** Durable non-terminal state while the restore loop waits on the environment
+ * — the last failure was a resource limit external to the session (#5295). */
+export interface LostRestoreWait {
   attempts: number;
   error: string;
 }
@@ -106,9 +117,10 @@ export const Status = {
 /**
  * The subset of session.InstanceData (session/storage.go) the sidebar renders.
  * Field names and JSON tags match the Go struct exactly so this decodes the
- * daemon projection as-is. Optional fields carry Go's `omitempty` semantics:
- * `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at` only present
- * for a LimitReached row.
+ * daemon projection as-is. Optional fields carry Go's `omitempty`/`omitzero`
+ * semantics: `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at`
+ * only present for a LimitReached row with a known reset time (omitzero on a
+ * time.Time, mirroring the TabExitData.at precedent).
  */
 export interface SessionData {
   id?: string;
@@ -169,6 +181,8 @@ export interface SessionData {
   idle_reason?: IdleReason;
   /** Present while a Lost row has exhausted automatic restore attempts. */
   lost_restore_failure?: LostRestoreFailure;
+  /** Present while the restore loop defers a retry on the environment (#5295). */
+  lost_restore_wait?: LostRestoreWait;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
@@ -242,6 +256,9 @@ export interface TabData {
    *  loopback URL is rendered through the same-origin daemon proxy, an external
    *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
   url?: string;
+  /** The proposal slug of a docs tab (TabKind.Docs); absent for other kinds.
+   *  Mirrors session.TabData.Proposal (session/storage.go). */
+  proposal?: string;
   /** Daemon proxy decision; absent only on older daemon records. */
   web_proxied?: boolean;
 }
@@ -250,7 +267,7 @@ export interface TabData {
  *  repo root the session belongs to, used to group/pick projects. */
 /** One creatable tab kind and whether this session may gain one. */
 export interface TabKindAllowance {
-  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode". */
+  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode", "docs". */
   kind: string;
   allowed: boolean;
   /** The daemon's own refusal text, empty when allowed. Rendered verbatim: it
@@ -490,6 +507,11 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings from the writer itself (e.g. an unregistered
+   *  default_accounts.<agent> name). A channel distinct from the response's
+   *  apply-time `warnings`: the daemon fills this even when the live apply
+   *  produced none (#5266). */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides

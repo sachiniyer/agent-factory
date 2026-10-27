@@ -24,7 +24,7 @@ import (
 // only the last is a refusal.
 //
 // Every path is walked one component at a time through directory descriptors
-// opened with O_NOFOLLOW, the same discipline readCodexRollout applies to its
+// opened with O_NOFOLLOW, the same discipline openCodexRollout applies to its
 // final component. An account home is an owner-only credential root; a symlink
 // planted anywhere beneath it must not redirect a write outside it, and a
 // symlinked source must not smuggle another file's contents into it.

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Ancestry env markers (#1104). Every process spawned inside an af tmux pane
@@ -40,6 +42,52 @@ const (
 	// the same string literal to diagnose test leaks without importing this package.
 	envMarkerTestguardRun = "AF_TESTGUARD_RUN"
 )
+
+// PanePidMarker is the pane-scoped user option that records a pane's identity
+// bundle — "<pane_pid>:<deaths>:<pane_tty>" — while it is alive. tmux ≥3.8
+// stops reporting pane_pid once a pane's root exits (#5319), but user options
+// live on the pane struct, which remain-on-exit preserves — so teardown can
+// keep naming the dead root by the pid it had while alive. The launch shim
+// stamps the bundle itself (sessionenv stamps — the shim IS the pane root),
+// which keeps the record current even across a user's commandless
+// respawn-pane, and ApplyRemainOnExit stamps still-alive pre-stamp panes as a
+// heal. The deaths, tty-name and @af_pane_cmd proofs are what let the reader
+// distrust a stamp a respawn carried into a new incarnation; what keeps a
+// respawn from running under the stale record at all is the shim's own
+// restamp-or-die (sessionenv).
+// Measured on tmux 3.8: a stamped pane answers `#{@af_pane_pid}` after
+// death while `#{pane_pid}` comes back empty. On tmux older than 3.8
+// pane_pid itself survives death, so a missing stamp loses nothing.
+const PanePidMarker = sessionenv.PanePidUserOption
+
+// paneDeathsMarker is the pane-died counter the freshness check compares the
+// stamp's deaths field against; paneCommandMarker pins the stamped
+// incarnation's pane_start_command for the byte-equality check. Both are
+// defined and documented in sessionenv beside the shim that writes them.
+const (
+	paneDeathsMarker  = sessionenv.PaneDeathsUserOption
+	paneCommandMarker = sessionenv.PaneCommandUserOption
+)
+
+// panePidStampArgs heals the pane identity record on an already-existing
+// pane: `-o` never overwrites a stamp that is already there (a pane that died
+// before the heal would re-expand #{pane_pid} to EMPTY on tmux ≥3.8 and
+// clobber its own good record), and `-F` expands the live pane_pid for a
+// still-running, pre-stamp pane. The pane-died hook is installed too — a
+// healed pane otherwise has no deaths counter, and its eventual death would
+// leave the stamp's freshness unprovable. The hook installs under a
+// dedicated array key (sessionenv.PaneDeathsHookName) so it neither clobbers
+// nor is clobbered by an operator's own pane-died hook.
+//
+// paneTarget is any pane target: `=name:` resolves to the session's active
+// pane, and a `%N` id targets a specific pane exactly.
+func panePidStampArgs(paneTarget string) []string {
+	return []string{
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, PanePidMarker, sessionenv.PanePidStampFormat, ";",
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, paneCommandMarker, "#{pane_start_command}", ";",
+		"set-hook", "-p", "-t", paneTarget, sessionenv.PaneDeathsHookName, sessionenv.PaneDeathsHookCommand,
+	}
+}
 
 // newSessionGeneration mints the process-generation identity stamped into one
 // tmux launch. It is a package var so tests can make exact argv assertions. The
@@ -206,32 +254,61 @@ func missingSessionEnvMarker(err error, marker string) bool {
 }
 
 var (
-	newSessionEnvOnce      sync.Once
+	newSessionEnvMu        sync.Mutex
+	newSessionEnvCached    bool
 	newSessionEnvSupported bool
 )
 
-// tmuxSupportsNewSessionEnv probes `tmux -V` once per process. Unparseable
-// versions ("openbsd-7.4", exotic builds) conservatively report false.
+// resetNewSessionEnvProbeCache clears the cached `-e` support probe so the next
+// call re-probes `tmux -V`. Tests that install a tmux shim on PATH use this to
+// start from an unprobed state; production never calls it (the cache is valid
+// for the process lifetime once a probe succeeds).
+func resetNewSessionEnvProbeCache() {
+	newSessionEnvMu.Lock()
+	newSessionEnvCached = false
+	newSessionEnvSupported = false
+	newSessionEnvMu.Unlock()
+}
+
+// tmuxSupportsNewSessionEnv probes `tmux -V` and caches the answer for the
+// process lifetime — but only on SUCCESS. A transient probe failure (a one-shot
+// fork/exec error, a flaky wrapper script exiting nonzero on a single
+// invocation) is NOT cached: the next call re-probes, so a recovered tmux is
+// picked up instead of permanently downgrading the daemon to "tmux < 3.2".
+// Unparseable versions ("openbsd-7.4", exotic builds) are a successful probe
+// that conservatively reports false, and ARE cached — the version is
+// deterministic, not transient.
+//
+// This mirrors the sibling tmuxSupportsNoStart probe in server_scope_linux.go,
+// which deliberately avoids caching on error for the same reason
+// (TestNoStartProbeFailureDoesNotDowngradeAndIsRetried pins that intent there).
+// The earlier sync.Once here latched false on any error, permanently blinding
+// cleanup, adoption, orphan reaping, and doctor to every session created after
+// a single hiccup.
 //
 // Bounded like every other tmux command in this package (#2099), though the
 // hazard here is narrower and worth naming honestly: `tmux -V` is answered by the
 // CLIENT and never contacts the server, so a wedged SERVER — the failure mode
 // #2099/#2105 are about — cannot stall it. What can is a hanging tmux BINARY (a
 // wrapper script, a stalled network filesystem holding the executable). That is
-// defensive rather than reproduced, but the blast radius justifies the three
-// lines: this sits behind a sync.Once on the session-CREATE path, so a single
-// hang would wedge session creation for the entire process lifetime and every
-// later caller would block on the Once rather than retry.
+// defensive rather than reproduced, but the blast radius justifies the bound:
+// without it a single hang would wedge session creation for the entire process
+// lifetime and every later caller would block on the mutex rather than retry.
 func tmuxSupportsNewSessionEnv() bool {
-	newSessionEnvOnce.Do(func() {
-		ctx, cancel := tmuxTimeoutContext()
-		defer cancel()
-		out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
-		if err != nil {
-			return
-		}
-		newSessionEnvSupported = versionSupportsNewSessionEnv(strings.TrimSpace(string(out)))
-	})
+	newSessionEnvMu.Lock()
+	defer newSessionEnvMu.Unlock()
+	if newSessionEnvCached {
+		return newSessionEnvSupported
+	}
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
+	if err != nil {
+		log.WarningLog.Printf("tmux -V probe failed; ancestry env markers disabled until a successful probe: %v", err)
+		return false
+	}
+	newSessionEnvSupported = versionSupportsNewSessionEnv(strings.TrimSpace(string(out)))
+	newSessionEnvCached = true
 	return newSessionEnvSupported
 }
 

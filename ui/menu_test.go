@@ -189,6 +189,161 @@ func menuHasOption(m *Menu, want keys.KeyName) bool {
 	return false
 }
 
+// TestMenuRestingRowKeepsRestoreAtNarrowWidth pins the #4755 footer lie: an
+// archived/lost/dead row fed the FULL instance menu sheds `r restore` in the
+// width drop order long before the dead live verbs (`t`, `w`, `1-9`) it also
+// carries — so at a real terminal width the footer advertises actions the row
+// cannot take and hides the one it can. A resting row must get its own compact
+// menu instead, so `r` survives at the width the issue reports.
+func TestMenuRestingRowKeepsRestoreAtNarrowWidth(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{name: "archived", status: session.Archived},
+		{name: "lost", status: session.Lost},
+		{name: "dead", status: session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+			m.SetSize(80, 1)
+
+			out := xansi.Strip(m.String())
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 80 cells must still advertise restore:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestMenuRestingRowShedsDeleteBeforeRestore: `r restore` is the whole point
+// of a resting row's footer, so it must outlast every droppable neighbor. The
+// shared hintDropOrder serves the live row — where Delete is deliberately the
+// last shed — and drops Restore early; applied to the compact resting menu
+// that hid restore at ~50 cells while `D delete session` stayed (the #4755
+// lie again, in miniature). The resting row sheds D first, restore last.
+func TestMenuRestingRowShedsDeleteBeforeRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{name: "archived", status: session.Archived},
+		{name: "lost", status: session.Lost},
+		{name: "dead", status: session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+			m.SetSize(50, 1)
+
+			out := xansi.Strip(m.String())
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 50 cells must still advertise restore — it is the row's verb:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "delete session") {
+				t.Fatalf("%s row at 50 cells must shed delete before restore:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestMenuRestingRowDropsDeadLiveVerbs is the other half of the #4755 footer
+// lie at ANY width: a resting row has no live surface, so the verbs that name
+// one — attach/interact, tab create/close/rename/jump — must not be offered.
+// The resting menu is the lifecycle verbs the row can actually take (delete,
+// restore) plus the global keys — and, for Lost/Dead rows, `s open pane`
+// (#5260): an archived row can never show a pane (pruneDeadPanes closes it on
+// sight), but a lost/dead row's pane still renders its fallback content in
+// ui/tab_pane.go, so the key works and the footer must say so.
+func TestMenuRestingRowDropsDeadLiveVerbs(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       session.Status
+		wantOpenPane bool
+	}{
+		{name: "archived", status: session.Archived, wantOpenPane: false},
+		{name: "lost", status: session.Lost, wantOpenPane: true},
+		{name: "dead", status: session.Dead, wantOpenPane: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+			m.SetSize(200, 1)
+
+			out := xansi.Strip(m.String())
+			for _, dead := range []string{
+				"interact", "attach", "new tab", "del tab", "rename tab",
+				"1-9/g go", "archive",
+			} {
+				if strings.Contains(out, dead) {
+					t.Fatalf("%s row must not advertise %q — no live surface exists:\n%s", tc.name, dead, out)
+				}
+			}
+			if gotOpenPane := strings.Contains(out, "open pane"); gotOpenPane != tc.wantOpenPane {
+				t.Fatalf("%s row open-pane advertisement = %v, want %v:\n%s", tc.name, gotOpenPane, tc.wantOpenPane, out)
+			}
+			for _, want := range []string{"new", "delete session", "restore", "help", "quit"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("%s row footer must keep %q:\n%s", tc.name, want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMenuRestingLostDeadRowShedsOpenPaneBeforeRestore pins the #5260 shed
+// order on the rows that own a pane surface: `s open pane` is a Lost/Dead
+// row's second verb — the diagnostic the row exists to offer after restore —
+// so it outlives delete and the conditional retry but still sheds before
+// `r restore` when the bar runs out of room.
+func TestMenuRestingLostDeadRowShedsOpenPaneBeforeRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{name: "lost", status: session.Lost},
+		{name: "dead", status: session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+
+			// 60 cells sheds only `D` from the Lost/Dead compact menu — both
+			// surviving verbs must still be named.
+			m.SetSize(60, 1)
+			out := xansi.Strip(m.String())
+			if !strings.Contains(out, "open pane") {
+				t.Fatalf("%s row at 60 cells must still advertise open pane:\n%s", tc.name, out)
+			}
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 60 cells must still advertise restore:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "delete session") {
+				t.Fatalf("%s row at 60 cells must shed delete first:\n%s", tc.name, out)
+			}
+
+			// 44 cells forces the next shed: open pane goes, restore stays.
+			m.SetSize(44, 1)
+			out = xansi.Strip(m.String())
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 44 cells must keep restore — it is the row's verb:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "open pane") {
+				t.Fatalf("%s row at 44 cells must shed open pane before restore:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
 func TestMenuOffersRetryForUnconfirmedAccountHandoff(t *testing.T) {
 	path := t.TempDir()
 	base := readyUIInstance()
@@ -788,6 +943,202 @@ func TestMenuScrollChipKeepsBothClickZones(t *testing.T) {
 		if got := cellSlice(line, r.X, r.X+r.W); got != want {
 			t.Fatalf("the %q zone covers %q, want the key's own glyph", want, got)
 		}
+	}
+}
+
+// tabbedUIInstance builds a Ready-status instance whose three-tab roster clears
+// the move-tab chip's TabCount() >= 3 gate (ui/menu.go). readyUIInstance leaves
+// Tabs nil, so its TabCount() is 0 and the move-tab pair never renders — useless
+// for the move-tab chip tests below, which set Tabs explicitly the way the
+// session-package tab tests do. A bare Instance falls back to LocalBackend's
+// capabilities, so the TabManagement half of the gate is already satisfied.
+func tabbedUIInstance(t *testing.T) *session.Instance {
+	t.Helper()
+	i := &session.Instance{ID: "tab-test-session"}
+	i.SetStatusForTest(session.Ready)
+	i.Tabs = []*session.Tab{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	return i
+}
+
+// TestMenuCollapseMoveTabPairIntoOneHint mirrors the scroll pair's collapse test:
+// with the default < / > bindings and three movable tabs, the pair advertises as
+// ONE "</> move tab" chip. It pins the default (no override) shape the
+// suppression tests below must degrade cleanly from — the fix must not regress
+// the normal two-key collapse.
+func TestMenuCollapseMoveTabPairIntoOneHint(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(tabbedUIInstance(t))
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if got := strings.Count(out, "move tab"); got != 1 {
+		t.Fatalf("the move-tab description renders %d times, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "</> move tab") {
+		t.Fatalf("the move-tab pair must collapse into one chip:\n%s", out)
+	}
+}
+
+// TestMoveTabChipNoDanglingSlashOnPartnerSuppress: a valid [keys] override
+// rebinds quit onto ">", move_tab_right's only default, so keys.buildMaps
+// suppresses move_tab_right to zero active keys (Help().Key == ""). The footer
+// must NOT collapse the pair over the empty partner glyph — it must show the
+// surviving "< move tab" single-key chip, not the malformed "</ move tab" with
+// its dangling slash. Pins the partner direction; the leading-direction
+// sibling below pins the other half of the fix. Dispatch is unaffected; this
+// is a rendering-only defect.
+func TestMoveTabChipNoDanglingSlashOnPartnerSuppress(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	// Cross-action: rebinding quit to ">" takes move_tab_right's only default.
+	if err := keys.ApplyOverrides(map[string][]string{"quit": {">"}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	m := NewMenu()
+	m.SetInstance(tabbedUIInstance(t))
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "/ move tab") {
+		t.Fatalf("move-tab chip malforms with a dangling slash over the empty partner:\n%s", out)
+	}
+	if !strings.Contains(out, "< move tab") {
+		t.Fatalf("the surviving direction must render as a single-key '< move tab' chip:\n%s", out)
+	}
+	if got := strings.Count(out, "move tab"); got != 1 {
+		t.Fatalf("the move-tab chip must render once, got %d:\n%s", got, out)
+	}
+	// The override took effect: quit now fires on ">", advertised as "> quit".
+	if !strings.Contains(out, "> quit") {
+		t.Fatalf("the quit override must still be advertised:\n%s", out)
+	}
+}
+
+// TestMoveTabChipNoDanglingSlashOnLeadingSuppress pins the leading direction,
+// which a partner-only guard misses. Rebinding new_tab onto "<" (move_tab_left's
+// only default) suppresses the LEADING half: the pair still collapses over the
+// now-empty leading glyph, yielding "/> move tab". This test fails on a fix that
+// only checks the partner is non-empty and passes only when the empty leading
+// half is skipped entirely before the collapse decision.
+func TestMoveTabChipNoDanglingSlashOnLeadingSuppress(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	// new_tab = "<" takes move_tab_left's only default.
+	if err := keys.ApplyOverrides(map[string][]string{"new_tab": {"<"}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	m := NewMenu()
+	m.SetInstance(tabbedUIInstance(t))
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "/> move tab") {
+		t.Fatalf("move-tab chip malforms with a dangling slash over the empty leading half:\n%s", out)
+	}
+	if !strings.Contains(out, "> move tab") {
+		t.Fatalf("the surviving direction must render as a single-key '> move tab' chip:\n%s", out)
+	}
+	if got := strings.Count(out, "move tab"); got != 1 {
+		t.Fatalf("the move-tab chip must render once, got %d:\n%s", got, out)
+	}
+}
+
+// TestMoveTabChipAbsentsWhenBothHalvesSuppress pins the both-suppressed direction:
+// "<" taken by new_tab and ">" taken by quit leave neither move-tab key live. The
+// chip must disappear entirely (not a bare "/ move tab"), and the row must close
+// up cleanly between its tab-group neighbours with a single separator.
+func TestMoveTabChipAbsentsWhenBothHalvesSuppress(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	if err := keys.ApplyOverrides(map[string][]string{"new_tab": {"<"}, "quit": {">"}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	m := NewMenu()
+	m.SetInstance(tabbedUIInstance(t))
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if got := strings.Count(out, "move tab"); got != 0 {
+		t.Fatalf("with both move-tab halves suppressed the chip must not render, got %d:\n%s", got, out)
+	}
+	// The surviving tab-group chips remain and close up with one separator — no
+	// dangling separator where the move-tab chip used to sit.
+	if !strings.Contains(out, "rename tab") || !strings.Contains(out, "1-9/g go") {
+		t.Fatalf("the tab-group neighbours must still render:\n%s", out)
+	}
+	if strings.Contains(out, "rename tab ·  1-9/g go") {
+		t.Fatalf("the row must not leave a double separator where the move-tab chip was:\n%s", out)
+	}
+}
+
+// The next two cover the pre-existing scroll pair (in hintPairs since the
+// scroll pair was introduced), which has the identical latent defect — a valid
+// override that fully suppresses one scroll half must collapse cleanly too.
+
+// TestScrollChipNoDanglingSlashOnPartnerSuppress: archive = "ctrl+d" takes
+// scroll_down's only default, suppressing the partner. The chip must degrade to
+// "ctrl+u preview scroll", not "ctrl+u/ preview scroll".
+func TestScrollChipNoDanglingSlashOnPartnerSuppress(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	if err := keys.ApplyOverrides(map[string][]string{"archive": {"ctrl+d"}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(true)
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "/ preview scroll") {
+		t.Fatalf("scroll chip malforms with a dangling slash over the empty partner:\n%s", out)
+	}
+	if !strings.Contains(out, "ctrl+u preview scroll") {
+		t.Fatalf("the surviving direction must render as a single-key chip:\n%s", out)
+	}
+	if got := strings.Count(out, "preview scroll"); got != 1 {
+		t.Fatalf("the scroll chip must render once, got %d:\n%s", got, out)
+	}
+}
+
+// TestScrollChipNoDanglingSlashOnLeadingSuppress: up = "ctrl+u" takes
+// scroll_up's only default, suppressing the leading half. The chip must degrade
+// to "ctrl+d preview scroll", not "/ctrl+d preview scroll".
+func TestScrollChipNoDanglingSlashOnLeadingSuppress(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	if err := keys.ApplyOverrides(map[string][]string{"up": {"ctrl+u"}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(true)
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "/ctrl+d preview scroll") {
+		t.Fatalf("scroll chip malforms with a dangling slash over the empty leading half:\n%s", out)
+	}
+	if !strings.Contains(out, "ctrl+d preview scroll") {
+		t.Fatalf("the surviving direction must render as a single-key chip:\n%s", out)
+	}
+	if got := strings.Count(out, "preview scroll"); got != 1 {
+		t.Fatalf("the scroll chip must render once, got %d:\n%s", got, out)
 	}
 }
 

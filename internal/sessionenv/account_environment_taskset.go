@@ -52,7 +52,9 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			}
 			return run.done(words[1:], false)
 		case option == "-a" || option == "--all-tasks" ||
-			option == "-c" || option == "--cpu-list":
+			option == "-c" || option == "--cpu-list" ||
+			tasksetChildLaunchingLongAbbrev(option) ||
+			tasksetChildLaunchingShortCluster(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
@@ -85,6 +87,57 @@ func tasksetProcessOnlyOption(option string) bool {
 	return false
 }
 
+// tasksetChildLaunchingLongAbbrev recognizes the unambiguous getopt_long
+// abbreviations of --all-tasks and --cpu-list, which both launch a masked
+// child on util-linux (measured on 2.39.3: `taskset --all 0x1 /bin/echo X`
+// and `taskset --cpu 0-3 /bin/echo X` both exec the child). The exact-equality
+// arm already handles the spelled-out forms; this closes the abbreviation
+// gap so the child tail is judged by tasksetCommandAfterMask rather than
+// fail-closed at the option arm. The `len > 2` / `--` guard confines the check
+// to long options, and --all-tasks / --cpu-list have no other --a* / --c*
+// long-option neighbors in taskset (--help / --version are handled earlier by
+// utilLinuxTerminalOption; --pid by tasksetProcessOnlyOption), so every
+// matched prefix is unambiguous. This mirrors the existing
+// strings.HasPrefix("--pid", option) idiom used throughout this file family.
+func tasksetChildLaunchingLongAbbrev(option string) bool {
+	if len(option) <= 2 || !strings.HasPrefix(option, "--") {
+		return false
+	}
+	return strings.HasPrefix("--all-tasks", option) || strings.HasPrefix("--cpu-list", option)
+}
+
+// tasksetChildLaunchingShortCluster recognizes a combined short-flag cluster
+// composed solely of `a`/`c` runes (e.g. -ac, -ca, -cc), which util-linux
+// taskset parses as the argument-free flags -a and -c glued into one argv
+// word — getopt accepts -ac as -a -c (measured on 2.39.3: `taskset -ac
+// 0 /bin/echo X` and `taskset -ca 0 /bin/echo X` both exec the child, exit
+// 0; duplicate runes like -aa/-cc are harmless). The child-launching arm
+// used exact equality, so such a cluster fell through to
+// `case strings.HasPrefix(option, "-")` and was refused before the child
+// tail was ever judged — even a provably-safe child. This is the symmetric
+// sibling of tasksetProcessOnlyOption's cluster loop: that handler routes
+// any -p-bearing cluster to the process-only arm (checked earlier in the
+// switch), so by the time this predicate is consulted the cluster contains
+// no `p`; utilLinuxTerminalOption (also checked earlier) has already peeled
+// any h/V-bearing word. The `len < 3` / single-dash / not-`--` guard
+// confines the check to short clusters of at least two flags, leaving the
+// lone `-a` and `-c` to the exact-equality arm. The a/c-only boundary
+// matches the binary's accept/reject line on the dot: a non-a/c rune glued
+// to the cluster is `invalid option -- '<r>'` on the binary and excluded
+// here for the same reason, so a malformed cluster falls to the fail-closed
+// `HasPrefix` arm unchanged.
+func tasksetChildLaunchingShortCluster(option string) bool {
+	if len(option) < 3 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag != 'a' && flag != 'c' {
+			return false
+		}
+	}
+	return true
+}
+
 func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
@@ -102,6 +155,16 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 	// shadowed taskset need not skip it, so the mask-onward tail is judged as
 	// a command before the real binary's child is returned.
 	if wrapperOperandTailMutates(words, names, memo) {
+		return nil, true
+	}
+	// The mask is judged above as a head; the real binary's child starts at
+	// words[1:]. A shadowed `./taskset` can shift past the mask (and, after
+	// -c, the cpu list) and exec any literal suffix of that child tail, so
+	// every suffix is judged. Because these words ARE the real child's argv,
+	// the child-tail scan drops the childless PID bound the selector and
+	// terminal branches keep — a command may take any number of operands, so
+	// the tail's length is not a mutation.
+	if shadowedChildTailMutates(words[1:], names, memo) {
 		return nil, true
 	}
 	return words[1:], false

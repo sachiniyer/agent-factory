@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -383,6 +384,151 @@ func TestProcessCollapseSeverityUnchanged(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, StatusFail, rows[0].status,
 		"orphaned-process declares no severity and must keep the fixable-implies-FAIL rule")
+}
+
+// TestStrongestDeclaredSeveritySkipsFixedFindings pins strongestDeclaredSeverity's
+// doc comment against the regression that put FAIL back on a resolved row. A
+// collapsed row stands for OUTSTANDING findings, so a fixed finding — even one
+// that declared StatusFail — must be tallied by the fixed/failed counters, not
+// read back through Severity to harden the row. The helper ignored f.Fixed and
+// short-circuited on the resolved finding's StatusFail.
+func TestStrongestDeclaredSeveritySkipsFixedFindings(t *testing.T) {
+	// A fixed FAIL plus an outstanding WARN: the row reflects only the WARN,
+	// not the resolved FAIL.
+	mixed := []Finding{
+		{Check: checkLeakedDaemon, Severity: StatusFail, Actionable: true, FixAction: "kill it", Fixed: true},
+		{Check: checkLeakedDaemon, Severity: StatusWarn, Actionable: false},
+	}
+	assert.Equal(t, StatusWarn, strongestDeclaredSeverity(mixed),
+		"a fixed finding is tallied by fixed/failed, not by severity; only the outstanding WARN remains")
+
+	// The un-fixed counterpart keeps the FAIL: the fix must not suppress a
+	// genuinely outstanding FAIL.
+	outstanding := []Finding{
+		{Check: checkLeakedDaemon, Severity: StatusFail, Actionable: true, FixAction: "kill it"},
+		{Check: checkLeakedDaemon, Severity: StatusWarn, Actionable: false},
+	}
+	assert.Equal(t, StatusFail, strongestDeclaredSeverity(outstanding),
+		"an unresolved FAIL finding must still escalate the row")
+
+	// Every finding fixed: nothing outstanding remains to declare a severity,
+	// so the helper yields to the fixed/failed tallies.
+	allFixed := []Finding{
+		{Check: checkLeakedDaemon, Severity: StatusFail, Actionable: true, FixAction: "kill it", Fixed: true},
+		{Check: checkLeakedDaemon, Severity: StatusWarn, Actionable: false, Fixed: true},
+	}
+	assert.Equal(t, CheckStatus(""), strongestDeclaredSeverity(allFixed),
+		"with every finding fixed, no severity is outstanding and the helper yields to the tallies")
+}
+
+// TestCollapsedRowSkipsFixedFailKeepsRowConsistentWithSummary is the
+// self-contradiction the summaryLine comment guards against: after
+// `af doctor --fix` stops the one proven debris daemon in a leaked-daemons group
+// that ALSO holds an advisory (upgraded) daemon, the collapsed row must read WARN
+// — the only severity still outstanding — and the trailing status-row tally must
+// count 0 FAIL. Pre-fix, strongestDeclaredSeverity read the FIXED finding's
+// StatusFail and returned FAIL, so the row read "FAIL  leaked-daemons" and the
+// tally counted "1 FAIL" beside the same summary's "no issues require action".
+func TestCollapsedRowSkipsFixedFailKeepsRowConsistentWithSummary(t *testing.T) {
+	report := &Report{}
+	report.addActionableFinding(Finding{
+		Check: checkLeakedDaemon, Detail: "debris daemon runs af from the temp dir",
+		FixAction: "kill it", Severity: StatusFail, fix: func() error { return nil },
+	})
+	report.addAdvisoryFinding(Finding{
+		Check: checkLeakedDaemon, Detail: "upgraded daemon is running a replaced binary",
+		Severity: StatusWarn,
+	})
+	// Apply --fix exactly as Run does: Fixed is set in place; Severity is left
+	// carrying the original StatusFail.
+	report.Findings[0].Fixed = true
+
+	require.Zero(t, report.UnresolvedCount(),
+		"UnresolvedCount excludes fixed findings; the run is healthy on every axis a conformant consumer gates on")
+
+	rows := renderRows(report, true, false)
+	require.Len(t, rows, 1)
+	row := rows[0]
+	assert.Equal(t, "leaked-daemons", row.name)
+	assert.Equal(t, StatusWarn, row.status,
+		"only the advisory WARN is outstanding; a fixed FAIL must not harden the row")
+	assert.False(t, row.actionable,
+		"the one actionable finding is fixed, so the row is no longer actionable")
+
+	var buf bytes.Buffer
+	Render(&buf, report, true, false)
+	out := buf.String()
+	assert.Contains(t, out, "WARN  leaked-daemons:",
+		"the human row label must match the outstanding WARN, not the resolved FAIL")
+	assert.NotContains(t, out, "FAIL  leaked-daemons:",
+		"a row that contradicts its own summary is the defect this fixes")
+	assert.Contains(t, out, "no issues require action")
+	assert.Contains(t, out, "0 FAIL",
+		"summaryLine counts ROWS by status; a WARN row contributes 0 FAIL, not 1")
+	assert.NotContains(t, out, "1 FAIL",
+		"the inflated FAIL tally was the precise contradiction the bug produced")
+
+	assert.Contains(t, out, "1 fixed",
+		"the stopped debris daemon is still reported by the human summary's fixed-finding count")
+
+	payload := BuildJSONReport(report, true, false)
+	var leakRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "leaked-daemons" {
+			leakRow = &payload.Checks[i]
+		}
+	}
+	require.NotNil(t, leakRow)
+	assert.Equal(t, "WARN", leakRow.Status, "the JSON row reuses renderRows, so it must agree with the human row")
+	assert.False(t, leakRow.Actionable)
+	assert.Zero(t, payload.Summary.Fail,
+		"a fixed FAIL must not be counted in summary.fail; only outstanding rows are")
+	assert.Zero(t, payload.Summary.Unresolved,
+		"unresolved is the health-probe boundary and excludes fixed findings")
+	assert.Zero(t, payload.Summary.Fixed,
+		"summary.fixed counts StatusFixed ROWS; the collapsed row is WARN, not FIXED (the fixed finding is surfaced via the '; N fixed.' summary suffix and the row's 'N stopped' detail)")
+}
+
+// TestCollapsedRowStillFailsWhileAnActionableFailRemains guards the other
+// direction: so long as the actionable StatusFail finding is NOT fixed, the row
+// stays FAIL and the tally counts it — the fix must not over-correct into
+// suppressing a genuine outstanding FAIL.
+func TestCollapsedRowStillFailsWhileAnActionableFailRemains(t *testing.T) {
+	report := &Report{}
+	report.addActionableFinding(Finding{
+		Check: checkLeakedDaemon, Detail: "debris daemon runs af from the temp dir",
+		FixAction: "kill it", Severity: StatusFail, fix: func() error { return nil },
+	})
+	report.addAdvisoryFinding(Finding{
+		Check: checkLeakedDaemon, Detail: "upgraded daemon is running a replaced binary",
+		Severity: StatusWarn,
+	})
+
+	rows := renderRows(report, false, false)
+	require.Len(t, rows, 1)
+	assert.Equal(t, StatusFail, rows[0].status,
+		"an unresolved actionable FAIL must keep the row at FAIL")
+	assert.True(t, rows[0].actionable)
+
+	var buf bytes.Buffer
+	Render(&buf, report, false, false)
+	assert.Contains(t, buf.String(), "FAIL  leaked-daemons:")
+	assert.Contains(t, buf.String(), "1 FAIL",
+		"the row still counts as FAIL while the actionable debris daemon is outstanding")
+
+	payload := BuildJSONReport(report, false, false)
+	var leakRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "leaked-daemons" {
+			leakRow = &payload.Checks[i]
+		}
+	}
+	require.NotNil(t, leakRow)
+	assert.Equal(t, "FAIL", leakRow.Status)
+	assert.True(t, leakRow.Actionable)
+	assert.Equal(t, 1, payload.Summary.Fail)
+	assert.Equal(t, 1, payload.Summary.Unresolved,
+		"the unfixed actionable finding keeps the run unhealthy")
 }
 
 func assertAnError() error { return fmt.Errorf("permission denied") }

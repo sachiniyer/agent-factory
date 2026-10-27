@@ -37,6 +37,7 @@ var accountLoginBrowserNames = []string{"NO_BROWSER", "BROWSER"}
 func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
@@ -58,7 +59,7 @@ func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 		{"account-scoped sibling", sibling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, environ, imports, err := tc.session.launchEnvironment()
+			_, environ, imports, _, _, err := tc.session.prepareLaunchEnvironment("")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,6 +83,7 @@ func TestAccountLaunchEnvironmentExcludesLoginBrowserSuppressors(t *testing.T) {
 func TestAccountLaunchEnvironmentStillHonorsExplicitBrowserPassthrough(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
@@ -95,7 +97,7 @@ func TestAccountLaunchEnvironmentStillHonorsExplicitBrowserPassthrough(t *testin
 		t.Fatal(err)
 	}
 
-	_, environ, _, err := agent.launchEnvironment()
+	_, environ, _, _, _, err := agent.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}

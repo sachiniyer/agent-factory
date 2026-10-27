@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -813,6 +814,10 @@ func TestMouse_TransientPreviewUsesTargetSnapshotOwner(t *testing.T) {
 func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	h, alpha, beta := mouseTestHome(t)
 	clock := newFakeClock(h)
+	// A completed, no-op loss check: this test is about clicks, not git.
+	origCheck := killLossCheck
+	t.Cleanup(func() { killLossCheck = origCheck })
+	killLossCheck = func(session.WorktreeCleanupImpact) killLossAssessment { return killLossAssessment{} }
 
 	// Open the kill dialog and click background, then "n or esc to cancel".
 	_, _ = h.handleKill()
@@ -828,10 +833,22 @@ func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
 	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
 
-	// Re-open and click "y/enter to confirm".
+	// Re-open. While the loss checks are pending (#4848) the confirm is
+	// withheld: no yes zone is drawn, and a click resolved to it does nothing.
 	clock.advance(time.Second)
-	_, _ = h.handleKill()
+	_, checkCmd := h.handleKill()
 	require.Equal(t, stateConfirm, h.state)
+	require.NotEmpty(t, h.confirmationOverlay.Pending(), "alpha owns a local worktree, so its kill dialog opens pending")
+	_ = h.View()
+	_, drawn := h.zones.Find(zones.OverlayConfirmYes)
+	assert.False(t, drawn, "a pending dialog must not draw a confirm zone")
+	_, _ = h.handleModalClick(zones.OverlayConfirmYes)
+	assert.Equal(t, stateConfirm, h.state, "clicking yes while pending must not confirm")
+	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "clicking yes while pending must not kill")
+	// Let the (injected, no-op) check land so the dialog is final, then click
+	// "y/enter to confirm".
+	settleKillCheck(t, h, checkCmd)
+	require.Empty(t, h.confirmationOverlay.Pending())
 	cmd := clickZone(t, h, zones.OverlayConfirmYes)
 	assert.Equal(t, stateDefault, h.state)
 	assert.Equal(t, session.Deleting, alpha.GetStatus(),
@@ -910,6 +927,103 @@ func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
 	assert.Zero(t, h.store.NumOpenPanes(),
 		"a pre-modal click must not survive a modal into a false double (#1731)")
 	assert.False(t, h.interactive, "the post-modal single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestMouse_RecoveryOverlayFalseDoubleFromAsyncKill: the recovery overlay
+// (m.recovery) is a stateless modal that never changes m.state, unlike the
+// stateConfirm modal in the tests above. An async kill error raises it between
+// two clicks on the same instance row; the state-keyed clearStaleClickTrackerAfter
+// gate sees stateDefault→stateDefault and cannot invalidate the pre-recovery
+// seed, so showRecovery must clear the tracker at the raise boundary (#1731
+// invariant, regressed by the recovery overlay added in 4af1c606).
+//
+// Variant 1: seed click, key dismissal (the screen's named action), re-press —
+// all within the double-click window.
+func TestMouse_RecoveryOverlayFalseDoubleFromAsyncKill(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	// A real click on beta's row seeds the tracker (and selects beta).
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	require.Equal(t, zones.TreeInstance(beta.Title), h.lastClickZone,
+		"precondition: the click seeds the double-click tracker")
+	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+
+	// An unrelated async kill error raises the recovery overlay. m.state stays
+	// stateDefault, so the state-keyed gate cannot see this excursion; showRecovery
+	// must clear the tracker itself (the fix).
+	target := captureSessionActionTarget(alpha, h.repoID)
+	_, _ = h.Update(instanceKilledMsg{target: target, err: errors.New("daemon refused the kill")})
+	require.NotNil(t, h.recovery, "the kill error raises the recovery overlay")
+	require.Equal(t, stateDefault, h.state, "recovery does not change m.state")
+	assert.Empty(t, h.lastClickZone,
+		"showRecovery must clear the double-click tracker so a pre-recovery click cannot pair with a post-recovery click (#1731)")
+
+	// Dismiss the overlay with a key press (the screen's named action). The
+	// dismissal early-returns before trackClick, so it neither seeds nor clears.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.Nil(t, h.recovery, "a key press dismisses the recovery overlay")
+	require.Equal(t, stateDefault, h.state)
+
+	// A fast click on that same row within the double-click window must stay a
+	// single select — the pre-recovery press must not pair with it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	assert.Nil(t, h.store.FindOpenPane(beta, 0),
+		"a pre-recovery click must not survive the recovery overlay into a false double")
+	assert.False(t, h.interactive, "the post-recovery single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestMouse_RecoveryOverlayFalseDoubleFromAsyncCreate: the recovery overlay
+// raised by an async create error on a DIFFERENT instance than the clicked row.
+// Because the failing instance is not the selected one, restoreFailedCreate is
+// not taken and m.state stays stateDefault — the same state-keyed gate gap as
+// the kill variant. Exercises dismissal via a mouse click (Variant 2): the
+// recovery screen registers no tree zones, so a click short-circuits at the
+// recovery gate before trackClick regardless of coordinates.
+func TestMouse_RecoveryOverlayFalseDoubleFromAsyncCreate(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	// A real click on beta's row seeds the tracker (and selects beta).
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	require.Equal(t, zones.TreeInstance(beta.Title), h.lastClickZone,
+		"precondition: the click seeds the double-click tracker")
+	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+
+	// An async create error on alpha (a different instance than the clicked
+	// beta) raises the recovery overlay. userStillWatching is false (the
+	// selection is beta, not alpha), so restoreFailedCreate is not taken and
+	// m.state stays stateDefault — the state-keyed gate cannot see this
+	// excursion; showRecovery must clear the tracker itself (the fix).
+	_, _ = h.Update(instanceStartedMsg{instance: alpha, err: errors.New("daemon refused the create")})
+	require.NotNil(t, h.recovery, "the create error raises the recovery overlay")
+	require.Equal(t, stateDefault, h.state, "recovery does not change m.state")
+	assert.Empty(t, h.lastClickZone,
+		"showRecovery must clear the double-click tracker so a pre-recovery click cannot pair with a post-recovery click (#1731)")
+
+	// Dismiss the overlay with a mouse click. The recovery screen registers no
+	// tree zones, so the click short-circuits at the recovery gate before
+	// trackClick — it neither seeds nor clears the tracker.
+	_, _ = h.Update(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	require.Nil(t, h.recovery, "a click dismisses the recovery overlay")
+	require.Equal(t, stateDefault, h.state)
+
+	// A fast click on that same row within the double-click window must stay a
+	// single select — the pre-recovery press must not pair with it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	assert.Nil(t, h.store.FindOpenPane(beta, 0),
+		"a pre-recovery click must not survive the recovery overlay into a false double")
+	assert.False(t, h.interactive, "the post-recovery single click must not enter interactive mode")
 	assert.Equal(t, stateDefault, h.state)
 }
 
