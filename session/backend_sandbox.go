@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -122,10 +123,26 @@ type sandboxProvisioner struct {
 
 	tunnel   *exec.Cmd
 	tunnelLn net.Listener
+	// lifeline holds the daemon-side pipe ends when the tunnel runs under the
+	// watch lifeline (#5564); nil for a directly-spawned tunnel. stopTunnel
+	// closes them — keepW's close is also what would EOF the lifeline into its
+	// group kill if it survived the group SIGKILL stopTunnel sends first.
+	lifeline *tunnelLifeline
 
 	reapMu  sync.Mutex
 	reaped  bool
 	reapErr error
+	// reaping tells StopAllSandboxTunnels (#5564) that reap() owns this
+	// provisioner's stopTunnel, so a daemon exit skips it rather than park
+	// behind the remote teardown's timeouts. reap's own stopTunnel is its
+	// first act under reapMu, so skipping loses nothing.
+	reaping atomic.Bool
+	// stopped latches in stopTunnel under reapMu (#5564): a provisioner whose
+	// tunnel was stopped is spent. A tunnel spawn that completes after the
+	// stop ran — a daemon exit that overtook the provision — must be killed
+	// by its spawner rather than published to a provisioner no remaining stop
+	// will reach.
+	stopped bool
 
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
@@ -338,6 +355,11 @@ func (p *sandboxProvisioner) verifyCopiedBinary() error {
 // small race — the readiness probe below is what actually establishes that the
 // forward came up, so a lost race fails the provision rather than handing back a
 // dead endpoint.
+//
+// The child is bound to this process's lifetime by the machinery in
+// sandbox_tunnel.go (#5564): spawned under the watch lifeline when this binary
+// can serve as one, registered for the daemon-exit stop, and env-stamped for
+// the next daemon's ownership-proven sweep.
 func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -347,25 +369,19 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	_ = ln.Close()
 
 	forward := fmt.Sprintf("%s:%s", localAddr, remoteAddr)
-	// -o ExitOnForwardFailure=yes is load-bearing, not hygiene. The local port is
-	// reserved by binding :0 and closing it, so another process can win it in the
-	// gap. OpenSSH defaults this to NO (`ssh -G` confirms), which would leave this
-	// -N child alive after a FAILED bind — and the readiness probe below would then
-	// connect to whatever DID win the port and report a healthy tunnel owned by an
-	// unrelated process. With it, ssh exits on the failed forward and the probe
-	// times out honestly.
-	cmd := exec.Command("sh", "-c", p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "af-sandbox", forward)
-	// Its own group so stopTunnel can kill the ssh client and any ProxyCommand
-	// helper together, not just the `sh` that launched them.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// No stdin payload here, so WaitDelay is correct and wanted: a tunnel that
-	// ignores its kill must not hold af's pipes open forever. This is the child
-	// TRAP 1 says it belongs on.
-	cmd.WaitDelay = sandboxTunnelWaitDelay
-	if err := cmd.Start(); err != nil {
+	// Registered before the spawn so a daemon exit racing this provision —
+	// StopAllSandboxTunnels — has the entry it needs the moment the child is
+	// born; the entry is dropped by stopTunnel, which reap reaches on every
+	// failure path below.
+	registerSandboxTunnel(p)
+	// Spawn+publish happen atomically under reapMu (provisionTunnelChild), so
+	// a StopAllSandboxTunnels stop can never interleave between a born child
+	// and its publication — and a child born after that stop already ran is
+	// killed by its own spawner rather than left registered to nothing.
+	_, _, err = p.provisionTunnelChild(forward)
+	if err != nil {
 		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
 	}
-	p.tunnel = cmd
 
 	if err := waitForSandboxTunnelWithin(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", err
@@ -381,6 +397,9 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 func sandboxTransportConfigKey(label string) string {
 	if label == string(BackendSSH) {
 		return "ssh.host"
+	}
+	if label == string(BackendHook) {
+		return "remote_hooks.provision_cmd"
 	}
 	return "sandbox.ssh"
 }
@@ -427,6 +446,11 @@ func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
 // generated (#3449) is one of them — the script is never built, so ssh never
 // runs and the sandbox is untouched.
 func (p *sandboxProvisioner) reap() error {
+	// Advertised before the lock: a daemon-exit StopAllSandboxTunnels reads
+	// this to leave the tunnel stop to us rather than wait out the remote
+	// teardown below, and our own stopTunnel is this body's first act under
+	// reapMu, so the claim is never empty.
+	p.reaping.Store(true)
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	if p.reaped {
@@ -599,16 +623,16 @@ func isSandboxAmbiguousExit(err error) bool {
 }
 
 func (p *sandboxProvisioner) stopTunnel() {
-	if p.tunnel == nil || p.tunnel.Process == nil {
-		return
-	}
-	// Negative pid: the whole group, so a ProxyCommand helper does not outlive
-	// the client it was opened for.
-	if err := syscall.Kill(-p.tunnel.Process.Pid, syscall.SIGKILL); err != nil {
-		_ = p.tunnel.Process.Kill()
-	}
-	_ = p.tunnel.Wait()
+	// Unregistered even when there was never a child: the entry exists from
+	// before the spawn, and StopAllSandboxTunnels must not revisit this
+	// provisioner while the kill below is still in flight. stopped latches
+	// with it so a spawn still in flight kills its own newborn rather than
+	// publish to a provisioner the registry no longer names.
+	unregisterSandboxTunnel(p)
+	p.stopped = true
+	killTunnel(p.tunnel, p.lifeline)
 	p.tunnel = nil
+	p.lifeline = nil
 	if p.tunnelLn != nil {
 		_ = p.tunnelLn.Close()
 		p.tunnelLn = nil
