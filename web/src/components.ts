@@ -119,7 +119,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -151,11 +151,22 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  // The desktop font-size pair (#5500): terminal text only, beside the other
+  // pane-level controls and hidden at the phone breakpoint (where the keybar
+  // carries the same controls instead). Each press steps the shared device
+  // class's size — every pane in the page refits, which is correct because the
+  // value is per class, not per pane.
+  const fontDecrease = action("A−", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
   return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 

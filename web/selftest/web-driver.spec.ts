@@ -2825,9 +2825,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const mouseHint = host.locator(".af-mouse-capture-hint");
-    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    // Seed off the live grid, not a constant: #5492 halves the phone font, so a
+    // count sized for the 13px grid underflows the doubled row count. Five lines
+    // per visible row also keeps the scrollback deeper in PIXELS than the flick
+    // plus its coast can cross — the margin 200 lines bought on ~15px cells.
+    const hostRows = host.locator(".xterm-rows > div");
+    await expect.poll(() => hostRows.count()).toBeGreaterThan(0);
+    const lineCount = (await hostRows.count()) * 5;
+    const lastLine = `touch-scroll-${lineCount}`;
+    await p.keyboard.type(`for i in $(seq 1 ${lineCount}); do printf 'touch-scroll-%s\\n' "$i"; done`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+    await expect(host).toContainText(lastLine, { timeout: 20_000 });
 
     // Aim at the screen — the element a finger actually lands on. The scrollable
     // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
@@ -2852,7 +2860,7 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       /enable-mouse-events/,
     );
     const bottom = await viewport.evaluate((el) => el.scrollTop);
-    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    expect(bottom, `${lineCount} lines of fresh output must leave real scrollback above the view`).toBeGreaterThan(0);
     await dragIntoHistory();
     await expect
       .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
@@ -4367,6 +4375,154 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
     // repopulates the field from e.value and Z is inserted at the restored caret.
     await p.keyboard.type("Z");
     await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The checkbox sibling of the same-key Enter-save test above. A bool row commits
+  // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole
+  // pane, so the focused checkbox is destroyed and replaced. The restoration
+  // ladder only knew about `editingInput` (text rows), `advancedToggle`, and the
+  // account fields, so a checkbox save dropped focus to <body>: the app's
+  // document-level keydown gate then ran, and in config view the user's next
+  // `[`/`]` cycled the top-level view (other keystrokes were silently swallowed) —
+  // the exact body-focus hazard rerenderKeepingUserState's own comments describe.
+  // The fix captures the focused checkbox's `aria-label` (the config key) before
+  // the rebuild and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // auto_update is a core-tier bool row, visible without expanding advanced.
+    // Clicking it focuses it and fires `change` → save.
+    const box = pane.locator('.af-config-row[data-key="auto_update"] input');
+    await box.click();
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt checkbox replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(box).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The select sibling of the checkbox test above. An enumerated row commits on
+  // `change` and the save round-trip rebuilds the pane, so the focused select is
+  // destroyed and replaced. The restoration ladder had a branch for the
+  // account-agent select but none for a per-key config select, so a select save
+  // dropped focus to <body> and the user's next `[`/`]` cycled the view. The fix
+  // captures the focused select's `aria-label` (the config key) before the rebuild
+  // and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // update_channel is a core-tier enum row (stable | preview). Pick the option
+    // the select does not already hold so `change` actually fires.
+    const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+    const current = await channel.evaluate((sel: HTMLSelectElement) => sel.value);
+    const target = current === "stable" ? "preview" : "stable";
+    // Focus the select first, mirroring the real gesture the bug report
+    // reproduced ("clicking a config-row <select>, changing the option"): a mouse
+    // click on the select focuses it and opens the dropdown, and Tabbing to it
+    // focuses it the same way. Playwright's `selectOption` from a NON-focused
+    // state dispatches the change event without transferring focus to the
+    // select, so the element never holds DOM focus and the bug's "rebuild
+    // destroys the focused select" scenario never materializes. Focus() first
+    // makes the select genuinely hold focus at change time, exactly as a user's
+    // own click-to-open or Tab would — so the assertion below proves the fix
+    // catches the same focus loss the bug report observed.
+    await channel.focus();
+    await channel.selectOption(target);
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran).
+    await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt select replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(channel).toBeFocused();
+
+    // Downstream contract: with focus on a native SELECT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
   } finally {
     releaseSave?.();
     await ctx.close().catch(() => {});
@@ -8277,8 +8433,6 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
   };
   const sessionName = "peer-agent-2347";
-  const lineCount = 40;
-  const lastLine = `peer-agent-line-${lineCount}`;
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -8293,6 +8447,23 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
+    // lineCount has to sit between the two grids this test drives: above the live
+    // local rows so the seeded output overflows them, yet under HALF the tall
+    // peer's — every typed line emits two rows (the PTY echo plus cat's copy),
+    // and the peer check only proves its point while the tall grid swallows all
+    // of them. Size it from the settled grid, not a constant: #5492's font
+    // halving roughly doubled the phone row count a fixed count was sized for.
+    let localRows = 0;
+    await expect
+      .poll(async () => {
+        const next = await firstRows();
+        const settled = next > 0 && next === localRows;
+        localRows = next;
+        return settled;
+      }, { message: "the phone grid must finish its attach fit before it is measured" })
+      .toBe(true);
+    const lineCount = Math.floor((localRows * 3) / 2);
+    const lastLine = `peer-agent-line-${lineCount}`;
     await expect.poll(firstRows).toBeLessThan(lineCount);
 
     // The fixture's `claude` is the real agent-tab PTY path with a deterministic
