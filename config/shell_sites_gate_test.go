@@ -198,7 +198,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	}},
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
-		note: "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
+		note:  "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
 	}},
 
 	// ---- not a shell at all ----
