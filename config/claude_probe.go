@@ -30,6 +30,15 @@ import (
 //   - "^[^/=\s]+\s*= ..." — a "name=value" alias assignment at the line start
 var aliasOutputRegex = regexp.MustCompile(`(?:^\S+:\s*aliased to|^\S+\s+is\s+aliased to|^\S+\s*->|^[^/=\s]+\s*=)\s*(.+)`)
 
+// aliasedToRegex matches the bash `type` ("... is aliased to ...") and zsh
+// `which` ("...: aliased to ...") alternatives of aliasOutputRegex, whose alias
+// value is wrapped in a `...' or ‘...’ re-quoting wrapper handled by
+// stripAliasValueWrapper. The "name=value" and "name -> value" alternatives do
+// not match this (their value is serialized with an ASCII " or ' pair handled
+// by stripAssignmentFormQuotes), so distinguishing the form routes each value
+// to the wrapper stripper that matches its quoting (#5526).
+var aliasedToRegex = regexp.MustCompile(`^(?:\S+:\s*aliased to|\S+\s+is\s+aliased to)`)
+
 // probeWaitDelay bounds how long the claude shell probe's Output() call keeps
 // waiting for stdout/stderr EOF after the probe shell has exited (or the
 // context deadline has killed it). Interactive rc files commonly background
@@ -237,9 +246,38 @@ func parseCommandProbeOutput(output string) string {
 		// Capture everything after the alias marker so paths containing
 		// spaces (e.g. "/Applications/Claude Code.app/.../claude") are
 		// preserved. bash's `type` wraps the alias value in `...' (or, in
-		// some locales, Unicode ‘...’) quotes — strip those.
+		// some locales, ‘...’) quotes — strip exactly ONE such wrapper
+		// pair. A cutset trim (strings.Trim with "`'‘’\"") was used here,
+		// but it strips ANY leading/trailing character in the set
+		// repeatedly on both sides, so when the alias VALUE itself begins
+		// or ends with a quote — e.g. `alias claude="claude --prompt
+		// 'hi'"`, which bash re-quotes and emits as
+		// `claude is aliased to `claude --prompt "'hi'"' — the cutset eats
+		// the value's own boundary quotes as if they were the shell's
+		// wrapper, leaving an unbalanced quote (here `claude --prompt
+		// "'hi`) in the persisted ProgramOverrides entry. That override is
+		// then executed verbatim via /bin/sh -c in every claude session
+		// pane and dies with `Syntax error: Unterminated quoted string`,
+		// making sessions unlaunchable with no fallback to the bare
+		// program name. Removing only the shell's wrapper pair preserves
+		// quote characters that belong to the value itself.
+		//
+		// The wrapper-stripping depends on which aliasOutputRegex alternative
+		// matched: the "aliased to" forms (bash `type`, zsh `which`) wrap the
+		// value in a `...' or ‘...’ re-quoting wrapper, so stripAliasValueWrapper
+		// removes exactly that pair; the "name=value" and "name -> value" forms
+		// serialize the value with an optional ASCII " or ' pair that is also a
+		// wrapper (e.g. claude="/opt/claude --model opus"), so
+		// stripAssignmentFormQuotes removes one matching pair. Applying the
+		// wrong stripper either eats a quote that belongs to the value (the
+		// cutset bug) or leaves a serialization wrapper that makes /bin/sh
+		// treat the whole value as one quoted executable name (#5526).
 		if matches := aliasOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
-			return strings.TrimSpace(strings.Trim(strings.TrimSpace(matches[1]), "`'‘’\""))
+			value := strings.TrimSpace(matches[1])
+			if aliasedToRegex.MatchString(line) {
+				return stripAliasValueWrapper(value)
+			}
+			return stripAssignmentFormQuotes(value)
 		}
 		if matches := bashTypeOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
 			return matches[1]
@@ -249,4 +287,72 @@ func parseCommandProbeOutput(output string) string {
 		}
 	}
 	return ""
+}
+
+// stripAliasValueWrapper removes a single shell-probe wrapper pair that the
+// `type`/`which` builtin puts around an alias value, without touching quote
+// characters that belong to the value itself.
+//
+// bash's `type` emits the alias value wrapped as `...' — a leading backtick
+// and a trailing apostrophe — re-quoting embedded single quotes as `"'...'"
+// (e.g. `alias claude="claude --prompt 'hi'"` is reported as
+// `claude is aliased to `claude --prompt "'hi'"'`). Some locales render the
+// wrapper as curly ‘...’ quotes. zsh's `which` adds no wrapper of its own.
+//
+// A two-sided cutset trim (`strings.Trim` with "`'‘’\"") was used here
+// historically, but it eats ANY leading/trailing character in the set
+// repeatedly on both sides, so when the alias value itself begins or ends
+// with a quote it also strips the value's own boundary quotes, leaving an
+// unbalanced quote. Stripping exactly one recognized wrapper pair preserves
+// them.
+func stripAliasValueWrapper(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 {
+		return v
+	}
+	// bash `type`: leading backtick + trailing apostrophe (ASCII), or
+	// trailing right single quote in some locales.
+	if v[0] == '`' {
+		switch {
+		case strings.HasSuffix(v, "'"):
+			return v[1 : len(v)-1]
+		case strings.HasSuffix(v, "’"):
+			return v[1 : len(v)-len("’")]
+		}
+		return v
+	}
+	// Curly wrapper: leading ‘ + trailing ’ (some locales).
+	if strings.HasPrefix(v, "‘") && strings.HasSuffix(v, "’") {
+		return v[len("‘") : len(v)-len("’")]
+	}
+	return v
+}
+
+// stripAssignmentFormQuotes removes a single ASCII double- or single-quote
+// wrapper pair that the "name=value" and "name -> value" alias-probe
+// alternatives serialize an alias value in (e.g. claude="/opt/claude
+// --model opus" or claude -> '/opt/claude'). These quotes are a serialization
+// wrapper, not part of the value: leaving them intact makes /bin/sh treat the
+// whole value as one quoted executable name, so the persisted override is
+// valid shell syntax yet launches a nonexistent command. Strip exactly one
+// matching pair; a value that does not begin and end with the same quote
+// character (or is too short to be a wrapper) is returned unchanged. This
+// restores the wrapper decoding the cutset trim performed for these forms
+// without touching the bash/zsh "aliased to" value-boundary quotes
+// stripAliasValueWrapper preserves.
+func stripAssignmentFormQuotes(v string) string {
+	if len(v) < 2 {
+		return v
+	}
+	switch v[0] {
+	case '"':
+		if v[len(v)-1] == '"' {
+			return v[1 : len(v)-1]
+		}
+	case '\'':
+		if v[len(v)-1] == '\'' {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }

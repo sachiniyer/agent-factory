@@ -2,15 +2,30 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// requireShellSyntax asserts command parses as valid shell syntax — the
+// property the cutset-trim bug violated with an unbalanced quote. It uses the
+// same mvdan.cc/sh parser family the account launch proof uses, so the check
+// is hermetic and does not depend on /bin/sh existing; callers that want the
+// pane's real shell additionally run /bin/sh -n themselves.
+func requireShellSyntax(t *testing.T, command string) {
+	t.Helper()
+	_, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	require.NoError(t, err, "%q must be valid shell syntax (no unbalanced quote)", command)
+}
 
 // TestGetClaudeCommandMemoized pins the #883 fix: repeated probes that share
 // the same SHELL/PATH/HOME must source the rc only once, while a changed HOME
@@ -131,4 +146,287 @@ func TestGetClaudeCommandCoalescesConcurrentMissingProbe(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(probes), "x"), "one environment should run one probe")
 	assert.Equal(t, 1, strings.Count(warnings.String(), "\n"), "one failed probe should emit one warning")
+}
+
+// TestStripAliasValueWrapper pins the wrapper-pair stripping that replaced the
+// two-sided cutset trim in parseCommandProbeOutput. The cutset
+// (`strings.Trim(..., "`'‘’\"")`) ate quote characters that belonged to the
+// alias VALUE itself whenever the value began or ended with a quote,
+// unbalancing it; this asserts exactly one shell wrapper pair is removed and
+// the value's own boundary quotes survive.
+func TestStripAliasValueWrapper(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// bash `type` wrapper `...': strip exactly one backtick + one
+		// trailing apostrophe, leaving the value's own quotes intact.
+		{"empty", "", ""},
+		{"one char", "`", "`"},
+		{"bare value no wrapper", "claude --model opus", "claude --model opus"},
+		{"wrapper only no inner", "`'", ""},
+		{"standard wrapper", "`claude --model opus'", "claude --model opus"},
+		{"whitespace around wrapper", "  `claude'  ", "claude"},
+		// Value boundaries that ARE quotes must survive.
+		{"value ending double-quoted arg", "`claude --model \"opus\"'", "claude --model \"opus\""},
+		{"value ending re-quoted apostrophes", "`claude --prompt \"'hi'\"'", "claude --prompt \"'hi'\""},
+		{"value ending adjacent apostrophes", "`claude --prompt 'hi''", "claude --prompt 'hi'"},
+		{"value starting double-quoted path", "`\"/opt/my claude/claude\" --flag'", "\"/opt/my claude/claude\" --flag"},
+		{"value starting single-quoted path", "`'/opt/my claude/claude' --flag'", "'/opt/my claude/claude' --flag"},
+		// Curly-quote wrapper (some locales).
+		{"curly wrapper", "‘claude --model opus’", "claude --model opus"},
+		{"curly wrapper with value quote", "‘claude --model \"opus\"’", "claude --model \"opus\""},
+		// Backtick wrapper with curly trailing quote.
+		{"backtick with curly trailing", "`claude’", "claude"},
+		// zsh `which` adds no wrapper of its own: a value that begins/ends
+		// with a quote is returned unchanged.
+		{"zsh form value starting with quote kept", "'/opt/claude' --flag", "'/opt/claude' --flag"},
+		{"zsh form value ending with quote kept", "claude --prompt 'hi'", "claude --prompt 'hi'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stripAliasValueWrapper(tc.in))
+		})
+	}
+}
+
+// TestStripAssignmentFormQuotes pins the wrapper-pair stripping the "name=value"
+// and "name -> value" probe alternatives need: their value may be serialized
+// in an ASCII " or ' wrapper pair that is not part of the value, and leaving it
+// intact makes /bin/sh treat the whole value as one quoted executable name. The
+// bash/zsh "aliased to" forms are handled by stripAliasValueWrapper instead —
+// stripAssignmentFormQuotes must not touch the value-boundary quotes those forms
+// preserve.
+func TestStripAssignmentFormQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"one char", `"`, `"`},
+		{"wrapper only double", `""`, ""},
+		{"wrapper only single", "''", ""},
+		{"double-quoted value", `"/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"single-quoted value", `'/opt/claude --model opus'`, "/opt/claude --model opus"},
+		{"double-quoted path with space", `"/Applications/Claude Code.app/Contents/MacOS/claude"`, "/Applications/Claude Code.app/Contents/MacOS/claude"},
+		{"unquoted value unchanged", "/opt/claude --model opus", "/opt/claude --model opus"},
+		// A value whose own boundary is a quote that is NOT a matching pair is
+		// left untouched (no wrapper to strip).
+		{"mismatched quotes", `"/opt/claude'`, `"/opt/claude'`},
+		// Only ONE wrapper pair is stripped; the value's own inner quotes survive.
+		{"one pair only double", `"/opt/claude --prompt 'hi'"`, "/opt/claude --prompt 'hi'"},
+		{"one pair only single", `'/opt/claude --model "opus"'`, `/opt/claude --model "opus"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stripAssignmentFormQuotes(tc.in))
+		})
+	}
+}
+
+// TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes
+// is the regression test for the cutset-trim bug: a probe line whose alias
+// value begins or ends with a quote character must parse to a shell-balanced
+// command. The persisted override is executed verbatim via /bin/sh -c, so an
+// unbalanced quote kills every session pane on launch.
+func TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"double-quoted model suffix", "claude is aliased to `claude --model \"opusplan\"'"},
+		{"re-quoted apostrophes", "claude is aliased to `claude --prompt \"'hi'\"'"},
+		{"adjacent apostrophes", "claude is aliased to `claude --prompt 'hi''"},
+		{"double-quoted path prefix", "claude is aliased to `\"/opt/my claude/claude\" --flag'"},
+		{"single-quoted path prefix", "claude is aliased to `'/opt/my claude/claude' --flag'"},
+		{"curly wrapper with value quote", "claude is aliased to ‘claude --model \"opus\"’"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseCommandProbeOutput(tc.line)
+			require.NotEmpty(t, parsed, "the alias value must parse to a non-empty command")
+			// The composed override the pane runs: <parsed> + <af flag>. It
+			// must be valid shell syntax — i.e. mvdan.cc/sh accepts it
+			// without a syntax error. The cutset-trim bug left an unbalanced
+			// quote that mvdan.cc/sh (and /bin/sh) reject.
+			composed := parsed + " " + DetectedClaudePermissionsFlag
+			requireShellSyntax(t, composed)
+			// And it must parse under the real /bin/sh the pane uses. Use
+			// syntax-only validation (-n) so a real `claude` on PATH is never
+			// launched (and cannot hang or run with --dangerously-skip-
+			// permissions); the property under test is shell PARSEability.
+			if _, err := os.Stat("/bin/sh"); err == nil {
+				out, err := exec.Command("/bin/sh", "-n", "-c", composed).CombinedOutput()
+				assert.NoError(t, err,
+					"/bin/sh -n rejected the composed override (unbalanced quote?): %s", out)
+			}
+		})
+	}
+}
+
+// TestParseCommandProbeOutputStripsAssignmentFormWrapper is the regression
+// test for the "name=value" / "name -> value" serialization-wrapper bug: a
+// probe line whose value is wrapped in an ASCII " or ' pair must have the
+// wrapper stripped so the composed override is valid shell syntax. Leaving
+// the wrapper intact made /bin/sh treat the whole value as one quoted
+// executable name, so the override parsed yet launched a nonexistent command
+// (#5526).
+func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{"equals double-quoted", `claude="/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"equals single-quoted", `claude='/opt/claude --model opus'`, "/opt/claude --model opus"},
+		{"arrow double-quoted", `claude -> "/opt/claude --model opus"`, "/opt/claude --model opus"},
+		{"arrow single-quoted", `claude -> '/opt/claude --model opus'`, "/opt/claude --model opus"},
+		// A value with an inner double-quoted arg keeps its inner quotes; only
+		// the outer serialization wrapper is stripped.
+		{"equals with inner quotes", `claude="/opt/claude --prompt 'hi'"`, "/opt/claude --prompt 'hi'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseCommandProbeOutput(tc.line)
+			require.Equal(t, tc.want, parsed, "the serialization wrapper must be stripped, not preserved")
+			composed := parsed + " " + DetectedClaudePermissionsFlag
+			requireShellSyntax(t, composed)
+			if _, err := os.Stat("/bin/sh"); err == nil {
+				out, err := exec.Command("/bin/sh", "-n", "-c", composed).CombinedOutput()
+				assert.NoError(t, err,
+					"/bin/sh -n rejected the composed override (wrapper not stripped?): %s", out)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd is the end-to-end
+// regression test: a real bash alias whose value's own boundary is a quote —
+// the shape the cutset-trim bug corrupted — flows through the full probe →
+// parse → shell-quote → compose pipeline and lands in
+// ProgramOverrides as a shell-balanced command that /bin/sh executes.
+func TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd(t *testing.T) {
+	bashPath := requireBash(t)
+
+	for _, tc := range []struct {
+		name      string
+		aliasLine string
+		// wantSubstr is a fragment the parsed alias value must still carry
+		// (proves the value's boundary quote survived the wrapper strip).
+		wantSubstr string
+	}{
+		// `alias claude="claude --prompt 'hi'"` — value ends in an
+		// apostrophe; bash's `type` re-quotes it adjacent to the wrapper.
+		{"value ending apostrophe", `alias claude="claude --prompt 'hi'"`, "--prompt"},
+		// `alias claude='claude --model "opusplan"'` — value ends in a
+		// double-quote; bash keeps it inside the `...' wrapper.
+		{"value ending double-quote", `alias claude='claude --model "opusplan"'`, "--model"},
+		// `alias claude='"/opt/my claude/claude" --flag'` — value begins
+		// with a double-quote; bash keeps it inside the `...' wrapper.
+		{"value starting double-quote", `alias claude='"/opt/my claude/claude" --flag'`, "--flag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
+				tc.aliasLine + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
+
+			t.Setenv("HOME", homeDir)
+			t.Setenv("SHELL", bashPath)
+			t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
+
+			cfg := DefaultConfig()
+			require.NotNil(t, cfg)
+			override := cfg.ProgramOverrides[tmux.ProgramClaude]
+			require.NotEmpty(t, override, "a quote-boundary alias must still produce an override (no regression in detection)")
+			assert.True(t, strings.HasSuffix(override, " "+DetectedClaudePermissionsFlag),
+				"the af-appended permissions flag must land as a standalone trailing arg, not inside an unclosed quoted string: %q", override)
+			assert.Contains(t, override, tc.wantSubstr)
+			// The whole point of the fix: the persisted override is valid
+			// shell syntax the pane can execute, and the permissions flag is
+			// a separate arg (not swallowed by an unclosed quote).
+			requireShellSyntax(t, override)
+			if _, err := os.Stat("/bin/sh"); err == nil {
+				// Syntax-only validation (-n): the property under test is
+				// shell parseability, not claude's exit code. -n never
+				// executes the command, so a real `claude` on PATH cannot
+				// be launched (with --dangerously-skip-permissions) or hang
+				// the test suite.
+				out, runErr := exec.Command("/bin/sh", "-n", "-c", override).CombinedOutput()
+				assert.NoError(t, runErr,
+					"/bin/sh -n rejected the override (unbalanced quote — the cutset-trim bug): %s", out)
+			}
+
+			// Account-scoped launch admission: wire the override through the
+			// proof/validation pair the launcher uses (the same pair
+			// TestDefaultConfigWithExecPrefixAlias exercises). Pre-fix the
+			// unbalanced quote failed to PARSE here, so
+			// GenerateAccountLaunchProof returned ok=false (parse refused
+			// the base) and ValidateAccountCommand gave the generic "could
+			// not be proven" refusal — account-scoped launches failed
+			// closed with no specific reason. Post-fix the override parses,
+			// so the proof SUCCEEDS (ok=true); the validation then reaches
+			// the specific "undeclared arguments" refusal for any user
+			// flags the alias added (the account boundary distrusts
+			// operator-supplied args beyond the executable + af-authored
+			// args, by design). The fix's guarantee for the account path
+			// is therefore that proof generation no longer fails closed on
+			// a parse error, and the refusal — when the alias carries user
+			// flags — names those flags rather than reporting an unprovable
+			// command; the proof/validate pair DOES accept a quote-boundary
+			// base with no user flags (see TestDefaultConfigWithExecPrefixAlias
+			// for that shape).
+			const sessionID = "0b6f2c1e-8a44-4d0e-9f31-7c5b2a9e4d10"
+			const pluginDir = "/home/op/.local/share/agent-factory/plugins/af"
+			base := override
+			final := base + " --session-id " + sessionID + " --plugin-dir " + pluginDir
+			proof, ok := sessionenv.GenerateAccountLaunchProof(base, final, []string{DetectedClaudePermissionsFlag})
+			require.True(t, ok,
+				"proof generation must succeed for the quote-boundary override (pre-fix it failed closed on the unbalanced-quote parse error): override=%q", override)
+			require.Equal(t,
+				[]string{DetectedClaudePermissionsFlag, "--session-id", sessionID, "--plugin-dir", pluginDir},
+				proof.GeneratedArgs)
+			err := sessionenv.ValidateAccountCommand(final, sessionenv.Account{
+				Agent:             "claude",
+				Name:              "work",
+				Dir:               "/afhome/accounts/claude/work",
+				TrustedExecutable: proof.TrustedExecutable,
+				GeneratedArgs:     proof.GeneratedArgs,
+			})
+			// The override parses, so the refusal — if any — must be the
+			// specific "undeclared arguments" refusal naming the alias's
+			// user flags, NOT the generic "could not be proven" parse-failure
+			// refusal pre-fix returned. Equivalently: a refusal that does
+			// NOT mention "undeclared arguments" is a parse regression.
+			if err != nil {
+				assert.Contains(t, err.Error(), "undeclared arguments",
+					"a refused account-scoped launch must name the alias's user args as undeclared (post-parse), not report the override as unprovable: override=%q err=%v", override, err)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigPersistsCompoundAliasEndToEnd pins the master contract for
+// a VALID compound alias — one that is real shell syntax but not a single
+// simple call, e.g. `alias claude="nvm use 20 && claude"`. Master persisted
+// such aliases verbatim (appending the permissions flag to the LAST command
+// of the chain, which is the claude invocation the operator wrote it for) and
+// they worked for unscoped launches through /bin/sh -c. An earlier revision of
+// this fix gated persistence on single-simple-call syntax and silently
+// dropped them — a regression, not a safety improvement: the gate is gone and
+// the compound alias must land in ProgramOverrides unchanged.
+func TestDefaultConfigPersistsCompoundAliasEndToEnd(t *testing.T) {
+	bashPath := requireBash(t)
+	homeDir := t.TempDir()
+	writeGuardedBashrc(t, homeDir, "nvm use 20 && claude")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("SHELL", bashPath)
+	t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
+
+	cfg := DefaultConfig()
+	require.NotNil(t, cfg)
+	override := cfg.ProgramOverrides[tmux.ProgramClaude]
+	require.Equal(t, "nvm use 20 && claude "+DetectedClaudePermissionsFlag, override,
+		"a valid compound alias must persist verbatim with the af flag appended to the claude leg, as on master")
+	requireShellSyntax(t, override)
 }
