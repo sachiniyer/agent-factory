@@ -192,7 +192,7 @@ func (s *remoteAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error)
 }
 
 func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
-	if s.idNative() {
+	if s.nativeFor(tabID) {
 		return s.rc.previewByID(tabID, full)
 	}
 	if s.inst == nil {

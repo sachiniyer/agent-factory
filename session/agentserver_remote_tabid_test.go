@@ -81,3 +81,28 @@ func TestRemoteAgentServer_CloseTabStreamDropsOnlyThatBroker(t *testing.T) {
 	assert.Contains(t, s.idBrokers, "b")
 	_ = a
 }
+
+// The agent tab's id is minted independently on each side, so it must stay on
+// the ordinal bridge even against a sandbox that advertises tab-id-addressing
+// (Codex P1 on #5575); a tab the daemon created rides the native plane.
+func TestRemoteAgentServer_AgentTabStaysOnOrdinalBridge(t *testing.T) {
+	modern := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "features": []string{tabIDAddressingFeature}}).
+		route("/v1/agent/preview", map[string]any{"content": "screen"})
+	srv := httptest.NewServer(modern.mux)
+	defer srv.Close()
+	agent := newRemoteAgentTab()
+	shell := &Tab{ID: "daemon-shell", Name: "shell", Kind: TabKindShell}
+	inst := &Instance{Title: "sb", Tabs: []*Tab{agent, shell}}
+	s := &remoteAgentServer{rc: modern.client(t, srv.URL), inst: inst}
+
+	assert.False(t, s.nativeFor(agent.ID), "agent tab id is not known to the sandbox")
+	assert.True(t, s.nativeFor(shell.ID))
+
+	_, err := s.PreviewByID(agent.ID, false)
+	require.NoError(t, err)
+	modern.mu.Lock()
+	body := modern.bodies["/v1/agent/preview"]
+	modern.mu.Unlock()
+	assert.Nil(t, body["tab_id"], "the agent tab preview must not send the daemon-minted id")
+}

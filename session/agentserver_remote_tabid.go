@@ -38,6 +38,25 @@ func (s *remoteAgentServer) idNative() bool {
 	return native
 }
 
+// nativeFor reports whether tabID should ride the id-native plane. The sandbox
+// knows a tab by the id the daemon supplied at create (W4.5), but the AGENT tab
+// is seeded independently on each side — the daemon's newRemoteAgentTab and the
+// sandbox's newAgentTab mint different random ids — so an agent-tab id sent
+// natively would be ErrTabGone on the far side. The agent tab is pinned to
+// ordinal 0 on both rosters and can neither close nor reorder, so the ordinal
+// bridge is exact for it until the two ids are reconciled.
+func (s *remoteAgentServer) nativeFor(tabID string) bool {
+	if !s.idNative() {
+		return false
+	}
+	if s.inst != nil {
+		if idx, ok := s.inst.TabIndexByID(tabID); ok && idx == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ordinalOf resolves a stable id to its CURRENT ordinal for the legacy bridge —
 // an agent-server that does not advertise tab-id-addressing, whose wire protocol
 // is ordinal-shaped. Re-resolved on every operation, never pinned: a pinned
@@ -87,7 +106,7 @@ func (s *remoteAgentServer) dropBrokerByID(tabID string, br *ptyBroker) {
 }
 
 func (s *remoteAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscription, error) {
-	if !s.idNative() {
+	if !s.nativeFor(tabID) {
 		idx, err := s.ordinalOf(tabID)
 		if err != nil {
 			return nil, err
@@ -106,7 +125,7 @@ func (s *remoteAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscripti
 }
 
 func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
-	if !s.idNative() {
+	if !s.nativeFor(tabID) {
 		idx, err := s.ordinalOf(tabID)
 		if err != nil {
 			return err
@@ -128,7 +147,7 @@ func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
 }
 
 func (s *remoteAgentServer) ResizeTab(tabID string, rows, cols uint16) error {
-	if !s.idNative() {
+	if !s.nativeFor(tabID) {
 		idx, err := s.ordinalOf(tabID)
 		if err != nil {
 			return err
