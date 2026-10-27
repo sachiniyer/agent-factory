@@ -487,10 +487,14 @@ func TestRestoreLostSessions_TransientPushBlipsDoNotPrechargeRecoverBudget(t *te
 		t.Fatalf("archive calls = %d, want %d (%d blips + %d successful pushes before each Recover)", got, want, blips, lostRestoreMaxAttempts)
 	}
 	snapshot := inst.LostRestoreFailureSnapshot()
-	if snapshot == nil || snapshot.Attempts != lostRestoreMaxAttempts {
-		t.Fatalf("surfaced failure = %#v, want %d attempts (the blips must not inflate the count)", snapshot, lostRestoreMaxAttempts)
+	// Attempts is the cumulative episode count (#5295 review): the three blips
+	// are real tries the episode made, so they appear in the surfaced count —
+	// while the give-up still fired at exactly lostRestoreMaxAttempts Recover
+	// calls above, which is what the separate-budget contract pins.
+	if snapshot == nil || snapshot.Attempts != blips+lostRestoreMaxAttempts {
+		t.Fatalf("surfaced failure = %#v, want %d attempts (the %d blips count toward the episode total, but must not precharge the Recover budget)", snapshot, blips+lostRestoreMaxAttempts, blips)
 	}
-	want := fmt.Sprintf("giving up after %d attempts:", lostRestoreMaxAttempts)
+	want := fmt.Sprintf("giving up after %d attempts:", blips+lostRestoreMaxAttempts)
 	if !strings.Contains(ownLogs.errors.String(), want) {
 		t.Fatalf("missing Recover-branch give-up %q; logs:\n%s", want, ownLogs.errors.String())
 	}

@@ -604,6 +604,47 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 					"intend it for every repo, or export it in your own shell",
 				prettyPath, key, selector, cloudProviderForSelector(selector), selector, globalConfigLocation)
 		}
+		// An ABSOLUTE executable is refused outright, inside the checkout or
+		// anywhere else. A checked-in config is not trusted provenance for a
+		// file outside it: the shared grant predicate (internal/sessionenv.
+		// GrantAgentForCommand) attributes absolute paths to the operator
+		// because the operator is supposed to be the one spelling them, and a
+		// repository that picks the spelling can aim the grant at content it
+		// controls — a committed file in another checkout of the same repo
+		// (the pane's worktree contains only its own tree, so a linked
+		// worktree or the main checkout escapes that containment test), or a
+		// payload post_worktree_commands delivers to /tmp during setup. The
+		// grant cannot tell either apart from the operator's /usr/local/bin
+		// install, so the untrusted layer may not produce the spelling at
+		// all — refuse the value outright, the same line the cloud-selector
+		// refusal above draws. Absolute overrides keep working where their
+		// provenance IS the operator's: the global config and the
+		// machine-local personal project file. A RELATIVE override still
+		// loads: it simply earns no grant (#5265 review).
+		if executable := sessionenv.AgentCommandExecutable(value); filepath.IsAbs(executable) {
+			return nil, nil, fmt.Errorf(
+				"in-repo config %s: program_overrides.%s names the absolute executable %q, which af cannot "+
+					"attribute to you rather than this repository — it may point at content the repo ships in "+
+					"another checkout or delivers at setup. A checked-in config may name a bare agent or a "+
+					"relative path; set the absolute override in %s if you intend it",
+				prettyPath, key, executable, globalConfigLocation)
+		}
+		// A command-local ENVIRONMENT change is refused on the same line. At
+		// launch the grant predicate sees only a command string, so it cannot
+		// tell LD_PRELOAD=./x.so codex in a checked-in file apart from
+		// ANTHROPIC_BASE_URL=… claude in the operator's own global config —
+		// and a bare deny would strip the second, a documented override
+		// shape. Config load is the one place that knows which layer the
+		// value came from: refuse the mutation here and keep launch
+		// semantics unchanged for operator-authored commands (#5265 review).
+		if sessionenv.AgentCommandSetsEnvironment(value) {
+			return nil, nil, fmt.Errorf(
+				"in-repo config %s: program_overrides.%s sets command-local environment, which af cannot "+
+					"attribute to you rather than this repository — an assignment or env mutation can preload "+
+					"code or redirect the agent's own configuration. A checked-in config may name a bare agent "+
+					"or a relative path with flags; set the environment-bearing override in %s if you intend it",
+				prettyPath, key, globalConfigLocation)
+		}
 	}
 
 	// The same shape warning (#3566), beside the same key check above. This file
