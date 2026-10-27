@@ -1,14 +1,18 @@
 package session
 
 import (
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -124,6 +128,86 @@ func TestAddShellTabWithID_ConcurrentSameIDLandsOnce(t *testing.T) {
 	assert.Same(t, t1, t2, "both creates must answer the one tab that landed")
 	assert.Equal(t, 2, inst.TabCount(), "exactly one tab landed under the raced id")
 	assert.True(t, inst.TabAlive(1), "the surviving tab's tmux session is the live one")
+}
+
+// A concurrent same-id create must never spawn its own command: the roster
+// dedupe runs after spawn, and for a process tab "spawned and reaped" is
+// already a duplicated deploy. tabCreateInFlight serializes the id instead —
+// the joiner waits on the owner's outcome and adopts, so exactly one
+// new-session ever runs under the id. Mismatched same-id requests refuse
+// before spawning too.
+func TestAddProcessTabWithID_ConcurrentSameIDJoinsWithoutSpawning(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_tabs_id_join"
+	// The FIRST tmux new-session blocks until the test releases it — holding a
+	// supplied-id create provably in-flight so a second same-id request's
+	// behavior is observable. newSessions records how many new-session calls
+	// ran, which is what proves the joiner never spawned.
+	inner := nameKeyedExec(map[string]bool{agentName: true})
+	var newSessions atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	block := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "new-session") && newSessions.Add(1) == 1 {
+				close(entered)
+				<-release
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.OutputFunc,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: block}
+	repoPath := "/tmp/tab-lifecycle-" + agentName
+	gw, err := git.NewGitWorktreeFromStorage(
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
+		agentName+"-branch", "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{
+		Title: agentName, Path: repoPath, Program: "claude",
+		backend: &LocalBackend{}, started: true, gitWorktree: gw,
+		Tabs: []*Tab{newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, block))},
+	}
+
+	// Create 1 spawns and stalls inside new-session — provably in-flight once
+	// `entered` closes (the id claim precedes the spawn, so it is held by then).
+	first := make(chan *Tab, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		tab, err := inst.AddProcessTabWithID("dup", "deploy.sh", "")
+		first <- tab
+		firstErr <- err
+	}()
+	<-entered
+
+	// Same id, same shape: joins — spawns nothing, answers once the owner
+	// resolves.
+	joined := make(chan *Tab, 1)
+	joinedErr := make(chan error, 1)
+	go func() {
+		tab, err := inst.AddProcessTabWithID("dup", "deploy.sh", "")
+		joined <- tab
+		joinedErr <- err
+	}()
+
+	// Same id, different shape: refuses BEFORE spawning — answered while
+	// create 1 is still blocked, so a return at all proves the early refusal.
+	if _, err := inst.AddProcessTabWithID("dup", "other.sh", ""); err == nil {
+		t.Fatal("a same-id create with a different command must refuse while the first is in flight")
+	}
+	if _, err := inst.AddShellTabWithID("dup"); err == nil {
+		t.Fatal("a same-id shell create against an in-flight process create must refuse")
+	}
+
+	close(release)
+	winner, jt := <-first, <-joined
+	require.NoError(t, <-firstErr)
+	require.NoError(t, <-joinedErr)
+	assert.Same(t, winner, jt, "the joiner adopts the tab the first create made")
+	assert.Equal(t, 2, inst.TabCount(), "exactly one tab landed under the raced id")
+	assert.Equal(t, int32(1), newSessions.Load(), "the joiner never ran new-session")
 }
 
 // A staged pendingMetadataTabs row owns its id too: a live-roster id and a

@@ -211,7 +211,10 @@ func TestHeadlessTabCreate_Refusals(t *testing.T) {
 		body    string
 		wantMsg string
 	}{
-		{"unsupported kind web", `{"kind":"web","url":"http://x"}`, "unsupported tab kind"},
+		// Strict decoding runs before the handler, so the body can only carry
+		// agentTabCreateRequest's own fields — a `url` member would be refused
+		// as an unknown field and never reach the kind switch.
+		{"unsupported kind web", `{"kind":"web","id":"w1"}`, "unsupported tab kind"},
 		{"empty kind", `{"id":"x"}`, "unsupported tab kind"},
 		{"process without command", `{"kind":"process","id":"p1"}`, "non-empty command"},
 	} {

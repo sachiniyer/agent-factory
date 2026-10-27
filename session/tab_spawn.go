@@ -73,27 +73,45 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // a fresh id, exactly as AddShellTab. The supplied id doubles as the create's
 // idempotency key: a roster entry already bearing it answers as that existing
 // tab when it is the same kind, and refuses otherwise (tabIDCollisionLocked).
-// The check runs early AND again at the i.mu append point — a concurrent
-// same-id create is deduped there: tabSpawnClaims gives the loser a tmux name
-// of its own, its spawn succeeds, and the append-point recheck closes that
-// just-spawned session and adopts the winner rather than landing a second tab
-// under the id, so W1.2's reconnect-replayed create can never double-spawn.
-// adoptOnSpawnFailure is the same recheck applied when OUR spawn is the one
-// that failed.
+// The check runs early AND again at the i.mu append point — and a CONCURRENT
+// same-id create never spawns at all: tabCreateInFlight serializes the id, so
+// the second request joins the first's outcome (adopt its tab, or inherit its
+// refusal) instead of executing a duplicate command whose side effects a
+// roster dedupe could never undo. adoptOnSpawnFailure is the roster recheck
+// applied when OUR spawn is the one that failed.
 func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
-	// One write-lock section covers the id check, the roster reads, AND the
-	// name claim: a concurrent create derives its tmux name off the same roster,
-	// so claiming while we derive is what keeps two racers from being issued
-	// the same session name — a loser's new-session would collide inside tmux
-	// on the winner's name, where Start's failed-spawn cleanup kill-sessions
-	// the name it just failed on: the WINNER's live session (#5571 W4.3). The
-	// claim is held until the append resolves so the loser walks to "-2", spawns
-	// a session of its own, and the collide arm below only ever reaps a session
-	// this create genuinely made.
+	// One write-lock section covers the id check, the in-flight id claim, the
+	// roster reads, AND the tmux-name claim: a concurrent create derives its
+	// tmux name off the same roster, so claiming while we derive is what keeps
+	// two DIFFERENT-id racers from being issued the same session name — a
+	// loser's new-session would collide inside tmux on the winner's name,
+	// where Start's failed-spawn cleanup kill-sessions the name it just failed
+	// on: the WINNER's live session (#5571 W4.3). The name claim is held until
+	// the append resolves so the loser walks to "-2", spawns a session of its
+	// own, and the collide arm below only ever reaps a session this create
+	// genuinely made.
+	var claim *tabCreateClaim
 	i.mu.Lock()
-	if refused, existing, found := i.tabIDCollisionLocked(id, TabKindShell, ""); found {
+	for {
+		if refused, existing, found := i.tabIDCollisionLocked(id, TabKindShell, ""); found {
+			i.mu.Unlock()
+			return existing, refused
+		}
+		c, wait, err := i.tabCreateClaimOrJoinLocked(id, TabKindShell, "")
+		if err != nil {
+			i.mu.Unlock()
+			return nil, err
+		}
+		if wait == nil {
+			claim = c
+			break
+		}
+		// A same-shape create under this id is in flight: join it — wait for
+		// it to resolve WITHOUT spawning, then the loop's roster recheck
+		// answers adopt-or-collide.
 		i.mu.Unlock()
-		return existing, refused
+		<-wait
+		i.mu.Lock()
 	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
@@ -114,6 +132,17 @@ func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
 		i.tabSpawnClaims[tmuxName] = true
 	}
 	i.mu.Unlock()
+	if claim != nil {
+		// The id claim outlives every return below: a joiner must not see the
+		// id free until this create's outcome is final — appended, refused, or
+		// failed — or it could spawn a second command in the gap.
+		defer func() {
+			i.mu.Lock()
+			delete(i.tabCreateInFlight, id)
+			close(claim.done)
+			i.mu.Unlock()
+		}()
+	}
 	if tmuxName != "" {
 		defer func() {
 			i.mu.Lock()
@@ -226,12 +255,30 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab,
 		return nil, fmt.Errorf("a process tab requires a non-empty command")
 	}
 
-	// One write-lock section covers the id check, the roster reads, AND the name
-	// claim — see AddShellTabWithID for why derivation and claim are atomic.
+	// One write-lock section covers the id check, the in-flight id claim, the
+	// roster reads, AND the name claim — see AddShellTabWithID for the
+	// derivation-plus-claim atomicity argument. For a process tab the claim
+	// matters most: its command is a side effect, so a same-id second request
+	// must join or refuse BEFORE anything runs, never spawn and dedupe after.
+	var claim *tabCreateClaim
 	i.mu.Lock()
-	if refused, existing, found := i.tabIDCollisionLocked(id, TabKindProcess, command); found {
+	for {
+		if refused, existing, found := i.tabIDCollisionLocked(id, TabKindProcess, command); found {
+			i.mu.Unlock()
+			return existing, refused
+		}
+		c, wait, err := i.tabCreateClaimOrJoinLocked(id, TabKindProcess, command)
+		if err != nil {
+			i.mu.Unlock()
+			return nil, err
+		}
+		if wait == nil {
+			claim = c
+			break
+		}
 		i.mu.Unlock()
-		return existing, refused
+		<-wait
+		i.mu.Lock()
 	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
@@ -248,6 +295,15 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab,
 		i.tabSpawnClaims[tmuxName] = true
 	}
 	i.mu.Unlock()
+	if claim != nil {
+		// Held through every return — see AddShellTabWithID.
+		defer func() {
+			i.mu.Lock()
+			delete(i.tabCreateInFlight, id)
+			close(claim.done)
+			i.mu.Unlock()
+		}()
+	}
 	if tmuxName != "" {
 		defer func() {
 			i.mu.Lock()
@@ -352,6 +408,50 @@ func (i *Instance) adoptOnSpawnFailure(id string, kind TabKind, command string, 
 		return nil, err
 	}
 	return existing, colErr
+}
+
+// tabCreateClaim is the in-flight record a supplied-id create leaves under
+// i.mu from its early check until it returns (#5571 W4.3). kind/command are the
+// create's shape: a second request under the same id compares them BEFORE
+// anything spawns — a match joins on done and resolves through the roster
+// recheck (adopt the tab the first create made, or a collision refusal if the
+// winner's shape somehow differs); a mismatch refuses immediately. That
+// ordering is the idempotency contract's point: a roster dedupe can only run
+// after both commands spawned, and for a process tab "spawned and reaped" is
+// already a duplicated deploy/migration.
+type tabCreateClaim struct {
+	kind    TabKind
+	command string
+	// done closes when the owning create returns — appended, refused, or
+	// failed — so a joiner always re-checks the roster against a final state.
+	done chan struct{}
+}
+
+// tabCreateClaimOrJoinLocked arbitrates a supplied-id create on i.mu (held in
+// and out). Three outcomes: claim set — this request owns the id and must
+// release it when it returns; wait non-nil — a same-shape create is in flight,
+// so the caller must drop i.mu, wait for it to close, and re-run the whole
+// early-check section against whatever the winner left on the roster; err —
+// a same-id create of a different shape is in flight, refused before any
+// spawn. id "" claims nothing (a mint-on-append id can collide with nothing).
+// Callers must hold i.mu.
+func (i *Instance) tabCreateClaimOrJoinLocked(id string, kind TabKind, command string) (claim *tabCreateClaim, wait <-chan struct{}, err error) {
+	if id == "" {
+		return nil, nil, nil
+	}
+	c, ok := i.tabCreateInFlight[id]
+	if !ok {
+		if i.tabCreateInFlight == nil {
+			i.tabCreateInFlight = map[string]*tabCreateClaim{}
+		}
+		claim = &tabCreateClaim{kind: kind, command: command, done: make(chan struct{})}
+		i.tabCreateInFlight[id] = claim
+		return claim, nil, nil
+	}
+	if c.kind != kind || (kind == TabKindProcess && c.command != command) {
+		return nil, nil, fmt.Errorf("tab id %q already names an in-flight %s create", id, TabKindName(c.kind))
+	}
+	return nil, c.done, nil
 }
 
 // tabIDCollisionLocked answers a supplied-id create against whoever already owns

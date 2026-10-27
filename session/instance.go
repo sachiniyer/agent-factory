@@ -504,6 +504,17 @@ type Instance struct {
 	// the winner's live session. Guarded by i.mu; lazily allocated since an
 	// instance that never spawns a sibling never needs it.
 	tabSpawnClaims map[string]bool
+
+	// tabCreateInFlight reserves the stable ids of supplied-id creates still
+	// in flight — claimed under i.mu at the early check, released when the
+	// owning create returns (#5571 W4.3). The roster dedupes same-id creates
+	// only AFTER they spawn, which cannot undo a duplicate command's side
+	// effects — a replayed `deploy.sh` that ran twice already deployed twice.
+	// The claim serializes same-id creates instead: a second request joins on
+	// the owner's done channel and resolves through the roster recheck, so a
+	// matching retry adopts without spawning and a mismatched one refuses
+	// before spawning. Guarded by i.mu; lazily allocated.
+	tabCreateInFlight map[string]*tabCreateClaim
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has
