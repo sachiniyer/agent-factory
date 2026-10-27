@@ -57,7 +57,11 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	writeFile(t, filepath.Join(repo, "README.md"), "sandbox e2e\n", 0644)
 	runExternal(t, repo, "git", "add", "-A")
 	runExternal(t, repo, "git", "commit", "-m", "seed")
-	bare := filepath.Join(t.TempDir(), "repo.git")
+	bareDir := t.TempDir()
+	// The container pushes as root into this bind mount; hand the files back
+	// before TempDir's RemoveAll or cleanup fails with EPERM.
+	reownTempViaDocker(t, "af-sandbox-e2e:test", bareDir)
+	bare := filepath.Join(bareDir, "repo.git")
 	runExternal(t, "", "git", "clone", "--bare", repo, bare)
 	runExternal(t, repo, "git", "remote", "add", "origin", "file:///repo.git")
 
