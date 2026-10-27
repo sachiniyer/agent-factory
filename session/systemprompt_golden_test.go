@@ -152,7 +152,7 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 		{
 			// proposals + "\n\n" + outro: a blank line, a new paragraph.
 			name: "proposals to inside outro",
-			want: "for the rest of the work.\n\nFinishing up: when the user confirms",
+			want: "af keeps them outside the worktree.\n\nFinishing up: when the user confirms",
 		},
 		{
 			// outro + "\n\n" + tail.
