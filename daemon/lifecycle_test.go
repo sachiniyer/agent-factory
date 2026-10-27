@@ -321,6 +321,9 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"WriteProposalDoc":    blockedDuringProbation,
 	"PullProposalChanges": blockedDuringProbation,
 	"CheckpointProposal":  blockedDuringProbation,
+	"SetProposalPushMode": blockedDuringProbation,
+	"HoldProposalPush":    blockedDuringProbation,
+	"SendProposalChanges": blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {
