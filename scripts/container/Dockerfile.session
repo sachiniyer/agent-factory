@@ -8,15 +8,16 @@
 # Build it with `make session-image` (no build context is sent; there is no COPY).
 #
 # Base — glibc, deliberately. The `af` binary copied in at session start is the
-# daemon's OWN executable, and production/release builds are a plain `go build`
-# (cgo on) on ubuntu-latest, i.e. dynamically linked against glibc 2.39. Such a
-# binary will NOT run on a musl base (alpine) or an older glibc (debian bookworm =
-# 2.36). node:22-trixie-slim is Debian 13 (glibc 2.41 — >= 2.39, with headroom) and
-# carries Node 22, which the codex CLI requires. If you rebuild the daemon on a
-# newer-glibc distro, rebuild this image on a matching-or-newer base too. (A static
-# `af`, CGO_ENABLED=0, would run on any base — but that is not how release builds
-# are produced today; see the integration test, which force-builds a static `af`
-# precisely so it can use an alpine test image.)
+# daemon's OWN executable, and the install/release artifacts are a plain `go
+# build` (cgo on) on ubuntu-latest, i.e. dynamically linked against glibc 2.39.
+# Such a binary will NOT run on a musl base (alpine) or an older glibc (debian
+# bookworm = 2.36). node:22-trixie-slim is Debian 13 (glibc 2.41 — >= 2.39, with
+# headroom) and carries Node 22, which the codex CLI requires. If you rebuild the
+# daemon on a newer-glibc distro, rebuild this image on a matching-or-newer base
+# too. (The libc constraint is docker-specific: the sandbox/ssh transports
+# stream the separate CGO_ENABLED=0 artifact — agent-factory-linux-<arch>-
+# static.tar.gz — which execs on any libc, and the integration test force-builds
+# a static `af` for the same reason so it can use an alpine test image.)
 FROM node:22-trixie-slim
 
 # Workspace tooling: git clones /workspace, tmux drives the agent PTY, and

@@ -47,6 +47,7 @@ listen_addr = '0.0.0.0:8443'
 preview_listen_addr = '127.0.0.1:8444'
 require_token = true
 require_loopback_token = true
+allow_unauthenticated_network = true
 cors_allowed_origins = ['https://af.example.com']
 `
 

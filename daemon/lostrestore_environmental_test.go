@@ -94,6 +94,41 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 		{"deadline carrying fsprobe sentinel", errors.Join(
 			fsprobe.ErrProbeTimedOut, context.DeadlineExceeded), lostRestoreEnvDeadline},
 		{"fsprobe sentinel bare", fmt.Errorf("space probe: %w", fsprobe.ErrProbeTimedOut), lostRestoreEnvNone},
+		// The workDir spawn gate in session/tmux.Start (#5341+#5295): a
+		// wedged worktree mount drives fsprobe.Stat to its bounded
+		// non-answer, which Start wraps as
+		//   ErrSessionNotStarted: ErrSpawnDirMissing: session "x" cannot start in /wt: <fsprobe non-answer>.
+		// The inner non-answer carries ErrProbeTimedOut + DeadlineExceeded
+		// through the %w verbs, so the classifier must read the bounded
+		// environmental class — routing the session to capped environmental
+		// backoff instead of wedging the daemon's create handler forever.
+		{"start worktree gate wrapping bounded non-answer", fmt.Errorf(
+			"%w: %w: session %q cannot start in %s: %w",
+			sessiontmux.ErrSessionNotStarted, sessiontmux.ErrSpawnDirMissing, "name", "/wt",
+			fsprobeWedgedStatNonAnswer("/wt")), lostRestoreEnvDeadline},
+		// restoreWithResult's respawn-branch gate wraps the same non-answer as
+		//   ErrSpawnDirMissing: tmux session "x" missing on Restore and its worktree /wt is unavailable: <fsprobe non-answer>.
+		// The restore poll runs on the daemon's startup restore lane holding
+		// the manager mutex and the per-session op-lock, so the bounded
+		// classification is what keeps one wedged mount from blocking every
+		// RPC that needs those locks.
+		{"restore worktree gate wrapping bounded non-answer", fmt.Errorf(
+			"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
+			sessiontmux.ErrSpawnDirMissing, "name", "/wt",
+			fsprobeWedgedStatNonAnswer("/wt")), lostRestoreEnvDeadline},
+		// The existing #5341 missing-worktree semantics must NOT pick up
+		// environmental classification: a genuinely-missing path (ENOENT) is
+		// a definitive session verdict, not a wait on the environment. The
+		// bounded seam passes real errnos through unchanged, so ENOENT still
+		// reaches the gate as ENOENT — the no-regression half of the fix.
+		{"start worktree gate wrapping ENOENT", fmt.Errorf(
+			"%w: %w: session %q cannot start in %s: %w",
+			sessiontmux.ErrSessionNotStarted, sessiontmux.ErrSpawnDirMissing, "name", "/wt",
+			syscall.ENOENT), lostRestoreEnvNone},
+		{"restore worktree gate wrapping ENOENT", fmt.Errorf(
+			"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
+			sessiontmux.ErrSpawnDirMissing, "name", "/wt",
+			syscall.ENOENT), lostRestoreEnvNone},
 		// Start's PRE-spawn has-session gate: a wedged shared tmux server
 		// that cannot answer the probe reports ErrTmuxServerNoAnswer +
 		// deadline — the same bounded environmental class af's other
@@ -141,6 +176,17 @@ func TestLostRestoreEnvironmentalErr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fsprobeWedgedStatNonAnswer reproduces the exact error shape fsprobe.Stat
+// returns when its bounded flight misses its deadline (see
+// internal/fsprobe/fsprobe.go's waitForFlight): the ErrProbeTimedOut +
+// context.DeadlineExceeded pair the lost-restore environmental classifier
+// requires. Built from the same sentinels (not a string) so errors.Is stays
+// honest the way the production probe is.
+func fsprobeWedgedStatNonAnswer(dir string) error {
+	return fmt.Errorf("stat probe of %s did not answer within %s — the filesystem did not answer the stat: %w: %w",
+		dir, 2*time.Second, fsprobe.ErrProbeTimedOut, context.DeadlineExceeded)
 }
 
 // TestLostRestoreEnvironmentalBackoff pins the wait schedule: the same
