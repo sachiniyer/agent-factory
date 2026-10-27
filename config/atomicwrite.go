@@ -485,14 +485,18 @@ func noticeSymlinkWrite(link, target string) {
 
 func resetSymlinkWriteNotices() { symlinkWriteNotices.Clear() }
 
-// refuseDanglingConfigLink reports the both-ends error when path is a symlink
+// RefuseDanglingConfigLink reports the both-ends error when path is a symlink
 // that does not resolve, and nil for anything else — including a path that is
 // simply absent, which is an ordinary first run.
 //
 // The read paths need this separately from the write paths: a dangling link
-// makes os.ReadFile return ENOENT, which is indistinguishable from "no config
-// yet" unless somebody looks with Lstat (#3660 review).
-func refuseDanglingConfigLink(path string) error {
+// makes os.ReadFile return ENOENT, which is indistinguishable from "no file yet"
+// unless somebody looks with Lstat (#3660 review). It guards every read of a
+// file af follows a symlink for — config.toml and config.json here, and the
+// task store tasks.json from package task (#3672) — so a dangling link fails
+// on read the same way resolveWriteTarget fails it on write. Exported for the
+// task store's read paths, which live in another package.
+func RefuseDanglingConfigLink(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return nil

@@ -249,15 +249,18 @@ func (m *home) handleTabDragRelease(msg tea.MouseMsg) (bool, tea.Cmd) {
 		now := m.mouseClock()
 		double := drag.zone == m.lastClickZone && now.Sub(m.lastClickAt) <= doubleClickInterval
 		m.clearDragState()
-		if !double {
-			m.lastClickZone = drag.zone
-			m.lastClickAt = now
-		}
 		// A click is a short drag, so it carries the same staleness — the press
 		// captured the target and this release acts on it. Same identity rule.
 		idx, ok := dragTabIndex(m.store.GetInstanceByTitle(drag.title), drag)
 		if !ok {
+			// Swallowed click (the grabbed tab was concurrently closed) — do not
+			// seed the double-click tracker, or a later click on the same row
+			// could be misread as a double (#1731/#1774 class).
 			return true, nil
+		}
+		if !double {
+			m.lastClickZone = drag.zone
+			m.lastClickAt = now
 		}
 		return true, m.handleTreeTabClick(drag.title, idx, double)
 	}
@@ -697,6 +700,20 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 		if idx, ok := zones.OverlaySearchIdx(id); ok {
 			m.searchOverlay.SetSelectedIndex(idx)
 			return m.handleStateSearch(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+	// The project picker (ctrl+p, #1461) is a list that answered the keyboard
+	// and silently swallowed the mouse — the #1819 class — because, unlike every
+	// sibling picker, it is its own widget and was wired for the keyboard only.
+	// A click on a project row now selects and submits it like j/k + enter,
+	// dropping into add mode when the add row is the target, exactly as
+	// handleListKey does for the same row.
+	case stateSwitchProject:
+		if m.projectPickerOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.projectPickerOverlay.SetSelectedIndex(idx)
+			return m.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
 		}
 	case stateNew:
 		// The naming form's status-bar hints (enter submit / tab change

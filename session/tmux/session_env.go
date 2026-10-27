@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 var sessionEnvExecutable = os.Executable
@@ -53,21 +54,6 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 	t.envPassthrough = normalized
 	t.programMu.Unlock()
 	return nil
-}
-
-// SetAccount selects the credential account this session's agent runs as. An
-// empty name leaves the session on the ambient identity, exactly as before this
-// feature existed.
-func (t *TmuxSession) SetAccount(name string) {
-	t.programMu.Lock()
-	defer t.programMu.Unlock()
-	t.account = name
-	t.accountEnvironmentOnly = false
-	if name == "" {
-		t.accountAgent = ""
-		return
-	}
-	t.accountAgent = sessionenv.AgentForCommand(t.program)
 }
 
 // Account is the credential account this session's next Start launches under,
@@ -198,15 +184,6 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		t.accountAgent,
 		t.accountEnvironmentOnly,
 		append([]string(nil), t.accountLoginEnv...)
-}
-
-// It SNAPSHOTS rather than taking the program as a parameter: the caller used to
-// read program through its own lock and this read the declaration through
-// another, so a rewrite landing between them wrapped an old command with a new
-// declaration (#3083 review).
-func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment("")
-	return wrapped, launchEnv, importNames, err
 }
 
 // workDir is the pane's working directory — the tree the shared grant
@@ -449,21 +426,33 @@ func appendMissingEnvironmentNames(names, required []string) []string {
 // client variables into only the new session. update-environment is temporarily
 // expanded and restored in the same tmux command queue, so values stay in
 // cmd.Env and never enter argv or the server's persistent global environment.
-func (t *TmuxSession) importClientEnvironmentArgs(newSessionArgs, names []string) ([]string, error) {
+//
+// The restore CANNOT rely on the queue alone: tmux abandons a ;-chained queue
+// at the first failed command, so a mid-queue failure would leave the server's
+// option permanently expanded to the credential import list. The second return
+// is the bounded restore Start defers onto every exit path — it re-applies the
+// baseline even when the queue's own trailing restore never ran (#5390).
+//
+// The baseline is the read value minus every name af only ever adds transiently
+// (sessionenv.ImportedCredentialNames). The true pre-expansion value of a
+// server an older build already left expanded is unrecoverable, but af never
+// intends those names to persist, so dropping them heals the stored option on
+// the next launch instead of re-persisting the leak as "previous".
+func (t *TmuxSession) importClientEnvironmentArgs(newSessionArgs, names []string) (args, restore []string, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	previousRaw, err := t.outputTmuxBounded(ctx, "show-options", "-gv", "update-environment")
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {
 		if timedOut {
-			return nil, fmt.Errorf("%w: read existing tmux update-environment option", ErrTmuxTimeout)
+			return nil, nil, fmt.Errorf("%w: read existing tmux update-environment option", ErrTmuxTimeout)
 		}
 		if tmuxServerAbsent(err) {
 			// No server is the ordinary first-session case. A fresh server snapshots
 			// the already-filtered client environment, so no import override is needed.
-			return newSessionArgs, nil
+			return newSessionArgs, nil, nil
 		}
-		return nil, fmt.Errorf("read existing tmux update-environment option: %w", err)
+		return nil, nil, fmt.Errorf("read existing tmux update-environment option: %w", err)
 	}
 
 	previous := strings.Fields(string(previousRaw))
@@ -480,10 +469,30 @@ func (t *TmuxSession) importClientEnvironmentArgs(newSessionArgs, names []string
 	}
 	sort.Strings(combined)
 
-	args := []string{"set-option", "-g", "update-environment", strings.Join(combined, " "), ";"}
+	// The option fields are bare names, not NAME=VALUE entries, so this filters
+	// by whole-field membership rather than reusing removeEnvironmentNames.
+	denied := make(map[string]struct{}, len(previous))
+	for _, name := range sessionenv.ImportedCredentialNames() {
+		denied[name] = struct{}{}
+	}
+	var baseline []string
+	for _, name := range previous {
+		if _, drop := denied[name]; !drop {
+			baseline = append(baseline, name)
+		}
+	}
+	if !slices.Equal(baseline, previous) {
+		log.WarningLog.Printf(
+			"tmux update-environment held credential import name(s) an interrupted earlier launch left behind; " +
+				"restoring it without them rather than keeping them server-wide")
+	}
+
+	restore = []string{"set-option", "-g", "update-environment", strings.Join(baseline, " ")}
+	args = []string{"set-option", "-g", "update-environment", strings.Join(combined, " "), ";"}
 	args = append(args, newSessionArgs...)
-	args = append(args, ";", "set-option", "-g", "update-environment", strings.Join(previous, " "))
-	return args, nil
+	args = append(args, ";")
+	args = append(args, restore...)
+	return args, restore, nil
 }
 
 func tmuxServerAbsent(err error) bool {

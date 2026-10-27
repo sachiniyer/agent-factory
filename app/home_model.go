@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -507,20 +506,14 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	ui.ApplyAppearance(appConfig.Appearance)
 	applyTheme()
 
-	// Apply configured detach key. The loader (sanitizeDetachKeys) already
-	// warns-and-defaults a bad hand-edited value, so this parse normally
-	// succeeds; if a value ever reaches here unparseable, fall back to the
-	// default rather than crashing the TUI on a config typo (#2556).
-	if appConfig.DetachKeys != "" {
-		detachKeys := appConfig.DetachKeys
-		b, err := config.ParseDetachKey(detachKeys)
-		if err != nil {
-			log.WarningLog.Printf("invalid detach_keys %q (%v); using default", detachKeys, err)
-			detachKeys = config.DefaultDetachKeys()
-			b, _ = config.ParseDetachKey(detachKeys)
-		}
-		tmux.SetDetachKey(b, detachKeys)
-	}
+	// Apply configured detach key. config.ApplyConfiguredDetachKey is the shared
+	// wiring site (also called by `af sessions attach`), so the matcher in
+	// apiclient reads the configured key on every fresh process. The loader
+	// (sanitizeDetachKeys) already warns-and-defaults a bad hand-edited
+	// value, so the parse inside it normally succeeds; if a value ever
+	// reaches it unparseable, it falls back to the default rather than
+	// crashing the TUI on a config typo (#2556).
+	config.ApplyConfiguredDetachKey(appConfig.DetachKeys)
 
 	// Load application state (seen-help-screens flags; #960 PR 6 the TUI no
 	// longer reads instances.json — the daemon owns it and answers Snapshot).

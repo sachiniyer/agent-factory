@@ -233,3 +233,37 @@ func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 	require.Empty(t, proof.TrustedExecutable,
 		"an exact executable path is part of the old launch's proof and must not survive replacement")
 }
+
+// GeneratedArgs surfaces the af-authored declaration validateAccountSwapPlan
+// seeds a swap proof from when the resolved base came from the pane's frozen
+// program (#5433): it must return the slice SetLaunchProgram recorded, stay
+// empty when no declaration was recorded, and grow with af's own program
+// rewrites the way launchSnapshot's proof does — and never alias the field
+// so a caller mutating its result cannot race concurrent rewrites.
+func TestGeneratedArgs_ReportsTheRecordedDeclaration(t *testing.T) {
+	session := &TmuxSession{}
+	require.Nil(t, session.GeneratedArgs(),
+		"a session that never recorded a launch declares no af-authored words")
+
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	session.SetLaunchProgram("codex -c check_for_update_on_startup=false", sessionenv.AccountLaunchProof{
+		GeneratedArgs: declared,
+	})
+	require.Equal(t, declared, session.GeneratedArgs(),
+		"the accessor returns the words SetLaunchProgram recorded")
+
+	// af's own rewrites keep the declaration growing alongside the command,
+	// the same invariant launchSnapshot's proof preserves.
+	session.rewriteProgramCmdByAf(resumeProgram)
+	require.Equal(t,
+		[]string{"-c", "check_for_update_on_startup=false", "resume", "--last"},
+		session.GeneratedArgs(),
+		"the accessor mirrors the declaration rewriteProgramCmdByAf keeps")
+
+	// Must snapshot, not alias: mutating the returned slice must not affect a
+	// concurrent read of the field.
+	snap := session.GeneratedArgs()
+	snap[0] = "MUTATED"
+	require.Equal(t, "-c", session.GeneratedArgs()[0],
+		"the accessor returns a copy so a caller cannot corrupt the field it serializes under programMu")
+}

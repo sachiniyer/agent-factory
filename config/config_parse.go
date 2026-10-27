@@ -335,10 +335,30 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	if err != nil {
 		return nil, err
 	}
+	// A shift+<rune> override Bubble Tea can never emit (Key has no Shift
+	// field, so Shift+A is emitted as "A", never "shift+a") was, before this
+	// change, a silently dead binding. Apply the "warn now, reject later"
+	// policy (#4599): warn for each one on load and drop it, so a config that
+	// already contains one upgrades without refusing to start over a binding
+	// that was already inert — including in the daemon's config reads
+	// (control_server.go, taskrun.go), which go through this same LoadConfig.
+	// The hard error for an existing dead binding stays a separate, later
+	// change. keys.ValidateOverrides below still hard-errors every other
+	// defect, and `af config set keys` (which calls keys.ValidateOverrides
+	// directly) still rejects writing a NEW dead binding.
+	overrides = discardDeadShiftRuneOverrides(config.Keys, overrides, prettyConfigPath)
 	if err := keys.ValidateOverrides(overrides); err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
 	}
 	config.keyOverrides = overrides
+
+	// The missing-claude advice is a property of the MERGED config, not the
+	// probe: DefaultConfig ran it before this file's program_overrides.claude
+	// was decoded, so gating there would tell an operator who already set the
+	// override to set it again (#5588). It runs last so a config that fails
+	// validation — and so never becomes effective — earns no advice. The
+	// no-file load paths make the same call on their in-memory defaults.
+	warnMissingClaudeOverride(config.ProgramOverrides)
 
 	return config, nil
 }

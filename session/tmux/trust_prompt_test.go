@@ -31,9 +31,33 @@ func TestClaudeTrustPromptPresent(t *testing.T) {
 	rewordedMention := `The onboarding docs ask: "Is this a project you created or one you trust?"
 Here is a summary of what I changed in the repo...`
 
-	// Old folder-trust wording (kept for older Claude Code builds).
+	// Old folder-trust wording (kept for older Claude Code builds). The picker
+	// row "❯ Yes  No" is the LAST non-blank line, so a live dialog is accepted.
 	oldDialog := `Do you trust the files in this folder?
 ❯ Yes  No`
+
+	// The old wording quoted above the agent's composer — the shape every live
+	// pane has. The picker row is NOT last, so a quoted phrase must be refused
+	// (start.go:421-422 — "a prose mention of one phrase must never inject
+	// Enter into a working agent").
+	oldDialogQuotedAboveComposer := "I remember when Claude asked: \"Do you trust the files in this folder?\"\n" +
+		"That prompt is gone now.\n" +
+		"╭────────────────────────────────────╮\n" +
+		"│ > Type your message here            │\n" +
+		"╰────────────────────────────────────╯\n" +
+		"? for shortcuts\n"
+
+	// The old wording in agent prose with no picker chrome at all.
+	oldDialogProse := "The bug report quotes the dialog: \"Do you trust the files in this folder?\"\n" +
+		"That is no longer a string af should treat as a prompt.\n" +
+		"? for shortcuts\n"
+
+	// The old wording above the picker row with trailing content painted below
+	// it. The picker row is NOT last, so the predicate must refuse.
+	oldDialogPickerNotLast := "Do you trust the files in this folder?\n" +
+		"❯ Yes  No\n" +
+		"That is the end of the dialog af used to tap Enter on.\n" +
+		"? for shortcuts\n"
 
 	// Ordinary Claude input box — no gate.
 	normalUI := `╭─────────────────────────────────────────╮
@@ -65,6 +89,9 @@ Here is a summary of what I changed in the repo...`
 		{"reworded full dialog", rewordedDialog, true},
 		{"reworded phrase without dialog marker", rewordedMention, false},
 		{"old folder-trust wording", oldDialog, true},
+		{"old folder-trust wording quoted above composer", oldDialogQuotedAboveComposer, false},
+		{"old folder-trust wording in agent prose", oldDialogProse, false},
+		{"old folder-trust wording picker not last", oldDialogPickerNotLast, false},
 		{"MCP modal footer last", mcpModal, true},
 		{"MCP modal lowercase footer last", strings.ToLower(mcpModal), true},
 		{"MCP phrase without footer", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes", false},

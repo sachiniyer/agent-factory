@@ -250,6 +250,13 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
 		insertAt := agentIdx + 1
+		// Global -c/--config options sit before the subcommand in codex's
+		// grammar, so the splice must land after them — the same position
+		// skipCodexConfigOptions gives resumeProgram's --last splice. Splicing
+		// ahead of them produces `codex resume <id> -c k=v`, which reorders
+		// the option after the subcommand; codex rejects that placement, so
+		// the carried swap would launch a replacement with invalid arguments.
+		insertAt = skipCodexConfigOptions(tokens, insertAt)
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
 			insertAt++
 		}
@@ -322,6 +329,110 @@ func ConversationSelectorArgs(program string) []string {
 		}
 	}
 	return nil
+}
+
+// CodexResumeSelection returns the arguments of command's resume subcommand —
+// every token from "resume" onward — so callers see the target AND its flags:
+// an explicit id, --last, or nothing (Codex's own picker), plus modifiers like
+// --all, which drops the working-directory scope --last normally applies. It
+// reports resume=false when command does not resume a Codex conversation.
+// ConversationSelectorArgs truncates to two words for refusal text; this form
+// preserves the tail because receipt routing must honor --all (#5471 review).
+func CodexResumeSelection(command string) (selector []string, resume bool) {
+	tokens, _ := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
+		return nil, false
+	}
+	idx := codexSubcommandIndex(tokens[agentIdx+1:])
+	if idx < 0 {
+		return nil, false
+	}
+	idx += agentIdx + 1
+	if idx < len(tokens) && (tokens[idx] == "exec" || tokens[idx] == "e") {
+		execIdx := codexExecSubcommandIndex(tokens[idx+1:])
+		if execIdx < 0 {
+			return nil, false
+		}
+		idx += execIdx + 1
+	}
+	if idx >= len(tokens) || tokens[idx] != "resume" {
+		return nil, false
+	}
+	return append([]string(nil), tokens[idx:]...), true
+}
+
+// CodexResumeTarget models the target of a CodexResumeSelection: the session
+// id positional, and the --last / --all modifiers that select the newest
+// rollout when no id is given. Under --last Codex's parser reinterprets the
+// positional as the initial prompt (cli/src/main.rs) — never a session id —
+// so it is consumed but never returned as id; a uuid-shaped prompt must not
+// pin a rollout (#5486 review). Flags may sit in any order, and resume
+// accepts the shared global options, so value-taking operands are consumed
+// before the first bare token is read as the id. It reports ok=false when
+// the selector carries an option af cannot model — including resume's own
+// --include-non-interactive — so the caller treats the target as unprovable
+// instead of guessing (#5471 review).
+func CodexResumeTarget(selector []string) (id string, last, all, ok bool) {
+	args := selector
+	if len(args) > 0 && args[0] == "resume" {
+		args = args[1:]
+	}
+	var positional string
+	for idx := 0; idx < len(args); idx++ {
+		tok := args[idx]
+		switch {
+		case tok == "--last":
+			last = true
+		case tok == "--all":
+			all = true
+		case codexGlobalOptionHasAttachedValue(tok):
+		case codexGlobalOptionTakesValue(tok):
+			idx++
+		case strings.HasPrefix(tok, "-"):
+			return "", false, false, false
+		case positional == "":
+			positional = tok
+		}
+	}
+	if last {
+		// `codex resume --last <X>` takes X as the initial prompt; the id
+		// shape is unreachable here.
+		positional = ""
+	}
+	return positional, last, all, true
+}
+
+// CodexResumeRunsRemote reports whether command routes Codex through a remote
+// app-server endpoint: `--remote <endpoint>` is a global option that converts
+// the launch into a remote client (cli/src/main.rs), so its resume writes its
+// rollout remotely — the local CODEX_HOME can never carry that receipt and a
+// remote resume must not resolve against the local store (#5486 review).
+// Global options are position-independent, so the scan walks every token
+// after the codex word — both the pre-subcommand region and the resume
+// selector — while consuming option values so `--remote` as a -c operand can
+// never be mistaken for the flag.
+func CodexResumeRunsRemote(command string) bool {
+	tokens, _ := splitShellTokens(command)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramCodex {
+		return false
+	}
+	for idx := agentIdx + 1; idx < len(tokens); idx++ {
+		tok := tokens[idx]
+		switch {
+		case tok == "--":
+			// The option terminator ends flag parsing: everything after it is
+			// positional, so `-- --remote` is a prompt word, never the flag
+			// (#5486 review).
+			return false
+		case tok == "--remote" || strings.HasPrefix(tok, "--remote="):
+			return true
+		case codexGlobalOptionTakesValue(tok):
+			idx++
+		}
+	}
+	return false
 }
 
 // codexSubcommandIndex returns the first Codex subcommand or prompt token
@@ -480,6 +591,40 @@ func DetectAgentFromCommand(command string) string {
 	return agent
 }
 
+// agentTokenIsEnvOptionCommandArg reports whether the agent token at agentIdx
+// is an argument to a GNU env command whose option parsing was terminated by a
+// bare `-` or `--` — equivalently, the command env execs is itself
+// option-looking. In that shape GNU env runs the option-looking token and the
+// agent-shaped word after it is only its argument, so the detected agent token
+// is not the running agent. The walk mirrors findAgentToken's: it follows
+// nested env wrappers, and only an env command that strictly precedes
+// agentIdx (so the agent is past it, not the command itself) and is
+// option-looking qualifies. Non-env wrapper prefixes such as `ionice` are not
+// env wrappers, so they are unaffected and still scan per #742.
+func agentTokenIsEnvOptionCommandArg(tokens []string, agentIdx int) bool {
+	for i := 0; i < agentIdx && i < len(tokens); {
+		tok := tokens[i]
+		if _, _, assignment := shellAssignment(tok); assignment {
+			i++
+			continue
+		}
+		if strings.EqualFold(baseCommand(tok), "env") {
+			invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+			if err != nil || invocation.CommandIndex < 0 {
+				return false
+			}
+			commandIdx := i + 1 + invocation.CommandIndex
+			if commandIdx < agentIdx && strings.HasPrefix(tokens[commandIdx], "-") {
+				return true
+			}
+			i = commandIdx
+			continue
+		}
+		i++
+	}
+	return false
+}
+
 // DetectAgentExecutable returns the canonical agent name that the executable
 // token of command will actually run, or "" when the executable is not a
 // recognized agent. Unlike DetectAgentFromCommand it stops at the first
@@ -529,6 +674,19 @@ func findAgentToken(tokens []string) (int, string) {
 // findAgentTokenStrict is findAgentToken with the parser failure preserved for
 // callers that must explain why a command cannot be modeled. Detection-only
 // callers deliberately collapse that failure to "no agent" and fail closed.
+//
+// One shape is excluded from the scan: a GNU env wrapper whose option parsing
+// was terminated by a bare `-` or `--` names an option-looking token as its
+// command (`env - -u claude`, `env -- -C /x claude`). GNU env then execs that
+// option-looking token and passes everything after it only as its argument,
+// so a later agent-shaped word is not the running agent. Bare `-` ending
+// option parsing is the #5036 fix; without this guard every consumer of the
+// shared scan — resumeProgram's --continue injection, the conversation
+// selectors, and CommandEnvironmentFromCommand's receipt-routing Agent —
+// would attach to a non-agent command, the regression Codex flagged on #5052.
+// The guard mirrors the scan's walk so an env command that names a supported
+// agent (`env - claude`) still counts, and only an agent strictly past an
+// option-looking env command is rejected.
 func findAgentTokenStrict(tokens []string) (int, string, error) {
 	for i := 0; i < len(tokens); {
 		tok := tokens[i]
@@ -550,6 +708,9 @@ func findAgentTokenStrict(tokens []string) (int, string, error) {
 		base := strings.ToLower(filepath.Base(tok))
 		for _, supported := range SupportedPrograms {
 			if base == supported {
+				if agentTokenIsEnvOptionCommandArg(tokens, i) {
+					break
+				}
 				return i, supported, nil
 			}
 		}

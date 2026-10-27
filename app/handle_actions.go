@@ -267,12 +267,25 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 			// daemon liveness so the user can retry the kill.
 			_ = inst.Transition(session.RevertKill())
 		}
-		// A wedged LOCAL daemon has an in-interface recovery: offer to restart it
-		// (#2479) instead of surfacing a shell command. A remote daemon is on
-		// another machine, so the local restart cannot help — fall through to the
-		// plain message there.
-		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
-			return m, m.offerDaemonRestart(msg.target.title)
+		// A wedged daemon took the kill request and went quiet
+		// (errDaemonUnresponsive), so the teardown may have landed with only the
+		// reply lost — the outcome is unknown. A LOCAL daemon has an in-interface
+		// recovery: offer to restart it (#2479) instead of surfacing a shell
+		// command. A REMOTE daemon is on another machine, so the local restart
+		// cannot help; route it to the "could not be confirmed" message below
+		// rather than the "session is retained" recovery, which would invite a
+		// second kill of a session that may already be gone. This matches on
+		// errDaemonUnresponsive directly because killSessionThroughDaemon rewraps
+		// the timeout with a single %w, dropping context.DeadlineExceeded from
+		// the chain that mutationOutcomeUnknown (below) would otherwise key on —
+		// so a remote timeout cannot be recognized as uncertain there and must
+		// be routed here (#4824).
+		if errors.Is(msg.err, errDaemonUnresponsive) {
+			if !isRemoteTarget() {
+				return m, m.offerDaemonRestart(msg.target.title)
+			}
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		// The daemon may have torn the session down with only the reply lost
 		// (#4824). The fence still reverts above — holding it would strand the
@@ -879,6 +892,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
+	case session.TabKindDocs:
+		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}
