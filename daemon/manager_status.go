@@ -690,6 +690,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	if !instance.Started() {
+		// An archived row is unstarted: an outage flag raised before the archive
+		// landed must not outlive it (the LiveArchived arm below is unreachable).
+		instance.ClearUnreachable()
 		return
 	}
 	if instance.GetInFlightOp() != session.OpNone {
