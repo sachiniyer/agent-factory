@@ -81,7 +81,7 @@ const afUsageIntroPlugin = `Agent Factory (af) is a terminal multiplexer that ru
 const AfInstallCommand = `curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh`
 
 // afUsageBody is every part of the reference that is true for BOTH audiences.
-const afUsageBody = `Commands print JSON on stdout; run "af <command> --help" for full flag lists. Every session and task command is PROJECT-SCOPED: it acts on the current directory's project unless --repo <path> names another one, so "af tasks list" shows this project's tasks and "af tasks add" binds the new task here. Acting on another project always takes an explicit --repo; "af tasks list --all" is the one opt-in that spans every project. Session titles are unique WITHIN a project, not across projects, so the same name may exist in several repos: a <title> resolves inside --repo when given, else the current directory's repo. Task ids are globally unique but still project-scoped — "af tasks get/show/update/trigger/remove/restart <id-or-name>" accepts a task's id OR its exact name: an exact id match always wins (a name that collides with another task's id still resolves to the id), and otherwise the name must belong to exactly one task in scope — a name several in-scope tasks share is refused with their ids, and a task owned by another project is refused naming the --repo that would reach it. A task whose project changed underneath a command is refused rather than acted on; nothing is changed, so re-run it. With no repo context (outside a git repository) a title or task id-or-name held by just one project still resolves, while one held by several reports an error naming the matches — sessions list the projects to pick with --repo, tasks the ids to pass instead. Remote hook sessions are the one exception: their names are shared across projects because the hook scripts receive them verbatim.
+const afUsageBody = `Commands print JSON on stdout; run "af <command> --help" for full flag lists. Every session and task command is PROJECT-SCOPED: it acts on the current directory's project unless --repo <path> names another one, so "af tasks list" shows this project's tasks and "af tasks add" binds the new task here. Acting on another project always takes an explicit --repo; "af tasks list --all" and "af sessions prune --all" are the opt-ins that span every project. Session titles are unique WITHIN a project, not across projects, so the same name may exist in several repos: a <title> resolves inside --repo when given, else the current directory's repo. Task ids are globally unique but still project-scoped — "af tasks get/show/update/trigger/remove/restart <id-or-name>" accepts a task's id OR its exact name: an exact id match always wins (a name that collides with another task's id still resolves to the id), and otherwise the name must belong to exactly one task in scope — a name several in-scope tasks share is refused with their ids, and a task owned by another project is refused naming the --repo that would reach it. A task whose project changed underneath a command is refused rather than acted on; nothing is changed, so re-run it. With no repo context (outside a git repository) a title or task id-or-name held by just one project still resolves, while one held by several reports an error naming the matches — sessions list the projects to pick with --repo, tasks the ids to pass instead. Remote hook sessions are the one exception: their names are shared across projects because the hook scripts receive them verbatim.
 
 Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
@@ -99,6 +99,7 @@ Sessions (one agent per isolated worktree):
   af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions retry-limit <title> --delivered           Mark an inspected handoff mission delivered (no resend); only after confirming it landed
   af sessions restore <title>                          Restore an archived, lost, or dead session
+  af sessions prune --older-than <dur> [--all]            Dry-run: list reclaimable archived-session worktrees (af writes nothing)
 
 Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 
@@ -232,7 +233,13 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		if _, err := ensureCodexSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up codex af skill, af guidance unavailable to codex: %v", err)
 		}
-		return resolved
+		// Keep codex's startup update picker from ever rendering for a launch
+		// af owns: af answering it is exactly the interaction that let a
+		// respawn die seconds after restore (#5238). Shared with the
+		// config-agent spawn through tmux.EnsureCodexUpdateCheckDisabled, one
+		// place so the two launch paths cannot drift — the same contract
+		// devin's trust flag holds on the line below.
+		return tmux.EnsureCodexUpdateCheckDisabled(resolved)
 	case tmux.ProgramGemini:
 		if _, err := ensureGeminiSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up gemini af skill, af guidance unavailable to gemini: %v", err)

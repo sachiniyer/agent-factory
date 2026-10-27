@@ -49,10 +49,41 @@ export function createLatestRequestGate(): LatestRequestGate {
 }
 
 /** One projection's fenced refetch: `refresh()` issues a request; `invalidate()`
- *  disowns whatever is already in flight without issuing one. */
+ *  disowns whatever is already in flight without issuing one. The returned promise
+ *  settles when THIS request does — committed, disowned by a newer one, or errored —
+ *  so a caller whose work is not done until the read has landed can await it. It
+ *  never rejects: the failure is reported through onError inside the fence —
+ *  unless `silent` is set, for a background retry whose caller owns the error
+ *  surface: a mid-loop failure must not paint a toast the next attempt is
+ *  about to recover. */
 export interface FencedRefetcher {
-  refresh(): void;
+  refresh(options?: { silent?: boolean }): Promise<void>;
   invalidate(): void;
+}
+
+/** A bounded background retry for a read whose first attempt degraded to a
+ *  fallback. `attempt` reports whether ITS read landed; `alive` gates every
+ *  wait so a disconnect or a newer connect ends the loop before another
+ *  request goes out. Resolves true on a landed read, false once the delay
+ *  list runs out — the list bounds it, so a permanently failing read cannot
+ *  poll forever. The attempt itself is trusted not to reject (the fence's
+ *  refresh() never does; its failures report through onError inside it). */
+export async function retryWithBackoff(
+  attempt: () => Promise<boolean>,
+  alive: () => boolean,
+  delays: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  for (const delay of delays) {
+    await sleep(delay);
+    if (!alive()) {
+      return false;
+    }
+    if (await attempt()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export interface FencedRefetchSpec<T> {
@@ -86,11 +117,11 @@ export interface FencedRefetchSpec<T> {
 export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefetcher {
   const gate = createLatestRequestGate();
   return {
-    refresh(): void {
+    refresh(options?: { silent?: boolean }): Promise<void> {
       const tok = spec.readToken();
       // `=== null` not `!tok`: "" is the authorized tokenless credential (#1696).
       if (tok === null) {
-        return;
+        return Promise.resolve();
       }
       const request = gate.begin();
       // The timeout's own fence: an expired request cannot commit even when it
@@ -112,7 +143,7 @@ export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefe
           own.abort();
         }, spec.timeoutMs);
       }
-      void spec
+      return spec
         .fetch(tok, controller?.signal)
         .then((value) => {
           if (isNewest()) {
@@ -120,7 +151,7 @@ export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefe
           }
         })
         .catch((error: unknown) => {
-          if (isNewest()) {
+          if (isNewest() && !options?.silent) {
             spec.onError?.(error);
           }
         })

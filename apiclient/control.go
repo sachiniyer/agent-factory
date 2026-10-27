@@ -81,6 +81,19 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 	return resp, err
 }
 
+// PruneSessions asks the daemon to enumerate reclaimable archived sessions —
+// strictly a read (#5136). This is the remote-daemon route for
+// `af sessions prune`: when --daemon-url/AF_DAEMON_URL names a remote, the
+// request must cross the wire — the local control socket would report the
+// WRONG host's archives.
+func (c *Client) PruneSessions(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+	var resp daemon.PruneSessionsResponse
+	if err := c.call("PruneSessions", req, &resp); err != nil {
+		return daemon.PruneSessionsResponse{}, err
+	}
+	return resp, nil
+}
+
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
 // (#1146) — the action behind the TUI's `c` key and the web's Retry button.
 // The CLI reaches the same public handler over its gob control transport.
@@ -338,6 +351,19 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	var resp daemon.ListBackendsResponse
 	if err := c.call("ListBackends", req, &resp); err != nil {
 		return daemon.ListBackendsResponse{}, err
+	}
+	return resp, nil
+}
+
+// ListPrograms reports the daemon host's program catalog and the default a
+// program-less create resolves to for repoPath (#4889). For a remote target
+// this is the only honest answer — the remote daemon's default_program is
+// remote state the client's local config files cannot see.
+func (c *Client) ListPrograms(repoPath string) (daemon.ListProgramsResponse, error) {
+	var resp daemon.ListProgramsResponse
+	req := daemon.ListProgramsRequest{RepoPath: repoPath}
+	if err := c.call("ListPrograms", req, &resp); err != nil {
+		return daemon.ListProgramsResponse{}, err
 	}
 	return resp, nil
 }
