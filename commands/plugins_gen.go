@@ -89,6 +89,7 @@ var pluginReleaseDigests = []string{
 	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
 	"338d85ab38d72bffdb161020f6110f118965535f33266c90564cbd5273bbee0e", // 3.25 — Codex preflight capture: run af version to completion and take the first line via parameter expansion, so a real (non-zero) af version failure is reported as broken instead of masked by || true
 	"9f9af14485acb7d9f3c385d2bce7d4d56fb4fd190ddc9b8dcd297c8ae65b89b4", // 3.26 — Codex preflight: bound the af version capture with a 10s timeout so a hanging/flooding wrapper cannot stall SessionStart, and exit 0 on the broken-CLI branch so Codex surfaces the reinstall report instead of discarding it on a non-zero exit
+	"e8e2c27752e1ef7b6bd6580f31de8a9a91a417ed61a7ee3b8e00af10e9c94a70", // 3.27 — Codex SessionStart af probe: child bash for exported-function wrappers, timeout --kill-after (#5648)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -379,10 +380,13 @@ func codexHooks() map[string]any {
 //
 // The capture is wall-clock bounded so a wrapper that hangs or floods output
 // cannot stall session startup for the 600s Codex applies when a hook declares
-// no timeout: af_version_bounded wraps `af version` in `timeout 10s` where
+// no timeout: af_version_bounded wraps `af version` in `timeout -k 2s 10s`
+// (SIGKILL after a 2s grace, so a wrapper that traps TERM still dies) where
 // timeout(1) is available (Linux, macOS-with-coreutils), and falls back to the
 // unbounded capture where it is missing rather than misreport a healthy af as
-// broken. A timeout (exit 124) or any non-zero exit is a failure that routes to
+// broken. The probe runs through a child `bash -c` because timeout(1) can only
+// exec a file: a child bash inherits an exported `af` shell function (`export
+// -f`), so function wrappers and file commands take the same branch. A timeout (exit 124) or any non-zero exit is a failure that routes to
 // the broken branch.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
@@ -404,7 +408,7 @@ func afPreflightHook() string {
 		"# reported as broken, not masked as healthy by a || true.\n" +
 		"af_version_bounded() {\n" +
 		"\tif command -v timeout >/dev/null 2>&1; then\n" +
-		"\t\ttimeout 10s af version 2>/dev/null\n" +
+		"\t\ttimeout -k 2s 10s bash -c 'af version' 2>/dev/null\n" +
 		"\telse\n" +
 		"\t\taf version 2>/dev/null\n" +
 		"\tfi\n" +
