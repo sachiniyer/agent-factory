@@ -7260,6 +7260,24 @@ function actionsDisclosure(label = "Session actions", enabled = () => true, onDi
   });
   return { el: el2, panel, trigger, open, close, dismiss, dispose: close };
 }
+function placeMenu(trigger, panel) {
+  panel.classList.remove("af-menu-up");
+  const anchor = trigger.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = trigger.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "") continue;
+    const clip = node.getBoundingClientRect();
+    top = Math.max(top, clip.top);
+    bottom = Math.min(bottom, clip.bottom);
+  }
+  const box = panel.getBoundingClientRect();
+  const needed = box.height + Math.max(0, box.top - anchor.bottom);
+  const below = bottom - anchor.bottom;
+  const above = anchor.top - top;
+  if (needed > below && above > below) panel.classList.add("af-menu-up");
+}
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
 }) {
@@ -7339,11 +7357,17 @@ function terminalChrome(opts) {
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
   return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
@@ -7764,6 +7788,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7775,6 +7800,10 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (focusedConfigControlKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7889,7 +7918,7 @@ var ConfigPane = class {
     row.append(label);
     row.append(this.renderControl(e));
     const status = this.status;
-    if (status && status.key === e.key) {
+    if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
         row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
       } else {
@@ -7968,6 +7997,134 @@ var ConfigPane = class {
     return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 };
+
+// src/terminal-font.ts
+var WEB_ENTRY = "web";
+var CONFIG_KEY_PHONE = "web.terminal_font_size_phone";
+var CONFIG_KEY_DESKTOP = "web.terminal_font_size_desktop";
+var TERMINAL_FONT_SIZE_MIN = 4;
+var TERMINAL_FONT_SIZE_MAX = 32;
+var TERMINAL_FONT_STEP_PHONE = 0.5;
+var TERMINAL_FONT_STEP_DESKTOP = 1;
+var TERMINAL_FONT_SIZE_PHONE_DEFAULT = 6.5;
+var TERMINAL_FONT_SIZE_DESKTOP_DEFAULT = 13;
+var PHONE_MEDIA_QUERY = "(max-width: 768px)";
+var PERSIST_DEBOUNCE_MS = 400;
+var sizes = {
+  phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT,
+  desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT
+};
+var listeners = /* @__PURE__ */ new Set();
+var persist = null;
+var persistTimers = /* @__PURE__ */ new Map();
+var pendingSaves = /* @__PURE__ */ new Map();
+function terminalFontSizeFor(phone) {
+  return phone ? sizes.phone : sizes.desktop;
+}
+function subscribeTerminalFontSizes(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+function bindTerminalFontPersist(save) {
+  persist = save;
+}
+function terminalFontClassForKey(key) {
+  if (key === CONFIG_KEY_PHONE) return "phone";
+  if (key === CONFIG_KEY_DESKTOP) return "desktop";
+  return null;
+}
+function terminalFontSizesFromConfig(entries) {
+  const next = { phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT, desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT };
+  const entry = entries.find((e) => e.key === WEB_ENTRY);
+  if (entry === void 0) {
+    return next;
+  }
+  let table;
+  try {
+    const parsed = JSON.parse(entry.value);
+    if (typeof parsed !== "object" || parsed === null) {
+      return next;
+    }
+    table = parsed;
+  } catch {
+    return next;
+  }
+  const leaf = (name, fallback) => {
+    const value = table[name];
+    return typeof value === "number" && Number.isFinite(value) && value >= TERMINAL_FONT_SIZE_MIN && value <= TERMINAL_FONT_SIZE_MAX ? value : fallback;
+  };
+  return {
+    phone: leaf("terminal_font_size_phone", next.phone),
+    desktop: leaf("terminal_font_size_desktop", next.desktop)
+  };
+}
+function setTerminalFontSizes(next) {
+  let changed = false;
+  for (const cls of ["phone", "desktop"]) {
+    if (persistTimers.has(cls) || pendingSaves.has(cls) || next[cls] === sizes[cls]) {
+      continue;
+    }
+    sizes[cls] = next[cls];
+    changed = true;
+  }
+  if (changed) {
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+}
+function stepTerminalFontSize(direction, phone = currentDeviceIsPhone()) {
+  const cls = phone ? "phone" : "desktop";
+  const step = phone ? TERMINAL_FONT_STEP_PHONE : TERMINAL_FONT_STEP_DESKTOP;
+  const next = clampTerminalFontSize(sizes[cls] + Math.sign(direction) * step);
+  if (next === sizes[cls]) {
+    return;
+  }
+  sizes[cls] = next;
+  for (const listener of listeners) {
+    listener();
+  }
+  schedulePersist(cls);
+}
+function currentDeviceIsPhone() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(PHONE_MEDIA_QUERY).matches;
+}
+function clampTerminalFontSize(size) {
+  return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size * 100) / 100));
+}
+function schedulePersist(cls) {
+  const prior = persistTimers.get(cls);
+  if (prior !== void 0) {
+    clearTimeout(prior);
+  }
+  persistTimers.set(cls, setTimeout(() => {
+    persistTimers.delete(cls);
+    const save = persist;
+    if (save === null) {
+      return;
+    }
+    pendingSaves.set(cls, (pendingSaves.get(cls) ?? 0) + 1);
+    const settle = () => {
+      const left = (pendingSaves.get(cls) ?? 1) - 1;
+      if (left > 0) {
+        pendingSaves.set(cls, left);
+      } else {
+        pendingSaves.delete(cls);
+      }
+    };
+    try {
+      void Promise.resolve(save(configKeyFor(cls), formatTerminalFontSize(sizes[cls]))).then(settle, settle);
+    } catch {
+      settle();
+    }
+  }, PERSIST_DEBOUNCE_MS));
+}
+function configKeyFor(cls) {
+  return cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP;
+}
+function formatTerminalFontSize(size) {
+  return String(size);
+}
 
 // src/account_scope.ts
 var AMBIENT_ACCOUNT = "";
@@ -8526,7 +8683,11 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192", "A\u2212", "A+"]];
+var FONT_ZOOM_LABELS = {
+  "A\u2212": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" }
+};
 var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
@@ -8684,12 +8845,13 @@ function keybarSheetClickIsOpeningGesture(event, opening) {
   return opening !== void 0;
 }
 var TerminalKeybar = class {
-  constructor(host, input, paste, refit, applicationCursor) {
+  constructor(host, input, paste, refit, applicationCursor, fontSizeStep) {
     this.host = host;
     this.input = input;
     this.paste = paste;
     this.refit = refit;
     this.applicationCursor = applicationCursor;
+    this.fontSizeStep = fontSizeStep;
     this.originalMaxHeight = host.style.maxHeight;
     this.textarea = host.querySelector(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
@@ -8703,10 +8865,12 @@ var TerminalKeybar = class {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = key;
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
         const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          else if (zoom) this.fontSizeStep(zoom.delta);
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else if (key === "Paste") void this.requestPaste(
             event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : void 0
@@ -9608,7 +9772,12 @@ function holdClockMs() {
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
+var VISIBLE_FIT_TIMER_MS = 250;
+var VISIBLE_FIT_MAX_ATTEMPTS = 60;
 var TOUCH_PRESS_MAX_ROWS = 32;
+function terminalFontSize(phone) {
+  return terminalFontSizeFor(phone);
+}
 var AttachTerminal = class {
   constructor(container, token2, endpoint, cb) {
     this.container = container;
@@ -9620,7 +9789,9 @@ var AttachTerminal = class {
       allowProposedApi: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      // Half the desktop pitch at phone width (#5492); the "change" listener
+      // below re-picks it if the viewport crosses the breakpoint.
+      fontSize: terminalFontSize(this.phone.matches),
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
       theme: terminalSurface(container, currentXtermTheme()),
@@ -9645,8 +9816,12 @@ var AttachTerminal = class {
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
       () => this.scheduleVisibleFit(),
-      () => this.term.modes.applicationCursorKeysMode
+      () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize
     );
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -9700,10 +9875,14 @@ var AttachTerminal = class {
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
       return accepted;
     });
-    this.ro = new ResizeObserver(() => this.scheduleFit());
+    this.ro = new ResizeObserver(() => {
+      this.parked = false;
+      this.scheduleFit();
+    });
     this.ro.observe(container);
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.parked = false;
         this.scheduleVisibleFit();
       }
     });
@@ -9711,6 +9890,7 @@ var AttachTerminal = class {
     window.addEventListener("focus", this.onWindowFocus);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.addEventListener("change", this.onPhoneChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
@@ -9738,6 +9918,10 @@ var AttachTerminal = class {
   midLineTimer = null;
   ro;
   io;
+  // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
+  // appbarControls() hold the same query. It picks the halved default pitch
+  // (#5492) at construction, and its "change" listener re-fits across it.
+  phone = window.matchMedia("(max-width: 768px)");
   ws = null;
   stopped = false;
   everOpened = false;
@@ -9746,6 +9930,26 @@ var AttachTerminal = class {
   reconnectTimer = null;
   resizeTimer = null;
   visibleFitFrame = null;
+  visibleFitTimer = null;
+  visibleFitAttempts = 0;
+  /** Whether this page is currently unpaintable, detected the only way the
+   *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
+   *  250ms timer had to deliver instead. An occluded page keeps
+   *  visibilityState='visible' while its frames starve — document.hidden is
+   *  not a sufficient probe — so the starved frame IS the parked signal. A
+   *  parked page must never write the shared PTY grid: with no user present its
+   *  resizes cannot be activations, and a parked client stealing the grid is
+   *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
+   *  any genuinely page-coupled signal — a delivered frame, an observer
+   *  callback, window focus, or a TRUSTED input event.
+   *
+   *  Null until the first probe delivery classifies the page — UNKNOWN, not
+   *  "not parked": a socket that opens inside the probe window (the onopen
+   *  force-resize included) must not let a write through on the default, or a
+   *  terminal constructed on an occluded page would stamp its grid onto the
+   *  shared PTY before its frames had a chance to starve. Every signal that
+   *  writes a boolean here IS itself a classification. */
+  parked = null;
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
@@ -9822,26 +10026,42 @@ var AttachTerminal = class {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   pendingViewport = null;
   exited = false;
+  unsubscribeFontSizes = null;
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  onWindowFocus = () => this.scheduleVisibleFit();
+  onWindowFocus = () => {
+    this.parked = false;
+    this.scheduleVisibleFit();
+  };
   onWindowBlur = () => {
     this.mouseOverrideKeyHeld = false;
     this.endHandedOffDrag();
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
+      this.parked = false;
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
     }
   };
+  // A crossing of the phone boundary re-picks the default pitch (#5492) —
+  // rotation past 768px, or a desktop window dragged narrow and back.
+  onPhoneChange = () => {
+    this.parked = false;
+    this.applyDeviceFontSize();
+  };
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  onPointerEnter = () => this.fitVisibleHost();
+  onPointerEnter = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
+    this.fitVisibleHost();
+  };
   // A scroll can target an already-focused window after another client resized the
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
@@ -9850,6 +10070,7 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
+    this.parked = false;
     this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
@@ -9919,6 +10140,9 @@ var AttachTerminal = class {
     event.preventDefault();
   };
   onTouchMove = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.handleUserScroll("touch");
     const touch = event.touches[0];
     const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
@@ -9963,6 +10187,9 @@ var AttachTerminal = class {
     this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
+      if (event.isTrusted) {
+        this.parked = false;
+      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -10004,7 +10231,10 @@ var AttachTerminal = class {
     if (this.pendingViewport === null) {
       return;
     }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    const plan = terminalUserScrollPlan(
+      source,
+      this.visibleFitFrame !== null || this.visibleFitTimer !== null
+    );
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
       this.disposeTouchPressMarker();
@@ -10040,6 +10270,7 @@ var AttachTerminal = class {
     window.removeEventListener("focus", this.onWindowFocus);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.removeEventListener("change", this.onPhoneChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
@@ -10052,6 +10283,8 @@ var AttachTerminal = class {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -10360,7 +10593,7 @@ var AttachTerminal = class {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   rowHeight() {
     const renderedRow = this.container.querySelector(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
   handleHistoryWheel(event) {
     if (!this.applicationOwnsWheel() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
@@ -10525,22 +10758,119 @@ var AttachTerminal = class {
     this.ws = null;
   }
   // --- resize ----------------------------------------------------------------
-  /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
-  scheduleVisibleFit() {
-    if (this.stopped || this.visibleFitFrame !== null) {
+  /** Re-derives the default pitch from the phone breakpoint (#5492). A real
+   *  crossing re-assigns xterm's fontSize — its option setter re-measures cell
+   *  metrics synchronously — then refits on the next painted frame, where the
+   *  changed grid goes out as an ordinary OpResize. The size guard keeps a
+   *  repeated call from scheduling a no-op fit. */
+  applyDeviceFontSize() {
+    const size = terminalFontSize(this.phone.matches);
+    if (this.term.options.fontSize === size) {
       return;
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
+    this.term.options.fontSize = size;
+    this.scheduleVisibleFit();
+  }
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one scheduled attempt; unlike the
+   *  resize debounce, this is not a time guess and never repeats on its own.
+   *
+   *  The attempt is delivered two ways: the frame, and a timer armed beside it.
+   *  A page the compositor has parked — exactly what a stranded multi-client pane
+   *  looks like, with a peer's tab holding the screen — starves rAF outright, and
+   *  a frame that never fires would leave visibleFitFrame set forever, coalescing
+   *  every later activation into a no-op. The timer still fires on that page, so
+   *  the reclaim cannot be lost with the frame. */
+  scheduleVisibleFit() {
+    if (this.stopped) {
+      return;
+    }
+    this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    this.queueVisibleFit();
+  }
+  /** Arms the delivery pair. The frame side is RE-armed, not trusted: an armed
+   *  handle is only a promise — the callback can already have been eaten by a
+   *  parked epoch, leaving a latched handle that would suppress every later
+   *  trigger — the strand. cancelAnimationFrame on a dead handle is a no-op,
+   *  and re-requesting a live one just moves the fit to the next frame. The
+   *  timer side coalesces: one live timer is enough to verify the frame. */
+  queueVisibleFit() {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    if (this.visibleFitTimer === null) {
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    }
+  }
+  /** Arms ONLY the frame probe — the wake detector for a resize this page is
+   *  not allowed to write yet. A parked or hidden page defers rAF until it
+   *  paints again, so a queued frame costs nothing while withheld and its
+   *  delivery IS the reactivation. The timer twin is never armed here: on a
+   *  withheld write its delivery can change nothing — it would fit, suppress,
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
+  armWakeProbe() {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+  }
+  /** Whichever of the twin triggers delivers first runs the fit and drops the
+   *  other. The channel the delivery arrived on is the parked detector: the
+   *  timer only wins when the frame armed beside it starved, so a timer
+   *  delivery marks the page parked and this fit writes nothing. A fit that
+   *  still cannot measure the host retries within the attempt budget — a
+   *  transient bail used to be FINAL, which is how one bad instant could strand
+   *  the pane on a peer's grid permanently. */
+  onVisibleFit(deliveredByFrame) {
+    this.parked = !deliveredByFrame;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
+    }
+    if (this.stopped) {
+      return;
+    }
+    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
+      return;
+    }
+    this.queueVisibleFit();
   }
   /** Drops activation work queued before a direct user scroll. Leaving that frame
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   cancelVisibleFitFrame() {
+    this.visibleFitAttempts = 0;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
     if (this.visibleFitFrame === null) {
       return;
     }
@@ -10550,32 +10880,44 @@ var AttachTerminal = class {
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
+   *  writer once, without a resize-echo ping-pong between visible clients.
+   *
+   *  Returns whether the pane reached a settled answer — measured the host and
+   *  either fit or decided no fit was due. False means the measurement itself
+   *  failed (xterm metrics mid-invalidation, the element mid-move, a detach
+   *  between proposal and fit): a transient the scheduled path retries within
+   *  its attempt budget. A zero-size pane reports settled — it is genuinely
+   *  hidden, and the intersection observer already owns refitting it when it
+   *  comes back. */
   fitVisibleHost() {
     if (this.stopped) {
-      return;
+      return true;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (host.width <= 0 || host.height <= 0) {
+      return true;
     }
     let proposed;
     try {
       proposed = this.fit.proposeDimensions();
     } catch {
-      return;
+      return false;
     }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
+    if (proposed === void 0) {
+      return false;
     }
     const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
     if (needsFit) {
       try {
         this.fit.fit();
       } catch {
-        return;
+        return false;
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    this.sendResize(this.term.rows, this.term.cols, false);
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
+    return true;
   }
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
    *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
@@ -10641,17 +10983,51 @@ var AttachTerminal = class {
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A parked page never writes the shared grid: its fit still runs so xterm's
+   *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
+   *  cannot be an activation, and it must not steal a live visible peer's grid.
+   *  document.visibilityState covers hidden pages; `parked` covers occluded
+   *  pages that still report 'visible' while their frames starve.
+   *
+   *  An owed write re-arms only a channel that can change its outcome.
+   *  Withheld on a parked/hidden page, that is the frame probe alone — its
+   *  delivery IS the reactivation, and it costs nothing while queued. The
+   *  timer twin is never armed for a withheld write (each tick would just
+   *  fit-and-withhold again — a perpetual poll), and a dead socket arms
+   *  nothing at all: the connect path force-sends the current size on open.
+   *  lastRows/lastCols are only credited once send() reports the frame
+   *  actually left — crediting a dropped write would erase the divergence
+   *  marker and silence every later attempt (the phantom-sent strand). */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (this.parked === null) {
+      return;
+    }
+    if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
+      this.retryOwedResize(rows, cols);
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
+    if (this.send(encode(resizeFrame(rows, cols)))) {
+      this.lastRows = rows;
+      this.lastCols = cols;
+      return;
+    }
+  }
+  /** Keeps the wake probe armed while a resize is owed — withheld by a
+   *  parked/hidden page. Self-limiting: the check re-reads the divergence,
+   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  the channel whose delivery can change the outcome; arming the timer
+   *  would just fit-and-withhold again on every tick. */
+  retryOwedResize(rows, cols) {
+    if (rows !== this.lastRows || cols !== this.lastCols) {
+      this.armWakeProbe();
+    }
   }
   /** Applies the server's authoritative size to xterm without echoing it back out
    *  as an OpResize (which would ping-pong). Records it as our last-known size so a
@@ -14909,22 +15285,34 @@ function createLatestRequestGate() {
     }
   };
 }
+async function retryWithBackoff(attempt, alive, delays, sleep) {
+  for (const delay2 of delays) {
+    await sleep(delay2);
+    if (!alive()) {
+      return false;
+    }
+    if (await attempt()) {
+      return true;
+    }
+  }
+  return false;
+}
 function createFencedRefetcher(spec) {
   const gate = createLatestRequestGate();
   return {
-    refresh() {
+    refresh(options) {
       const tok = spec.readToken();
       if (tok === null) {
-        return;
+        return Promise.resolve();
       }
       const request = gate.begin();
       const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      void spec.fetch(tok).then((value) => {
+      return spec.fetch(tok).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
       }).catch((error) => {
-        if (isNewest()) {
+        if (isNewest() && !options?.silent) {
           spec.onError?.(error);
         }
       });
@@ -16852,6 +17240,7 @@ var AppShell = class {
     }
     const activeBefore = document.activeElement;
     let restoreChangedFocus;
+    const reopened = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
@@ -16871,7 +17260,11 @@ var AppShell = class {
           (target) => this.rowActions(target, s.id === state.selectedId),
           previous
         );
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : void 0;
+        if (menu) {
+          menu.open();
+          reopened.push(menu);
+        }
         if (focusedName) restoreChangedFocus = () => row.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
       },
@@ -16893,6 +17286,7 @@ var AppShell = class {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -16917,6 +17311,9 @@ var AppShell = class {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("\u2026");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
@@ -17474,7 +17871,8 @@ var AppShell = class {
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
-      closePane: () => this.actions.closePane?.()
+      closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -18372,13 +18770,25 @@ async function connect(candidate) {
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then((tasks2) => ({ tasks: tasks2, error: "" })).catch((error) => ({ tasks: [], error: errorText(error) })),
-    fetchRegisteredProjects(candidate)
+    fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null)
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    void reconcileConfigRead(candidate, attempt);
+  }
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
@@ -19273,10 +19683,13 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+var configReadCommits = 0;
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -19288,7 +19701,23 @@ var configRefetcher = createFencedRefetcher({
   }
 });
 function refreshConfig() {
-  configRefetcher.refresh();
+  return configRefetcher.refresh();
+}
+var CONNECT_CONFIG_RETRY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3, 16e3];
+async function reconcileConfigRead(candidate, attempt) {
+  const landed = await retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await configRefetcher.refresh({ silent: true });
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+  );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
@@ -19362,16 +19791,15 @@ var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
     if (requestGeneration !== connectionGeneration || token !== tok) {
-      refreshConfig();
-      return;
+      return refreshConfig();
     }
     store.set({
       configStatus: {
@@ -19382,12 +19810,16 @@ function applyConfigValueNow(key, value, tok) {
         error: ""
       }
     });
-    refreshConfig();
+    return refreshConfig();
   }).catch((err) => {
     if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+    if (terminalFontClassForKey(key) !== null) {
+      surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+    }
   });
 }
+bindTerminalFontPersist(applyConfigValue);
 var TASK_HEALTH_POLL_MS = 6e4;
 window.setInterval(() => {
   const state = store.get();
@@ -19718,6 +20150,7 @@ var actions = {
   dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

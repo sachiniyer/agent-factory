@@ -291,13 +291,17 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
 	// for the same reason — the Add-project view a client builds out of the two
 	// must not have to wait on a probation it has no stake in.
-	"ListDirectory":           allowedDuringProbation,
-	"ListOnComplete":          allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
-	"ListPrograms":            allowedDuringProbation,
-	"ListProjects":            allowedDuringProbation,
-	"ListTasks":               allowedDuringProbation,
-	"Ping":                    allowedDuringProbation,
-	"Preview":                 allowedDuringProbation,
+	"ListDirectory":  allowedDuringProbation,
+	"ListOnComplete": allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
+	"ListPrograms":   allowedDuringProbation,
+	"ListProjects":   allowedDuringProbation,
+	"ListTasks":      allowedDuringProbation,
+	"Ping":           allowedDuringProbation,
+	"Preview":        allowedDuringProbation,
+	// Slice 1 (#5136) is a strictly read-only listing — the same admission
+	// class as Snapshot and ListTasks; the mutating --apply lands in the
+	// follow-up and must move this back.
+	"PruneSessions":           allowedDuringProbation,
 	"ReleaseUpgradeProbation": allowedDuringProbation,
 	"Shutdown":                allowedDuringProbation,
 	"Snapshot":                allowedDuringProbation,
