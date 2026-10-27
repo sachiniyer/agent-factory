@@ -6647,11 +6647,11 @@ async function restoreSession(id, title, token2, expectedDaemonBootId) {
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
@@ -7455,6 +7455,7 @@ function viewNavigation(onSelect) {
   }
   return { el: el2, tabs };
 }
+var activeModalTrap = null;
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
   const errorLine = h("div", { class: "af-modal-error", role: "alert" });
@@ -7473,7 +7474,10 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
-  card.addEventListener("keydown", (event) => {
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event) => {
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll(
       "button, input, select, textarea, a[href], summary, [tabindex]"
@@ -7486,14 +7490,21 @@ function modalChrome(opts) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     }
-  });
+  };
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {
     el: backdrop,
     setBusy(busy) {
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -7502,6 +7513,9 @@ function modalChrome(opts) {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
@@ -7509,6 +7523,9 @@ function modalChrome(opts) {
     },
     close() {
       backdrop.remove();
+    },
+    reactivate() {
+      installTrap();
     }
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
@@ -7734,7 +7751,10 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 }
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
@@ -7848,7 +7868,8 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
+    const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7861,9 +7882,16 @@ var ConfigPane = class {
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
-      this.el.querySelector(
+      const restored = this.el.querySelector(
         `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
-      )?.focus({ preventScroll: true });
+      );
+      restored?.focus({ preventScroll: true });
+      if (restored instanceof HTMLInputElement && restored.type === "text" && focusedConfigTextCaret?.start != null) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
+        );
+      }
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -16443,6 +16471,12 @@ var TAB_PRESS_LIMITS = { holdMs: 500, slopPx: 10 };
 function pressDistance(fromX, fromY, toX, toY) {
   return Math.hypot(toX - fromX, toY - fromY);
 }
+function tabDragFeedbackRegion(overBar, overPane) {
+  if (overBar) {
+    return "bar";
+  }
+  return overPane ? "pane" : "none";
+}
 
 // src/keyed-rows.ts
 var KeyedRows = class {
@@ -16627,6 +16661,9 @@ function renderLogin(root2, state, actions2) {
   root2.replaceChildren(loginView(state, actions2));
   const input = root2.querySelector("#af-token");
   if (input) input.value = draft;
+}
+function clearLoginDraft(root2) {
+  loginDrafts.set(root2, "");
 }
 function loginView(state, actions2) {
   if (state.loginCondition === "unavailable") {
@@ -18207,10 +18244,13 @@ var AppShell = class {
         return;
       }
       e.preventDefault();
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
     bar.addEventListener("pointerup", (e) => {
@@ -18930,6 +18970,7 @@ async function fetchRegisteredProjects(tok) {
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
@@ -19159,6 +19200,7 @@ function openModal(m, focusCard = false, explicitInvoker) {
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    m.reactivate?.();
     if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
   });
 }

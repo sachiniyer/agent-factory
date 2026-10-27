@@ -107,6 +107,31 @@ func TabLabelAt(instance *session.Instance, idx int) (string, bool) {
 	return label, true
 }
 
+// TabTextAt is TabLabelAt without the kind glyph, for callers that quote the
+// tab's text rather than display its row: a confirmation reading `Delete tab
+// "Terminal"` means the tab named Terminal, while `"› Terminal"` quotes the
+// presentation layer's decoration as if it were part of the name (#4630). The
+// collision prefix follows the same rule as TabLabelAt — slot number only when
+// another tab shares the text — and it is computed on the TEXT, since two tabs
+// of different kinds can carry one text under different glyphs. It reports
+// false under the same conditions as TabLabelAt.
+func TabTextAt(instance *session.Instance, idx int) (string, bool) {
+	if instance == nil {
+		return "", false
+	}
+	tabs := instance.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return "", false
+	}
+	text := textForTab(tabs[idx])
+	for candidateIdx, candidate := range tabs {
+		if candidateIdx != idx && textForTab(candidate) == text {
+			return fmt.Sprintf("%d %s", idx+1, text), true
+		}
+	}
+	return text, true
+}
+
 // labelForTab is the kind glyph, a space, then the tab's text. Every consumer
 // treats a label as an opaque display string — the tab bar, the tree rows, and
 // the preview/selection hints all render it whole, and the 1-9 jump keys index

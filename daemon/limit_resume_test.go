@@ -36,6 +36,13 @@ type limitResumeBackend struct {
 	onRespawn     func(*session.Instance)
 	onPrompt      func(*session.Instance, string)
 	sendPromptErr error
+	// respawnErr, when non-nil, makes Respawn fail with it AFTER onRespawn has
+	// run — mirroring LocalBackend.respawn, which can rebuild a vanished worktree
+	// (mutating durable provenance: branchCreatedByUs, baseCommitSHA) and only
+	// later fail at the tmux spawn/setupTabs step. The omitted ConfirmLive (a
+	// real respawn failure returns before that transition) keeps the session
+	// limit-blocked, exactly as the production code does.
+	respawnErr error
 }
 
 func (b *limitResumeBackend) IsAlive(*session.Instance) (bool, error) {
@@ -62,11 +69,18 @@ func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 	b.mu.Lock()
 	b.respawnCalls++
 	mutate := b.onRespawn
+	err := b.respawnErr
 	b.mu.Unlock()
 	// A real respawn can rebuild the worktree on its way to success, mutating
 	// durable state before anything downstream runs (#1854).
 	if mutate != nil {
 		mutate(i)
+	}
+	if err != nil {
+		// A failed respawn returns BEFORE ConfirmLive (the real
+		// backend_local_respawn.go returns from the tmux/setupTabs step),
+		// so the session stays limit-blocked under its resume fence.
+		return err
 	}
 	// The guard-free core: re-spawn regardless of liveness (matches the real
 	// LocalBackend.respawn, which ends by marking the session live).
@@ -205,7 +219,123 @@ func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.
 	}
 }
 
-// TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails is the post-#1857
+// TestResumeFromLimit_PersistsRespawnMutationsWhenRespawnFails is the regression
+// for the limit-resume failure return that dropped rebuilt worktree state.
+// Respawn shares LocalBackend.respawn, so it can rebuild a vanished worktree —
+// recreating the branch and flipping branchCreatedByUs true — and then fail at a
+// LATER step (tmux spawn, setupTabs). The sibling recovery paths
+// (lostrestore.go, restore.go) persist on failure precisely so that
+// in-memory-provenance mutation is not lost to an unclean daemon exit; the
+// limit-resume failure return persisted nothing (the exact bug), so a restart
+// reloaded a record saying af did NOT create the branch, the next successful
+// resume re-persisted that wrong value, and kill cleanup never deleted the
+// branch af itself recreated — an orphaned branch (#1532/#1841/#2883).
+//
+// The fix persists the instance on the respawn-failure return (a settlement, per
+// #2883) and classifies a post-rebuild failure as mutation-committed (the way
+// restore.go does with *session.RecoverRebuiltWorkspaceError), so a caller does
+// not treat an already-committed rebuild as an untouched, freely retryable one.
+func TestResumeFromLimit_PersistsRespawnMutationsWhenRespawnFails(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// The worktree the fresh rebuild leaves behind, with branchCreatedByUs=true.
+	// The seeded disk record carries no worktree data at all, so anything the
+	// respawn rebuilt exists only in memory until something writes it back.
+	wtPath := filepath.Join(filepath.Dir(repoPath), "repo-respawn-fail")
+	branch := "af/respawn-fail"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	rebuilt, err := sessiongit.NewGitWorktreeFromStorage(repoPath, wtPath, "respawn-fail", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+
+	// alive=false → an answered death → the respawn arm. The respawn rebuilds
+	// the worktree (onRespawn installs it with branchCreatedByUs=true), then
+	// fails at the tmux/setupTabs step — wrapped in RecoverRebuiltWorkspaceError
+	// to mark the mutation as having already landed before the failure.
+	backend := &limitResumeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		alive:       false,
+		onRespawn:   func(i *session.Instance) { i.SetGitWorktreeForTest(rebuilt) },
+		respawnErr:  &session.RecoverRebuiltWorkspaceError{Err: errors.New("tmux spawn failed")},
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "respawn-fail", backend, true, session.Running)
+	inst.Prompt = "finish the migration"
+	inst.SetLimitReached(time.Time{})
+
+	_, err = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "respawn-fail", RepoID: repoID})
+	if err == nil {
+		t.Fatal("resumeFromLimit returned nil; a failed Respawn must surface an error to the caller")
+	}
+	// A post-rebuild failure committed durable workspace state, so it must be
+	// classified as mutation-committed — not a freely retryable failure (#3236).
+	if !isMutationCommitted(err) {
+		t.Fatalf("resume error must be mutation-committed (a rebuild landed before the failure): %v", err)
+	}
+
+	if _, respawnCalls, _ := backend.snapshot(); respawnCalls != 1 {
+		t.Fatalf("Respawn called %d times, want 1 (the fixture must reach the respawn arm)", respawnCalls)
+	}
+
+	// The rebuild's provenance must be durable: a daemon restart must reload a
+	// record that says af created the branch, or kill cleanup never deletes it.
+	rec := recordFor(t, repoID, "respawn-fail")
+	if rec == nil {
+		t.Fatal("record must still exist after a failed resume")
+	}
+	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
+		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a failed Respawn)", rec.Worktree.BranchCreatedByUs)
+	}
+	if rec.Worktree.BranchName != branch {
+		t.Fatalf("persisted branch = %q, want %q (the rebuilt branch must be recorded or kill orphans it)", rec.Worktree.BranchName, branch)
+	}
+	// The respawn failed before ConfirmLive, so the session must stay parked at
+	// the limit wall — in memory and on disk — so both retry paths still fire.
+	if !inst.LimitReached() {
+		t.Fatal("session is not limit-blocked in memory after a failed respawn; ConfirmLive must not have run")
+	}
+	if rec.Liveness != session.LiveLimitReached {
+		t.Fatalf("persisted liveness = %v, want LiveLimitReached (a failed respawn must leave the session parked on disk)", rec.Liveness)
+	}
+}
+
+// TestResumeFromLimit_RespawnFailureWithoutRebuildIsNotMutationCommitted pins the
+// other side of the fix: a respawn that fails WITHOUT having rebuilt the worktree
+// (no RecoverRebuiltWorkspaceError) is an ordinary failure, not a committed
+// mutation — the persist still runs (harmless: the unchanged state is written
+// back), but the error must not read as mutation-committed or a caller could
+// mistake a freely-retryable failure for one that already landed.
+func TestResumeFromLimit_RespawnFailureWithoutRebuildIsNotMutationCommitted(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// alive=false → the respawn arm; no onRespawn, so no worktree mutation; a
+	// plain tmux error that is NOT wrapped in RecoverRebuiltWorkspaceError.
+	backend := &limitResumeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		alive:       false,
+		respawnErr:  errors.New("tmux spawn failed"),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "respawn-plain-fail", backend, true, session.Running)
+	inst.Prompt = "finish the migration"
+	inst.SetLimitReached(time.Time{})
+
+	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "respawn-plain-fail", RepoID: repoID})
+	if err == nil {
+		t.Fatal("resumeFromLimit returned nil; a failed Respawn must surface an error to the caller")
+	}
+	if isMutationCommitted(err) {
+		t.Fatalf("a non-rebuild respawn failure must not be mutation-committed: %v", err)
+	}
+	if _, respawnCalls, _ := backend.snapshot(); respawnCalls != 1 {
+		t.Fatalf("Respawn called %d times, want 1", respawnCalls)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("session must stay limit-blocked after a failed respawn")
+	}
+}
+
 // codex finding. On the answered-death arm Respawn ends in ConfirmLive, so the session
 // reads LiveRunning before its pending prompt has been delivered — and #1857's
 // checkpoint serializes the whole instance right there. A SendPrompt failure (or

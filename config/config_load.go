@@ -116,7 +116,7 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	//
 	// It is the same broken link AtomicWriteFileFollowingLink refuses, so it is
 	// refused the same way, naming both ends.
-	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 		return nil, err
 	}
 
@@ -176,7 +176,7 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	// defaults without stopping or naming the link, diverging from the
 	// dangling-config.toml behavior the tomlPath guard above guarantees.
 	// Refuse it the same way, naming both ends (#3660 review).
-	if err := refuseDanglingConfigLink(configPath); err != nil {
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(configPath)
@@ -236,7 +236,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	// to write defaults, while af itself refuses to start on that very link. A
 	// diagnostic that disagrees with the thing it diagnoses is worse than no
 	// diagnostic (#3660 review).
-	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 		return ReadOnlyConfigLoad{Path: tomlPath}, err
 	}
 
@@ -247,10 +247,15 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		jsonExists := fileExists(configPath)
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				cfg := DefaultConfig()
+				// Diagnostics agree with startup: the stub resolves to these
+				// same in-memory defaults via emptyConfigStubLoad, which owes
+				// the missing-claude advice validateConfig owns (#5588).
+				warnMissingClaudeOverride(cfg.ProgramOverrides)
 				return ReadOnlyConfigLoad{
 					Path:      tomlPath,
 					EmptyStub: true,
-					Config:    DefaultConfig(),
+					Config:    cfg,
 				}, nil
 			}
 		}
@@ -270,7 +275,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	// Missing — the exact diagnostic/startup divergence the tomlPath guard
 	// above was written to close, reproduced on the legacy path. Refuse it
 	// the same way, naming both ends (#3660 review).
-	if err := refuseDanglingConfigLink(configPath); err != nil {
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
 		return ReadOnlyConfigLoad{Path: configPath}, err
 	}
 
@@ -281,10 +286,12 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		// state af accepts and runs past (#4483 review — diagnostics must agree
 		// with startup or they diagnose a file af does not have).
 		if len(data) == 0 {
+			cfg := DefaultConfig()
+			warnMissingClaudeOverride(cfg.ProgramOverrides)
 			return ReadOnlyConfigLoad{
 				Path:      configPath,
 				EmptyStub: true,
-				Config:    DefaultConfig(),
+				Config:    cfg,
 			}, nil
 		}
 		cfg, parseErr := parseLoadedConfigJSON(data, prettyConfigPath, configPath)
@@ -315,8 +322,11 @@ func emptyConfigStubLoad(prettyPath string) (*Config, error) {
 	cfg.source.builtIn = snapshotConfig(cfg)
 	// The same probed-shell-value notice materializeDefaultConfig gives the
 	// defaults it writes: the values being returned are identical, so the
-	// alias-carrying-`exec --` case is reported here too (#3566 parity).
+	// alias-carrying-`exec --` case is reported here too (#3566 parity). The
+	// missing-claude advice validateConfig owns is owed here for the same
+	// reason: these defaults carry no configured override to gate it (#5588).
 	warnGlobalShellValues(cfg, prettyPath)
+	warnMissingClaudeOverride(cfg.ProgramOverrides)
 	return cfg, nil
 }
 
@@ -595,8 +605,11 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	// would otherwise say nothing about a probed claude alias carrying `exec --`
 	// (#3566 review). Everything here came from the defaults, so the value also
 	// matches af's probe and the warning carries its "check that alias too" note
-	// alongside the path of the file it is about to create.
+	// alongside the path of the file it is about to create. The missing-claude
+	// advice is owed for the same reason — these defaults have a claude override
+	// only when the probe found one (#5588).
 	warnGlobalShellValues(defaultCfg, prettyTomlPath)
+	warnMissingClaudeOverride(defaultCfg.ProgramOverrides)
 	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)
@@ -625,8 +638,8 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// exists because another process really can install one in this window.
 		// The exclusive create then reports EEXIST on the link and the reread
 		// fails, which would land right back on silent defaults — the exact
-		// outcome refuseDanglingConfigLink was added to stop (#3660 review).
-		if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		// outcome RefuseDanglingConfigLink was added to stop (#3660 review).
+		if err := RefuseDanglingConfigLink(tomlPath); err != nil {
 			return nil, err
 		}
 	}
