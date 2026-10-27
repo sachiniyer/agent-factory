@@ -70,8 +70,9 @@ func createdTaskStatus(data session.InstanceData) string {
 // "Did not change" is NOT the same as "is idle", which is the whole reason the
 // working check sits here. The caller reaches this branch on pane STILLNESS, and
 // stillness is only evidence of idleness for agents that repaint while they work
-// (claude/codex animate a spinner + elapsed timer; amp does not — it holds a
-// static frame through every quiet gap in a turn). So before settling Ready, ask
+// (codex animates a spinner + elapsed timer; amp holds a static frame through
+// every quiet gap in a turn; claude animates one but was still seen holding a
+// still pane mid-turn). So before settling Ready, ask
 // the agent: a pane that says it is working IS working, and stays Running. See
 // task.IsWorkingContent for why a debounce cannot stand in for this.
 //
@@ -98,7 +99,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if task.IsWorkingContent(content, agent) {
 		// Still mid-turn behind a still pane: hold Running so the #1766 status dot
 		// stays dark. Settling Ready here is the green flash (#1766 says green ==
-		// waiting for you), and it is not merely cosmetic — a Ready amp is what
+		// waiting for you), and it is not merely cosmetic — a Ready session is what
 		// `af sessions watch` unblocks on and what tells a user their turn is done.
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 		return
@@ -680,6 +681,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
 		}
+		// Same settle-persist contract as the restore paths: a respawn that
+		// settles a relocation record persists the cleared state before the
+		// spawn proceeds (#5295 review).
+		instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+			return m.persistInstanceErr(repoID, i)
+		})
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {
@@ -770,6 +777,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 	}
 	if accountSwap != nil {
+		// A committed-swap recovery that re-established the runtime after a
+		// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered
+		// with StartupStateUnknown set and started cleared. The probe or the
+		// replacement respawn above has now positively identified the runtime,
+		// but ConfirmLive re-establishes liveness without clearing the inert
+		// fence or restoring started — so resolve the startup state HERE, before
+		// the readiness contract and mission delivery below attempt to preview
+		// or send against this row. On the real local backend both preview
+		// (LocalBackend.PreviewContext) and the prompt send
+		// (SendPromptCommandWithStatus) refuse a row whose started bit is still
+		// false, so a resolve left until the success path's tail is unreachable
+		// and the committed swap stays wedged. No-op for an ordinary resume or a
+		// healthy committed swap, where the fence was never raised.
+		instance.ResolveStartupState()
 		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
 			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
 			if settleErr != nil {

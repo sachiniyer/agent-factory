@@ -68,7 +68,7 @@ func TestReloadCorruptedRow_LoadsIncomingAgentFromDisk(t *testing.T) {
 		PendingHandoffMission: "", // no mission marker — the takeover brief is gone
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"), // non-empty: reattach path
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")), // non-empty: reattach path
 			SessionName:  "handoff-corrupt",
 			BranchName:   "corrupt-branch",
 		},

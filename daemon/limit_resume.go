@@ -70,7 +70,18 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 		}
 		return resumeNotPerformed, retryErr
 	}
-	if !accountSwapResumeEligible(instance) {
+	// A committed account swap whose post-commit respawn went blind
+	// (ErrAccountSwapAgentTeardownBlind) is recoverable through the alreadySet
+	// branches of resumeFromLimitLockedOutcome. That error path marks
+	// StartupStateUnknown while preserving the pending swap, and
+	// accountSwapResumeEligible gates on StartupStateUnknown first, so without
+	// this short-circuit the gate would refuse every Retry with "not blocked on
+	// a usage limit" before the committed-swap recovery branches could run. The
+	// scheduler must still respect the "suppress automatic retries until
+	// inspection" intent of the StartupStateUnknown marker, so the
+	// committed-swap bypass lives here at the explicit RPC rather than inside
+	// the shared predicate.
+	if committedAccountSwap(instance) == nil && !accountSwapResumeEligible(instance) {
 		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}
 
