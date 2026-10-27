@@ -27,10 +27,11 @@ func TestFanOutRemoteProbes_WedgedHostIsolated(t *testing.T) {
 		}
 		fastDone.Add(1)
 	}
+	admitAll := func() (func(), bool) { return func() {}, true }
 	targets := []worktreeProbeTarget{{instance: wedged}, {instance: fast1}, {instance: fast2}}
 
 	start := time.Now()
-	fanOutRemoteProbes(targets, probe)
+	fanOutRemoteProbes(targets, probe, admitAll)
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("sweep held by wedged probe for %v", d)
 	}
@@ -38,7 +39,7 @@ func TestFanOutRemoteProbes_WedgedHostIsolated(t *testing.T) {
 		t.Fatalf("healthy sessions probed %d times, want 2", got)
 	}
 
-	fanOutRemoteProbes(targets, probe)
+	fanOutRemoteProbes(targets, probe, admitAll)
 	if got := wedgedCalls.Load(); got != 1 {
 		t.Fatalf("wedged host probed %d times, want 1 (no stacking)", got)
 	}

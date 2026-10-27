@@ -41,37 +41,60 @@ func (m *Manager) refreshStatusProbes(targets []worktreeProbeTarget) {
 		}
 		m.refreshInstanceStatus(t.repoID, t.instance)
 	}
-	fanOutRemoteProbes(remote, m.refreshInstanceStatus)
+	fanOutRemoteProbes(remote, m.refreshInstanceStatus, func() (func(), bool) {
+		if _, ok := m.beginBackgroundMutation(); !ok {
+			return nil, false
+		}
+		return m.backgroundMutationWG.Done, true
+	})
 }
 
-func fanOutRemoteProbes(targets []worktreeProbeTarget, probe func(string, *session.Instance)) {
+func fanOutRemoteProbes(targets []worktreeProbeTarget, probe func(string, *session.Instance), admit func() (func(), bool)) {
 	if len(targets) == 0 {
 		return
 	}
 	sem := make(chan struct{}, max(remoteProbeConcurrency, 1))
 	var wg sync.WaitGroup
 	for _, t := range targets {
+		// A full fan-out skips the session this sweep rather than queueing it: a
+		// queued probe would be marked active and starve behind wedged hosts
+		// long after the sweep gave up on it.
+		select {
+		case sem <- struct{}{}:
+		default:
+			continue
+		}
 		if _, busy := remoteProbesActive.LoadOrStore(t.instance, struct{}{}); busy {
+			<-sem
+			continue
+		}
+		// Admission joins the probe to the manager's background-mutation
+		// lifecycle, so shutdown's terminal checkpoint cannot be overwritten by a
+		// probe that outlived its sweep.
+		done, ok := admit()
+		if !ok {
+			remoteProbesActive.Delete(t.instance)
+			<-sem
 			continue
 		}
 		wg.Add(1)
 		go func(t worktreeProbeTarget) {
+			defer done()
 			defer wg.Done()
 			defer remoteProbesActive.Delete(t.instance)
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			probe(t.repoID, t.instance)
 		}(t)
 	}
-	done := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(done)
+		close(finished)
 	}()
 	timer := time.NewTimer(remoteProbeSweepWait)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-finished:
 	case <-timer.C:
 	}
 }
