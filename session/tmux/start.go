@@ -208,11 +208,31 @@ func (t *TmuxSession) Start(workDir string) error {
 	// loses its agent-specific environment. Thread the result into command
 	// selection so a failed bootstrap falls back without repeating its timeout.
 	serverErr := EnsureDaemonServer()
-	args, envErr = t.importClientEnvironmentArgs(args, importNames)
+	args, restoreUpdateEnvironment, envErr := t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %w", ErrSessionNotStarted, envErr)
+	}
+	if restoreUpdateEnvironment != nil {
+		// tmux abandons a ;-chained queue at the first failed command, so the
+		// queue's own trailing restore is not guaranteed: any mid-queue failure
+		// would leave the server's update-environment permanently expanded to
+		// the credential import list, and every later launch would re-read the
+		// corrupted value as its baseline. Re-apply the baseline on EVERY exit
+		// path once the expansion is queued — a slightly delayed restore on a
+		// failure rather than never (#5390). Bounded like every tmux command in
+		// this package; best-effort, because a server too wedged to answer has
+		// no healthy session outcome to withhold anyway.
+		defer func() {
+			ctx, cancel := tmuxTimeoutContext()
+			if err := t.runTmuxBounded(ctx, restoreUpdateEnvironment...); err != nil {
+				log.WarningLog.Printf(
+					"could not restore tmux update-environment after %s launch (credential import list may stay expanded): %v",
+					t.sanitizedName, err)
+			}
+			cancel()
+		}()
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
