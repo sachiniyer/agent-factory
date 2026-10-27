@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -72,6 +73,16 @@ var (
 	daemonProcessEnvLookup = proctree.EnvLookup
 	daemonProcessOwnerUID  = proctree.OwnerUID
 	daemonProcessCwd       = proctree.WorkingDir
+	// cpuFraction reads a process's lifetime-average CPU. A package var so
+	// tests can stage the possible-orphan overflow tail's measured CPU
+	// deterministically: the per-process fraction is, like the daemon
+	// identities above, a machine-dependent fact no test can stage without
+	// root, and whether a busy loop reads 0.3 or 1.0 of a core depends on
+	// the host's free-core count at scan time. The possible-orphan summary
+	// describes the hidden tail by its measured max, so the one row the
+	// operator sees about those processes reflects their CPU rather than
+	// a hardcoded "idle" guess.
+	cpuFraction = proctree.CPUFraction
 )
 
 // processLeakMinAge separates durable escaped/orphaned processes from ordinary
@@ -91,7 +102,7 @@ const (
 // describeProc renders "pid 123 (yes, 99% CPU over 15d2h): yes" for findings.
 func describeProc(p proctree.Process) string {
 	desc := fmt.Sprintf("pid %d (%s", p.PID, p.Comm)
-	if frac, age, err := proctree.CPUFraction(p); err == nil {
+	if frac, age, err := cpuFraction(p); err == nil {
 		desc += fmt.Sprintf(", %.0f%% CPU over %s", frac*100, formatAge(age))
 	}
 	desc += ")"
@@ -423,7 +434,11 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		compared++
-		if configuredProgram == runningProgram {
+		// Same byte-or-literal-argv rule as the daemon's drift latch
+		// (#5504): quoting-only spellings of the same argv are not drift,
+		// and a non-literal side falls back to the byte verdict.
+		if configuredProgram == runningProgram ||
+			sessionenv.LiteralCommandsEqual(configuredProgram, runningProgram) {
 			continue
 		}
 		drifted++
@@ -635,6 +650,77 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					if capturedPIDs[p.PID] || !observations.stillPresent(p) {
 						continue
 					}
+					// The same foreign-home attribution that the dead-session
+					// arm applies below: on the shared default tmux server a
+					// session name is derived from repo path + title and does
+					// not encode AF_HOME, so a surviving process from another
+					// install can carry a name that now matches one of OUR live
+					// sessions (temporal reuse once that install's session died).
+					// Its AF_HOME proves it is not ours, so report it as such
+					// rather than attributing the escape to this install. The
+					// escaped arm remains report-only either way — no kill path
+					// is added here.
+					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
+					if homeStatus == proctree.EnvFound {
+						// A relative AGENT_FACTORY_HOME is stamped unchanged by
+						// session/tmux.afHomeDir, so it is relative to the launching
+						// af process's frame, not the doctor's. normalizeHome resolves
+						// a path in THIS process's frame, which would resolve a
+						// relative marker against the directory doctor was invoked
+						// from — collapsing two distinct homes (each launched from a
+						// different working directory with AF_HOME=.af) onto the same
+						// doctor-relative path and letting a genuine foreign escapee
+						// compare equal to ours, falling through as an escapee of this
+						// install. The marker's originating frame is not recoverable
+						// from here, so treat a relative marker as unproven rather
+						// than normalizing it in the current frame: report it under the
+						// foreign-home key without attributing the escape to us.
+						if !filepath.IsAbs(home) {
+							// A relative marker is unproven ownership, not a
+							// confirmed foreign home: the marker's originating
+							// frame is not recoverable from here, so the
+							// collapsed row must not assert the definite "from
+							// another agent-factory home" claim the absolute
+							// arm makes. A distinct check key keeps this out of
+							// the foreign-home-process collapse, whose summary
+							// ("N processes from another agent-factory home")
+							// would otherwise state a conclusion the detector
+							// withheld for a relative marker in the default
+							// (non-verbose) CLI and JSON output.
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-unresolved",
+								Detail: fmt.Sprintf("%s carries live session %s's name but its AF_HOME (%s) "+
+									"is a relative path that cannot be resolved to a specific agent-factory "+
+									"home — not attributed to this install", describeProc(p), name, home),
+							})
+							continue
+						}
+						// Canonicalize both sides through normalizeHome (the same
+						// home-identity normalization checkForeignDaemons uses) rather
+						// than filepath.Clean: Clean is lexical and leaves a symlinked
+						// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
+						// unequal to the same home, which would report a genuine
+						// escapee as foreign. Compare by filesystem identity first
+						// (os.SameFile via sameHome): on a case-insensitive macOS
+						// volume EvalSymlinks preserves the spelling of non-symlink
+						// components, so ".Agent-Factory" and ".agent-factory" are the
+						// same directory but compare unequal as normalized strings;
+						// os.SameFile sees through the case difference and keeps a
+						// genuine same-home escapee off the foreign-home report.
+						if !sameHome(home, ctx.opts.ConfigDir) {
+							// A distinct check key keeps this out of the escaped-process
+							// collapse, whose row ("N processes escaped live session
+							// pane trees") would re-attribute a foreign process to this
+							// install in the default (non-verbose) CLI and JSON output.
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
+									"agent-factory home (%s) — not attributed to this install",
+									describeProc(p), name, home),
+							})
+							continue
+						}
+					}
 					report.addAdvisoryFinding(Finding{
 						Check: "escaped-process",
 						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
@@ -694,16 +780,17 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	// cap the listing — on a long-lived dev box this class is numerous and
 	// mostly idle, and it is report-only by definition.
 	type ranked struct {
-		p    proctree.Process
-		frac float64
+		p       proctree.Process
+		frac    float64
+		unknown bool
 	}
 	rankedPossibles := make([]ranked, 0, len(possibles))
 	for _, p := range possibles {
 		if !observations.stillPresent(p) {
 			continue
 		}
-		frac, _, _ := proctree.CPUFraction(p)
-		rankedPossibles = append(rankedPossibles, ranked{p, frac})
+		frac, _, err := cpuFraction(p)
+		rankedPossibles = append(rankedPossibles, ranked{p, frac, errors.Is(err, proctree.ErrCPUUnknown)})
 	}
 	sort.Slice(rankedPossibles, func(i, j int) bool {
 		if rankedPossibles[i].frac != rankedPossibles[j].frac {
@@ -714,10 +801,45 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	const maxPossibleOrphans = 15
 	for i, r := range rankedPossibles {
 		if i == maxPossibleOrphans {
+			// The descending sort above makes the overflow tail the coldest
+			// portion of the set, but "coldest of N" is not "idle" — a set at
+			// 33%-78% CPU has a tail at ≤33%, still a third of a core. The
+			// per-process frac the loop just captured on `ranked` is the
+			// measured data; describe the hidden remainder from its max and
+			// fall back to the idle wording only when the data supports it.
+			tail := rankedPossibles[maxPossibleOrphans:]
+			maxFrac := 0.0
+			unknown := 0
+			for _, t := range tail {
+				if t.unknown {
+					// CPUFraction returns ErrCPUUnknown (not a zero
+					// fraction) when it could not read the counter — e.g.
+					// a possible owned by another UID or hidden by a
+					// restricted process table. A 0 frac here is an
+					// unmeasured process, not an idle one; track it so the
+					// summary does not claim "idle" about CPU it never saw.
+					unknown++
+					continue
+				}
+				if t.frac > maxFrac {
+					maxFrac = t.frac
+				}
+			}
+			desc := "all idle or near-idle"
+			switch {
+			case unknown == len(tail):
+				desc = "CPU unmeasured in the remainder"
+			case unknown > 0:
+				desc = fmt.Sprintf("up to %.0f%% CPU in the remainder (%d unmeasured)", maxFrac*100, unknown)
+			case maxFrac >= runawayCPUFraction:
+				desc = fmt.Sprintf("some at up to %.0f%% CPU", maxFrac*100)
+			case maxFrac > 0:
+				desc = fmt.Sprintf("up to %.0f%% CPU in the remainder", maxFrac*100)
+			}
 			report.addAdvisoryFinding(Finding{
 				Check: "possible-orphan",
-				Detail: fmt.Sprintf("… and %d more processes of dead tmux servers (all idle or near-idle; "+
-					"none carry an agent-factory marker, so none are killed)", len(rankedPossibles)-maxPossibleOrphans),
+				Detail: fmt.Sprintf("… and %d more processes of dead tmux servers (%s; "+
+					"none carry an agent-factory marker, so none are killed)", len(tail), desc),
 			})
 			break
 		}

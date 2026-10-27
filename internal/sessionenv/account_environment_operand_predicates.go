@@ -358,7 +358,16 @@ func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bo
 		return true
 	}
 	if equal := strings.IndexByte(name, '='); equal >= 0 {
+		// Cut the operand at the first `=` to reach its assignment target. bash's
+		// `NAME+=value` append operator leaves a trailing `+` on the target once
+		// the cut lands (`CODEX_HOME+=/other` -> `CODEX_HOME+`), so a guarded name
+		// then misses the denied-set match and an append-assignment mutates the
+		// very variable this predicate exists to protect. Strip the trailing `+`
+		// so the append form is judged by its real target. The bare top-level
+		// form is caught earlier by the parser's `*syntax.Assign` (Append) node;
+		// this is the path that reaches a wrapper-peeled word list.
 		name = name[:equal]
+		name = strings.TrimSuffix(name, "+")
 	}
 	return accountEnvironmentNameDenied(name, names)
 }
