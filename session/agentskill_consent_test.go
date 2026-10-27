@@ -11,11 +11,12 @@ import (
 
 // #1977: af must not edit the user's GLOBAL per-agent config directories
 // (codex's $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
-// ~/.config/amp/skills) as a side effect of creating a session. Those files
-// reach outside af and outlive it — they survive archiving the session and
-// uninstalling af, and still load when the user runs that agent by hand.
+// ~/.config/amp/skills, and devin's ~/.config/devin/skills) as a side effect of
+// creating a session. Those files reach outside af and outlive it — they
+// survive archiving the session and uninstalling af, and still load when the
+// user runs that agent by hand.
 //
-// The gate lives at ensureAfSkillDir, the one choke point all three share.
+// The gate lives at ensureAfSkillDir, the one choke point all four share.
 
 // agentHome points HOME at a temp dir so every global agent skills base
 // resolves inside the test, and returns it. The af home is sandboxed
@@ -72,7 +73,8 @@ func seedAfOwnedSkill(t *testing.T, home string) string {
 // TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig is the #1977
 // regression. On a default install — no config key set, which is every install
 // — creating a session for codex, gemini or amp wrote a SKILL.md into the
-// user's own agent config directory. Nothing may land there now.
+// user's own agent config directory. Devin later joined the same consent-gated
+// seam. Nothing may land there now.
 func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) {
 	cases := []struct {
 		agent string
@@ -258,13 +260,13 @@ func TestGlobalAgentSkills_AfOwnedSeamsAreUnaffected(t *testing.T) {
 	agentHome(t)
 	writeAfConfig(t, false)
 
-	if got := injectSystemPrompt("claude", skillTarget{}); !strings.Contains(got, "--plugin-dir") {
+	if got := injectSystemPrompt("claude", skillTarget{}, false); !strings.Contains(got, "--plugin-dir") {
 		t.Errorf("claude's af-owned plugin seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("aider", skillTarget{}); !strings.Contains(got, "--read") {
+	if got := injectSystemPrompt("aider", skillTarget{}, false); !strings.Contains(got, "--read") {
 		t.Errorf("aider's af-owned --read seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("opencode", skillTarget{}); !strings.Contains(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt("opencode", skillTarget{}, false); !strings.Contains(got, "OPENCODE_CONFIG=") {
 		t.Errorf("opencode's af-owned config seam must be unaffected by the global-config gate, got %q", got)
 	}
 }

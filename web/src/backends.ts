@@ -11,6 +11,8 @@
 // change to this file — the property web/src/backends.test.ts pins. A label map
 // would look harmless and would silently render a new backend as blank.
 
+import { CALLBACK_UNAVAILABLE_PREFIX } from "./status.js";
+
 /** The daemon's three-outcome availability answer (daemon.BackendAvailability).
  *
  *  "unknown" is load-bearing: it means the daemon could NOT check (e.g. the repo's
@@ -30,6 +32,11 @@ export interface BackendOption {
   /** Actionable reason whenever `status` is not "available" — the same text the
    *  CLI prints at create time. Absent when available. */
   reason?: string;
+  /** Advisory: a create on this backend succeeds but the session gets NO af
+   *  callback — the daemon cannot mint a credential under its current
+   *  listener/auth posture (#5571 W3.1). Not a precondition: the backend stays
+   *  selectable; the text is the same refusal the create path degrades with. */
+  callback_unavailable_reason?: string;
 }
 
 /** The daemon's per-repo backend catalog (daemon.ListBackendsResponse). */
@@ -89,6 +96,16 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
     return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
 
+  // The callback advisory rides the same `reason` channel as a real refusal, but
+  // only on an AVAILABLE choice — backendSelectable gates on status, never on
+  // reason, so the notice stays advisory ("this session will have no af
+  // callback") instead of looking like a block (#5571 W3.1).
+  const callbackAdvisory = (opt: BackendOption | undefined): string =>
+    opt?.status === "available" && opt.callback_unavailable_reason
+      ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason
+      : "";
+
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices: BackendChoice[] = [
     {
       value: REPO_DEFAULT,
@@ -97,12 +114,14 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
       // one. The reason says what is wrong with the key.
       label: catalog.default === ""
         ? "Repo default"
-        : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
+        : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
       // Taken from the daemon, not inferred here. A repo whose declared default is
       // broken resolves to that broken backend and FAILS — it does not quietly run
       // local — so the default is not automatically a safe harbour.
       status: catalog.default_status,
-      reason: catalog.default_status === "available" ? "" : (catalog.default_reason ?? ""),
+      reason: catalog.default_status === "available"
+        ? callbackAdvisory(resolvedDefault)
+        : (catalog.default_reason ?? ""),
     },
   ];
 
@@ -111,7 +130,7 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
       value: opt.name,
       label: opt.label,
       status: opt.status,
-      reason: opt.status === "available" ? "" : (opt.reason ?? ""),
+      reason: opt.status === "available" ? callbackAdvisory(opt) : (opt.reason ?? ""),
     });
   }
   return choices;
