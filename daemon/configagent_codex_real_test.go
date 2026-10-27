@@ -16,6 +16,8 @@ import (
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const realCodexConfigAgentSentinel = "AF_CONFIG_AGENT_2220_BRIEFING_SUBMITTED"
@@ -31,6 +33,106 @@ const realCodexConfigAgentSentinel = "AF_CONFIG_AGENT_2220_BRIEFING_SUBMITTED"
 // is logged as the other half of the diagnosis: on the failure it shows whether
 // the briefing is still sitting in the composer after Spawn reported success.
 func TestRealCodexConfigAgentSubmitsBriefing(t *testing.T) {
+	env := newRealCodexConfigAgentEnv(t)
+	prompt := configagent.BuildBriefing(
+		configagent.ModeOnboard,
+		env.cfg,
+		filepath.Join(env.afHome, config.ConfigFileName),
+	) + "\n\n" + realCodexConfigAgentSentinel
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	sessionName, _, err := env.manager.SpawnConfigAgent(ctx, daemon.SpawnConfigAgentRequest{
+		Program: env.codexBin,
+		Prompt:  prompt,
+	})
+	if err != nil {
+		t.Fatalf("spawn real Codex config agent: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := env.manager.ReapConfigAgent(daemon.ReapConfigAgentRequest{SessionName: sessionName}); err != nil {
+			t.Errorf("reap real Codex config agent: %v", err)
+		}
+	})
+
+	immediate := captureConfigAgentPane(t, sessionName)
+	t.Logf("pane immediately after Spawn returned:\n%s", immediate)
+
+	rollouts := filepath.Join(env.codexHome, "sessions")
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		found, scanErr := treeContains(rollouts, realCodexConfigAgentSentinel)
+		if scanErr != nil {
+			t.Fatalf("scan Codex rollouts: %v", scanErr)
+		}
+		if found {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("Spawn returned success but Codex recorded no user turn containing the briefing sentinel; final pane:\n%s",
+		captureConfigAgentPane(t, sessionName))
+}
+
+// TestRealCodexConfigAgentFullBriefingReceipt verifies the receiver-side receipt
+// for the actual production input shape: the UNMODIFIED configagent.BuildBriefing
+// output, which ends with trailing whitespace ("\n\n"). Codex 0.144.6 trims a
+// submitted turn before recording it (chat_composer.rs
+// prepare_submission_text_with_options: text.trim().to_string()), so the receipt
+// matcher must trim the prompt's trailing whitespace to confirm the recorded turn.
+// Without that (#5488) every real spawn logged "briefing receipt was not observed"
+// even though the briefing landed. This gate asserts a positive receipt via
+// session.WaitForPromptReceipt against the full, unmodified briefing — the
+// assertion the original receipt feature (ef6c955e) claimed but never shipped,
+// because the existing sentinel test pads the prompt so it never ends in
+// whitespace and so never exercises the trim.
+func TestRealCodexConfigAgentFullBriefingReceipt(t *testing.T) {
+	env := newRealCodexConfigAgentEnv(t)
+
+	// Snapshot the Codex store BEFORE spawn so WaitForPromptReceipt only
+	// considers the rollout this spawn creates.
+	receiptSnapshot := session.BeginConversationCaptureAtCodexHome(env.codexHome)
+
+	briefing := configagent.BuildBriefing(
+		configagent.ModeOnboard,
+		env.cfg,
+		filepath.Join(env.afHome, config.ConfigFileName),
+	)
+	// The briefing ends with trailing whitespace ("\n\n"); do NOT trim or pad
+	// it. The receipt must confirm this exact production shape.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	sessionName, _, err := env.manager.SpawnConfigAgent(ctx, daemon.SpawnConfigAgentRequest{
+		Program: env.codexBin,
+		Prompt:  briefing,
+	})
+	if err != nil {
+		t.Fatalf("spawn real Codex config agent: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := env.manager.ReapConfigAgent(daemon.ReapConfigAgentRequest{SessionName: sessionName}); err != nil {
+			t.Errorf("reap real Codex config agent: %v", err)
+		}
+	})
+
+	// Directly confirm the full, unmodified briefing is recorded as a Codex user
+	// turn. This is the positive receiver-side signal the spawn's internal wait
+	// also relies on; calling it here with the verbatim BuildBriefing output
+	// keeps the assertion honest for the trailing-whitespace shape that
+	// previously never confirmed.
+	if err := session.WaitForPromptReceipt(ctx, tmux.ProgramCodex, receiptSnapshot, briefing, 30*time.Second); err != nil {
+		t.Fatalf("the full BuildBriefing output (ending in trailing whitespace) must be confirmed as a Codex user turn: %v", err)
+	}
+}
+
+// newRealCodexConfigAgentEnv performs the throwaway-home setup shared by the
+// opt-in real-Codex config-agent tests. It skips when
+// AF_REAL_CODEX_CONFIG_AGENT is not set, so the suite is inert outside the
+// isolated Codex testbox.
+func newRealCodexConfigAgentEnv(t *testing.T) *realCodexConfigAgentEnv {
+	t.Helper()
 	if os.Getenv("AF_REAL_CODEX_CONFIG_AGENT") != "1" {
 		t.Skip("set AF_REAL_CODEX_CONFIG_AGENT=1 inside the isolated Codex testbox")
 	}
@@ -61,45 +163,21 @@ func TestRealCodexConfigAgentSubmitsBriefing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct manager: %v", err)
 	}
-	prompt := configagent.BuildBriefing(
-		configagent.ModeOnboard,
-		cfg,
-		filepath.Join(afHome, config.ConfigFileName),
-	) + "\n\n" + realCodexConfigAgentSentinel
-
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	sessionName, _, err := manager.SpawnConfigAgent(ctx, daemon.SpawnConfigAgentRequest{
-		Program: codexBin,
-		Prompt:  prompt,
-	})
-	if err != nil {
-		t.Fatalf("spawn real Codex config agent: %v", err)
+	return &realCodexConfigAgentEnv{
+		manager:   manager,
+		cfg:       cfg,
+		codexHome: codexHome,
+		afHome:    afHome,
+		codexBin:  codexBin,
 	}
-	t.Cleanup(func() {
-		if err := manager.ReapConfigAgent(daemon.ReapConfigAgentRequest{SessionName: sessionName}); err != nil {
-			t.Errorf("reap real Codex config agent: %v", err)
-		}
-	})
+}
 
-	immediate := captureConfigAgentPane(t, sessionName)
-	t.Logf("pane immediately after Spawn returned:\n%s", immediate)
-
-	rollouts := filepath.Join(codexHome, "sessions")
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		found, scanErr := treeContains(rollouts, realCodexConfigAgentSentinel)
-		if scanErr != nil {
-			t.Fatalf("scan Codex rollouts: %v", scanErr)
-		}
-		if found {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	t.Fatalf("Spawn returned success but Codex recorded no user turn containing the briefing sentinel; final pane:\n%s",
-		captureConfigAgentPane(t, sessionName))
+type realCodexConfigAgentEnv struct {
+	manager   *daemon.Manager
+	cfg       *config.Config
+	codexHome string
+	afHome    string
+	codexBin  string
 }
 
 func captureConfigAgentPane(t *testing.T, sessionName string) string {

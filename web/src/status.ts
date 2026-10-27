@@ -77,6 +77,7 @@ const IDLE_REASON_LABELS: Record<IdleReason, string> = {
   "usage-limit": "usage limit",
   "process-exited": "process exited",
   "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
   "delivery-unconfirmed": "delivery unknown",
@@ -97,6 +98,15 @@ export function idleReasonDetail(s: SessionData, now: Date = new Date()): string
     if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
       const noun = attempts === 1 ? "attempt" : "attempts";
       detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  // Mirror of session.LostRestoreWait.Detail — the wait names the error that
+  // armed it until a restore attempt or a structural failure retires it.
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
     }
   }
   if (s.last_pane_churn_at) {

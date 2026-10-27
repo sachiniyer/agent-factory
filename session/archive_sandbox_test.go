@@ -222,6 +222,8 @@ func TestFromInstanceData_SandboxBackends(t *testing.T) {
 			assert.True(t, inst.Capabilities().Archive)
 			assert.Equal(t, LiveArchived, inst.GetLiveness())
 			assert.False(t, inst.Started())
+			assert.False(t, inst.ConsumeLoadRuntimeReplacement(),
+				"an inert row with no wait to clear must not enroll a pointless load-time write")
 		})
 
 		t.Run(typ+" live loads inert + Lost, not started", func(t *testing.T) {
@@ -232,11 +234,23 @@ func TestFromInstanceData_SandboxBackends(t *testing.T) {
 				Branch:      "root/s",
 				BackendType: typ,
 				Liveness:    LiveRunning,
+				// An environmental wait persisted while the session was live
+				// must NOT survive the inert load: lostSessionWantsRestore's
+				// Started gate can never reach this row, so keeping the record
+				// would report "waiting on the environment" in every client
+				// while nothing retries (#5295 review).
+				LostRestoreWait: &LostRestoreWait{Attempts: 3, Error: "enospc"},
 			})
 			require.NoError(t, err)
 			assert.Equal(t, typ, inst.GetBackend().Type())
 			assert.Equal(t, LiveLost, inst.GetLiveness())
 			assert.False(t, inst.Started(), "a reloaded sandbox session must not be started (loop skips it)")
+			assert.Nil(t, inst.LostRestoreWaitSnapshot(),
+				"an unreachable row drops the armed-retry record on load")
+			assert.True(t, inst.ConsumeLoadRuntimeReplacement(),
+				"clearing a PERSISTED wait must enroll the load-time checkpoint so instances.json drops it too (#5295 review)")
+			assert.False(t, inst.ConsumeLoadRuntimeReplacement(),
+				"the enrollment is consumed exactly once")
 		})
 	}
 }

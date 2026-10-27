@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +21,21 @@ type captureLaunchEnvPty struct {
 func (p *captureLaunchEnvPty) Start(command *exec.Cmd) (*os.File, error) {
 	p.cmd = command
 	return nil, errors.New("stop after capturing launch command")
+}
+
+// forceAgentOnSearchPath plants executable stubs for the named agents in a
+// private directory and makes it the whole PATH: the launcher's grant
+// predicate models execvp's walk, so a bare agent name earns its credential
+// grant only when a real executable file answers it (#5265).
+func forceAgentOnSearchPath(t *testing.T, names ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
 }
 
 func forceSessionEnvExecutable(t *testing.T, path string) {
@@ -152,9 +168,37 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	}
 }
 
+// A scoped session's account material may only ride an executable af can
+// attribute to the operator — the same grant question the ambient filter
+// answers. A bare program that resolves through a repository-controlled PATH
+// entry must refuse the launch rather than inject the selected account's
+// environment into repository content (#5265 review).
+func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
+		t.Fatal(err)
+	}
+	// A PATH that resolves bare codex through the pane's working directory.
+	t.Setenv("PATH", ".")
+
+	session := NewTmuxSession("scoped-grant-fails", "codex")
+	session.SetAccountForAgent("codex", "work")
+	if _, _, _, err := session.launchEnvironment(); err == nil {
+		t.Fatal("account-scoped launch on a repository-controlled PATH hit was not refused")
+	} else if !strings.Contains(err.Error(), "cannot attribute") {
+		t.Fatalf("scoped grant refusal lost its reason: %v", err)
+	}
+}
+
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	// The scoped agent pane carries account material only on an executable af
+	// can attribute to the operator, so the bare codex name needs a PATH hit.
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")
@@ -171,7 +215,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 	t.Setenv("BASH_ENV", "/tmp/ambient-bashrc")
 	t.Setenv("PS1", "$((CODEX_HOME=42))")
-	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
+	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +253,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
-	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment()
+	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +289,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
 	}
-	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment()
+	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +303,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
+	forceAgentOnSearchPath(t, "claude")
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
