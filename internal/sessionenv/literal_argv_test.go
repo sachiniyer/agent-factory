@@ -69,8 +69,8 @@ func TestLiteralCommandArgv(t *testing.T) {
 		{"escaped backslash decodes", `claude a\\b`, []string{"claude", `a\b`}, true, ""},
 		{"escaped apostrophe joins quotes", `claude '/o'\''b'`, []string{"claude", "/o'b"}, true,
 			"the ShellQuotePath idiom: ' quoted text \\' literal apostrophe ' — must round-trip"},
-		{"backslash-newline continuation", "claude a\\\nb", []string{"claude", "ab"}, true,
-			"\\<newline> is removed entirely"},
+		{"backslash-newline is unparseable", "claude a\\\nb", nil, false,
+			"a continuation joins words for keyword recognition but vanishes elsewhere — fail closed"},
 		{"escaped equals suppresses tilde", `claude a\=~`, []string{"claude", "a=~"}, true,
 			"the escaped = cannot put the ~ in expansion position"},
 		{"colon-tilde in a non-assignment word", "claude /tmp/a:~/claude", []string{"claude", "/tmp/a:~/claude"}, true,
@@ -121,10 +121,10 @@ func TestLiteralCommandArgv(t *testing.T) {
 			"a word-leading ~ expands to a home directory"},
 		{"tilde user prefix", "claude ~u/x", nil, false, ""},
 		{"tilde slash prefix", "claude ~/x", nil, false, ""},
-		{"tilde after equals", "claude a=~", nil, false,
-			"bash expands the tilde in an assignment-form argument even in arg position"},
-		{"tilde after colon", "claude a=b:~", nil, false,
-			"inside an assignment-shaped word a ~ after an unquoted : expands (bash: a:b -> a:/home)"},
+		{"tilde after equals is literal to /bin/sh", "claude a=~", []string{"claude", "a=~"}, true,
+			"dash and bash-as-sh both pass arg-position = tildes literally — only bash-as-bash expands"},
+		{"tilde after colon is literal to /bin/sh", "claude a=b:~", []string{"claude", "a=b:~"}, true,
+			"same rule: :~ expands only in a real assignment word, which is refused on call.Assigns"},
 		{"continuation-joined keyword", "ti\\\nme claude", nil, false,
 			"\\<newline> cannot be certified: the joined word is unquoted time — bash keyword (review round 6)"},
 		{"brace expansion comma", "claude {a,b}", nil, false,
@@ -229,11 +229,12 @@ func TestLiteralCommandsEqual(t *testing.T) {
 			"bash expands the left side to a} + b; the quoted side is one literal word (review round 5)"},
 		{"absorbed-close literal against quoted", "claude {a},{b}", "claude '{a},{b}'", true,
 			"bash leaves {a},{b} literal — the inner { never lets the outer one close"},
-		{"tilde-equals against quoted", "claude a=~", "claude 'a=~'", false, ""},
+		{"tilde-equals against quoted", "claude a=~", "claude 'a=~'", true,
+			"the /bin/sh launch shell passes arg-position = tildes literally — identical argv"},
 		{"colon-tilde path against quoted", "claude /tmp/a:~/claude", "claude '/tmp/a:~/claude'", true,
 			"~ after : in a non-assignment word is literal in every shell (review round 6)"},
-		{"assignment colon-tilde against quoted", "claude x=a:~", "claude 'x=a:~'", false,
-			"inside an assignment-shaped word the same :~ expands"},
+		{"assignment colon-tilde against quoted", "claude x=a:~", "claude 'x=a:~'", true,
+			"literal under /bin/sh — refusing it was the false-drift shape #5504 is about"},
 		{"second-equals tilde against quoted", "claude v=a=~", "claude 'v=a=~'", true,
 			"only the first = enables a following ~, so both spell the literal v=a=~"},
 		{"continuation-keyword against quoted", "ti\\\nme claude", "'time' claude", false,
@@ -273,6 +274,44 @@ func TestLiteralCommandsEqual(t *testing.T) {
 			require.Equal(t, test.want, LiteralCommandsEqual(test.a, test.b), test.why)
 			require.Equal(t, test.want, LiteralCommandsEqual(test.b, test.a),
 				"equality is symmetric: "+test.why)
+		})
+	}
+}
+
+// Codex review round 7: the word walk must stay linear — a long word of
+// delimiter bytes (or thousands of quoted parts) must not trigger a rescan of
+// the accumulated buffer per byte/part. testing.AllocsPerRun is the op-count
+// proxy: a quadratic rescan allocates a fresh copy of the whole word on every
+// delimiter, so its allocation count scales with the input while a linear
+// walk allocates only the handful of amortized builder growths and the final
+// strings.
+func TestLiteralCommandArgv_LinearOnPathologicalWords(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{"name-like prefix with many delimiters",
+			"claude " + strings.Repeat("a", 20000) + strings.Repeat("=", 20000)},
+		{"many quoted parts",
+			"claude a" + strings.Repeat("'b'", 50000)},
+		{"many escaped characters",
+			"claude " + strings.Repeat(`\x`, 50000)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			call, ok := singleSimpleCall(test.command)
+			require.True(t, ok)
+			require.Len(t, call.Args, 2)
+			word := call.Args[1]
+			if _, _, ok := literalArgvWord(word); !ok {
+				t.Fatalf("the pathological word must stay literal: %q", test.command[:40])
+			}
+			// Measure the walker alone: the parser's per-part objects are
+			// linear noise — a rescan of the accumulated value per byte or
+			// part allocates O(input) buffer copies inside literalArgvWord.
+			if allocs := testing.AllocsPerRun(3, func() { literalArgvWord(word) }); allocs > 256 {
+				t.Fatalf("word walk allocated %.0f objects — a rescan of the accumulated "+
+					"value per byte/part allocates O(input) copies", allocs)
+			}
 		})
 	}
 }

@@ -198,11 +198,11 @@ func TestBuiltInProgramOverride_DoubleQuotedEscapeDecode(t *testing.T) {
 		`\x is not an escapable pair inside "…" — the decoded word keeps the backslash`)
 }
 
-// Codex review round 6: ~ after an unquoted : or = expands only inside an
-// assignment-shaped word (NAME=…), so a detected path containing a colon keeps
-// its tilde literal — the bare and double-quoted spellings are the same argv.
-// Inside an assignment-shaped word the same :~ really does expand and must
-// stay refused.
+// Codex review rounds 6-7: ~ after an unquoted : or = is literal to the
+// /bin/sh launch shell — expansion there happens only at word start — so a
+// detected path containing a colon keeps its tilde literal and every spelling
+// is the same argv. A different word that merely contains :~ is still refused
+// for what it is: a different argv, not a different spelling.
 func TestBuiltInProgramOverride_ColonTildePathRoundTrips(t *testing.T) {
 	const detected = `'/tmp/a:~/claude' --dangerously-skip-permissions`
 	for _, configured := range []string{
@@ -219,7 +219,7 @@ func TestBuiltInProgramOverride_ColonTildePathRoundTrips(t *testing.T) {
 		"x=a:~/claude --dangerously-skip-permissions", detected)
 	require.False(t, builtInProgramOverride(resolved, "claude",
 		"x=a:~/claude --dangerously-skip-permissions"),
-		"inside an assignment-shaped word the :~ expands — never trust it")
+		"x=a:~/claude is literal to /bin/sh too — it just is not the detected word")
 }
 
 // The end-to-end repro from #5487: a config written by an older af carries the

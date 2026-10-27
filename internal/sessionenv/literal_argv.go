@@ -18,13 +18,23 @@ import (
 // syntax.Lit part's raw bytes, so an unquoted `*` or `~` on disk would be
 // reported as the literal word `*` or `~` even though the shell expands it at
 // exec time. This walker DECODES unquoted backslash escapes per POSIX (\x is
-// the literal character x, and backslash-newline is removed — the same decode
-// that makes ShellQuotePath's '\” apostrophe idiom round-trip) and then
+// the literal character x — the same decode that makes ShellQuotePath's '\”
+// apostrophe idiom round-trip) and then
 // refuses any word whose UNQUOTED, UNESCAPED characters the shell could still
-// act on: a glob metacharacter, a tilde in expansion position, or a brace
-// expansion. Quoted or escaped copies of the same characters are literal text
-// and stay comparable.
+// act on: a glob metacharacter, a word-leading tilde, or a brace expansion.
+// Quoted or escaped copies of the same characters are literal text and stay
+// comparable.
 func LiteralCommandArgv(command string) ([]string, bool) {
+	// A line continuation is removed before everything except reserved-word
+	// recognition, which still sees the joined word — the comparator cannot
+	// prove how ti\<newline>me lexes, so any backslash-newline anywhere in the
+	// source makes the command unparseable (Codex review rounds 6-7). The
+	// parser does not retain the pair inside Lit values, so this must be a
+	// source-level check; over-rejecting a quoted or escaped copy is safe —
+	// the caller falls back to the byte compare.
+	if strings.Contains(command, "\\\n") {
+		return nil, false
+	}
 	call, ok := singleSimpleCall(command)
 	if !ok || len(call.Assigns) > 0 {
 		return nil, false
@@ -81,105 +91,97 @@ var shellKeywords = map[string]bool{
 // word arrived bare — every byte unquoted and unescaped — which the caller
 // needs for the command-word keyword check. Quoted parts contribute their
 // text verbatim; unquoted Lit parts are decoded per POSIX (\x emits literal
-// x, \<newline> emits nothing) and simultaneously checked for syntax the
-// shell could still act on — an UNESCAPED glob (* ? [), an unescaped tilde in
-// expansion position (the word's first character, or directly after an
-// unescaped = or : — the assignment-form positions bash expands even in
-// argument position), or an unescaped $ immediately before a quote part (the
-// POSIX spelling of $'…'/$"…", literal to a POSIX sh but decoded input to
-// bash). unquoted accumulates only unescaped Lit characters for the brace
-// check, since every separator of a brace expansion must be unquoted and
-// unescaped.
+// x, \<newline> is unparseable) and simultaneously checked for syntax the
+// shell could still act on — an UNESCAPED glob (* ? [), a word-leading tilde
+// (the only expansion position the /bin/sh launch shell honors in argument
+// position; a ~ after = or : is literal there — Codex review round 7), or an
+// unescaped $ immediately before a quote part (the POSIX spelling of
+// $'…'/$"…", literal to a POSIX sh but decoded input to bash). unquoted
+// accumulates only unescaped Lit characters for the brace check, since every
+// separator of a brace expansion must be unquoted and unescaped.
 func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 	if word == nil {
 		return "", false, false
 	}
 	var value, unquoted strings.Builder
-	// prev/prevInert track the last emitted byte and whether it came from an
-	// unquoted, unescaped source — the only context that can put a following
-	// tilde in expansion position.
-	prev, prevInert := byte(0), false
-	// wordStart stays true while nothing but line continuations has preceded
-	// the current position: a continuation vanishes before tilde-prefix
-	// evaluation, so a ~ behind one is still the word's first character. Any
-	// emitted byte or quote part — even an empty one — ends it.
+	// wordStart is true until the first byte is emitted or the first quote
+	// part is seen — even an empty one — since a ~ only expands at the very
+	// front of a word.
 	wordStart := true
 	bare := true
-	// Tilde expansion after = or : applies only inside an assignment-shaped
-	// word (NAME=...): a ~ in /tmp/a:~/claude is literal in every shell while
-	// x=a:~ expands. assignment turns true when the word emits an unquoted =
-	// whose decoded prefix is a valid shell name; lastDelim marks the position
-	// right after that delimiter, since only the FIRST = enables a following ~
-	// (v=a=~ is literal under bash).
-	assignment, lastDelim := false, false
+	// lastUnq/lastUnqInert track the last emitted byte and whether it came
+	// from unquoted, unescaped text — the only context whose trailing $ can
+	// form the ambiguous $'…'/$"…" spelling with a following quote part. They
+	// are maintained incrementally; rescanning the accumulated value is what
+	// made earlier versions quadratic (Codex review round 7).
+	var lastUnq byte
+	lastUnqInert := false
 	for i, part := range word.Parts {
-		if dq, ok := part.(*syntax.DblQuoted); ok {
-			wordStart, bare, lastDelim = false, false, false
+		switch p := part.(type) {
+		case *syntax.DblQuoted:
+			wordStart, bare = false, false
 			before := value.Len()
-			if !appendLiteralDblQuoted(&value, dq) {
+			if !appendLiteralDblQuoted(&value, p, &lastUnq) {
 				return "", false, false
 			}
 			if value.Len() > before {
-				prev, prevInert = value.String()[value.Len()-1], false
+				lastUnqInert = false
 			}
-			continue
-		}
-		lit, ok := part.(*syntax.Lit)
-		if !ok {
-			wordStart, bare, lastDelim = false, false, false
-			before := value.Len()
-			if !appendLiteralShellPart(&value, part) {
+		case *syntax.SglQuoted:
+			wordStart, bare = false, false
+			if p.Dollar {
 				return "", false, false
 			}
-			if value.Len() > before {
-				prev, prevInert = value.String()[value.Len()-1], false
+			for k := 0; k < len(p.Value); k++ {
+				value.WriteByte(p.Value[k])
 			}
-			continue
-		}
-		raw := lit.Value
-		for j := 0; j < len(raw); j++ {
-			c := raw[j]
-			if c == '\\' {
-				bare = false
-				if j+1 == len(raw) {
-					// Unreachable from a successful parse (a trailing escape
-					// continues into the next part); keep it as literal text.
-					value.WriteByte('\\')
-					prev, prevInert, wordStart, lastDelim = '\\', false, false, false
+			if len(p.Value) > 0 {
+				lastUnq, lastUnqInert = p.Value[len(p.Value)-1], false
+			}
+		case *syntax.Lit:
+			raw := p.Value
+			for j := 0; j < len(raw); j++ {
+				c := raw[j]
+				if c == '\\' {
+					bare = false
+					if j+1 == len(raw) {
+						// Unreachable from a successful parse (a trailing escape
+						// continues into the next part); keep it as literal text.
+						value.WriteByte('\\')
+						lastUnq, lastUnqInert, wordStart = '\\', false, false
+						continue
+					}
+					n := raw[j+1]
+					if n == '\n' {
+						// Defense in depth: the command-level scan rejects
+						// continuations before parsing; keep the refusal here
+						// in case a Lit value ever retains the pair.
+						return "", false, false
+					}
+					value.WriteByte(n)
+					lastUnq, lastUnqInert, wordStart = n, false, false
+					j++
 					continue
 				}
-				n := raw[j+1]
-				if n == '\n' {
-					// A line continuation is removed before everything except
-					// reserved-word recognition, which still sees the joined
-					// word — the comparator cannot prove how ti\<newline>me
-					// lexes, so it must not certify (Codex review round 6).
+				switch c {
+				case '*', '?', '[':
 					return "", false, false
+				case '~':
+					if wordStart {
+						return "", false, false
+					}
 				}
-				value.WriteByte(n)
-				prev, prevInert, wordStart, lastDelim = n, false, false, false
-				j++
-				continue
+				value.WriteByte(c)
+				unquoted.WriteByte(c)
+				lastUnq, lastUnqInert, wordStart = c, true, false
 			}
-			switch c {
-			case '*', '?', '[':
+			// The $ check runs after the Lit is decoded so an escaped \$ —
+			// literal text — is not mistaken for the $'…'/$"…" spelling.
+			if lastUnqInert && lastUnq == '$' && i+1 < len(word.Parts) && isQuotedWordPart(word.Parts[i+1]) {
 				return "", false, false
-			case '~':
-				if wordStart || lastDelim || (prevInert && prev == ':' && assignment) {
-					return "", false, false
-				}
 			}
-			delim := c == '=' && !assignment && isShellName(value.String())
-			value.WriteByte(c)
-			unquoted.WriteByte(c)
-			prev, prevInert, wordStart, lastDelim = c, true, false, delim
-			if delim {
-				assignment = true
-			}
-		}
-		// The $ check runs after the Lit is decoded so an escaped \$ — literal
-		// text — is not mistaken for the $'…'/$"…" spelling.
-		if prevInert && prev == '$' && i+1 < len(word.Parts) && isQuotedWordPart(word.Parts[i+1]) {
+		default:
+			// ParamExp, CmdSubst, ArithmExp and friends — never literal.
 			return "", false, false
 		}
 	}
@@ -197,7 +199,9 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 // $(…), `…`, or an arithmetic form — and makes the whole word non-literal.
 // Escaped and quoted characters inside here never reach the caller's unquoted
 // skeleton, so they stay inert for the glob, tilde, and brace scans.
-func appendLiteralDblQuoted(b *strings.Builder, dq *syntax.DblQuoted) bool {
+// last receives the most recently emitted byte, so the caller's trailing-$
+// check needs no rescan of the accumulated buffer.
+func appendLiteralDblQuoted(b *strings.Builder, dq *syntax.DblQuoted, last *byte) bool {
 	if dq == nil || dq.Dollar {
 		return false
 	}
@@ -218,28 +222,13 @@ func appendLiteralDblQuoted(b *strings.Builder, dq *syntax.DblQuoted) bool {
 				switch raw[j+1] {
 				case '$', '`', '"', '\\':
 					b.WriteByte(raw[j+1])
+					*last = raw[j+1]
 					j++
 					continue
 				}
 			}
 			b.WriteByte(c)
-		}
-	}
-	return true
-}
-
-// isShellName reports whether s is a valid shell variable name — the
-// assignment-shape gate for the = / : tilde rule.
-func isShellName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		name := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(i > 0 && c >= '0' && c <= '9')
-		if !name {
-			return false
+			*last = c
 		}
 	}
 	return true
