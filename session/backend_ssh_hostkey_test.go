@@ -34,7 +34,8 @@ func TestSSHStrictPostureVerifiesAgainstTheConfiguredFile(t *testing.T) {
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", KnownHosts: kh}, config.SSHHostKeyStrict)
 
 	assert.Contains(t, cmd, "StrictHostKeyChecking=yes", "strict must refuse an unknown or changed key")
-	assert.Contains(t, cmd, "UserKnownHostsFile='"+kh+"'")
+	assert.Contains(t, cmd, `UserKnownHostsFile="`+kh+`"`,
+		"the store path is double-quoted at the ssh config layer so a whitespace path stays one file")
 	assert.Contains(t, cmd, "GlobalKnownHostsFile=/dev/null",
 		"the old client read ONE file; a system-wide entry must not satisfy verification now")
 }
@@ -43,7 +44,7 @@ func TestSSHStrictPostureFallsBackToTheUserKnownHosts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict)
-	assert.Contains(t, cmd, "UserKnownHostsFile='"+filepath.Join(home, ".ssh", "known_hosts")+"'")
+	assert.Contains(t, cmd, `UserKnownHostsFile="`+filepath.Join(home, ".ssh", "known_hosts")+`"`)
 }
 
 // An unexpected posture value must still fail SAFE to strict, exactly as the old
@@ -67,7 +68,7 @@ func TestSSHAcceptNewWritesToAFHomeNotUserKnownHosts(t *testing.T) {
 
 	assert.Contains(t, cmd, "StrictHostKeyChecking=accept-new",
 		"accept-new trusts an unknown key but must still refuse a CHANGED one")
-	assert.Contains(t, cmd, "UserKnownHostsFile='"+filepath.Join(afHome, sshKnownHostsFileName)+"'")
+	assert.Contains(t, cmd, `UserKnownHostsFile="`+filepath.Join(afHome, sshKnownHostsFileName)+`"`)
 	assert.NotContains(t, cmd, filepath.Join(userHome, ".ssh", "known_hosts"),
 		"accept-new must never be pointed at the user's shared known_hosts (#2556)")
 
@@ -88,7 +89,7 @@ func TestSSHAcceptNewUsesConfiguredKnownHosts(t *testing.T) {
 	kh := filepath.Join(t.TempDir(), "my_known_hosts")
 
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "h2.example.com", KnownHosts: kh}, config.SSHHostKeyAcceptNew)
-	assert.Contains(t, cmd, "UserKnownHostsFile='"+kh+"'")
+	assert.Contains(t, cmd, `UserKnownHostsFile="`+kh+`"`)
 	assert.NotContains(t, cmd, sshKnownHostsFileName, "with ssh.known_hosts set, the af store must not be used")
 }
 
@@ -97,7 +98,7 @@ func TestSSHAcceptNewUsesConfiguredKnownHosts(t *testing.T) {
 func TestSSHInsecurePostureVerifiesNothing(t *testing.T) {
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "whatever"}, config.SSHHostKeyInsecure)
 	assert.Contains(t, cmd, "StrictHostKeyChecking=no")
-	assert.Contains(t, cmd, "UserKnownHostsFile='"+os.DevNull+"'",
+	assert.Contains(t, cmd, `UserKnownHostsFile="`+os.DevNull+`"`,
 		"insecure must not record anything either — /dev/null is the equivalent of ignoring the key")
 }
 
@@ -107,12 +108,13 @@ func TestSSHInsecurePostureVerifiesNothing(t *testing.T) {
 func TestSSHLoginUserIsPinnedAgainstSSHConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", User: "deploy"}, config.SSHHostKeyStrict)
-	assert.Contains(t, cmd, "User='deploy'")
+	assert.Contains(t, cmd, `User="deploy"`,
+		"the login user is pinned and quoted at the ssh config layer so a spaced username stays one value")
 
 	// With no ssh.user, the daemon's own account is pinned rather than left to
 	// ssh_config — again matching the old loginUser().
 	bare := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict)
-	assert.Contains(t, bare, "-o User='")
+	assert.Contains(t, bare, `User="`)
 }
 
 // An identity file is offered, and the AGENT is still available — the old

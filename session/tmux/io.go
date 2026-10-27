@@ -781,6 +781,32 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 	return string(output), nil
 }
 
+// CapturePaneBuffer captures the pane's WHOLE buffer — scrollback plus the
+// visible grid — in the same GRID form CaptureVisiblePaneGrid returns
+// (capture-pane -p -e without -J): one line per stored row, so a caller can
+// slice it by pane rows. The dead-pane repaint uses it to bottom-anchor the
+// tail (#5330): the visible grid alone is what a live repaint wants, but a
+// held dead pane's content extends into history and its last rows are the
+// only ones worth showing.
+//
+// Bounded by tmuxCommandTimeout (#1787) like its visible-grid sibling, which
+// it can replace on the subscribe path; wraps ErrSessionGone the same way.
+func (t *TmuxSession) CapturePaneBuffer() (string, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-S", "-", "-t", exactTarget(t.sanitizedName))
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: capture-pane buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		if !t.ExistsOrUnknown() {
+			return "", t.sessionGoneError("capture-pane buffer", err)
+		}
+		return "", fmt.Errorf("error capturing pane buffer: %v", err)
+	}
+	return string(output), nil
+}
+
 type paneCursorState struct {
 	Row     int
 	Col     int
