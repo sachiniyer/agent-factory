@@ -384,29 +384,36 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 		kind := tabKindForData(td.Kind)
 		var cur *Tab
 		for _, t := range i.Tabs {
-			if (td.ID != "" && t.ID == td.ID) || (td.ID == "" && t.ID == "" && t.Name == td.Name) {
+			if t.ID == td.ID && (td.ID != "" || t.Name == td.Name) {
 				cur = t
 				break
 			}
 		}
 		exit := tabExitFromData(td.Exit)
+		// An id-less legacy row stays id-less: the daemon resolves it through its
+		// name/ordinal fallback, and refuses an id it never issued.
+		fresh := &Tab{ID: td.ID, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL,
+			Proposal: td.Proposal, PushMode: td.PushMode, Exit: exit, accountScope: td.AccountScope}
 		if cur == nil {
-			id := td.ID
-			if id == "" {
-				id = newTabID()
-			}
-			cur = &Tab{ID: id}
 			changed = true
-		} else if cur.Name != td.Name || cur.Kind != kind || cur.URL != td.URL ||
-			cur.Command != td.Command || !tabExitEqual(cur.Exit, exit) {
-			changed = true
-		} else if idx >= len(i.Tabs) || i.Tabs[idx] != cur {
-			changed = true
+			next = append(next, fresh)
+			continue
 		}
-		cur.Name, cur.Kind, cur.Command, cur.URL = td.Name, kind, td.Command, td.URL
-		cur.Proposal, cur.PushMode, cur.Exit = td.Proposal, td.PushMode, exit
-		cur.accountScope = td.AccountScope
-		next = append(next, cur)
+		if cur.Name == td.Name && cur.Kind == kind && cur.URL == td.URL && cur.Command == td.Command &&
+			cur.Proposal == td.Proposal && cur.PushMode == td.PushMode &&
+			cur.accountScope == td.AccountScope && tabExitEqual(cur.Exit, exit) {
+			// Unchanged: keep the pointer, readers may hold it (copy-on-write).
+			if idx >= len(i.Tabs) || i.Tabs[idx] != cur {
+				changed = true
+			}
+			next = append(next, cur)
+			continue
+		}
+		changed = true
+		cp := *cur
+		cp.Name, cp.Kind, cp.Command, cp.URL = td.Name, kind, td.Command, td.URL
+		cp.Proposal, cp.PushMode, cp.Exit, cp.accountScope = td.Proposal, td.PushMode, exit, td.AccountScope
+		next = append(next, &cp)
 	}
 	if !changed {
 		return false
