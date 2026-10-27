@@ -121,13 +121,19 @@ type sandboxProvisioner struct {
 	sessionDir string
 	remotePID  string
 
-	tunnel   *exec.Cmd
-	tunnelLn net.Listener
-	// lifeline holds the daemon-side pipe ends when the tunnel runs under the
-	// watch lifeline (#5564); nil for a directly-spawned tunnel. stopTunnel
-	// closes them — keepW's close is also what would EOF the lifeline into its
-	// group kill if it survived the group SIGKILL stopTunnel sends first.
-	lifeline *tunnelLifeline
+	// tunnel is the currently published generation of the supervised ssh
+	// transport (#5571 W1.2): nil between a death and its re-dial, and after
+	// stopTunnel. forward/localAddr pin the -L contract — localAddr is the
+	// endpoint every consumer dials, fixed at provision and re-bound verbatim
+	// on every re-dial so a consumer's cached URL is never stale — and forward
+	// embeds the remote agent-server's listen address it targets. reverseFwds
+	// is W3.4's -R slot (the in-sandbox callback): empty here; each element is
+	// composed into the spawn as `-R "$N"` so a future reverse forward gets
+	// the same ExitOnForwardFailure fatality, group teardown, and supervision.
+	tunnel      *tunnelChild
+	forward     string
+	localAddr   string
+	reverseFwds []string
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -141,8 +147,12 @@ type sandboxProvisioner struct {
 	// tunnel was stopped is spent. A tunnel spawn that completes after the
 	// stop ran — a daemon exit that overtook the provision — must be killed
 	// by its spawner rather than published to a provisioner no remaining stop
-	// will reach.
-	stopped bool
+	// will reach. stoppedCh is closed under the same latch so the transport
+	// supervisor can wake out of a re-dial backoff immediately rather than
+	// sleep through a teardown (#5571 W1.2); it is built lazily by
+	// stoppedChanLocked because reap-only provisioners never spawn one.
+	stopped   bool
+	stoppedCh chan struct{}
 
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
@@ -384,18 +394,28 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	// born; the entry is dropped by stopTunnel, which reap reaches on every
 	// failure path below.
 	registerSandboxTunnel(p)
+	// The transport contract the supervisor re-establishes on every re-dial is
+	// pinned here, once: every generation binds the same localAddr so the
+	// published endpoint is never stale, and W3.4's -R slot rides p.reverseFwds.
+	p.reapMu.Lock()
+	p.forward, p.localAddr = forward, localAddr
+	p.reapMu.Unlock()
 	// Spawn+publish happen atomically under reapMu (provisionTunnelChild), so
 	// a StopAllSandboxTunnels stop can never interleave between a born child
 	// and its publication — and a child born after that stop already ran is
 	// killed by its own spawner rather than left registered to nothing.
-	_, _, err = p.provisionTunnelChild(forward)
-	if err != nil {
+	if _, err := p.provisionTunnelChild(); err != nil {
 		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
 	}
 
-	if err := waitForSandboxTunnelWithin(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
+	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", err
 	}
+	// The supervisor starts only after the FIRST generation proves ready: an
+	// ssh that cannot establish at all is a provision failure (reaped as one),
+	// not an outage to retry — the re-dial loop exists for transports that die
+	// AFTER they once worked.
+	go p.superviseTunnel()
 	return localAddr, nil
 }
 
@@ -413,6 +433,11 @@ func sandboxTransportConfigKey(label string) string {
 	}
 	return "sandbox.ssh"
 }
+
+// waitForSandboxTunnelFn is the readiness probe both startTunnel and the
+// transport supervisor run after a spawn — a var so a supervisor test can give
+// its fake tunnel a working forward without standing up a real listener.
+var waitForSandboxTunnelFn = waitForSandboxTunnelWithin
 
 // waitForSandboxTunnel probes the local end until it answers. Without this the
 // provision would return an endpoint whose first request races the forward.
@@ -636,17 +661,18 @@ func (p *sandboxProvisioner) stopTunnel() {
 	// Unregistered even when there was never a child: the entry exists from
 	// before the spawn, and StopAllSandboxTunnels must not revisit this
 	// provisioner while the kill below is still in flight. stopped latches
-	// with it so a spawn still in flight kills its own newborn rather than
-	// publish to a provisioner the registry no longer names.
+	// with it — and stoppedCh closes — so a spawn still in flight kills its
+	// own newborn rather than publish to a provisioner the registry no longer
+	// names, and the transport supervisor parked on a backoff wakes and exits
+	// (#5571 W2 supervision). The latch is checked because a retried reap
+	// runs this again and a second close would panic.
 	unregisterSandboxTunnel(p)
-	p.stopped = true
-	killTunnel(p.tunnel, p.lifeline)
-	p.tunnel = nil
-	p.lifeline = nil
-	if p.tunnelLn != nil {
-		_ = p.tunnelLn.Close()
-		p.tunnelLn = nil
+	if !p.stopped {
+		p.stopped = true
+		close(p.stoppedChanLocked())
 	}
+	killTunnel(p.tunnel)
+	p.tunnel = nil
 }
 
 type sandboxBackend struct {
