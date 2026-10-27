@@ -137,6 +137,11 @@ func (i *Instance) MarkUserKilled() {
 		// tombstone, including when OpNone means noteStateChangeLocked is a no-op.
 		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
+		// The tombstone permanently disables automatic restore, so an armed
+		// environmental wait becomes a promise nothing can keep — every client
+		// would report "waiting on the environment" while only the tombstone's
+		// cleanup loop runs. It commits clear with the tombstone (#5295 review).
+		i.lostRestoreWait = LostRestoreWait{}
 		i.touchLocked()
 	}
 	i.inFlightOp = OpNone
@@ -159,6 +164,10 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	if userKilled && !i.userKilled {
 		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
+		// Same retirement as the daemon's own commit: a tombstoned row can
+		// never be auto-restored, so a mirrored armed-wait is a lie here too
+		// (#5295 review).
+		i.lostRestoreWait = LostRestoreWait{}
 		i.touchLocked()
 		if i.inFlightOp != OpKilling {
 			i.inFlightOp = OpNone
@@ -553,6 +562,18 @@ func (i *Instance) SetStartedForTest(started bool) {
 	defer i.mu.Unlock()
 	if i.started != started {
 		i.started = started
+		i.touchLocked()
+	}
+}
+
+// SetBranchForTest sets the branch name recorded on the instance. Test-only:
+// the real flow sets it inside LocalBackend.Start, which unit tests that wire a
+// worktree with SetGitWorktreeForTest never run.
+func (i *Instance) SetBranchForTest(branch string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Branch != branch {
+		i.Branch = branch
 		i.touchLocked()
 	}
 }

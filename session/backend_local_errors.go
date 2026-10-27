@@ -74,7 +74,7 @@ func finishRecoverTabFailure(
 	setupErr := fmt.Errorf("recover: restore tabs for session %q: %w", title, err)
 	if restoreResult == tmux.RestoreRespawned {
 		if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-			setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+			setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 		}
 	}
 	return markRecoverRebuilt(rebuilt, setupErr)
@@ -102,20 +102,11 @@ func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err e
 	// closing it destroys a running agent and its scrollback to report a problem
 	// with a different tab. finishRecoverTabFailure draws the same line by only
 	// closing what it respawned.
-	//
-	// A sibling spawn-dir refusal is the same shape: the binding (live or
-	// never-spawned) is what Recover reattaches or re-spawns, and the loader
-	// routes the row Lost rather than dropping it (#5172). Closing the agent
-	// here would kill the live session behind the preserved handle that launch
-	// just decided to keep — the contradiction retainsInertInstance's own
-	// comment calls out. Mirror the two preserveAgentHandle sites in launch by
-	// sparing the agent from this error too.
-	if firstTime || tmuxSession == nil || retainsInertInstance(err) ||
-		errors.Is(err, tmux.ErrSpawnDirMissing) {
+	if firstTime || tmuxSession == nil || retainsInertInstance(err) {
 		return err
 	}
 	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-		return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+		return fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 	}
 	return err
 }
@@ -126,7 +117,7 @@ func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) e
 	}
 	for _, session := range sessions {
 		if _, err := session.CloseAndWaitForPaneExit(); err != nil {
-			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %v)", setupErr, err)
+			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %w)", setupErr, err)
 		}
 	}
 	return setupErr
