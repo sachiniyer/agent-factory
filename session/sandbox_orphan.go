@@ -68,7 +68,12 @@ func (e *SandboxOrphanError) OrphanRecord() *Instance { return e.record }
 // would jump in the clients' rail order at the moment it settles.
 type sandboxIdentity struct {
 	id, title, path string
-	createdAt       time.Time
+	// repoIdentityPath is the canonical repo identity the owning create resolved
+	// (InstanceOptions.RepoIdentityPath); the retained row must keep projecting it
+	// or the tombstone leaves the canonical project scope under a bare repository's
+	// linked-worktree registration — losing the only cleanup handle's attribution.
+	repoIdentityPath string
+	createdAt        time.Time
 }
 
 // newSandboxOrphanError builds the orphan error for a sandbox whose teardown
@@ -97,11 +102,12 @@ func newSandboxOrphanError(who sandboxIdentity, res ProvisionResult, cause error
 		created = time.Now()
 	}
 	record := &Instance{
-		ID:        id,
-		Title:     who.title,
-		Path:      who.path,
-		CreatedAt: created,
-		UpdatedAt: time.Now(),
+		ID:               id,
+		Title:            who.title,
+		Path:             who.path,
+		repoIdentityPath: who.repoIdentityPath,
+		CreatedAt:        created,
+		UpdatedAt:        time.Now(),
 		// Lost, not Ready: no agent ever ran on this sandbox. Retention comes from
 		// the unknown-cleanup marker and the tombstone below, never from a row that
 		// looks alive.

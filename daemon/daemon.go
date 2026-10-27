@@ -392,6 +392,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// the pane it was reading is torn down.
 	defer manager.configAssistants.stop()
 
+	// And the ssh -L tunnels behind ssh/sandbox sessions (#5564). They are
+	// children of THIS daemon, not of any session teardown — a session must
+	// survive the daemon that hosts it, so nothing else ever stops them on
+	// exit, and a clean exit would orphan them exactly like a SIGKILL does.
+	// Registered here, before the control socket binds and restore runs, for
+	// the same reason as the supervisors above: a signal during warm-up must
+	// not slip past it, and the session-side registry covers tunnels no
+	// instance points at yet (a provision still in flight).
+	defer stopSandboxTunnels()
+
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
@@ -530,6 +540,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// in-process scheduler below replaces them.
 	sweepLegacyTaskUnits()
 
+	sweepStartupOrphanSandboxTunnels()
 	sweepStartupOrphanContainers(manager)
 	sweepStartupTabCleanup(manager)
 	manager.finishInstanceRestore()
@@ -771,6 +782,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					if existing != nil {
 						if prior := existing[key]; prior != nil {
 							next[key] = prior
+							materialized++
 							continue
 						}
 					}
@@ -783,6 +795,9 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if existing != nil {
 				if instance := existing[key]; instance != nil {
 					next[key] = instance
+					if stableIDMatchesForDaemon(instance.ID, item.ID) {
+						materialized++
+					}
 					continue
 				}
 			}

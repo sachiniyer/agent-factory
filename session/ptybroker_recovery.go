@@ -252,6 +252,16 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	// readLoop begins feeding and waking subscribers IMMEDIATELY — the barrier is what
 	// keeps those bytes behind the repaint built below (#1975).
 	if err := b.ensureCaptureStartedLocked(); err != nil {
+		// A held dead pane is not a broken dial — pipe-pane refuses it
+		// FOREVER, so there is nothing to re-dial (#5330). The armed
+		// subscribers are released onto a repaint of the dead pane's screen:
+		// the buffer's bottom-anchored tail plus the "Pane is dead" marker,
+		// built by the same Snapshot path a live recovery uses. A respawn
+		// arrives through resetCapture, not through here.
+		if b.ch.PaneDead() {
+			rp = b.recoveryRepaint()
+			return
+		}
 		// Same reasoning as the stop-error split in ensureCaptureStartedLocked, and
 		// this is the site that fires MORE often: a failed dial is the unreachable
 		// -endpoint case, which the stop path never even reaches. redialLoop gives
@@ -357,6 +367,19 @@ func redialDelay(attempt int) time.Duration {
 // healthy capture appearing (a subscribe beat us to it).
 func (b *ptyBroker) redialLoop() {
 	for {
+		// A held dead pane is terminal, not an outage: pipe-pane refuses it
+		// forever, so there is nothing to re-dial (#5330). Run the guarded
+		// recovery ONCE — it releases the attached subscribers onto a repaint
+		// of the dead pane's screen — then stop driving. A respawn arrives
+		// through resetCapture, not through here. Cheap to ask each iteration
+		// — the loop only runs while a capture is unhealthy.
+		if b.ch.PaneDead() {
+			b.recoverDeadUpstream()
+			b.mu.Lock()
+			b.redialing = false
+			b.mu.Unlock()
+			return
+		}
 		b.mu.Lock()
 		healthy := b.capturing && !b.captureEnded
 		if b.closed || healthy || len(b.subs) == 0 {

@@ -1,0 +1,14 @@
+
+[38;5;231m●[39m The core logic checks out, but I spotted a possible stuck state: if [38;5;153mattach[39m crashes mid-write, re-running it for the
+  same slug does nothing despite the error telling users to retry. I'll dig into the store and CLI code next.
+
+[38;5;246m●[39m Running [1m1[0m shell command…                                                                                           
+
+[38;5;174m*[39m [38;5;174mMoonwalking… [38;5;246m(1m 21s · ↓[39m [38;5;246m4.8k tokens · thinking)[39m      
+[38;5;246m  ⎿  Tip: Use /config to change your default permission mode (including Plan Mode)
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · esc to interrupt · ← 2 agents
+

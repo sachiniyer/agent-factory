@@ -73,6 +73,8 @@ export function tabLabel(tab: NamedTab): string {
       return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
+    case TabKind.Docs:
+      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
     default:
       return tab.name || "Tab";
   }
@@ -103,5 +105,5 @@ export function tabDisplayLabel(tab: NamedTab): string {
  * the Go side keeps the same pairing beside its own label mapping.
  */
 export function isRenameableTab(kind: number): boolean {
-  return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;
+  return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode || kind === TabKind.Docs;
 }

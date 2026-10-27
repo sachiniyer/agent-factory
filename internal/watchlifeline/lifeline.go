@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -76,6 +77,32 @@ const (
 	// shell convention for "command not found / not executable".
 	ExitStartFailed = 127
 )
+
+// Exe names the binary a spawner execs as the lifeline: its own.
+//
+// On Linux that is /proc/<pid>/exe, which execs the spawner's exact binary
+// even after `af upgrade` replaced the file at its path, so the two halves of
+// the protocol can never be different versions there. It names the CALLER's
+// pid rather than "self" because a systemd-bound spawn execs it from inside
+// systemd-run, where "self" would be systemd-run.
+//
+// macOS has no such handle, so os.Executable's path can hold a newer or older
+// af than the running process. The ack makes that safe: a binary that does
+// not speak this protocol sends none, and the spawner falls back to a direct
+// spawn.
+//
+// Shared by every lifeline consumer (watch commands and ssh sandbox tunnels):
+// session cannot import daemon, so the resolution lives here rather than in
+// the watcher that first needed it.
+func Exe() (string, error) {
+	if runtime.GOOS == "linux" {
+		exe := fmt.Sprintf("/proc/%d/exe", os.Getpid())
+		if _, err := os.Stat(exe); err == nil {
+			return exe, nil
+		}
+	}
+	return os.Executable()
+}
 
 // Argv is the lifeline invocation after the executable path: the daemon passes
 // these as the command's arguments.
