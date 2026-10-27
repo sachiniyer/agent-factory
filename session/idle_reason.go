@@ -434,6 +434,57 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 	return replaced
 }
 
+// markAgentRuntimeReplaced records whether the runtime a recover or load just
+// re-established is a REPLACEMENT process — a respawn or remote re-provision,
+// or a reattach whose pane identity could not be verified — rather than the
+// recorded agent still running (#4222). Both branches of a re-establishment
+// assign it before their ConfirmLive edge (or before Start(false) returns), so
+// the run-end classifier reads this attempt's verdict, never a stale one.
+func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.agentRuntimeReplaced = replaced
+}
+
+// InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as
+// interrupted when this instance's runtime was just established as a
+// replacement (#4222). It is the load path's sibling of transition.go's
+// ConfirmLive carve-out — there is no ConfirmLive edge where Start(false)
+// re-spawns a gone runtime, so the daemon's load settlement calls this before
+// persisting the row. Reports whether a run was ended.
+func (i *Instance) InterruptTaskRunIfRuntimeReplaced() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || !i.agentRuntimeReplaced {
+		return false
+	}
+	i.endTaskRunInterruptedLocked()
+	return true
+}
+
+// TaskRunInterrupted reports whether this session's task run ended interrupted
+// by a runtime replacement (#4222) rather than on an agent-idle completion
+// edge. Sticky for the process's lifetime — used by the daemon's completion
+// predicate to tell the two ways the run marker clears apart.
+func (i *Instance) TaskRunInterrupted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunInterrupted
+}
+
+// ConsumeTaskRunInterrupted reports once that a restore's ConfirmLive ended an
+// in-flight task run as interrupted (#4222). The daemon calls it at its restore
+// sites to stamp the owning task's run status; in-memory and one-shot, so a
+// restart before the consume keeps the prior status — matching every other
+// best-effort status write.
+func (i *Instance) ConsumeTaskRunInterrupted() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	interrupted := i.taskRunInterruptedStamp
+	i.taskRunInterruptedStamp = false
+	return interrupted
+}
+
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
 // It applies both directions because runtime replacement can clear or replace
 // the evidence, and the daemon snapshot is authoritative for all five fields.

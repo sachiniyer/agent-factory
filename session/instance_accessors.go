@@ -584,6 +584,14 @@ func (i *Instance) MarkLoadRuntimeReplacedForTest() {
 	i.markLoadRuntimeReplaced()
 }
 
+// MarkAgentRuntimeReplacedForTest seeds the replacement verdict a backend
+// stamps on a recovered runtime (#4222). Production sets it only from backend
+// recover/load paths; tests use it to model a respawn vs a verified reattach
+// around a ConfirmLive edge.
+func (i *Instance) MarkAgentRuntimeReplacedForTest(replaced bool) {
+	i.markAgentRuntimeReplaced(replaced)
+}
+
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
 // previous daemon would have left behind (#2669). Test-only: the real flow
 // writes them from CloseTab's commit and reads them back through

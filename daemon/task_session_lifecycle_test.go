@@ -222,6 +222,52 @@ func TestRunEndedIntoIdle_ExcludesAnUncertainCreate(t *testing.T) {
 		"a create whose startup outcome was never established is not a finished run")
 }
 
+// TestTaskSessionLifecycle_InterruptedRunStampsAbortedAndKeepsTheSession is the
+// #4222 report end to end: a Lost-restore that RESPAWNED the runtime — the
+// prompted agent is gone and the replacement was never replayed the prompt —
+// ends the run as interrupted. The owning task's status is stamped
+// "aborted: runtime replaced" at the restore's settlement, and no on_complete
+// verb may apply to the interrupted run's work.
+func TestTaskSessionLifecycle_InterruptedRunStampsAbortedAndKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-int", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-int")
+	stubTaskLifecycle(t, "task-int", task.OnCompleteKill)
+
+	// Lost mid-run → restore fence → the backend's respawn verdict → the
+	// ConfirmLive that used to drop the fence and leave the run's marker for
+	// the replacement pane's first idle edge to "finish".
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+	inst.MarkAgentRuntimeReplacedForTest(true)
+	require.NoError(t, inst.Transition(session.ConfirmLive()))
+	require.False(t, inst.TaskRunActive(),
+		"the run ends at the restore edge — before the fix the marker was still set here")
+
+	// The restore's post-operation settlement site stamps the owning task.
+	manager.noteRuntimeReplaced(repoID, inst)
+	assert.Equal(t, taskStatusAbortedRuntimeReplaced, lastRunStatus(t, "task-int"))
+
+	// The racing tick: a poll that captured the run in flight before the
+	// restore must not read the replacement's idle pane as a completed run —
+	// that tick is what used to hand on_complete the interrupted worktree.
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	// Nothing dispatched, so a short settle is enough to prove no teardown ran.
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, stillRegistered,
+		"an interrupted run keeps its session — on_complete must not reap it")
+	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+	assert.Nil(t, inst.OwedOnComplete(), "no teardown obligation may be filed for an interrupted run")
+}
+
 // TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete is the
 // issue's report end to end (#5219): a task session whose prompt was attempted
 // but whose agent has not visibly reacted settles idle on the first quiet

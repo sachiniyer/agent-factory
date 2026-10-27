@@ -128,6 +128,34 @@ type Instance struct {
 	// to the previous release — which knows only the mission hold — drops the
 	// marker instead of releasing it as a retired mission edge.
 	taskRunTurnGateHeld bool
+	// agentRuntimeReplaced records whether the runtime a recover or load just
+	// re-established is a REPLACEMENT process — a respawn or remote
+	// re-provision, or a reattach whose pane identity could not be verified —
+	// rather than the recorded agent still running. Backends assign it on every
+	// re-establishment, before their ConfirmLive edge (or before Start(false)
+	// returns), so the run-end classifier reads this attempt's verdict and
+	// never a stale one: replaced ends an in-flight task run as interrupted;
+	// a verified reattach leaves the run to the agent that still owns its
+	// prompt (#4222).
+	agentRuntimeReplaced bool
+	// taskRunInterrupted records that this session's task run ended
+	// interrupted — the runtime that owned its prompt was replaced without a
+	// replay (#4222). It is what tells "the marker cleared" apart from "the
+	// run completed" for the daemon's completion edge, which may have captured
+	// taskRunWasActive=true on a tick that raced the restore. Sticky for the
+	// process's lifetime: a session has exactly one run, and an interrupted
+	// end is a fact about it that never un-happens. In-memory only — after a
+	// restart the marker is already false, so no poll can ever capture the
+	// active half of the edge again and nothing needs the flag.
+	taskRunInterrupted bool
+	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
+	// the daemon's status write: set when a restore's ConfirmLive performs the
+	// interrupt, consumed once by noteRuntimeReplaced so the owning task's
+	// last_run_status is stamped exactly once — a later restore with no run to
+	// interrupt must not rewrite a newer status. A restart in the gap keeps the
+	// prior status while the durable fact — the cleared marker — was persisted
+	// by the restore's own settlement.
+	taskRunInterruptedStamp bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

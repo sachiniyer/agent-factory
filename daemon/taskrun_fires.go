@@ -44,6 +44,14 @@ import (
 // evidence whether the interrupted attempt already satisfied it.
 
 const taskStatusAbortedShutdown = "aborted: daemon shutting down"
+
+// taskStatusAbortedRuntimeReplaced records a run that never completed because
+// its runtime was replaced — a Lost-restore respawn or a daemon restart that
+// spawned a fresh process — without the run's prompt being replayed (#4222).
+// The aborted: prefix keeps a pending fire replayable, same as the shutdown
+// member: the occurrence did not run to completion.
+const taskStatusAbortedRuntimeReplaced = "aborted: runtime replaced"
+
 const taskStatusAbortedPrefix = "aborted:"
 
 // errTaskFireReconcile marks a reconcile failure — the interrupted attempt's

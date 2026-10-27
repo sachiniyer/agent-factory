@@ -300,15 +300,23 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced()
+			// The same verdict the recover path stamps (#4222): a load-time
+			// respawn is a replacement process, so a task run still in flight on
+			// this row ends interrupted rather than finished by the fresh agent's
+			// first idle tick.
+			i.markAgentRuntimeReplaced(true)
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
 			// the session under the same sanitized name. The pane root's (pid,
 			// start-time) identity is the proof — a match keeps the recorded launch
 			// command across the restart, and only a mismatch or an unanswerable
-			// probe retires the claim.
+			// probe retires the claim. A reattach that retires the claim could not
+			// prove it kept the prompted process, so it counts as replacement for
+			// the task-run question too (#4222).
 			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
 				i.markLoadRuntimeReplaced()
+				i.markAgentRuntimeReplaced(true)
 			}
 		}
 	} else {

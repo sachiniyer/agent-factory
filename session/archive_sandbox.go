@@ -195,6 +195,11 @@ func recoverSandbox(i *Instance) error {
 		}
 		return err
 	}
+	// A sandbox recover re-provisions unconditionally — there is no remote
+	// reattach — so the runtime ConfirmLive publishes is always a replacement
+	// (#4222). Stamp the verdict before the edge so the run-end classifier
+	// inside it can interrupt a still-in-flight task run.
+	i.markAgentRuntimeReplaced(true)
 	_ = i.Transition(ConfirmLive())
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -75,14 +76,39 @@ const taskLifecycleHookWait = 10 * time.Minute
 //     (keepUncertainCreate), and reaping it would destroy exactly what that
 //     retention exists to preserve. Stating the condition here means a future
 //     refactor of the poll's early returns cannot silently authorize that.
+//
+//   - the run did not end interrupted (#4222). A Lost-restore whose replacement
+//     runtime was never replayed the prompt clears the marker inside its own
+//     ConfirmLive — off the poll's edge entirely — so a tick that captured
+//     taskRunWasActive before racing that restore would otherwise read the
+//     freshly-idle replacement pane as a completed run and apply on_complete
+//     to work the interrupted run produced. The sticky flag is the
+//     distinguishing fact: the marker cleared, but not by a completion edge.
 func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	if !taskRunWasActive || instance.TaskRunActive() {
+		return false
+	}
+	if instance.TaskRunInterrupted() {
 		return false
 	}
 	if instance.StartupStateUnknown() {
 		return false
 	}
 	return instance.GetLiveness() == session.LiveReady
+}
+
+// stampTaskRunInterrupted records "aborted: runtime replaced" on the task whose
+// run a runtime replacement interrupted (#4222). Best-effort like the run
+// path's own status write: the durable fact is the cleared run marker, which
+// the replacement's settlement already persisted.
+func stampTaskRunInterrupted(instance *session.Instance) {
+	taskID := instance.TaskID
+	if taskID == "" {
+		return
+	}
+	if _, err := task.UpdateTaskStatus(taskID, nil, taskStatusAbortedRuntimeReplaced); err != nil {
+		log.WarningLog.Printf("could not record task %s's interrupted run (session %q): %v", taskID, instance.Title, err)
+	}
 }
 
 // deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED
