@@ -201,7 +201,7 @@ func (s *Store) Changes(sessionID string) (*Changes, error) {
 		if err != nil {
 			return err
 		}
-		edits, err := s.unseen(slug, sessionID, cursor, head)
+		edits, err := s.unseen(slug, sessionID, cursor, head, true)
 		if err != nil {
 			return err
 		}
@@ -253,7 +253,7 @@ func (s *Store) Checkpoint(sessionID string) (*Checkpoint, error) {
 		if err != nil {
 			return err
 		}
-		edits, err := s.unseen(slug, sessionID, cursor, head)
+		edits, err := s.unseen(slug, sessionID, cursor, head, false)
 		if err != nil {
 			return err
 		}
@@ -290,8 +290,9 @@ const (
 )
 
 // unseen lists commits in from..to that touch slug, oldest first, without the
-// agent commits of session sessionID.
-func (s *Store) unseen(slug, sessionID, from, to string) ([]Edit, error) {
+// agent commits of session sessionID. Without withDiff, Files and Patch stay
+// empty and git runs once.
+func (s *Store) unseen(slug, sessionID, from, to string, withDiff bool) ([]Edit, error) {
 	format := "--format=%H" + fieldSep + "%ct" + fieldSep +
 		"%(trailers:key=Af-Author,valueonly,separator=)" + fieldSep +
 		"%(trailers:key=Af-Session,valueonly,separator=)" + recordSep
@@ -326,12 +327,62 @@ func (s *Store) unseen(slug, sessionID, from, to string) ([]Edit, error) {
 		if sec, err := strconv.ParseInt(f[1], 10, 64); err == nil {
 			e.At = time.Unix(sec, 0).UTC().Format(time.RFC3339)
 		}
-		if e.Files, e.Patch, err = s.commitDiff(e.Commit, slug); err != nil {
-			return nil, err
+		if withDiff {
+			if e.Files, e.Patch, err = s.commitDiff(e.Commit, slug); err != nil {
+				return nil, err
+			}
 		}
 		edits = append(edits, e)
 	}
 	return edits, nil
+}
+
+// Unseen counts the commits that Changes would return for session sessionID
+// now, and returns its slug. It takes no snapshot and does not move the cursor,
+// so edits on disk that are not committed yet do not count.
+func (s *Store) Unseen(sessionID string) (string, int, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return "", 0, err
+	}
+	if !s.initialized() {
+		return "", 0, ErrNotAttached
+	}
+	slug, cursor, err := s.sessionState(sessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	head, err := s.head()
+	if err != nil {
+		return "", 0, err
+	}
+	edits, err := s.unseen(slug, sessionID, cursor, head, false)
+	if err != nil {
+		return "", 0, err
+	}
+	return slug, len(edits), nil
+}
+
+// RewindCursor moves the cursor of session sessionID back from to, where a
+// Changes call left it, to from. It does nothing when the cursor has moved
+// since, so it never hides an edit that a later pull or checkpoint showed.
+func (s *Store) RewindCursor(sessionID, from, to string) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+	return s.withLock(func() error {
+		current, err := s.git(nil, "rev-parse", "--verify", "--quiet", cursorRefPrefix+sessionID)
+		if err != nil {
+			if isExitCode(err, 1) {
+				return nil
+			}
+			return err
+		}
+		if strings.TrimSpace(current) != to {
+			return nil
+		}
+		_, err = s.git(nil, "update-ref", cursorRefPrefix+sessionID, from, to)
+		return err
+	})
 }
 
 func (s *Store) commitDiff(commit, slug string) ([]string, string, error) {
@@ -354,6 +405,15 @@ func (s *Store) commitDiff(commit, slug string) ([]string, string, error) {
 }
 
 func isExitCode(err error, code int) bool {
+	var got int
+	return exitCode(err, &got) && got == code
+}
+
+func exitCode(err error, code *int) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	*code = exitErr.ExitCode()
+	return true
 }

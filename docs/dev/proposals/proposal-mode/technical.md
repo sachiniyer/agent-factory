@@ -122,11 +122,10 @@ that are not committed come only from agents.
 
 ## Transport
 
-- **Step 1** reads and writes the local disk directly, in the same way that
-  other `config`-backed commands do. With `--daemon-url`, a command fails
-  with an error that says remote daemons are not supported yet.
-- **Step 2** adds daemon HTTP routes. The Docs tab and remote CLIs use them.
-  The CLI moves to these routes, and the disk code moves into the daemon.
+- **Step 1** read and wrote the local disk directly.
+- **Step 2** moves the store behind daemon HTTP routes (see `api.md`). The CLI
+  and the Docs tab both use them, so `--daemon-url` works. The daemon is the
+  only process that writes the store.
 
 ## Three-way merge (step 2)
 
@@ -141,24 +140,75 @@ If `HEAD` changed that file since that commit, the daemon runs
 
 ## File watching (step 2)
 
-The daemon watches each open proposal with fsnotify. When an agent writes a
-file, the daemon sends a `proposal.changed` event on the existing events
-WebSocket, so open tabs reload clean buffers immediately. For a buffer that has
-edits, the tab merges on its next save.
+The daemon checks the watched proposals in its existing poll loop. A proposal
+is watched when a session is attached to it or has a Docs tab for it. For each
+watched proposal, the daemon reads the folder and compares the mtime and size
+of each doc with the last values it saw. A change publishes a
+`proposal.changed` event on the existing events WebSocket, so open tabs reload
+clean buffers immediately. For a buffer that has edits, the tab merges on its
+next save.
+
+- This uses no new dependency. A stat of a few files on each tick costs less
+  than fsnotify, which needs a watch for each folder and its own goroutine.
+- The check does not commit. The next read, save, `changes` or `checkpoint`
+  snapshots the change as before.
+- The list of attachments is read again only when the attach refs change.
 
 ## Push (step 3)
 
-The daemon starts a push to the session that owns the Docs tab when all three
-conditions are true:
+The daemon sends a session its unseen edits as a prompt, so the agent does not
+have to pull them. `api.md` (Push) has the routes, the status shape and the
+prompt.
 
-1. The last human save was 10 s or more ago.
-2. The session is `Ready` (it is idle and waits for input).
-3. `changes` for that session is not empty.
+### Conditions
 
-The push sends a prompt through the same path as `send-prompt`. The prompt
-contains the diff and one line that reminds the agent of the callout rules.
-Each tab has an Auto / Manual switch. In Manual mode, nothing is sent until
-the user clicks **Send now**.
+In auto mode, the daemon sends when all of these are true:
+
+1. The last human save (`SaveProposalDoc`) was 10 s or more ago. A save
+   records its time for every session attached to the proposal.
+2. The session is `Ready` (it is idle and waits for input). For Claude this is
+   reliable: `task/claude_working.go` keeps a session `Running` through a
+   mid-turn pause behind a still pane.
+3. No TUI is attached full-screen to the session (the same pause lease that
+   holds task deliveries, #1586), so a push does not submit what the user is
+   typing in the pane.
+4. `changes` for that session would not be empty.
+5. The push is not held, and no earlier push is unconfirmed.
+
+**Send now** skips the 10 s wait, the hold and condition 3. It still waits
+for `Ready` and for an unconfirmed delivery.
+
+### Code
+
+- `proposal.DecidePush` is a pure function from one session's state and the
+  time to a push state and a send decision. It holds every timing rule, so
+  `proposal/push_test.go` tests the rules without a daemon.
+- `proposal.Service` keeps one push entry for each attached session: mode,
+  last human save, hold, send now, delivery in flight, the time of an
+  unconfirmed delivery, a retry time, and a cached unsent count. The count
+  comes from `git log` with no diff, and it is counted again after each
+  commit through the daemon, each pull or checkpoint, and every 30 s.
+- The poll loop calls `ScanProposals` and then `pushProposals`
+  (`daemon/proposals_push.go`). That builds one `PushTarget` for each loaded
+  session: the push mode of each Docs tab, `Ready` from the liveness, and the
+  TUI pause lease. A send runs on its own goroutine, so a slow delivery never
+  holds the poll loop.
+- The push mode is stored on the Docs tab (`push_mode` in the tab record), so
+  it stays after a restart. The rest of the state is in memory. After a
+  daemon restart, a push starts again with the next human save.
+
+### Send
+
+1. The daemon runs the same store call as `changes`, which moves the cursor.
+2. It builds the prompt from the edits (`proposal.PushPrompt`). Above 8 KB of
+   patches the prompt names the files only.
+3. It calls `SendPromptWithStatus`, the path of `af sessions send-prompt`.
+4. `delivered` confirms the push. `sent-unverified`, `could-not-confirm` and
+   an ambiguous send error leave it unconfirmed: no other push goes to the
+   session until the daemon sees it busy, or for 60 s. A refusal before any
+   byte reached the pane (`prompt not delivered`) or `not-delivered` puts the
+   cursor back with a compare-and-swap ref update, and the push tries again
+   after 10 s.
 
 ## Code layout
 

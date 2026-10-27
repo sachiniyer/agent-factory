@@ -51,13 +51,21 @@ The web UI only gets this tab, in step 2 and step 3.
 
 ## Push chip (step 3)
 
-- In Auto mode, after a save, the chip counts down from 10 s while the agent
-  is idle: "Sending to agent in 4s · Hold".
-- **Hold** stops this push. The next edit starts the countdown again.
-- If the agent is busy, the chip shows "Waits for agent". It sends when the
-  agent becomes idle and 10 s have passed since your last edit.
-- In Manual mode, the chip is a **Send now** button. It is active when
-  unsent edits exist.
+The chip renders the `push` status from `GetProposal` and then each
+`proposal.push` event for the tab's session (`api.md`, Push).
+
+| `state` | Chip |
+|---|---|
+| `countdown` | "Sending to agent in 4s · Hold". The tab counts down from `due_in_ms`, starting when it receives the status, not to `due_at`: the browser clock can be different from the daemon clock. |
+| `waiting_agent` | "Waits for agent". It sends when the agent becomes idle and 10 s have passed since your last edit. |
+| `held` | "Held · Send now". The next edit starts the countdown again. |
+| `sent` | "Sent to agent". |
+| `idle` | Nothing in auto mode. |
+
+- **Hold** calls `HoldProposalPush`.
+- **Send now** calls `SendProposalChanges`. In Manual mode the chip is always
+  a **Send now** button, and it is active when `unsent` is more than 0.
+- The Auto / Manual switch calls `SetProposalPushMode`.
 
 ## Copy
 
