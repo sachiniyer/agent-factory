@@ -14,7 +14,8 @@ function topLevelFunction(source: string, name: string): string {
   const node = ast.statements.find(statement =>
     ts.isFunctionDeclaration(statement) && statement.name?.text === name);
   assert.ok(node, `index.ts must declare ${name}`);
-  return node.getText(ast);
+  // `export` survives getText; the sandbox runs a script, not a module.
+  return node.getText(ast).replace(/^export\s+/, "");
 }
 
 interface Project { id: string; root: string }
@@ -24,6 +25,7 @@ interface State {
   selectedProject: string | null;
   sessions: unknown[];
   tasks: unknown[];
+  projectsError?: string;
 }
 
 /** An error the stubbed api classifies: "refused" is a definitive daemon refusal,
@@ -38,7 +40,8 @@ const UNKNOWN = (label: string) => `outcome:uncertain:Rebind of ${label} · outc
 
 function harness(initial: { registeredProjects: Project[]; selectedProject: string | null }) {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-  const state: State = { ...initial, sessions: [], tasks: [] };
+  const refetchSource = readFileSync(new URL("./refetch.ts", import.meta.url), "utf8");
+  const state: State = { ...initial, sessions: [], tasks: [], projectsError: "" };
   let persisted: string | null = initial.selectedProject;
   const events: string[] = [];
   const submits: Array<(path: string) => void> = [];
@@ -60,6 +63,11 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
       setTimeout: (fn: () => void) => { const id = nextTimer++; timers.set(id, fn); return id; },
       clearTimeout: (id: number) => { timers.delete(id); },
     },
+    // refetch.ts arms its read bound through globalThis.setTimeout — in the
+    // sandbox that is THIS global, not window's. A never-firing timer keeps the
+    // refetch alive for the test's own bound to cut across it.
+    setTimeout: () => ({}) as unknown as ReturnType<typeof setTimeout>,
+    clearTimeout: () => undefined,
     store: {
       get: () => state,
       set: (patch: Partial<State>) => Object.assign(state, patch),
@@ -105,13 +113,25 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null;
     var connectionGeneration = 0, rebindInFlightGeneration = 0; // var: tests bump the connection
-    const REBIND_ANSWER_MS = 30000, REBIND_REFRESH_MS = 10000;
+    const REBIND_ANSWER_MS = 30000, REBIND_REFRESH_MS = 10000, REGISTRY_READ_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
     ${topLevelFunction(source, "rebindOutcomeUnknown")}
     ${topLevelFunction(source, "followConfirmedRebind")}
     ${topLevelFunction(source, "commitRegisteredProjects")}
     ${topLevelFunction(source, "openRebindProject")}
+    ${topLevelFunction(refetchSource, "createLatestRequestGate")}
+    ${topLevelFunction(refetchSource, "createFencedRefetcher")}
+    // The real refetcher, wired like index.ts's: the conflict read's commit
+    // must join the same latest-request fence as every other refresh (#4888
+    // review) — and this test counts that fence, not a reimplementation.
+    const projectsRefetcher = createFencedRefetcher({
+      readToken: () => token,
+      fetch: listProjects,
+      timeoutMs: REGISTRY_READ_MS,
+      commit: commitRegisteredProjects,
+      onError: (e) => store.set({ projectsError: errorText(e) }),
+    });
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   runInNewContext(code, context);
   const app = context as typeof context & {

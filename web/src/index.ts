@@ -1415,23 +1415,20 @@ function openRebindProject(projectId: string, label: string): void {
             m.setBusy(false);
             m.setError(errorText(e));
           };
-          // fetch carries no timeout, so the read is bounded: after
-          // REBIND_REFRESH_MS its late answer is dropped and missed() runs
-          // instead of leaving the modal busy forever (#4888 review). The
-          // bound also aborts the request itself — a daemon that accepts and
-          // never answers would otherwise keep the connection pending while
-          // missed() refetches, and repeated conflicts would pile those reads
-          // up against the per-origin connection pool (#4888 review).
-          const readAbort = new AbortController();
+          // The read runs through projectsRefetcher so its commit joins the
+          // same latest-request fence as every other registry refresh — a
+          // late conflict answer can no longer overwrite a newer refresh
+          // that committed while it was in flight (#4888 review). The
+          // re-arm then reads the committed store state; REBIND_REFRESH_MS
+          // still bounds how long the modal waits on it before missed().
           let readSettled = false;
           const bound = window.setTimeout(() => {
             if (readSettled) return;
             readSettled = true;
-            readAbort.abort();
             missed();
           }, REBIND_REFRESH_MS);
-          void listProjects(tok, readAbort.signal)
-            .then((projects) => {
+          void projectsRefetcher.refresh()
+            .then(() => {
               if (readSettled) return;
               readSettled = true;
               window.clearTimeout(bound);
@@ -1439,9 +1436,13 @@ function openRebindProject(projectId: string, label: string): void {
               // A read under a credential this page no longer holds says nothing
               // it may act on; the form still re-arms, on the daemon's message.
               const own = token === tok;
-              const now = own ? projects.find((p) => p.id === projectId) : undefined;
+              if (own && store.get().projectsError) {
+                // The fenced read failed — same end state as the bound.
+                missed();
+                return;
+              }
+              const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : undefined;
               if (own) {
-                commitRegisteredProjects(projects);
                 if (now !== undefined) {
                   expectedRoot = now.root;
                   expectedCheckoutID = now.checkout_id;
@@ -1456,13 +1457,6 @@ function openRebindProject(projectId: string, label: string): void {
               }
               m.setBusy(false);
               m.setError(now !== undefined ? `Rebound elsewhere, to ${now.root} · submit again to move it from there` : errorText(e));
-            })
-            .catch(() => {
-              if (readSettled) return;
-              readSettled = true;
-              window.clearTimeout(bound);
-              // The direct read failed — same end state as the bound.
-              missed();
             });
         };
         const unknownOutcome = (): void => {

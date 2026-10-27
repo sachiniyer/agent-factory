@@ -19430,23 +19430,24 @@ function openRebindProject(projectId, label) {
             m.setBusy(false);
             m.setError(errorText(e));
           };
-          const readAbort = new AbortController();
           let readSettled = false;
           const bound = window.setTimeout(() => {
             if (readSettled) return;
             readSettled = true;
-            readAbort.abort();
             missed();
           }, REBIND_REFRESH_MS);
-          void listProjects(tok, readAbort.signal).then((projects) => {
+          void projectsRefetcher.refresh().then(() => {
             if (readSettled) return;
             readSettled = true;
             window.clearTimeout(bound);
             if (!current()) return;
             const own = token === tok;
-            const now = own ? projects.find((p) => p.id === projectId) : void 0;
+            if (own && store.get().projectsError) {
+              missed();
+              return;
+            }
+            const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : void 0;
             if (own) {
-              commitRegisteredProjects(projects);
               if (now !== void 0) {
                 expectedRoot = now.root;
                 expectedCheckoutID = now.checkout_id;
@@ -19459,11 +19460,6 @@ function openRebindProject(projectId, label) {
             }
             m.setBusy(false);
             m.setError(now !== void 0 ? `Rebound elsewhere, to ${now.root} \xB7 submit again to move it from there` : errorText(e));
-          }).catch(() => {
-            if (readSettled) return;
-            readSettled = true;
-            window.clearTimeout(bound);
-            missed();
           });
         };
         const unknownOutcome = () => {

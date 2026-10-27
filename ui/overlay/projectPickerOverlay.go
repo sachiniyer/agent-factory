@@ -423,6 +423,15 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 		// registry identity and keep a session-only row; a zero-session row
 		// has nothing left to describe and drops (#4888 review).
 		if row.SessionCount > 0 {
+			// Unless the healthy read claims this row's root for a DIFFERENT
+			// repository: the converted session row's only navigable target is
+			// stale outright then, and keeping it would shadow the fresh
+			// registration's row and send its Enter to a checkout the old repo
+			// no longer occupies — the same claim check the session-derived
+			// rows above get (#4888 review).
+			if claimedRepo, claimed := freshRootRepo[row.Root]; claimed && claimedRepo != row.RepoID {
+				continue
+			}
 			sessionRow := row
 			sessionRow.RegistryID = ""
 			sessionRow.RegistryRoot = ""
