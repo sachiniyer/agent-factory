@@ -88,8 +88,25 @@ func TestBranchesHeldByWorktrees_ReportsArchivedHolds(t *testing.T) {
 	assert.NotContains(t, held, "foo-3")
 }
 
+// holdsFromPorcelain parses porcelain via parseWorktreeBranchBindings and
+// aggregates the bindings into a branch→paths map, mirroring what
+// BranchesHeldByWorktrees does in production.
+func holdsFromPorcelain(porcelain string) (map[string][]string, error) {
+	bindings, err := parseWorktreeBranchBindings(porcelain)
+	if err != nil {
+		return nil, err
+	}
+	holds := make(map[string][]string)
+	for _, b := range bindings {
+		if b.Branch != "" {
+			holds[b.Branch] = append(holds[b.Branch], b.Path)
+		}
+	}
+	return holds, nil
+}
+
 func TestParseWorktreeBranchHoldsPreservesEveryHolder(t *testing.T) {
-	holds, err := parseWorktreeBranchHolds(
+	holds, err := holdsFromPorcelain(
 		"worktree /repo/live\x00HEAD abc\x00branch refs/heads/shared\x00\x00" +
 			"worktree /repo/archived\x00HEAD def\x00branch refs/heads/shared\x00\x00")
 	require.NoError(t, err)
@@ -231,7 +248,7 @@ func TestParseWorktreeBranchHolds(t *testing.T) {
 		porcelain += record + "\x00"
 	}
 
-	held, err := parseWorktreeBranchHolds(porcelain)
+	held, err := holdsFromPorcelain(porcelain)
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string][]string{
