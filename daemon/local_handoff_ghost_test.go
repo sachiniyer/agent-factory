@@ -457,3 +457,63 @@ func TestLocalPendingHandoffGhostReleasesInertRelocationLiveLost(t *testing.T) {
 		t.Fatalf("rawTaskRunHoldsSlot held a local LiveLost row whose relocation-recovery record keeps the loader inert (Started=false); canAutoRestoreLostSession refuses it and the loaded form releases, so the raw arm must release too or the ghost wedges max_concurrent_runs forever")
 	}
 }
+
+// TestLocalPendingHandoffGhostReleasesUndecodableRelocation is the third shape
+// the handoffFenceLoadedFormHolds relocation gate must not re-raise: a local row
+// whose relocation-recovery record cannot be decoded (here, missing rollback-safety
+// originals — RestoreRelocationRecoveryOriginals errors with "rollback safety
+// metadata is missing"). FromInstanceData rejects such a row at the same
+// RestoreRelocationRecoveryOriginals boundary, so no Instance or restore loop can
+// ever materialize it and clear its TaskRunActive. LoadedActivity returns
+// ActivityPending for a non-sandbox row it cannot read a loaded form for, so the
+// LoadedActivityPending early return in handoffFenceLoadedFormHolds would hold the
+// slot — and with no in-memory lifecycle edge to release it, the capped task
+// wedges forever. The undecodable guard releases the unmaterializable shape
+// before LoadedActivity is consulted, mirroring the loader's rejection.
+//
+// The row carries the handoff fence (HandoffOriginalStartupStateUnknown proving
+// the original state was false) so the marker gate passes and a LiveRunning
+// liveness so the only thing that could re-raise the hold is the
+// LoadedActivityPending early return; the undecodable relocation recovery is what
+// makes it unmaterializable.
+func TestLocalPendingHandoffGhostReleasesUndecodableRelocation(t *testing.T) {
+	originalFalse := false
+	row := session.InstanceData{
+		TaskID:                             "task1",
+		TaskRunActive:                      true,
+		Liveness:                           session.LiveRunning,
+		BackendType:                        "local",
+		PendingHandoffMission:              "continue the inherited work",
+		HandoffDeliveryStatus:              session.PromptCouldNotConfirm,
+		StartupStateUnknown:                true,
+		HandoffOriginalStartupStateUnknown: &originalFalse,
+		Worktree: session.GitWorktreeData{
+			// A recovery record with a real stall state but none of the
+			// rollback-safety originals (OriginalExternalWorktree/
+			// OriginalBranchCreatedByUs/OriginalStartupStateUnknown) the
+			// restore path requires — RestoreRelocationRecoveryOriginals
+			// errors with "rollback safety metadata is missing". This is the
+			// shape the loader rejects outright (FromInstanceData fails at the
+			// same boundary), so no Instance or restore loop can clear
+			// TaskRunActive.
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryStalled,
+			},
+		},
+	}
+	// Precondition: the relocation record is undecodable, so FromInstanceData
+	// rejects this row and no Instance or restore loop can materialize it.
+	if _, err := row.RestoreRelocationRecoveryOriginals(); err == nil {
+		t.Fatalf("precondition: the relocation record must be undecodable for this to be the unmaterializable shape; got no error")
+	}
+	// Precondition: LoadedActivity reports ActivityPending for the non-sandbox
+	// row it cannot read a loaded form for — the early return the
+	// undecodable guard must bypass.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityPending {
+		t.Fatalf("LoadedActivity reported %v for a local row with an undecodable relocation record; the non-sandbox err branch must report pending for the unmaterializable shape the fence must not re-raise", activity)
+	}
+	if rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot held a local row whose relocation-recovery record is undecodable (FromInstanceData rejects it, so no Instance or restore loop can clear TaskRunActive); LoadedActivity returns ActivityPending for the non-sandbox shape, but the loaded form never exists, so holding it wedges max_concurrent_runs forever on a ghost no in-memory lifecycle edge can release")
+	}
+}

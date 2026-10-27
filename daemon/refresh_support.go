@@ -179,7 +179,29 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // hold for it, or the ghost wedges the cap. A row whose restored record has no
 // relocation recovery is the one the loader starts, so it is the one shape the
 // fallback re-raises.
+//
+// A row whose relocation-recovery record cannot be decoded at all (for example,
+// missing rollback-safety originals) is unmaterializable: FromInstanceData
+// rejects it at the same RestoreRelocationRecoveryOriginals boundary, so no
+// Instance or restore loop can ever clear its TaskRunActive. LoadedActivity
+// returns ActivityPending for such a non-sandbox row (it cannot read a loaded
+// form that does not exist), so the LoadedActivityPending early return would
+// hold the slot and wedge the cap on a ghost no in-memory lifecycle edge can
+// release. The undecodable guard at the top releases that shape before
+// LoadedActivity is consulted, mirroring the loader's rejection.
 func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
+	// A row whose relocation-recovery record cannot be decoded is unmaterializable:
+	// FromInstanceData rejects it at this same RestoreRelocationRecoveryOriginals
+	// boundary, so no Instance or restore loop can ever clear its TaskRunActive.
+	// LoadedActivity returns ActivityPending for such a non-sandbox row because it
+	// cannot read a loaded form that does not exist, so the LoadedActivityPending
+	// early return below would hold the slot and, with no lifecycle edge to release
+	// it, wedge max_concurrent_runs forever on a ghost no in-memory Instance can
+	// clear. Check the loader's restoration boundary before accepting
+	// LoadedActivityPending and release this unmaterializable shape.
+	if _, err := item.RestoreRelocationRecoveryOriginals(); err != nil {
+		return false
+	}
 	if activity, _ := session.LoadedActivity(item); activity == session.ActivityPending {
 		return true
 	}
@@ -204,8 +226,8 @@ func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
 	// still revive — the only shape the fence re-raises a hold for.
 	restored, err := item.RestoreRelocationRecoveryOriginals()
 	if err != nil {
-		// Undecodable: LoadedActivity above returned ActivityPending, so this
-		// branch is unreachable for a LiveLost row; fail closed rather than wedge.
+		// Unreachable: the guard above already released an undecodable row.
+		// Fail closed rather than wedge a ghost no Instance can clear.
 		return false
 	}
 	return session.EffectiveLiveness(item) == session.LiveLost &&
