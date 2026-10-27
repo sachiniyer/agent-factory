@@ -180,6 +180,16 @@ type livePosture struct {
 	// snapshot returns the current global config. It is read EXACTLY ONCE per
 	// request (withLivePosture) and the whole posture derives from that one read.
 	snapshot func() *config.Config
+	// posturePair, when set, replaces snapshot: it returns the config AND the
+	// #5183 upgrade-probation token floor in ONE atomic read. The apply sequence
+	// is three ordered writes — arm, config publish, disarm — and reading the
+	// floor as a separate atomic from the config lets a request straddle them:
+	// old tokenless config observed before the publish, cleared floor observed
+	// after it → the phantom pair admits the request unauthenticated on a socket
+	// both real snapshots would have gated. Pairing is the only answer — neither
+	// read order alone closes both the arm and the disarm straddle. Nil means
+	// (snapshot(), false) — no floor.
+	posturePair func() (*config.Config, bool)
 	// freeze is this listener KIND's refusal freeze, shared by every generation:
 	// a refusal can land while an OLDER generation is still draining after a
 	// normal rebind, so per-generation state cannot cover the hole — the freeze
@@ -342,22 +352,53 @@ func (f *postureFreeze) unfreezeFrom(seq uint64) {
 // the live config's token requirements where those are stricter, or the live
 // snapshot when no pin reaches it. The overlay keeps the #2480 direction
 // honest through a freeze: a tightening apply still reaches draining conns on
-// a frozen generation — only relaxations are pinned out.
+// a frozen generation — only relaxations are pinned out. The probation token
+// floor (#5183) overlays last, on whichever config that chose, in the same
+// OR-only direction.
 func (l *livePosture) current() *config.Config {
-	live := l.snapshot()
+	var live *config.Config
+	floored := false
+	if l.posturePair != nil {
+		live, floored = l.posturePair()
+	} else {
+		live = l.snapshot()
+	}
+	cfg := live
 	if f := l.freeze; f != nil {
 		f.mu.Lock()
 		f.pruneLocked(time.Now())
 		for _, r := range f.pins {
 			if l.seq <= r.through {
-				cfg := tightenFrozenPosture(r.cfg, live)
-				f.mu.Unlock()
-				return cfg
+				cfg = tightenFrozenPosture(r.cfg, live)
+				break
 			}
 		}
 		f.mu.Unlock()
 	}
-	return live
+	if floored {
+		cfg = withProbationTokenFloor(cfg)
+	}
+	return cfg
+}
+
+// withProbationTokenFloor overlays the #5183 upgrade-probation floor onto the
+// config a request is gated under: an upgrade candidate keeping a journaled
+// socket bound demands the bearer token whatever the loaded config's
+// require_token says. Same direction as tightenFrozenPosture — the floor ORs
+// into the token requirement and never relaxes anything. It raises
+// RequireToken only: the floor exists so a kept-bound NETWORK socket never
+// answers unauthenticated, and require_loopback_token governs only a
+// loopback-bound socket (the gate's loopbackExempt is judged from the bound
+// address), which is not that exposure. Allocates only while the floor is
+// armed and the config is tokenless — the probation window, never steady
+// state.
+func withProbationTokenFloor(cfg *config.Config) *config.Config {
+	if cfg == nil || cfg.RequireToken {
+		return cfg
+	}
+	floored := *cfg
+	floored.RequireToken = true
+	return &floored
 }
 
 // tightenFrozenPosture merges a pinned config with the live one field-wise so
