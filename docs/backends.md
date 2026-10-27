@@ -705,6 +705,29 @@ recipe in
 
 ---
 
+## Moving a live session to a sandbox (move script)
+
+> **Status:** the building blocks (worktree snapshot, move-script contract,
+> all-or-nothing orchestration) live in the `move` package. The
+> `af sessions move <title> --to <host>` command and the global `move_cmd`
+> setting are not wired yet, so nothing here is user-invokable today; this
+> section is the contract the script will run under.
+
+A move seeds the sandbox workspace from a snapshot of the local worktree — the
+branch history plus every uncommitted and untracked file — rather than a fresh
+clone. `.gitignore`d files are not carried; the operator's **move script** copies
+them. The script runs on the daemon box, never from repository config.
+
+- **stdin:** a JSON object with `session_id`, `title`, `branch`,
+  `source_worktree`, `host`, `dest_workspace` and (when scoped) `account`.
+- **env:** `AF_SSH`, the exact ssh command af uses for that host, so
+  `rsync -e "$AF_SSH" …` and `$AF_SSH host 'cmd'` reach the same machine.
+- **exit:** `0` continues; anything else aborts. Any failure before the session
+  row switches leaves the local session running exactly as before and reaps the
+  half-built sandbox workspace.
+
+See `examples/move-script/move.sh` for a documented example.
+
 ## Archive & restore
 
 For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), archive and restore
