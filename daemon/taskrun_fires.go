@@ -44,6 +44,14 @@ import (
 // evidence whether the interrupted attempt already satisfied it.
 
 const taskStatusAbortedShutdown = "aborted: daemon shutting down"
+
+// taskStatusAbortedRuntimeReplaced records a run that never completed because
+// its runtime was replaced — a Lost-restore respawn or a daemon restart that
+// spawned a fresh process — without the run's prompt being replayed (#4222).
+// The aborted: prefix keeps a pending fire replayable, same as the shutdown
+// member: the occurrence did not run to completion.
+const taskStatusAbortedRuntimeReplaced = "aborted: runtime replaced"
+
 const taskStatusAbortedPrefix = "aborted:"
 
 // errTaskFireReconcile marks a reconcile failure — the interrupted attempt's
@@ -300,6 +308,17 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 			matched = true
 		}
 		if !matched {
+			continue
+		}
+		// A row whose task run was interrupted by a runtime replacement is not
+		// this fire's delivered product (#4222 review): the prompted process is
+		// gone and its replacement was never replayed the prompt, so the
+		// recorded occurrence is still owed. Adopting it would stamp "started"
+		// over the interrupted run's aborted status and discharge a delivery
+		// that never landed. The row stays — its interrupted work is kept —
+		// while the fire falls through to a fresh delivery, and the leftover
+		// path below already declines to reap an identity this row still owns.
+		if data.TaskRunInterrupted {
 			continue
 		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
