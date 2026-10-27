@@ -350,8 +350,11 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
 		if err := call(ctx, req, &resp); err != nil {
 			status := http.StatusInternalServerError
+			var shaped interface{ HTTPStatus() int }
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
+			} else if errors.As(err, &shaped) {
+				status = shaped.HTTPStatus()
 			}
 			writeHTTPError(w, r, status, err)
 			flushHTTPResponse(w)
@@ -490,7 +493,34 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 	}
 	var coded codedError
 	if errors.As(err, &coded) {
-		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
+		env := apiproto.FailureWithCode(err.Error(), coded.APIErrorCode())
+		// An error can carry data the client needs to recover, such as the three
+		// versions of a conflicting proposal save.
+		var withData interface{ EnvelopeData() any }
+		if errors.As(err, &withData) {
+			env.Data = withData.EnvelopeData()
+		}
+		writeHTTPEnvelope(w, r, status, env)
+		return
+	}
+	// A verified resource errno is worth a machine-readable code on the wire:
+	// the errno's errors.Is identity dies in serialization, so the code is how
+	// a client-side classifier still sees "the remote ran out of a kernel
+	// resource" rather than a generic message string (#5295 review).
+	if lostRestoreResourceErrno(err) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeResourceExhausted))
+		return
+	}
+	// A deadline inside the operation — the archive RPC's inner git push
+	// deadline, not this transport's — serializes just as lossy: the client
+	// receives an uncoded message string its bounded-deadline arm cannot
+	// re-see, so a stalled origin would charge the structural budget until
+	// give-up. The resource check above deliberately wins when both hold —
+	// a resource verdict is the stronger environmental signal (#5295 review).
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeDeadlineExceeded))
 		return
 	}
 	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))

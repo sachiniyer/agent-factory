@@ -402,9 +402,8 @@ async function clickRailAction(p: Page, title: string, name: "Archive session" |
   await railAction(p, title, name).click();
 }
 async function taskAction(target: Locator, label: string): Promise<void> {
-  const trigger = target.locator(".af-term-more");
-  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
-  await target.locator("button", { hasText: label }).click();
+  if (label === "Enable" || label === "Disable") await target.getByRole("switch").click();
+  else await target.getByRole("button", { name: label, exact: true }).click();
   if (label === "Remove") await target.page().getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
 }
 
@@ -1477,7 +1476,7 @@ test("token persistence: the login screen says the token will be saved", async (
   const ctx = await tokenRequiredContext(browser);
   const p = await ctx.newPage();
   await p.goto("/");
-  await expect(p.locator(".af-login-note")).toContainText("Saved here until you disconnect");
+  await expect(p.locator(".af-login-note")).toContainText("Saved here until you log out");
   await ctx.close();
 });
 
@@ -1488,7 +1487,8 @@ test("token persistence: Disconnect forgets the token, so the next visit prompts
 
   // The logout affordance: on a shared machine or after a rotation, this is the way
   // back to the prompt. It must clear the STORE, not just the in-memory credential.
-  await p.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await p.locator('.af-viewtab[data-view="config"]').click();
+  await p.locator(".af-config-disconnect").click();
   await expect(p.locator("#af-token")).toBeVisible();
   expect(await storedToken(p)).toBeNull();
 
@@ -1893,28 +1893,18 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
 // narrower there — below the breakpoint it moved INTO the More popover and carried
 // its own sizing rule, so a desktop-only check would miss a copy still rendering
 // behind a disclosure the user has to open to see.
-test("#2458 mobile (375px): the More popover carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
+test("#2458 mobile (375px): the phone appbar carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
   try {
     const p = await ctx.newPage();
     await openTokenless(p);
     await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
 
-    const more = p.locator(".af-appbar-more");
-    await expect(more).toBeVisible();
-    await more.click();
-    const tools = p.locator(".af-appbar-tools");
-    await expect(tools).toBeVisible();
-
-    // Opened, so this is a real look inside rather than a pass earned by the
-    // popover being collapsed.
-    await expect(tools.locator(".af-live")).toHaveCount(0);
-    await expect(tools).not.toContainText("Live");
-    await expect(tools).not.toContainText("Connecting…");
-    // The controls that DO belong there survived the removal — the popover lost one
-    // child, not its contents.
-    await expect(tools.getByRole("button", { name: "Disconnect" })).toBeVisible();
-    await expect(tools.locator(".af-theme-opt").first()).toBeVisible();
+    // With no session open the More menu has nothing to hold, so it is not offered.
+    await expect(p.locator(".af-appbar-more")).toBeHidden();
+    await expect(p.locator(".af-appbar .af-live")).toHaveCount(0);
+    await expect(p.locator(".af-appbar")).not.toContainText("Live");
+    await expect(p.locator(".af-appbar")).not.toContainText("Connecting…");
   } finally {
     await ctx.close();
   }
@@ -2835,9 +2825,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const mouseHint = host.locator(".af-mouse-capture-hint");
-    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    // Seed off the live grid, not a constant: #5492 halves the phone font, so a
+    // count sized for the 13px grid underflows the doubled row count. Five lines
+    // per visible row also keeps the scrollback deeper in PIXELS than the flick
+    // plus its coast can cross — the margin 200 lines bought on ~15px cells.
+    const hostRows = host.locator(".xterm-rows > div");
+    await expect.poll(() => hostRows.count()).toBeGreaterThan(0);
+    const lineCount = (await hostRows.count()) * 5;
+    const lastLine = `touch-scroll-${lineCount}`;
+    await p.keyboard.type(`for i in $(seq 1 ${lineCount}); do printf 'touch-scroll-%s\\n' "$i"; done`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+    await expect(host).toContainText(lastLine, { timeout: 20_000 });
 
     // Aim at the screen — the element a finger actually lands on. The scrollable
     // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
@@ -2862,7 +2860,7 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       /enable-mouse-events/,
     );
     const bottom = await viewport.evaluate((el) => el.scrollTop);
-    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    expect(bottom, `${lineCount} lines of fresh output must leave real scrollback above the view`).toBeGreaterThan(0);
     await dragIntoHistory();
     await expect
       .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
@@ -4377,6 +4375,154 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
     // repopulates the field from e.value and Z is inserted at the restored caret.
     await p.keyboard.type("Z");
     await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The checkbox sibling of the same-key Enter-save test above. A bool row commits
+  // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole
+  // pane, so the focused checkbox is destroyed and replaced. The restoration
+  // ladder only knew about `editingInput` (text rows), `advancedToggle`, and the
+  // account fields, so a checkbox save dropped focus to <body>: the app's
+  // document-level keydown gate then ran, and in config view the user's next
+  // `[`/`]` cycled the top-level view (other keystrokes were silently swallowed) —
+  // the exact body-focus hazard rerenderKeepingUserState's own comments describe.
+  // The fix captures the focused checkbox's `aria-label` (the config key) before
+  // the rebuild and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // auto_update is a core-tier bool row, visible without expanding advanced.
+    // Clicking it focuses it and fires `change` → save.
+    const box = pane.locator('.af-config-row[data-key="auto_update"] input');
+    await box.click();
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt checkbox replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(box).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The select sibling of the checkbox test above. An enumerated row commits on
+  // `change` and the save round-trip rebuilds the pane, so the focused select is
+  // destroyed and replaced. The restoration ladder had a branch for the
+  // account-agent select but none for a per-key config select, so a select save
+  // dropped focus to <body> and the user's next `[`/`]` cycled the view. The fix
+  // captures the focused select's `aria-label` (the config key) before the rebuild
+  // and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // update_channel is a core-tier enum row (stable | preview). Pick the option
+    // the select does not already hold so `change` actually fires.
+    const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+    const current = await channel.evaluate((sel: HTMLSelectElement) => sel.value);
+    const target = current === "stable" ? "preview" : "stable";
+    // Focus the select first, mirroring the real gesture the bug report
+    // reproduced ("clicking a config-row <select>, changing the option"): a mouse
+    // click on the select focuses it and opens the dropdown, and Tabbing to it
+    // focuses it the same way. Playwright's `selectOption` from a NON-focused
+    // state dispatches the change event without transferring focus to the
+    // select, so the element never holds DOM focus and the bug's "rebuild
+    // destroys the focused select" scenario never materializes. Focus() first
+    // makes the select genuinely hold focus at change time, exactly as a user's
+    // own click-to-open or Tab would — so the assertion below proves the fix
+    // catches the same focus loss the bug report observed.
+    await channel.focus();
+    await channel.selectOption(target);
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran).
+    await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt select replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(channel).toBeFocused();
+
+    // Downstream contract: with focus on a native SELECT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
   } finally {
     releaseSave?.();
     await ctx.close().catch(() => {});
@@ -6034,7 +6180,8 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
 
   // Log out, then reconnect (tokenless loopback: the no-auth login offers a single
   // Connect button, no token to paste).
-  await page.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-config-disconnect").click();
   await expect(page.locator(".af-login")).toBeVisible();
   await page.locator(".af-login button.af-primary").click();
   await expect(page.locator(".af-app")).toBeVisible();
@@ -6324,14 +6471,12 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   // Enable/disable round-trips via UpdateTask: the new task is enabled (Disable
   // shown). Disabling flips it, and re-enabling flips it back — proof the toggle
   // rides UpdateTask keyed by the task's id.
+  const enabled = addedRow.getByRole("switch");
+  await expect(enabled).toHaveAttribute("aria-checked", "true");
   await taskAction(addedRow, "Disable");
-  await expect(addedRow.locator("button", { hasText: "Enable" })).toHaveCount(1);
-  await addedRow.locator(".af-term-more").click();
-  await expect(addedRow.locator("button", { hasText: "Enable" })).toBeVisible({ timeout: 30_000 });
+  await expect(enabled).toHaveAttribute("aria-checked", "false", { timeout: 30_000 });
   await taskAction(addedRow, "Enable");
-  await expect(addedRow.locator("button", { hasText: "Disable" })).toHaveCount(1);
-  await addedRow.locator(".af-term-more").click();
-  await expect(addedRow.locator("button", { hasText: "Disable" })).toBeVisible({ timeout: 30_000 });
+  await expect(enabled).toHaveAttribute("aria-checked", "true", { timeout: 30_000 });
 
   // Trigger-now round-trips via TriggerTask (enabled cron tasks only). Await the RPC
   // response and assert the envelope carries no error — the daemon fired it — and the
@@ -6401,7 +6546,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
 
   // Open the Edit form. It reuses the add-task modal in edit mode, SEEDED from the
   // task's current values — proof the form is not a blank re-entry.
-  await editedRow.locator("button", { hasText: "Edit" }).click();
+  await editedRow.getByRole("button", { name: "Edit", exact: true }).click();
   const editModal = page.locator(".af-modal-card");
   await expect(editModal).toBeVisible();
   await expect(editModal.locator(".af-modal-title")).toHaveText("Edit task");
@@ -6535,7 +6680,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
 
   // Re-open it: the stored cron round-trips back through ParseCron into the WEEKLY
   // preset with its cells restored — not a raw string in a text box.
-  await row.locator("button", { hasText: "Edit" }).click();
+  await row.getByRole("button", { name: "Edit", exact: true }).click();
   const editModal = page.locator(".af-modal-card");
   await expect(editModal).toBeVisible();
   await expect(editModal.locator('select[aria-label="Schedule type"]')).toHaveValue("weekly");
@@ -6567,7 +6712,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
   await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
   await expect(reloadedRow.locator(".af-task-trigger")).toContainText("0 */6 * * *");
-  await reloadedRow.locator("button", { hasText: "Edit" }).click();
+  await reloadedRow.getByRole("button", { name: "Edit", exact: true }).click();
   const reopened = page.locator(".af-modal-card");
   await expect(reopened.locator('select[aria-label="Schedule type"]')).toHaveValue("everyNHours");
   await expect(reopened.locator('input[aria-label="Interval"]')).toHaveValue("6");
@@ -7879,13 +8024,15 @@ test("theme (redesign PR1): a saved dark choice is stamped before the app mounts
   expect(atMount).toBe("dark");
   // And it stuck: <html data-theme="dark"> after the app is up.
   expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe("dark");
-  // The dark theme option reads active in the appbar toggle.
-  await expect(page.locator('.af-theme-opt[data-theme-opt="dark"]')).toHaveClass(/af-theme-opt-active/);
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await expect(page.locator(".af-theme-select")).toHaveValue("dark");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
 });
 
 test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors live", async () => {
   // Force Dark and capture a token-driven color (the rail surface).
-  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-theme-select").selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const darkRail = await bgColor(page, ".af-rail");
   const darkBody = await bgColor(page, "body");
@@ -7899,7 +8046,7 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
 
   // Toggle to Light: the SAME selectors resolve to different token values, proving the
   // chrome is driven by the CSS custom properties, not hardcoded colors.
-  await page.locator('.af-theme-opt[data-theme-opt="light"]').click();
+  await page.locator(".af-theme-select").selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   const lightRail = await bgColor(page, ".af-rail");
   const lightBody = await bgColor(page, "body");
@@ -7919,7 +8066,7 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   expect(lightRail).toBe(surfaceRGB("light"));
   expect(darkRail).toBe(surfaceRGB("dark"));
   expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
-  await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+  await expect(page.locator(".af-theme-select")).toHaveValue("light");
 
   // Palette responses from old daemons cannot change fixed browser appearance.
   let paletteReads = 0;
@@ -7929,13 +8076,15 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   expect(await bgColor(page, "body")).toBe(surfaceRGB("light"));
   expect(paletteReads).toBe(0);
   await page.unroute("**/v1/GetTheme");
-  await page.locator('.af-theme-opt[data-theme-opt="system"]').click();
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-theme-select").selectOption("system");
   await expect(page.locator("html")).not.toHaveAttribute("data-theme");
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveAttribute("data-af-theme", "dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-af-theme", "light");
   await page.evaluate(() => localStorage.removeItem("af-theme"));
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
 
 });
 
@@ -8284,8 +8433,6 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
   };
   const sessionName = "peer-agent-2347";
-  const lineCount = 40;
-  const lastLine = `peer-agent-line-${lineCount}`;
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -8300,6 +8447,23 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
+    // lineCount has to sit between the two grids this test drives: above the live
+    // local rows so the seeded output overflows them, yet under HALF the tall
+    // peer's — every typed line emits two rows (the PTY echo plus cat's copy),
+    // and the peer check only proves its point while the tall grid swallows all
+    // of them. Size it from the settled grid, not a constant: #5492's font
+    // halving roughly doubled the phone row count a fixed count was sized for.
+    let localRows = 0;
+    await expect
+      .poll(async () => {
+        const next = await firstRows();
+        const settled = next > 0 && next === localRows;
+        localRows = next;
+        return settled;
+      }, { message: "the phone grid must finish its attach fit before it is measured" })
+      .toBe(true);
+    const lineCount = Math.floor((localRows * 3) / 2);
+    const lastLine = `peer-agent-line-${lineCount}`;
     await expect.poll(firstRows).toBeLessThan(lineCount);
 
     // The fixture's `claude` is the real agent-tab PTY path with a deterministic
@@ -9342,17 +9506,18 @@ test("post-boot theme-color rewrite follows system and explicit choices (#1826, 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
-  await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await p.locator('.af-viewtab[data-view="config"]').click();
+  await p.locator(".af-theme-select").selectOption("dark");
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.dark);
   await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
 
-  await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
+  await p.locator(".af-theme-select").selectOption("light");
   await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.light);
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
-  await p.locator('.af-theme-opt[data-theme-opt="system"]').click();
+  await p.locator(".af-theme-select").selectOption("system");
   await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
   await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
   await ctx.close();
@@ -12586,7 +12751,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         await expect(brand, "decoration yields before project context").toBeHidden();
         await expect(toggle).toBeVisible();
         await expect(project).toBeVisible();
-        await expect(more, "secondary appbar tools collapse behind one touch target").toBeVisible();
+        await expect(more, "an empty More menu is not offered").toBeHidden();
         await expect(tools).toBeHidden();
 
         const primary = await p.evaluate(() => {
@@ -12598,7 +12763,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
             toggle: rect(".af-nav-toggle"),
             views: rect(".af-viewnav"),
             project: rect(".af-project-switch"),
-            more: rect(".af-appbar-more"),
           };
         });
         for (const [name, box] of Object.entries(primary)) {
@@ -12608,7 +12772,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         }
         expect(primary.project.width, "project context owns nearly the whole second row").toBeGreaterThan(200);
         expect(Math.abs(primary.toggle.top - primary.views.top), "top-level navigation shares one top edge").toBeLessThanOrEqual(1);
-        expect(Math.abs(primary.more.top - primary.project.top), "project and More share one top edge").toBeLessThanOrEqual(1);
         expect(primary.project.top, "the project row follows the top-level navigation row").toBeGreaterThan(
           primary.toggle.top + primary.toggle.height,
         );
@@ -12623,8 +12786,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         }
         await p.keyboard.press("Tab");
         await expect(project, "project follows the view row in DOM and pixels").toBeFocused();
-        await p.keyboard.press("Tab");
-        await expect(more, "More follows the project in DOM and pixels").toBeFocused();
 
         const truncation = await projectName.evaluate((el) => {
           const css = getComputedStyle(el);
@@ -12656,41 +12817,8 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         expect(menuBox!.x).toBeGreaterThanOrEqual(0);
         expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
 
-        // Disclosure exclusivity belongs to the actions, not pointer bubbling. The
-        // More click stops propagation and keyboard activation has no mousedown, so
-        // both directions would otherwise leave overlapping panels open (#2226's
-        // event-path gotcha in miniature).
-        await more.click();
-        await expect(projectMenu).toBeHidden();
-        await expect(tools).toBeVisible();
-        await expect(more).toHaveAttribute("aria-expanded", "true");
-        await project.focus();
-        await p.keyboard.press("Enter");
-        await expect(tools).toBeHidden();
-        await expect(more).toHaveAttribute("aria-expanded", "false");
-        await expect(projectMenu).toBeVisible();
         await projectItem(p, LONG_PROJECT).click();
         await expect(projectMenu).toBeHidden();
-
-        // Rare chrome remains operable rather than consuming the project row.
-        await more.click();
-        await expect(tools).toBeVisible();
-        await expect(tools.locator(`.af-theme-opt[data-theme-opt="${theme}"]`)).toHaveClass(/af-theme-opt-active/);
-        const disconnect = tools.getByRole("button", { name: "Disconnect" });
-        await expect(disconnect).toBeVisible();
-        const toolsBox = await tools.boundingBox();
-        expect(toolsBox, "More popover has phone geometry").not.toBeNull();
-        expect(toolsBox!.x).toBeGreaterThanOrEqual(0);
-        expect(toolsBox!.x + toolsBox!.width).toBeLessThanOrEqual(width);
-        for (const control of [disconnect, ...(await tools.locator(".af-theme-opt").all())]) {
-          const box = await control.boundingBox();
-          expect(box, "every More action has geometry").not.toBeNull();
-          expect(box!.height, "More actions keep comfortable tap heights").toBeGreaterThanOrEqual(40);
-        }
-        await p.keyboard.press("Escape");
-        await expect(tools).toBeHidden();
-        await expect(more).toHaveAttribute("aria-expanded", "false");
-        await expect(more).toBeFocused();
 
         await testInfo.attach(`2227-${width}-${theme}-drawer-closed`, {
           body: await p.screenshot(),
@@ -12751,7 +12879,7 @@ test("desktop (1280px): the mobile drawer never engages — the rail stays in vi
   await expect(p.locator(".af-nav-toggle")).toBeHidden();
   await expect(p.locator(".af-brand")).toBeVisible();
   await expect(p.locator(".af-appbar-more")).toBeHidden();
-  await expect(p.locator(".af-appbar-tools")).toBeVisible();
+  await expect(p.locator(".af-appbar-tools")).toBeAttached();
   await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
   await ctx.close();
 });
