@@ -113,7 +113,9 @@ test("no job reports a probe row under a name a PR run uses", () => {
     if (/needs\./.test(job.if || "")) {
       // These skip on ordinary PRs, where GitHub shows an unevaluated name raw,
       // so they must keep a plain one. No gate reads them.
-      assert.doesNotMatch(job.name, /\$\{\{/, `${id} skips on ordinary PRs, so its name must be plain`);
+      // A skipped matrix job never expands, so test-systemd's raw
+      // `Test (systemd, ${{ matrix.os }})` is its plain name there.
+      if (!/\$\{\{ matrix\./.test(job.name)) assert.doesNotMatch(job.name, /\$\{\{/, `${id} skips on ordinary PRs, so its name must be plain`);
       assert.ok(!["Build", "Lint"].includes(job.name), `${id} must not carry a required check's name`);
       continue;
     }
