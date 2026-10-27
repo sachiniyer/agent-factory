@@ -274,6 +274,9 @@ func TestTaskPaneUnavailableEditorExplainsLiveActions(t *testing.T) {
 		require.LessOrEqual(t, len(strings.Split(plain, "\n")), height)
 		pane.SetUnavailable(nil)
 		pane.SetSize(100, 40)
+		// The verbs render only at the selector/button stops they fire from
+		// (#5538); step off the opening Name field to see them.
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 		plain = stripANSI(pane.String())
 		require.Contains(t, plain, "enter save")
 		require.Contains(t, plain, "x toggle")
