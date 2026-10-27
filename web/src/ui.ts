@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
 import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -1620,6 +1620,7 @@ export class AppShell {
     }
     const activeBefore = document.activeElement as HTMLElement | null;
     let restoreChangedFocus: (() => void) | undefined;
+    const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
       s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
@@ -1634,7 +1635,8 @@ export class AppShell {
         const row = sessionRow(s, s.id === state.selectedId,
           id => this.runRailExit(() => this.actions.open(id)),
           target => this.rowActions(target, s.id === state.selectedId), previous);
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : undefined;
+        if (menu) { menu.open(); reopened.push(menu); }
         if (focusedName) restoreChangedFocus = () =>
           row.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
@@ -1650,6 +1652,7 @@ export class AppShell {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -1676,6 +1679,9 @@ export class AppShell {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("…");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
