@@ -79,6 +79,13 @@ export function projectName(root: string): string {
  * repo appear in the switcher before any session exists. Defaults to none, so the
  * pure session+task derivation is unchanged for callers that don't pass it.
  */
+/** The project a session belongs to: its worktree's repo root, else its project
+ *  `path`. Off-box (ssh/sandbox/docker) rows have no local worktree, so they never
+ *  set worktree.repo_path; without the fallback the rail dropped them (LG-02). */
+export function projectRoot(s: Pick<SessionData, "worktree" | "path">): string {
+  return s.worktree?.repo_path || s.path || "";
+}
+
 export function projectSummaries(
   sessions: SessionData[],
   tasks: TaskData[],
@@ -86,7 +93,7 @@ export function projectSummaries(
 ): ProjectSummary[] {
   const byRoot = new Map<string, SessionData[]>();
   for (const s of sessions) {
-    const root = s.worktree?.repo_path;
+    const root = projectRoot(s);
     if (!root) {
       continue;
     }
@@ -164,7 +171,7 @@ export function pickerProjects(
 ): string[] {
   const roots = new Set<string>();
   for (const s of sessions) {
-    const root = s.worktree?.repo_path;
+    const root = projectRoot(s);
     if (root) {
       roots.add(root);
     }
@@ -193,7 +200,7 @@ export function scopeToProject(sessions: SessionData[], root: string | null): Se
   if (!root) {
     return [];
   }
-  return sessions.filter((s) => s.worktree?.repo_path === root);
+  return sessions.filter((s) => projectRoot(s) === root);
 }
 
 /** The set of valid project roots (a project has any live session or any task). A
@@ -222,7 +229,7 @@ export function defaultProject(
   // Prefer the most-recently-created LIVE session whose repo is a real project.
   let best: SessionData | null = null;
   for (const s of sessions) {
-    const root = s.worktree?.repo_path;
+    const root = projectRoot(s);
     if (!root || isArchived(s) || !valid.has(root)) {
       continue;
     }
@@ -230,8 +237,9 @@ export function defaultProject(
       best = s;
     }
   }
-  if (best?.worktree?.repo_path) {
-    return best.worktree.repo_path;
+  const bestRoot = best ? projectRoot(best) : "";
+  if (bestRoot) {
+    return bestRoot;
   }
   // No live sessions: fall back to the newest task's project (a task-only default).
   let bestTask: TaskData | null = null;
@@ -298,7 +306,7 @@ export function persistProjectChoice(root: string): void {
 /** Match DeleteProject's non-archived targets and IsExternalWorktree decision.
  * The daemon projects the resolved flag, including legacy external worktrees. */
 export function projectDeletionBreakdown(sessions: SessionData[], root: string): { sessionCount: number; inPlaceCount: number } {
-  const live = sessions.filter(s => s.worktree?.repo_path === root && !isArchived(s));
+  const live = sessions.filter(s => projectRoot(s) === root && !isArchived(s));
   const inPlaceCount = live.filter(s => s.worktree?.external_worktree === true).length;
   return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }

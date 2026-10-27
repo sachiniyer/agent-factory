@@ -263,3 +263,11 @@ test("project deletion counts only this root's non-archived regular and external
   assert.deepEqual(projectDeletionBreakdown(sessions, "/a"), { sessionCount: 1, inPlaceCount: 2 });
   assert.deepEqual(projectDeletionBreakdown(sessions, "/empty"), { sessionCount: 0, inPlaceCount: 0 });
 });
+
+test("off-box rows with no worktree group by their project path (LG-02)", () => {
+  const sb = sess("sb", { id: "sb", path: "/r/a", backend_type: "sandbox", liveness: Liveness.Running });
+  assert.deepEqual(projectSummaries([sb], []).map((p) => p.root), ["/r/a"]);
+  assert.deepEqual(scopeToProject([sb, ready("loc", "/r/b")], "/r/a"), [sb]);
+  assert.deepEqual(pickerProjects([sb], []), ["/r/a"]);
+  assert.equal(defaultProject([sb], []), "/r/a");
+});

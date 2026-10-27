@@ -90,7 +90,7 @@ import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { restoreShortcutFocus } from "./shortcut-focus.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, projectRoot, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
   clampActiveTab,
   pickSelection,
@@ -591,7 +591,7 @@ function resolveRoute(): void {
   try {
     const session = route && store.get().sessions.find((s) => s.id === route.session);
     if (session?.id) {
-      if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+      if (projectRoot(session)) switchProject(projectRoot(session));
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else {
@@ -748,7 +748,7 @@ function switchProject(root: string): void {
   // clear it so the main pane returns to its empty state instead of showing a session
   // hidden from the scoped rail.
   const sel = selectedSessionData();
-  const keep = sel && sel.worktree?.repo_path === root ? store.get().selectedId : null;
+  const keep = sel && projectRoot(sel) === root ? store.get().selectedId : null;
   splitView.blur();
   // A KEPT selection keeps its pane too, so its active tab is whatever that pane shows
   // — not 0, which would desync the bar from it (#1855, same as moveSelection).
@@ -2546,7 +2546,7 @@ function doHandoff(): void {
     handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      loadAccounts: () => loadCreateAccounts(projectRoot(sel)),
       currentAccount: sel.account,
       onSubmit: (to: string, account?: string) => {
         const tok = token;
@@ -2887,7 +2887,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // never stays attached to a session hidden from the (now re-scoped) rail.
   if (selectedId) {
     const sel = sessions.find((s) => s.id === selectedId);
-    if (sel && sel.worktree?.repo_path !== selectedProject) {
+    if (sel && projectRoot(sel) !== selectedProject) {
       selectedId = null;
     }
   }
