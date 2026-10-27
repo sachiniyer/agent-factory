@@ -37,7 +37,7 @@ test("reconnecting during restore preserves the fence until the post-response Sn
   const wait = latch(); let restores = 0;
   await page.route("**/v1/RestoreSession", async route => { restores++; await wait.promise; await route.fulfill({ json: { data: {} } }); });
   await f.start(); await expect.poll(() => restores).toBe(1); await page.keyboard.press("Escape");
-  await page.locator(".af-appbar button", { hasText: "Disconnect" }).evaluate((button: HTMLButtonElement) => button.click());
+  await page.locator(".af-config-disconnect").evaluate((button: HTMLButtonElement) => button.click());
   await page.locator(".af-login button.af-primary").click();
   await expect(page.locator("#app")).toHaveAttribute("data-af-resync-settled", "");
   await f.actions().click();
