@@ -291,19 +291,36 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
 	// for the same reason — the Add-project view a client builds out of the two
 	// must not have to wait on a probation it has no stake in.
-	"ListDirectory":           allowedDuringProbation,
-	"ListOnComplete":          allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
-	"ListPrograms":            allowedDuringProbation,
-	"ListProjects":            allowedDuringProbation,
-	"ListTasks":               allowedDuringProbation,
-	"Ping":                    allowedDuringProbation,
-	"Preview":                 allowedDuringProbation,
+	"ListDirectory":  allowedDuringProbation,
+	"ListOnComplete": allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
+	"ListPrograms":   allowedDuringProbation,
+	"ListProjects":   allowedDuringProbation,
+	"ListTasks":      allowedDuringProbation,
+	"Ping":           allowedDuringProbation,
+	"Preview":        allowedDuringProbation,
+	// Slice 1 (#5136) is a strictly read-only listing — the same admission
+	// class as Snapshot and ListTasks; the mutating --apply lands in the
+	// follow-up and must move this back.
+	"PruneSessions":           allowedDuringProbation,
 	"ReleaseUpgradeProbation": allowedDuringProbation,
 	"Shutdown":                allowedDuringProbation,
 	"Snapshot":                allowedDuringProbation,
 	// A name suggestion is a best-effort read (no readiness gate), so it answers
 	// during probation like the other read-only lookups (#2470).
 	"SuggestSessionName": allowedDuringProbation,
+	// Proposal reads answer during probation; every route that can commit to the
+	// proposal store or change a tab waits like the other mutations.
+	"ListProposals":       allowedDuringProbation,
+	"GetProposal":         allowedDuringProbation,
+	"StartProposal":       blockedDuringProbation,
+	"AttachProposal":      blockedDuringProbation,
+	"DetachProposal":      blockedDuringProbation,
+	"AddProposalDoc":      blockedDuringProbation,
+	"ReadProposalDoc":     blockedDuringProbation,
+	"SaveProposalDoc":     blockedDuringProbation,
+	"WriteProposalDoc":    blockedDuringProbation,
+	"PullProposalChanges": blockedDuringProbation,
+	"CheckpointProposal":  blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

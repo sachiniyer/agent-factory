@@ -442,57 +442,6 @@ func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *Spaw
 	return nil
 }
 
-// ListAccounts reports the registered accounts on this host with their
-// logged-in state. A read, so no mutation admission gate.
-func (s *controlServer) ListAccounts(req ListAccountsRequest, resp *ListAccountsResponse) error {
-	out, err := s.manager.ListAccounts(req)
-	if err != nil {
-		return err
-	}
-	*resp = out
-	return nil
-}
-
-// RegisterAccount creates an account's credential directory without logging in.
-// It writes to the daemon host's agent-factory home, so it is behind the same
-// mutation admission gate as every other write.
-func (s *controlServer) RegisterAccount(req RegisterAccountRequest, resp *RegisterAccountResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	out, err := s.manager.RegisterAccount(req)
-	if err != nil {
-		return err
-	}
-	*resp = out
-	return nil
-}
-
-// AccountLogin opens an agent's own login flow in a bare tmux session scoped to
-// one account, and returns what a client needs to attach to it.
-//
-// No event is published: a login pane is not a session, so nothing on the events
-// plane models it — the same reason SpawnConfigAgent publishes none.
-//
-// It is behind requireStateMutationAdmission because it MUTATES the host: it
-// registers an account directory and spawns a process. It is deliberately NOT
-// sandboxAllowed for the same reason CreateSession is not — starting a process
-// on the daemon host is the plainest form of the host authority that credential
-// withholds (see httproutes.go's rule).
-func (s *controlServer) AccountLogin(req AccountLoginRequest, resp *AccountLoginResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// net/rpc gives no per-call context; the spawn is bounded by tmux's own start
-	// timeout, and the interactive flow it opens is unbounded by design.
-	out, err := s.manager.AccountLogin(context.Background(), req)
-	if err != nil {
-		return err
-	}
-	*resp = out
-	return nil
-}
-
 // ReapConfigAgent tears down a config-agent session. No event is published: a
 // config agent is not a session, so nothing on the events plane models it.
 func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, _ *ReapConfigAgentResponse) error {
