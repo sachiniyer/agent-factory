@@ -92,7 +92,7 @@ The check is deliberately code-derived on all four halves:
 | CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags **after `initCobraDefaults` finishes building it** (see below) |
 | API | `daemon.HTTPRoutes()` — the same table that builds the live mux, with request fields reflected off the wire structs |
 | TUI | `keys.EffectiveBindings(nil)` — the canonical binding table |
-| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts` — `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
+| Web | the `af<T>(method, body, token)` call sites across `web/src/` — `af()` is exported, so any module can reach a daemon RPC through it; `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
 
 A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
@@ -361,10 +361,14 @@ For a wrapper payload the obvious move is to read its TypeScript interface. That
 is wrong in the dangerous direction: an interface says what is **possible**, and
 a client that never sends a field still passes.
 
-`TaskUpdate` declares seven options; the single call site
-(`web/src/index.ts:862`) sends `{ enabled }`. Reading the type credited the web
-with six options it cannot reach and reported parity over them. Reading the
-values it actually passes reports them as the gaps they are (#1935).
+When this audit learned the lesson, `TaskUpdate` declared seven options and
+its single call site sent `{ enabled }`: reading the type credited the web
+with six options it could not reach and reported parity over them; reading
+the values it actually passed reported them as the gaps they were (#1935).
+The interface has since grown to nine options, all now sent across the edit
+form and the toggle — and the walk still derives that reach from the values,
+so a future declared-but-unsent field lands as a gap instead of a silent
+credit.
 
 ## "Could not check" is a third answer
 
@@ -511,7 +515,7 @@ moment to decide what the other two do about it, which is the whole point.
 
 ## Updating the parser
 
-If `web/src/api.ts` is restructured so its calls no longer match
+If `web/src` is restructured so its calls no longer match
 `webCallRe`, the check fails loudly via `minWebCalls` rather than quietly
-concluding the web calls nothing. Fix the parser in `parity/derive_test.go`;
+concluding the web calls nothing. Fix the parser in `parity/web_rpc_derive_test.go`;
 never lower the floor to make it pass.

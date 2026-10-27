@@ -66,6 +66,41 @@ func TestDeliverPrompt_DefersWhileTargetAttached(t *testing.T) {
 	}
 }
 
+// TestDeliverPrompt_AttachedLimitedTargetParks covers the overlap of the defer
+// lease and the limit fence: a task-origin delivery into a session that is
+// both attached AND limit-reached must park, not defer. Deferring would let a
+// cron occurrence slip through as deliverable-after-detach and would keep a
+// watch backlog in ordinary retention instead of the durable limit park.
+func TestDeliverPrompt_AttachedLimitedTargetParks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	rec := &promptRecorder{}
+	backend := recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec}
+	instance := registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Running)
+	manager.setLimitReached(instance, time.Now().Add(time.Hour))
+
+	// Attached to a limit-reached target: attachment alone defers, but the
+	// usage limit is the blocker the task record owns.
+	manager.PauseStatusPoll(repoID, "captain", "")
+
+	status, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:              "captain",
+		RepoPath:           repoPath,
+		Program:            "claude",
+		Prompt:             "scheduled-event",
+		TaskOrigin:         true,
+		DeferWhileAttached: true,
+	})
+	if err != nil {
+		t.Fatalf("a parked delivery must not error: %v", err)
+	}
+	if status != TaskStatusLimitParked {
+		t.Fatalf("status = %q, want %q — a limit-reached target must park even while attached", status, TaskStatusLimitParked)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("a parked delivery must NOT paste into the attached pane, got %v", got)
+	}
+}
+
 // TestDeliverPrompt_ManualSendDeliversWhileTargetAttached pins that the defer
 // is scoped to automated deliveries: a manual send (DeferWhileAttached unset,
 // as `af sessions send-prompt` leaves it) is an explicit user action and still
@@ -171,13 +206,13 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		attempts.Add(1)
 		if req.DeferWhileAttached && attached.Load() {
 			once.Do(func() { close(firstAttempt) })
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -257,14 +292,14 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		if req.DeferWhileAttached && attached.Load() {
 			// The first held attempt proves the parked fire now owns the lock.
 			once.Do(func() { close(firstAttempt) })
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		delivered.Add(1)
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -323,7 +358,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		attempts.Add(1)
 		once.Do(func() { close(firstAttempt) })
 		if attached.Load() {
@@ -333,10 +368,10 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 			if !req.DeferWhileAttached {
 				forcedWhileAttached.Store(true)
 			}
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		pasted.Add(1)
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -423,7 +458,7 @@ func TestWatcher_DefersDeliveryWhileTargetAttached(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab158601", script, dir)))
 	bd := &busyDeliver{}
 	bd.attached.Store(true) // a TUI is attached to the target for now
-	s.deliver = bd.deliver
+	s.deliver = adaptWatchDelivery(bd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

@@ -58,6 +58,32 @@ func TestAgentCredentialMounts_OnlyExisting(t *testing.T) {
 	}
 }
 
+// TestAgentCredentialMounts_AmpMountsItsSecretStore pins amp's row to the file
+// amp authenticates from (#4305). amp keeps its API key in a file secret store,
+// $XDG_DATA_HOME/amp/secrets.json; ~/.config/amp/settings.json is its settings
+// file and carries no credential. Measured on amp 0.0.1784610062 under strace
+// with a throwaway HOME: with only settings.json present — even one holding
+// apiKey fields — amp reports "No API key found", and with only secrets.json
+// present it goes on to call the service. The row used to name settings.json,
+// so a docker amp session started unauthenticated while the log said a
+// credential file had been mounted.
+func TestAgentCredentialMounts_AmpMountsItsSecretStore(t *testing.T) {
+	home := "/home/tester"
+	got := agentCredentialMounts(tmux.ProgramAmp, home, true, func(string) bool { return true })
+	want := []string{"-v", "/home/tester/.local/share/amp/secrets.json:/root/.local/share/amp/secrets.json:ro,z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("amp session mounts:\n got %#v\nwant %#v", got, want)
+	}
+
+	// A host with amp's settings but no stored key has nothing to lend the
+	// container, so nothing is mounted and the operator is told no credential
+	// was found.
+	settingsOnly := func(p string) bool { return p == filepath.Join(home, ".config/amp/settings.json") }
+	if got := agentCredentialMounts(tmux.ProgramAmp, home, true, settingsOnly); got != nil {
+		t.Errorf("amp with only settings.json on the host: want no mount, got %#v", got)
+	}
+}
+
 // TestAgentCredentialMounts_None covers the "mount nothing" paths: an unknown
 // agent, no candidate present, and an unresolved (empty) home. All return nil.
 func TestAgentCredentialMounts_None(t *testing.T) {

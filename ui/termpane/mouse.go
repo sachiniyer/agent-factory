@@ -24,12 +24,13 @@ import (
 // writes input: the encoder reads terminal modes (mouse tracking, SGR encoding)
 // that the PTY reader pump mutates through emu.Write.
 func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
-	ev, ok := translateMouse(msg, x, y)
-	if !ok {
-		return false
-	}
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
+	// The view can be a crop of a taller emulator (a viewer watching a larger
+	// pane, #4480): translate the view row to the emulator row the same window
+	// Render shows, so the event lands on the cell it was painted over. x needs
+	// no translation — the crop is left-anchored.
+	y += t.viewSourceYLocked(t.emu.CursorPosition().Y, t.height)
 	// During a resize gap the pane zone can grow before the emulator is resized to
 	// match, so a click in the not-yet-propagated region can land past the current
 	// grid. Forwarding it would encode a bogus row/col the inner app never drew, so
@@ -37,6 +38,10 @@ func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	// emulator under the same lock SendMouse already holds. The streamed bytes are
 	// the pane itself, so grid row == content row (no status offset).
 	if y < 0 || y >= t.emu.Height() || x < 0 || x >= t.emu.Width() {
+		return false
+	}
+	ev, ok := translateMouse(msg, x, y)
+	if !ok {
 		return false
 	}
 	t.emu.SendMouse(ev)

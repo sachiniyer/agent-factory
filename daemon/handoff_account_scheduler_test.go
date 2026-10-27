@@ -82,7 +82,8 @@ func TestResumeFromLimit_ParkedManualIncomingResetAllowsExplicitRetry(t *testing
 	m, repo, inst, backend, _ := parkManualHandoffOnIncomingLimit(t, time.Hour)
 	backend.limited = false
 
-	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	_, err := m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	require.NoError(t, err)
 	_, _, prompts := backend.snapshot()
 	require.Len(t, prompts, 1)
 	_, _, pending := inst.PendingAccountSwap()

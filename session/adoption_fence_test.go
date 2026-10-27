@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
 
 // agentServerMethodWritesToThePTY classifies EVERY method on the agent-server
@@ -403,4 +404,194 @@ func TestCloseAdoptionFenceReadsAndShutsTogether(t *testing.T) {
 	if inst.AdoptionDeliveries() != got {
 		t.Fatal("a refused delivery must not change the count the teardown already read")
 	}
+}
+
+// TestFileOwedOnCompleteIfNotDischarged is the helper the paused-path's
+// fileOwedTaskLifecycle now goes through. Its contract has two halves, each
+// pinned by a subtest in this group:
+//
+//   - When no adoption delivery has reached since the run-end baseline was
+//     captured (deliveries == atRunEnd), it FILES the marker under i.mu and
+//     returns true, so the caller persists — unchanged from the pre-fix file path.
+//   - When a delivery already raced the helper (deliveries > atRunEnd), it
+//     REFUSES to file and returns false: there is nothing durable to file, and
+//     a marker whose FiledAt postdates the keystroke is exactly the bug the
+//     helper exists to close. The in-memory deliveries > atRunEnd signal is
+//     what the unpaused drain stands down on, and a restart that wipes that
+//     in-memory check wipes the (never-filed) marker too.
+//
+// Both reads (the comparison) and the write (the marker move) sit inside one
+// i.mu critical section, so a delivery that races the helper either happens
+// first (and the helper refuses) or finds a real marker to clear via
+// NoteAdoptionDelivery's existing path — the pre-fix split into separate
+// OwedOnComplete()-then-SetOwedOnComplete sections is what this helper closes.
+func TestFileOwedOnCompleteIfNotDischarged(t *testing.T) {
+	t.Run("FilesWhenNoDeliveryHasReachedTheBaseline", func(t *testing.T) {
+		inst, _ := newProbeInstance(t)
+		inst.taskRunActive = true
+		inst.SetStatusForTest(Running)
+		if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+			t.Fatalf("completion transition: %v", err)
+		}
+		if inst.TaskRunActive() {
+			t.Fatal("the idle edge must end the run")
+		}
+		if baseline := inst.AdoptionDeliveriesAtRunEnd(); baseline != 0 {
+			t.Fatalf("baseline = %d, want 0", baseline)
+		}
+		if deliveries := inst.AdoptionDeliveries(); deliveries != 0 {
+			t.Fatalf("deliveries = %d, want 0 (no pre-window delivery)", deliveries)
+		}
+		if existing := inst.OwedOnComplete(); existing != nil {
+			t.Fatalf("OwedOnComplete = %v, want nil (nothing filed yet)", existing)
+		}
+
+		marker := &PendingOnCompleteData{TaskID: "task-x", FiledAt: parseMarkerFiledAt(t, "2026-09-19T10:00:00Z")}
+		filed := inst.FileOwedOnCompleteIfNotDischarged(marker)
+		if !filed {
+			t.Fatal("FileOwedOnCompleteIfNotDischarged returned filed=false, want true")
+		}
+		if got := inst.OwedOnComplete(); got != marker {
+			t.Fatalf("OwedOnComplete pointer = %p, want %p (the marker passed in)", got, marker)
+		}
+		if FiledAt := inst.OwedOnComplete().FiledAt; !FiledAt.Equal(marker.FiledAt) {
+			t.Fatalf("FiledAt = %v, want %v", FiledAt, marker.FiledAt)
+		}
+
+		// A delivery that arrives AFTER the helper has filed takes the
+		// existing NoteAdoptionDelivery path: clears the marker, fires the
+		// durable-discharge notify (here unset, so just confirm the clear).
+		if err := inst.NoteAdoptionDelivery(); err != nil {
+			t.Fatalf("post-file delivery: %v", err)
+		}
+		if got := inst.OwedOnComplete(); got != nil {
+			t.Fatalf("post-file delivery must clear the marker; got %v", got)
+		}
+	})
+
+	t.Run("RefusesAfterAPreFilingDelivery-LeavesNoDurableMarker", func(t *testing.T) {
+		inst, _ := newProbeInstance(t)
+		inst.taskRunActive = true
+		inst.SetStatusForTest(Running)
+		if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+			t.Fatalf("completion transition: %v", err)
+		}
+		baseline := inst.AdoptionDeliveriesAtRunEnd()
+		if baseline != 0 {
+			t.Fatalf("baseline = %d, want 0", baseline)
+		}
+
+		// The browser-PTY keystroke in the bug's window: it takes only i.mu, so
+		// it crosses the manager lock release that opens the window. No marker
+		// exists yet, so it bumps the in-memory count but discharges nothing
+		// durably.
+		if err := inst.NoteAdoptionDelivery(); err != nil {
+			t.Fatalf("in-window NoteAdoptionDelivery: %v", err)
+		}
+		if deliveries := inst.AdoptionDeliveries(); deliveries != baseline+1 {
+			t.Fatalf("deliveries = %d, want %d (the in-window delivery counted)", deliveries, baseline+1)
+		}
+		if marker := inst.OwedOnComplete(); marker != nil {
+			t.Fatalf("OwedOnComplete = %v, want nil — no marker exists for the delivery to clear", marker)
+		}
+
+		// The helper is called AFTER the in-window delivery by fileOwedTaskLifecycle.
+		// It must refuse: a post-keystroke FiledAt would erase the in-memory adoption
+		// signal the unpaused drain relies on.
+		lateMarker := &PendingOnCompleteData{TaskID: "task-x", FiledAt: parseMarkerFiledAt(t, "2026-09-19T10:01:00Z")}
+		filed := inst.FileOwedOnCompleteIfNotDischarged(lateMarker)
+		if filed {
+			t.Fatal("FileOwedOnCompleteIfNotDischarged returned filed=true after a pre-filing delivery, want false")
+		}
+		if got := inst.OwedOnComplete(); got != nil {
+			t.Fatalf("OwedOnComplete = %v, want nil — the helper must not file a post-keystroke marker", got)
+		}
+		// The in-memory discharge evidence survives, so the unpaused drain's
+		// deliveries != atRunEnd check stands it down (whether or not the helper
+		// ran).
+		if deliveries := inst.AdoptionDeliveries(); deliveries != baseline+1 {
+			t.Fatalf("deliveries = %d, want %d — a refused filing must not move the count", deliveries, baseline+1)
+		}
+		if atRunEnd := inst.AdoptionDeliveriesAtRunEnd(); atRunEnd != baseline {
+			t.Fatalf("atRunEnd = %d, want %d — the run-end baseline must not move", atRunEnd, baseline)
+		}
+	})
+
+	t.Run("RefusesOnRepeatedCallsAfterAPreFilingDelivery", func(t *testing.T) {
+		// The post-refuse state must remain refuse: an idempotent refile attempt
+		// (a re-drive of the deferred drain) must not file a marker after the
+		// helper has already refused. Refiling is the fileOwedTaskLifecycle
+		// contract with marker-set rows; once the helper stands it down on
+		// deliveries, repeated attempts must too.
+		inst, _ := newProbeInstance(t)
+		inst.taskRunActive = true
+		inst.SetStatusForTest(Running)
+		if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+			t.Fatalf("completion transition: %v", err)
+		}
+		if err := inst.NoteAdoptionDelivery(); err != nil {
+			t.Fatalf("in-window NoteAdoptionDelivery: %v", err)
+		}
+		marker := &PendingOnCompleteData{TaskID: "task-x", FiledAt: parseMarkerFiledAt(t, "2026-09-19T10:01:00Z")}
+		if filed := inst.FileOwedOnCompleteIfNotDischarged(marker); filed {
+			t.Fatal("first helper call returned filed=true, want false")
+		}
+		if filed := inst.FileOwedOnCompleteIfNotDischarged(marker); filed {
+			t.Fatal("repeat helper call returned filed=true, want false (idempotent refuse)")
+		}
+		if got := inst.OwedOnComplete(); got != nil {
+			t.Fatalf("OwedOnComplete = %v, want nil after repeated refuse", got)
+		}
+	})
+
+	t.Run("FilesWhenAtRunEndAndDeliveriesAreNonzeroButMatchedThusFar", func(t *testing.T) {
+		// A run that received deliveries BEFORE its run-end edge pins the
+		// baseline at that count. The helper only refuses if a delivery
+		// arrived AFTER that baseline — deliveries > atRunEnd — so a session
+		// with deliveries == atRunEnd > 0 must still file the marker: the
+		// baseline already accounts for the in-run deliveries and what matters
+		// is whether adoption happened after the run ended.
+		inst, _ := newProbeInstance(t)
+		inst.taskRunActive = true
+		inst.SetStatusForTest(Running)
+		// Deliveries during the run: their baseline is the count at the run-end edge.
+		if err := inst.AgentServer().SendPrompt("the task's own work"); err != nil {
+			t.Fatalf("in-run SendPrompt: %v", err)
+		}
+		if err := inst.AgentServer().SendPrompt("more task work"); err != nil {
+			t.Fatalf("in-run SendPrompt: %v", err)
+		}
+		if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+			t.Fatalf("completion transition: %v", err)
+		}
+		baseline := inst.AdoptionDeliveriesAtRunEnd()
+		if baseline != 2 {
+			t.Fatalf("atRunEnd = %d, want 2 (the in-run deliveries)", baseline)
+		}
+		if deliveries := inst.AdoptionDeliveries(); deliveries != baseline {
+			t.Fatalf("deliveries = %d, want %d", deliveries, baseline)
+		}
+
+		marker := &PendingOnCompleteData{TaskID: "task-x", FiledAt: parseMarkerFiledAt(t, "2026-09-19T10:00:00Z")}
+		filed := inst.FileOwedOnCompleteIfNotDischarged(marker)
+		if !filed {
+			t.Fatal("FileOwedOnCompleteIfNotDischarged returned filed=false for deliveries == atRunEnd > 0, want true")
+		}
+		if got := inst.OwedOnComplete(); got != marker {
+			t.Fatalf("OwedOnComplete = %p, want %p (the marker passed in)", got, marker)
+		}
+	})
+}
+
+// parseMarkerFiledAt parses an RFC3339 timestamp for a PendingOnCompleteData
+// FiledAt field. A test helper rather than a literal because the success path
+// compares FiledAt with .Equal, and time.Time equality benefits from being
+// derivable from a parseable string rather than constructed inline.
+func parseMarkerFiledAt(t *testing.T, s string) time.Time {
+	t.Helper()
+	v, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", s, err)
+	}
+	return v
 }

@@ -50,7 +50,12 @@ var agentCredentialFiles = map[string][]string{
 		".gemini/gemini-credentials.json",
 		".gemini/google_accounts.json",
 	},
-	tmux.ProgramAmp:      {".config/amp/settings.json"},
+	// amp stores its API key in a file secret store, $XDG_DATA_HOME/amp/secrets.json
+	// (#4305). ~/.config/amp/settings.json is its settings file and carries no
+	// credential: amp reports "No API key found" with only settings.json present.
+	// With amp's native keyring storage enabled there is no key file at all, and
+	// AMP_API_KEY (via session_env_passthrough) is the only way in.
+	tmux.ProgramAmp:      {".local/share/amp/secrets.json"},
 	tmux.ProgramOpencode: {".local/share/opencode/auth.json"},
 	// devin is a cloud agent; config.json holds its settings but the session
 	// image ships no devin CLI, so this is a no-op until an image adds devin.
@@ -225,6 +230,105 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 	// Each mount is two args ("-v", "<spec>"), so the file count is len/2.
 	log.InfoLog.Printf("backend=docker: docker.mount_agent_credentials: mounting %d credential file(s) for agent %q read-only into the container", len(mounts)/2, agent)
 	return mounts
+}
+
+// validateCredentialDockerRunArgs refuses repo-controlled docker.run_args that
+// could redirect the agent's credential lookup away from the read-only file af
+// has mounted. docker.run_args is repository-controlled and checked in
+// (config/manifest.go marks the `docker` table sourceRepoOnly) and appended
+// AFTER the credential mount with no later env af emits to dominate it — so a
+// repo entry setting the agent's credential-root environment variable
+// (CODEX_HOME for codex, CLAUDE_CONFIG_DIR for claude, GEMINI_CLI_HOME for
+// gemini) flows unopposed into the container, survives the agent-server's env
+// filter because those names are BUILT-IN per-agent names
+// (internal/sessionenv/sessionenv.go), and reaches the agent process, which
+// then reads its credential from the redirected path instead of af's mounted
+// file. The mounted credential is never read; the session starts
+// unauthenticated while af's provisioning log reports the mount as installed.
+//
+// The same lexical guard the account path has had since #3400, applied to the
+// credential-mount path (#2194): refuse -e/--env/--env-file setting any of the
+// agent's identity names. The account path's validator
+// (validateAccountDockerRunArgs) defends the SAME env redirect on its path; the
+// credential path predates that hardening and was never retrofitted, leaving the
+// gap this closes.
+//
+// The mount surface needs no guard here because a repo cannot win it: Docker
+// refuses a second -v at af's single-file credential mount's destination, and a
+// parent-directory mount does not shadow af's single-file child (runc mounts
+// parent-then-child, so the child always wins). So unlike the account guard,
+// this checks environment entries only — a -v, --mount, --tmpfs, --device or
+// --volumes-from is left through, because none can replace the single-file
+// mount the credential path's safety rests on. The account guard blocks those
+// for its own nested-path reason, which does not apply to a single-file mount.
+//
+// The denied set is accountDockerDeniedNames(agent): the agent's identity env
+// names (AccountIdentityNames) plus its cloud-mode auth selectors
+// (AgentAuthSelectors). It is empty for the agents on the credential-mount
+// feature whose config-root variable does NOT relocate credential lookup —
+// amp, opencode and devin (internal/sessionenv/account.go records the measured
+// reason each is out) — and this guard is a no-op for them. For those agents,
+// the redirect risk via generic XDG variables (XDG_DATA_HOME for opencode,
+// XDG_CONFIG_HOME for amp) is closed instead by runContainer re-asserting those
+// variables after run_args when credential mounts are installed. Refusing
+// --env-file for an empty denied set would be over-refusal, so the empty set
+// returns early.
+func validateCredentialDockerRunArgs(args []string, agent string) error {
+	denied := accountDockerDeniedNames(agent)
+	if len(denied) == 0 {
+		return nil
+	}
+	checkEnv := func(value string) error {
+		name, _, _ := strings.Cut(value, "=")
+		if _, refused := denied[name]; refused {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for a %s credential-mount session because it can redirect credential lookup away from the file af mounted read-only",
+				name, agent)
+		}
+		return nil
+	}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--env-file" || arg == "-env-file":
+			return fmt.Errorf("backend=docker: docker.run_args cannot use %s for a %s credential-mount session because af cannot prove the file contains no entry that redirects credential lookup", arg, agent)
+		case strings.HasPrefix(arg, "--env-file="):
+			return fmt.Errorf("backend=docker: docker.run_args cannot use --env-file for a %s credential-mount session because af cannot prove the file contains no entry that redirects credential lookup", agent)
+		case arg == "-e" || arg == "--env":
+			if index+1 < len(args) {
+				index++
+				if err := checkEnv(args[index]); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--env="):
+			if err := checkEnv(strings.TrimPrefix(arg, "--env=")); err != nil {
+				return err
+			}
+		case strings.HasPrefix(arg, "-e="):
+			if err := checkEnv(strings.TrimPrefix(arg, "-e=")); err != nil {
+				return err
+			}
+		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
+			if err := checkEnv(strings.TrimPrefix(arg, "-e")); err != nil {
+				return err
+			}
+		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
+			// A combined short option (e.g. -te) whose -e sets an environment
+			// variable exactly as -e on its own does. Only -e can redirect
+			// credential lookup on this path, so a -v in the cluster is read as
+			// a value-taking option that ends the walk rather than a mount to
+			// check — there is no account boundary here to protect. The index
+			// deliberately does NOT advance past the value, for the same reason
+			// the account guard's doesn't.
+			if err := dockerCheckShorthandCluster(arg, args, index, "e",
+				func(character byte, value string) error { return checkEnv(value) },
+				"a "+agent+" credential-mount session", "the -e"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // dockerAccountHome is where an account's directory is mounted inside the

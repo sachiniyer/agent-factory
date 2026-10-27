@@ -89,7 +89,9 @@ type deliveryObservation struct {
 // suffix whose appearance proves the whole paste drained; renderWitness is a
 // disjoint prefix whose appearance proves the pane DID render this payload and
 // can therefore support a terminal negative when completion is still absent.
-// Baselines prefer the capture after the pre-submit clear (and conservatively
+// payload is the whole normalized text and baselineText the normalized baseline
+// frame; only the positional newest-render check reads them (#4884). Baselines
+// prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
 // in scrollback cannot be mistaken for evidence from this paste. If neither
 // capture succeeds, baselineCaptured stays false and no count comparison may
@@ -100,6 +102,8 @@ type deliveryProbe struct {
 	completionBaseline    int
 	renderWitness         string
 	renderWitnessBaseline int
+	payload               string
+	baselineText          string
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -154,11 +158,12 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 // submit (#1254/#1256) — and keeps working unchanged; it was never special, it was
 // just the only agent whose breakage was loud enough to notice.
 //
-// The middle return value reports whether an observed-absent outcome may be
-// automatically redelivered (#3293): true only when the post-Enter boundary
-// frame was captured and still lacked this payload's completion tail. It is
-// meaningful only alongside PromptNotDelivered and always false otherwise.
-func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bool, error) {
+// The middle return value is the evidence an automatic redelivery needs
+// (#3293). It is non-nil exactly when the status is PromptNotDelivered, which
+// this path reports only when absence held through the post-Enter boundary
+// frame; an observed-absent attempt whose boundary frame cannot prove absence
+// is reported as sent-unverified instead (#4884).
+func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *absenceProof, error) {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit. The
@@ -213,9 +218,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 			log.WarningLog.Printf("could not delete paste buffer %q after a failed load (it may never have been created): %v", buf, derr)
 		}
 		if loadTimedOut {
-			return PromptCouldNotConfirm, false, fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, nil, fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return PromptCouldNotConfirm, false, fmt.Errorf("error loading paste buffer: %w", err)
+		return PromptCouldNotConfirm, nil, fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
 	// Clear any draft stranded in the composer BEFORE this paste (#2070/#1982
@@ -303,9 +308,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 			log.ErrorLog.Printf("failed to delete paste buffer %q after paste error: %v", buf, derr)
 		}
 		if pasteTimedOut {
-			return PromptCouldNotConfirm, false, fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, nil, fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return PromptCouldNotConfirm, false, fmt.Errorf("error pasting buffer: %w", pasteErr)
+		return PromptCouldNotConfirm, nil, fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
 	// Remember only a payload tmux actually accepted. Reusing the delivery
 	// probe's exact completion suffix keeps one source of truth for what tmux was
@@ -336,7 +341,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 	// daemon poll.
 	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
 	if err != nil {
-		return PromptCouldNotConfirm, false, err
+		return PromptCouldNotConfirm, nil, err
 	}
 	if boundaryOK {
 		t.seedDeliveryBaseline(boundary)
@@ -344,7 +349,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		t.deferDeliveryBaseline()
 	}
 
-	retryAuthorized := false
+	var proof *absenceProof
 	if observation.outcome == deliveryObservedAbsent {
 		// This is deliberately the only ERROR emitted by delivery observation:
 		// unlike could-not-observe, the final capture contains a new prefix from
@@ -371,10 +376,10 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		// can prove what the composer had RECEIVED when Enter arrived (#2065:
 		// "not on screen" is not "not submitted"). The residual is the same
 		// uncertainty a human retrying a not-delivered report has always
-		// carried, which is the trade #3293 codified. It also deliberately does
-		// NOT reclassify the status: the pre-Enter frame authorized
-		// observed-absent and remains the reported evidence (#2255/#2266); the
-		// boundary frame only vetoes the retry.
+		// carried, which is the trade #3293 codified, and SendKeysCommandObserved
+		// re-checks the pane once more before acting on it. The ERROR above
+		// keeps printing the pre-Enter frame that authorized observed-absent
+		// (#2255/#2266); a veto changes only the reported status, below.
 		//
 		// The boundary frame comes from `capture-pane -e` (the status monitor's
 		// convention), so a colorized composer interleaves ANSI escapes through
@@ -395,11 +400,30 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		// about this paste. Replacement within that ms window is still
 		// invisible to any count comparison — narrower again, still not
 		// closed, same residual honesty as above.
-		retryAuthorized = boundaryOK && probe.baselineCaptured &&
-			strings.Count(normalizeDelivery(xansi.Strip(boundary)), probe.completion) <=
-				strings.Count(normalizeDelivery(observation.pane), probe.completion)
+		//
+		// The count comparison is necessary, not sufficient: on a history-less
+		// pane an older identical copy can scroll off exactly as this one drains,
+		// holding the count flat (#4884). So the boundary must also still show
+		// this payload's NEWEST render cut short. And since the property is
+		// "redeliver only on proven absence", an absent observation the boundary
+		// cannot uphold is reported as sent-unverified, not not-delivered: every
+		// caller that re-sends on not-delivered would otherwise re-open the same
+		// double submit one layer up.
+		if boundaryOK && probe.baselineCaptured {
+			boundaryText := normalizeDelivery(xansi.Strip(boundary))
+			proof = probe.absenceAt(boundaryText)
+			if proof != nil && strings.Count(boundaryText, probe.completion) >
+				strings.Count(normalizeDelivery(observation.pane), probe.completion) {
+				proof = nil
+			}
+		}
+		if proof == nil {
+			log.WarningLog.Printf("submit: withholding redelivery to session %q and reporting sent-unverified: the Enter boundary frame does not prove the prompt absent, and it may have submitted (#4884)",
+				t.sanitizedName)
+			return PromptSentUnverified, nil, nil
+		}
 	}
-	return observation.outcome.promptDeliveryStatus(), retryAuthorized, nil
+	return observation.outcome.promptDeliveryStatus(), proof, nil
 }
 
 // sendEnterAndCaptureBoundary submits whatever is pending and captures the pane
@@ -683,7 +707,7 @@ func newDeliveryProbe(text string) deliveryProbe {
 		}
 	}
 
-	probe := deliveryProbe{completion: string(n[len(n)-completionLen:])}
+	probe := deliveryProbe{completion: string(n[len(n)-completionLen:]), payload: string(n)}
 	if availablePrefix >= minDistinctiveFragment {
 		if availablePrefix > witnessRunes {
 			availablePrefix = witnessRunes
@@ -699,6 +723,7 @@ func newDeliveryProbe(text string) deliveryProbe {
 func (p deliveryProbe) withBaseline(content string) deliveryProbe {
 	normalized := normalizeDelivery(content)
 	p.baselineCaptured = true
+	p.baselineText = normalized
 	if p.completion != "" {
 		p.completionBaseline = strings.Count(normalized, p.completion)
 	}
@@ -823,8 +848,18 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 		// server cannot push a single capture past the deadline below (#2099).
 		if content, ok := t.capturePaneForDeliveryWithin(deadline.Sub(pasteDeliveryNow())); ok {
 			normalized := normalizeDelivery(content)
+			// Counts alone cannot classify a history-less pane: the composer's
+			// growth scrolls older rows off the top, so an older identical copy's
+			// tail can leave the frame as this paste's tail enters it and the
+			// completion count never grows (#4884). Once the render witness has
+			// newly appeared, the NEWEST render decides: whole means landed,
+			// cut short means absent.
+			witnessNew := probe.baselineCaptured && probe.renderWitness != "" &&
+				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline
+			_, newestWhole := probe.newestRender(normalized)
 			if probe.baselineCaptured &&
-				strings.Count(normalized, probe.completion) > probe.completionBaseline {
+				(strings.Count(normalized, probe.completion) > probe.completionBaseline ||
+					witnessNew && newestWhole) {
 				streak++
 				if streak >= needed {
 					return deliveryObservation{outcome: deliveryObservedLanded, pane: content}
@@ -832,8 +867,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 				// One weak short-tail sighting is neither confirmed delivery nor
 				// absence. A later failure must not combine with it.
 				lastObservation = deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
-			} else if probe.baselineCaptured && probe.renderWitness != "" &&
-				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline {
+			} else if witnessNew {
 				streak = 0
 				lastObservation = deliveryObservation{outcome: deliveryObservedAbsent, pane: content}
 			} else {

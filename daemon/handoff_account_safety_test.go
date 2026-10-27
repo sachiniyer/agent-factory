@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -40,7 +41,7 @@ func TestHandoffAccountMissingTargetRefusesBeforeTeardown(t *testing.T) {
 			require.ErrorContains(t, err, "launch preflight")
 			require.False(t, isMutationCommitted(err))
 			require.Equal(t, "codex", inst.AgentProgram())
-			require.Empty(t, inst.Handoffs())
+			require.Empty(t, inst.Tabs[0].Handoffs)
 			require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 			_, respawns, prompts := backend.snapshot()
 			require.Zero(t, respawns)
@@ -132,6 +133,301 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 	}
 }
 
+// The precheck-to-lock window must re-resolve the account NAMESPACE, not only
+// the command (#4430 review round 3): flipping `program_overrides.claude` from
+// "claude" to "codex" between the advisory pass and locked admission changes
+// which registry Selected consults. A namespace frozen at request time would
+// admit "personal" against claude's registry while the committed launch runs
+// codex — so the refusal must name codex, proving the locked pass re-resolved.
+// The request carries an explicit `--to claude`: an account-ONLY swap would
+// stay bound to the runtime's own claude namespace by design — the pane keeps
+// running the established command — while an explicit target is re-resolved
+// under the lock, and the flipped enum resolves to codex (#4430 review round 6).
+func TestHandoffAccountReresolvesAccountNamespaceUnderProjectLock(t *testing.T) {
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal") // registered under claude only
+	project, err := config.RegisterProject(inst.Path)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "claude")
+	require.NoError(t, err)
+	prepareHandoffTargetPreflight(t, inst)
+	// The flipped resolution needs a launchable codex so the ONLY refusal the
+	// locked pass can produce is the namespace one.
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	inst.ClearLimitReached()
+
+	precheckDone := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePrecheck := func() { releaseOnce.Do(func() { close(release) }) }
+	m.accountSwapAfterManualPrecheckForTest = func() {
+		close(precheckDone)
+		<-release
+	}
+	t.Cleanup(func() {
+		releasePrecheck()
+		m.accountSwapAfterManualPrecheckForTest = nil
+	})
+
+	handoffDone := make(chan error, 1)
+	go func() {
+		_, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repoID, To: tmux.ProgramClaude, Account: "personal",
+		})
+		handoffDone <- err
+	}()
+	select {
+	case <-precheckDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not reach the precheck-to-lock window")
+	}
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "codex")
+	require.NoError(t, err)
+	releasePrecheck()
+	select {
+	case err := <-handoffDone:
+		require.Error(t, err,
+			"the locked admission must consult the namespace the override NOW resolves to — "+
+				"personal is registered under claude, not codex")
+		require.Contains(t, err.Error(), "codex")
+		require.False(t, isMutationCommitted(err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not finish")
+	}
+}
+
+// An account-only handoff (no --to) keeps the recorded program. The pane runs
+// codex through program_overrides.claude, and program_overrides.codex points
+// elsewhere; the request's defaulted agent is that running IDENTITY, not an
+// enum, so the account must resolve in codex's registry. Re-resolving the
+// identity through codex's own override admitted a gemini launch instead
+// (#4430 review). "work" exists only in gemini's registry here, so the old
+// resolution passes the namespace check while the fixed one names codex.
+func TestHandoffAccountOnlyResolvesTheRecordedProgramNamespace(t *testing.T) {
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal") // registered under claude only
+	project, err := config.RegisterProject(inst.Path)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "codex")
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.codex", "gemini")
+	require.NoError(t, err)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+	prepareHandoffTargetPreflight(t, inst)
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ClearLimitReached()
+	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName(), "precondition: the pane runs codex")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repoID, Account: "work"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `account "work" is not registered for codex`,
+		"an account-only request resolves in the running agent's registry")
+	require.NotContains(t, err.Error(), tmux.ProgramGemini)
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
+}
+
+// handoffRealPlanBackend keeps limitResumeBackend's recorded surface but runs
+// the REAL LocalBackend.PrepareAgentSwap, so the daemon judges the command a
+// production handoff actually froze. The plain fake freezes program=target —
+// it never resolves program_overrides, which is exactly the indirection the
+// cross-agent refusal reads: with the fake's plan, EffectiveAgent returns the
+// enum and the refusal can never fire, no matter what the override says.
+type handoffRealPlanBackend struct{ *limitResumeBackend }
+
+func (b *handoffRealPlanBackend) PrepareAgentSwap(i *session.Instance, target string) (session.AgentSwapPlan, error) {
+	return (&session.LocalBackend{}).PrepareAgentSwap(i, target)
+}
+
+// The ordinary (no --account) handoff must judge account capability on the
+// resolved command, not the target enum (#4430 review). `program_overrides.
+// aider = "codex"` passes the enum check — aider has no account namespace — but
+// the plan's frozen command launches Codex, which does. Dropping the recorded
+// scope would start Codex with ambient credentials, so the handoff must refuse
+// and name the resolution, before any pane is touched.
+func TestHandoffScopedSessionRefusesCrossAgentProgramOverride(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \"codex\"\n")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+	require.ErrorContains(t, err, "resolves to codex")
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, "claude", inst.AgentProgram())
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account,
+		"a refused handoff leaves the recorded scope untouched")
+	require.Empty(t, inst.Tabs[0].Handoffs)
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
+
+// The inverse override direction of the test above (#4430 review):
+// `program_overrides.codex = "aider"` makes a "codex" handoff launch Aider,
+// which has no account namespace — the honest answer is the scope drop, not a
+// --account refusal that could never name an Aider account. The capability
+// check reads the frozen plan's EffectiveAgent, so admission must see the same
+// aider the launch will.
+func TestHandoffScopedSessionDescopesCrossAgentProgramOverride(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "aider"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\ncodex = \"aider\"\n")
+
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "codex"})
+	require.NoError(t, err,
+		"a target whose resolved command cannot carry a scope must take the descope, not a --account refusal")
+	require.Equal(t, "work", resp.FromAccount)
+	require.Empty(t, resp.ToAccount)
+	account, _ := inst.AccountSelection()
+	require.Empty(t, account, "the record dropped the scope — aider has no namespace for it")
+	handoffs := inst.Tabs[0].Handoffs
+	require.Len(t, handoffs, 1)
+	require.Equal(t, "work", handoffs[0].FromAccount)
+	_, _, prompts := backend.snapshot()
+	require.Len(t, prompts, 1)
+}
+
+// D1 (#4430 review): an UNCLASSIFIABLE resolved command is not a provable
+// non-scopable agent — `npx codex` may launch a scopable agent underneath —
+// so a scoped session refuses the swap rather than dropping its durable pin.
+// The pickers hide the row for the same reason; the daemon refuses even when
+// the row was still reachable (a CLI caller, an older UI, a direct RPC).
+func TestHandoffScopedSessionRefusesUnclassifiableTarget(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	wrapper := filepath.Join(bin, "wrapped-codex")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \""+wrapper+"\"\n")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+	require.Error(t, err, "an unclassifiable resolved command must refuse rather than drop a durable pin")
+	require.Contains(t, err.Error(), "cannot classify")
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account, "a refused handoff never touches the scope")
+	require.Empty(t, inst.Tabs[0].Handoffs, "a refused handoff records nothing")
+	_, _, prompts := backend.snapshot()
+	require.Empty(t, prompts, "a refused handoff delivers no mission")
+}
+
+// Error precedence on the plan-failure path (#4430 review): PrepareAgentSwap
+// resolves the command BEFORE preflight checks it, so a target that is BOTH
+// unlaunchable AND scopable-resolved must still get the scope refusal —
+// --account is the remedy the user can act on, while the preflight detail
+// would send them to install an agent they were never going to reach. An
+// unclassifiable resolution earns the same refusal for the mirror-image
+// reason (it can never be proven safe for the scope), while a KNOWN
+// non-scopable one leaves the preflight error to name the real blocker.
+func TestHandoffScopedSessionScopeRefusalBeatsPreflightFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		override   string
+		wantErr    string
+		absentErr  string
+		wantDetail string
+	}{
+		{name: "scopable resolution wins over preflight",
+			override:   "aider = \"/nonexistent/codex\"",
+			wantErr:    "--account",
+			absentErr:  "preflight",
+			wantDetail: "resolves to codex"},
+		{name: "unclassifiable resolution wins over preflight",
+			override:   "aider = \"/nonexistent/mystery\"",
+			wantErr:    "cannot classify",
+			absentErr:  "preflight",
+			wantDetail: "cannot classify"},
+		{name: "non-scopable resolution leaves preflight",
+			override:  "aider = \"/nonexistent/aider\"",
+			wantErr:   "preflight",
+			absentErr: "--account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+			inst.SetBackend(&handoffRealPlanBackend{backend})
+			inst.Account = "work"
+			inst.ClearLimitReached()
+			gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+			require.NoError(t, err)
+			inst.SetGitWorktreeForTest(gw)
+			writeLimitAccountCandidates(t, "[program_overrides]\n"+tc.override+"\n")
+
+			_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+			require.NotContains(t, err.Error(), tc.absentErr)
+			if tc.wantDetail != "" {
+				require.Contains(t, err.Error(), tc.wantDetail)
+			}
+			account, _ := inst.AccountSelection()
+			require.Equal(t, "work", account, "a refused handoff never touches the scope")
+		})
+	}
+}
+
+// The descope sibling fence must cover teardowns that already committed: a
+// PendingTabCleanup handle is a tmux session whose kill was never confirmed,
+// so its process may still run under the dropped account's environment while
+// the live roster reports it gone (#4430 review). The handoff must refuse
+// there exactly as validateAccountSwap does, and name the remedy — the
+// cleanup sweep the next daemon start runs — because the removed tab cannot
+// be closed again.
+func TestHandoffScopedSessionDescopeRefusesPendingTabCleanup(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "aider"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\ncodex = \"aider\"\n")
+	inst.SetPendingTabCleanupForTest([]session.TabCleanupData{
+		{TabID: "build", TmuxName: inst.Title + "__build"},
+	})
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "codex"})
+	require.ErrorContains(t, err, "unconfirmed",
+		"a pending teardown can still run under the dropped account — the descope must refuse it")
+	require.ErrorContains(t, err, "restart af",
+		"the refusal must name the remedy: the next start retries the cleanup sweep")
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account,
+		"a refused handoff leaves the recorded scope untouched")
+	require.Empty(t, inst.Tabs[0].Handoffs)
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
+
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 	for _, live := range []session.Liveness{session.LiveRunning, session.LiveReady} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {
@@ -163,7 +459,8 @@ func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 			m.ResumeLimitedSessions()
 			require.NotNil(t, inst.ToInstanceData().PendingAccountSwap,
 				"an unconfirmed delivery must wait for an explicit operator retry")
-			require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+			_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+			require.NoError(t, err)
 			require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 		})
 	}
@@ -288,4 +585,97 @@ func prepareHandoffTargetPreflight(t *testing.T, inst *session.Instance) {
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0700))
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+}
+
+// A recorded-enum match is a committed-swap retry only while its transaction
+// is pending. The pane runs codex under a recorded aider label; a later
+// program_overrides edit repoints aider at gemini. `--to aider --account work`
+// is then a NEW cross-agent handoff to the resolved gemini — but the raw
+// target == i.Program compare used to route it to "already uses aider account
+// work" before the target was ever resolved (#4430 review round 4).
+func TestHandoffAccountEnumMatchWithoutPendingSwapIsANewHandoff(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Program = tmux.ProgramAider
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramGemini), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	// The override edit after the pin: the aider label now launches gemini.
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \"gemini\"\n")
+
+	resp, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "work",
+	})
+	require.NoError(t, err, "the enum match is not a no-op once the label resolves elsewhere")
+	require.True(t, resp.OK)
+	require.Equal(t, tmux.ProgramGemini, inst.AccountAgent(),
+		"the account must move to the namespace the resolved aider command belongs to")
+}
+
+// A committed same-agent ALIAS swap leaves three spellings that disagree: the
+// ledger records To=aider (the requested enum), Program keeps the established
+// claude label, and the pane runs codex. A retry spelling the request the way
+// it was first made — `--to aider` — matches neither the resolved outgoing nor
+// the recorded enum, so without the committed ledger target the fence would
+// refuse the very retry its error message advertises (#4430 review round 6).
+func TestHandoffAccountRetriesCommittedSwapByItsLedgerTarget(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "finish migration", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
+	bin := t.TempDir()
+	for _, name := range []string{tmux.ProgramCodex, tmux.ProgramAider} {
+		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "personal")
+	require.NoError(t, err)
+	writeLimitAccountCandidates(t, "[program_overrides]\nclaude = \"codex\"\naider = \"codex\"\n")
+
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Program = tmux.ProgramClaude
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+
+	// Commit the alias swap and strand it at delivery: `--to aider` resolves to
+	// the running codex, so the commit is same-agent — Program stays claude
+	// while the ledger records To=aider.
+	backend.sendPromptErr = errors.New("delivery interrupted")
+	_, err = m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "personal",
+	})
+	require.ErrorContains(t, err, "delivery interrupted")
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending)
+	recorded, ok := inst.LastHandoff()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramAider, recorded.To, "the ledger keeps the requested enum spelling")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"the same-agent commit keeps the established program label")
+
+	// The retry spells the target exactly as before: `aider` matches neither the
+	// running codex nor the recorded claude — only the committed ledger target.
+	backend.sendPromptErr = nil
+	resp, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "personal",
+	})
+	require.NoError(t, err, "the retry must match the committed transaction's own target spelling")
+	require.True(t, resp.OK)
+	require.Equal(t, "personal", resp.ToAccount)
+	_, _, pending = inst.PendingAccountSwap()
+	require.False(t, pending, "the retried transaction must retire its durable marker")
+	require.Len(t, inst.ToInstanceData().Tabs[0].Handoffs, 1,
+		"the retry must finish the recorded transaction, not append a second handoff")
 }

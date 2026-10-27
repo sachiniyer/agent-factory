@@ -48,10 +48,22 @@ func (b *remoteWorkspaceBackend) Capabilities() session.Capabilities {
 // the probeAnsweredDead arm through a successful pre-reap push into a
 // persistently failing Recover (the within-arm contrast the preserve-push
 // give-up fix is measured against).
+//
+// FireOnSandboxRetired is called unconditionally before returning: this backend
+// simulates a full recoverSandbox call (including the sandbox reap), so any
+// registered on-retired hook is always fired here regardless of success or
+// failure. A pre-reap failure would NOT reach this Recover, so the hook call
+// is always post-reap in this fake.
 func (b *remoteWorkspaceBackend) Recover(inst *session.Instance) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.recovers++
+	// Fire the on-retired hook: this fake stands in for the full recoverSandbox
+	// path, which includes the sandbox reap. The hook must fire before we return
+	// so that per-episode budget resets take effect even on a Recover failure
+	// (the real recoverSandbox fires it inside reprovisionRemote, after the reap
+	// but before Start).
+	inst.FireOnSandboxRetired()
 	if b.failWith != nil {
 		return b.failWith
 	}

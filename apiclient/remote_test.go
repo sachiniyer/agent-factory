@@ -156,7 +156,7 @@ func TestNewRemote_RESTRoundTripWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("Snapshot over HTTP: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestNewRemote_WrongToken401(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRemote: %v", err)
 		}
-		_, err = c.Snapshot(daemon.SnapshotRequest{})
+		_, _, err = c.Snapshot(daemon.SnapshotRequest{})
 		if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 			t.Fatalf("token %q: want unauthorized error, got %v", badTok, err)
 		}
@@ -256,7 +256,7 @@ func TestNewRemote_NeverRespondsAfterConnectTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.Snapshot(daemon.SnapshotRequest{})
+		_, _, e := c.Snapshot(daemon.SnapshotRequest{})
 		errc <- e
 	}()
 	select {
@@ -288,7 +288,7 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, e := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- e
 	}()
 	select {
@@ -327,7 +327,7 @@ func TestDialStream_StalledRequestWriteTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- err
 	}()
 	select {
@@ -378,7 +378,7 @@ func TestDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
 		}
 	}
 
-	sc, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.T) {
 		return &closeNotifyConn{Conn: conn, closed: closed}, nil
 	}
 
-	if _, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0); err == nil {
+	if _, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0); err == nil {
 		t.Fatal("rejected WebSocket upgrade unexpectedly succeeded")
 	}
 	select {
@@ -456,7 +456,7 @@ func TestNewRemote_SlowButProgressingResponseNotKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("slow-but-progressing response must NOT be timed out, got %v", err)
 	}
@@ -490,7 +490,7 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(ctx, StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("DialStream over HTTP: %v", err)
 	}

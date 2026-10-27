@@ -943,12 +943,13 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 
-	t.Run("re-materializes defaults from an empty config.json stub (#864)", func(t *testing.T) {
-		// An empty config.json is the fingerprint of a failed first-run write
-		// from a pre-TOML af, not a user's settings. It must NOT wedge startup
-		// with the #758 "config is empty" hard error; instead the stub is
-		// dropped and defaults regenerated as config.toml so the next run
-		// parses cleanly.
+	t.Run("recovers defaults in memory from an empty config.json stub (#864/#4483)", func(t *testing.T) {
+		// An empty config.json is ambiguous: the fingerprint of a failed
+		// first-run write from a pre-TOML af, or a live file mid-rewrite. It
+		// must NOT wedge startup with the #758 "config is empty" hard error —
+		// and the load must not unlink it either (#4483): a read never
+		// deletes user data, so defaults come back in memory and the stub is
+		// left for whoever holds it.
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 		fastShell(t)
 		configDir, err := GetConfigDir()
@@ -963,12 +964,13 @@ func TestLoadConfig(t *testing.T) {
 		require.NotNil(t, cfg)
 		assert.Equal(t, defaultProgram, cfg.DefaultProgram)
 
-		// The empty stub is dropped and defaults land in config.toml; the
-		// stale config.json must not linger to trip the duplicate-config path.
-		assert.NoFileExists(t, configPath, "the empty config.json stub must be removed")
-		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
+		// The stub stays exactly as found — still there, still empty — and no
+		// config.toml is materialized over it.
+		data, err := os.ReadFile(configPath)
 		require.NoError(t, err)
-		assert.NotEmpty(t, data, "defaults must be regenerated as a non-empty config.toml")
+		assert.Empty(t, data, "the load must not delete or rewrite the stub (#4483)")
+		assert.NoFileExists(t, filepath.Join(configDir, TomlConfigFileName),
+			"nothing is materialized over a file that may be mid-rewrite")
 	})
 
 	t.Run("empty config.json is NOT dropped when config.toml already exists", func(t *testing.T) {

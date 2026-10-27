@@ -92,7 +92,7 @@ func TestControlKillSession_CommittedTeardownFailure_FillsEnvelopeWithoutKilledE
 
 	_, ch := manager.events.subscribe()
 	var resp KillSessionResponse
-	if err := cs.KillSession(KillSessionRequest{Title: "committed-envelope", RepoID: repoID}, &resp); err != nil {
+	if err := cs.KillSession(&KillSessionRequest{Title: "committed-envelope", RepoID: repoID}, &resp); err != nil {
 		t.Fatalf("a committed kill must land in the envelope, not be returned as an rpc error: %v", err)
 	}
 	if !resp.OK {

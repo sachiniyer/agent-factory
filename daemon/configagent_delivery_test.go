@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
@@ -89,6 +90,95 @@ func TestConfigAgentCodexTrustModalSubmitsBriefing(t *testing.T) {
 	if !strings.Contains(string(data), configAgentCodexFixtureSentinel) {
 		t.Fatalf("Spawn reported success without a receiver-side Codex user turn; rollout:\n%s", data)
 	}
+}
+
+// TestConfigAgentCodexTrimsRecordedTurnAndConfirmsReceipt models Codex 0.144.6's
+// chat_composer.rs trim of a submitted turn before it is recorded, then asserts
+// the spawn's receiver-side receipt (session.WaitForPromptReceipt) confirms a
+// prompt that ends in the trailing whitespace configagent.BuildBriefing produces.
+//
+// The hermetic fixture's default "accept" mode records the pasted draft verbatim,
+// so a prompt with no trailing whitespace never exercises the #5488 mismatch.
+// This test pads the prompt with a trailing "\n\n" (the shape BuildBriefing
+// ships) and uses the "accept-trim" fixture mode so the recorded turn is
+// trailing-whitespace stripped — exactly what real Codex stores. The receipt
+// must still confirm within the initial window; before #5488 it never did
+// because the untrimmed prompt could not be a substring of the trimmed record.
+func TestConfigAgentCodexTrimsRecordedTurnAndConfirmsReceipt(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "accept-trim")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+
+	// Mirror configagent.BuildBriefing's trailing shape: a long multi-line
+	// prompt ending in trailing whitespace ("\n\n"), with a sentinel payload
+	// so the recorded turn can be inspected. Real Codex trims the turn before
+	// recording; the fixture's "accept-trim" mode does the same.
+	prompt := strings.Repeat("config-agent briefing line\n", 256) +
+		configAgentCodexFixtureSentinel + "\n\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// The receipt must be CONFIRMED within the initial window. With the #5488
+	// bug, the trimmed recorded turn never contained the untrimmed prompt, so
+	// the spawn logged "briefing receipt was not observed" and escalated.
+	require.NotContains(t, info.String(), "briefing receipt was not observed",
+		"a trailing-whitespace prompt must confirm against the trimmed recorded turn within the window")
+	require.Empty(t, warnings.String(),
+		"a confirmed receipt must not escalate to a warning")
+
+	// Prove the fixture actually modeled the trim, so the confirmation above is
+	// meaningful: the recorded user_message is the prompt with its trailing
+	// whitespace stripped (it ends in the sentinel, not in "\n\n"). Without this
+	// check the test could pass against a verbatim recording for the wrong
+	// reason. The hermetic tmux paste delivers "\r" line endings (tmux converts
+	// "\n" to "\r" inside a bracketed paste), while real Codex records "\n";
+	// normalize the recorded turn's line endings so the comparison reflects the
+	// shape real Codex stores.
+	require.True(t, strings.HasSuffix(prompt, "\n\n"),
+		"the prompt must end in trailing whitespace so the test is non-vacuous")
+	message, err := readConfigAgentCodexUserMessage(rollout)
+	require.NoError(t, err)
+	require.NotEmpty(t, message, "the accept-trim fixture must record a user turn")
+	normalizedMessage := strings.ReplaceAll(strings.ReplaceAll(message, "\r\n", "\n"), "\r", "\n")
+	require.Equal(t, strings.TrimSpace(prompt), normalizedMessage,
+		"the accept-trim fixture must record the trailing-whitespace-stripped turn (modeling Codex text.trim())")
+}
+
+// readConfigAgentCodexUserMessage returns the message of the first Codex
+// user_message event recorded in rollout, or "" if none is present.
+func readConfigAgentCodexUserMessage(rollout string) (string, error) {
+	data, err := os.ReadFile(rollout)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var event struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil {
+			continue
+		}
+		if event.Type == "event_msg" && event.Payload.Type == "user_message" && event.Payload.Message != "" {
+			return event.Payload.Message, nil
+		}
+	}
+	return "", nil
 }
 
 // TestConfigAgentUnconfirmedReceiptStillAttaches is #2483. A receiver that never
@@ -321,7 +411,21 @@ func runConfigAgentCodexFixture(mode string) error {
 	if err := os.MkdirAll(filepath.Dir(rollout), 0755); err != nil {
 		return fmt.Errorf("create fake Codex sessions dir: %w", err)
 	}
-	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta"}`+"\n"), 0600); err != nil {
+	// session_meta carries the pane's real working directory, the same field a
+	// bound receipt snapshot correlates on (#5471): without it this rollout is
+	// uncorrelatable and no briefing it records can ever be observed.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve fake Codex working dir: %w", err)
+	}
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": cwd},
+	})
+	if err != nil {
+		return fmt.Errorf("encode fake Codex session_meta: %w", err)
+	}
+	if err := os.WriteFile(rollout, append(meta, '\n'), 0600); err != nil {
 		return fmt.Errorf("create fake Codex rollout: %w", err)
 	}
 
@@ -378,7 +482,19 @@ func runConfigAgentCodexFixture(mode string) error {
 					draft.Reset()
 					continue
 				}
-				if err := appendConfigAgentCodexUserTurn(rollout, draft.String()); err != nil {
+				recorded := draft.String()
+				if mode == "accept-trim" {
+					// Model Codex 0.144.6's chat_composer.rs
+					// prepare_submission_text_with_options, which trims a
+					// submitted turn before recording it
+					// (text.trim().to_string()). The default "accept" mode
+					// records the pasted draft verbatim and so hides the
+					// trailing-whitespace mismatch the receipt matcher must
+					// handle (#5488); this mode reproduces the real recorded
+					// shape so the receipt path is exercised in CI.
+					recorded = strings.TrimSpace(recorded)
+				}
+				if err := appendConfigAgentCodexUserTurn(rollout, recorded); err != nil {
 					return err
 				}
 				phase = "working"
@@ -453,4 +569,310 @@ func appendConfigAgentCodexUserTurn(rollout, prompt string) error {
 		return err
 	}
 	return f.Sync()
+}
+
+// shortenConfigAgentReceiptWindows shrinks all three receipt budgets at once so
+// the #5471 watcher phases — escalation window, pane excerpt, late re-check —
+// run in milliseconds. It restores them all on cleanup, the same pattern the
+// tests above apply per-var.
+func shortenConfigAgentReceiptWindows(t *testing.T, receipt, escalation, recheckDelay, recheckWindow time.Duration) {
+	t.Helper()
+	oldReceipt := configAgentPromptReceiptTimeout
+	oldEscalation := configAgentPromptReceiptEscalationTimeout
+	oldDelay := configAgentLateReceiptRecheckDelay
+	oldWindow := configAgentLateReceiptRecheckWindow
+	configAgentPromptReceiptTimeout = receipt
+	configAgentPromptReceiptEscalationTimeout = escalation
+	configAgentLateReceiptRecheckDelay = recheckDelay
+	configAgentLateReceiptRecheckWindow = recheckWindow
+	t.Cleanup(func() {
+		configAgentPromptReceiptTimeout = oldReceipt
+		configAgentPromptReceiptEscalationTimeout = oldEscalation
+		configAgentLateReceiptRecheckDelay = oldDelay
+		configAgentLateReceiptRecheckWindow = oldWindow
+	})
+}
+
+// TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt covers the first half of
+// #5471: when the receipt is still unconfirmed after the escalation window,
+// the spawn-time pane capture is logged as a sanitized excerpt — the only
+// place a trust/login/update modal that absorbed Enter would still be visible
+// (the same Enter usually dismisses it, so the buffer is taken pre-send).
+func TestConfigAgentUnconfirmedReceiptLogsPaneExcerpt(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	info, _ := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		10*time.Minute, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+	}, 3*time.Second, 25*time.Millisecond,
+		"an unconfirmed receipt must leave the pane's visible state in the log")
+	// The drop fixture leaves the composer drawn; its banner text is what the
+	// excerpt must carry once the ANSI is stripped.
+	require.Contains(t, info.String(), "OpenAI Codex",
+		"the excerpt should contain the pane's visible text")
+}
+
+// TestConfigAgentLateReceiptRecheckObserved is the "slow rollout" arm of #5471:
+// the receipt lands after the 35s-equivalent windows but before the late
+// re-check, which must then log the observed latency since delivery.
+func TestConfigAgentLateReceiptRecheckObserved(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		4*time.Second, 250*time.Millisecond)
+
+	const prompt = "briefing recorded minutes after every window closed"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// The turn must arrive AFTER the escalation window closes unconfirmed — a
+	// receipt the escalation poll can still see resolves as "confirmed late"
+	// and never reaches the re-check — but BEFORE the re-check fires.
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt was still not observed")
+	}, 3*time.Second, 25*time.Millisecond)
+	require.NoError(t, appendConfigAgentCodexUserTurn(rollout, prompt))
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "briefing receipt observed at the late re-check") &&
+			strings.Contains(info.String(), "after delivery")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a receipt that lands past the windows must surface its observed latency at the late re-check")
+	require.NotContains(t, warnings.String(), "briefing receipt never arrived")
+}
+
+// TestConfigAgentLateReceiptRecheckNeverArrived is the "lost briefing" arm of
+// #5471: no turn is ever recorded, so the late re-check must say so plainly.
+func TestConfigAgentLateReceiptRecheckNeverArrived(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	_, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		1500*time.Millisecond, 250*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt never arrived; still unobserved")
+	}, 6*time.Second, 50*time.Millisecond,
+		"a receipt still absent at the late re-check must be reported as never arrived")
+}
+
+// TestConfigAgentReceiptAmbiguousSiblingStaysIndeterminate is the #5471
+// review's shared-home case: two Codex processes on one box can each create a
+// rollout under the same CODEX_HOME during the receipt wait, at which point
+// the store can no longer prove which file is the config agent's own. The
+// diagnostic must report that ambiguity honestly rather than attribute the
+// sibling's turn and log "observed", or report "never arrived" while a real
+// rollout exists.
+func TestConfigAgentReceiptAmbiguousSiblingStaysIndeterminate(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		600*time.Millisecond, 250*time.Millisecond)
+
+	const prompt = "briefing recorded minutes after every window closed"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
+	})
+
+	// A second Codex process's rollout appears under the same CODEX_HOME after
+	// this spawn's initial receipt wait has expired unconfirmed, so the
+	// escalation poll now sees two new files it cannot attribute.
+	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
+		"sessions", "2026", "07", "21",
+		"rollout-2026-07-21T09-00-00-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0755))
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": os.Getenv("AGENT_FACTORY_HOME")},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sibling, append(meta, '\n'), 0600))
+	require.NoError(t, appendConfigAgentCodexUserTurn(sibling, "a different config agent's briefing"))
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(),
+			"could not continue checking the briefing receipt")
+	}, 3*time.Second, 25*time.Millisecond,
+		"an ambiguous rollout set must be reported as indeterminate, not a verdict")
+	require.Contains(t, warnings.String(), "prompt receipt ambiguous")
+	// Give the late re-check horizon time to pass: no verdict may follow an
+	// ambiguous wait either.
+	time.Sleep(1500 * time.Millisecond)
+	require.NotContains(t, info.String(), "briefing receipt observed at the late re-check")
+	require.NotContains(t, warnings.String(), "briefing receipt never arrived")
+}
+
+// TestConfigAgentLateReceiptRecheckSkipsGoneSession is the #5471 review's
+// gone-session case: if the config agent left tracking — or its pane exited on
+// its own without a reap — the late re-check must skip quietly rather than log
+// a rollout verdict for a session that is gone.
+func TestConfigAgentLateReceiptRecheckSkipsGoneSession(t *testing.T) {
+	for _, gone := range []string{"untracked", "pane exited"} {
+		t.Run(gone, func(t *testing.T) {
+			testguard.IsolateTmux(t)
+			manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+			info, warnings := captureConfigAgentReceiptLogs(t)
+			// The re-check horizon (3s) must sit comfortably past the excerpt
+			// observation bound (2s) so the session is gone BEFORE the watcher
+			// reaches its late-check guards; otherwise the test races the timer.
+			shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+				3*time.Second, 250*time.Millisecond)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+				Program: program,
+				Prompt:  "briefing the receiver never records as a turn",
+			})
+			require.NoError(t, err)
+
+			ts := manager.configAgents.session(sessionName)
+			require.NotNil(t, ts)
+			t.Cleanup(func() { _, _ = ts.Close() })
+
+			// The excerpt line is the last thing logged before the watcher parks
+			// on the re-check timer, so observing it means the wait has begun.
+			require.Eventually(t, func() bool {
+				return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+			}, 2*time.Second, 25*time.Millisecond)
+
+			switch gone {
+			case "untracked":
+				manager.configAgents.mu.Lock()
+				delete(manager.configAgents.sessions, sessionName)
+				manager.configAgents.mu.Unlock()
+			case "pane exited":
+				_, err := ts.Close()
+				require.NoError(t, err)
+			}
+
+			// The re-check horizon passes with no verdict logged either way.
+			require.Never(t, func() bool {
+				return strings.Contains(info.String(), "observed at the late re-check") ||
+					strings.Contains(warnings.String(), "briefing receipt never arrived") ||
+					strings.Contains(warnings.String(), "late receipt re-check could not determine")
+			}, 4*time.Second, 50*time.Millisecond,
+				"a gone session must not get a late re-check verdict")
+		})
+	}
+}
+
+// TestConfigAgentReapDuringLateRecheckWaitUnwindsWatcher is the #5471 review's
+// join-budget case: a watcher parked on the 5m re-check timer must still unwind
+// instantly when reap cancels it — joinReceiptWatchers must never have to wait
+// out its timeout, which is the only way teardown could tell the difference.
+func TestConfigAgentReapDuringLateRecheckWaitUnwindsWatcher(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+	shortenConfigAgentReceiptWindows(t, 250*time.Millisecond, 250*time.Millisecond,
+		10*time.Minute, 250*time.Millisecond)
+	shortenReceiptJoinTimeout(t, 3*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing the receiver never records as a turn",
+	})
+	require.NoError(t, err)
+
+	// Once the excerpt line lands the watcher is parked on the re-check timer;
+	// reaping now cancels that wait, and the join can only return quickly if the
+	// goroutine actually observed receiptCtx.Done() — an abandoned watcher would
+	// hold the join for the whole configAgentReceiptJoinTimeout and log it.
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "pane excerpt after unconfirmed briefing receipt")
+	}, 3*time.Second, 25*time.Millisecond)
+
+	start := time.Now()
+	require.NoError(t, manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName}))
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, configAgentReceiptJoinTimeout,
+		"reap returned only because the watcher unwound on receiptCtx.Done(), "+
+			"not because the join abandoned it after %s", configAgentReceiptJoinTimeout)
+	require.NotContains(t, warnings.String(), "did not unwind",
+		"the watcher parked on the re-check timer must unwind on cancellation, not be abandoned")
+}
+
+func TestConfigAgentPaneExcerpt(t *testing.T) {
+	t.Run("strips ansi and residual controls", func(t *testing.T) {
+		got := configAgentPaneExcerpt("\x1b[31mDo you trust\x1b[0m this dir?\x07\n\x9b2Ky/n\r")
+		require.NotContains(t, got, "\x1b")
+		require.NotContains(t, got, "\x07")
+		require.NotContains(t, got, "\x9b")
+		require.NotContains(t, got, "\r")
+		require.Contains(t, got, "Do you trust this dir?")
+	})
+
+	t.Run("redacts credential shapes", func(t *testing.T) {
+		got := configAgentPaneExcerpt(
+			"pat: ghp_0123456789abcdefghij\nkeyed: api_key=hunter2secret\n")
+		require.NotContains(t, got, "ghp_0123456789abcdefghij")
+		require.NotContains(t, got, "hunter2secret")
+	})
+
+	t.Run("keeps the tail within the line cap", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < configAgentPaneExcerptMaxLines+10; i++ {
+			fmt.Fprintf(&b, "line-%02d\n", i)
+		}
+		got := configAgentPaneExcerpt(b.String())
+		require.True(t, strings.HasPrefix(got, "… (truncated)"))
+		require.NotContains(t, got, "line-00")
+		require.Contains(t, got, fmt.Sprintf("line-%02d", configAgentPaneExcerptMaxLines+9))
+	})
+
+	t.Run("keeps the tail within the byte cap", func(t *testing.T) {
+		got := configAgentPaneExcerpt(strings.Repeat("x", configAgentPaneExcerptMaxBytes+100))
+		require.True(t, strings.HasPrefix(got, "… (truncated)"))
+		require.LessOrEqual(t, len(got), len("… (truncated)\n")+configAgentPaneExcerptMaxBytes)
+		require.True(t, utf8.ValidString(got))
+	})
+
+	t.Run("marks an empty pane", func(t *testing.T) {
+		require.Equal(t, "(empty pane)", configAgentPaneExcerpt("\x1b[2J  \n\t\n"))
+	})
 }

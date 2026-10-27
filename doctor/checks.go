@@ -54,6 +54,10 @@ func tempDirDefault() string { return os.TempDir() }
 
 var (
 	daemonProcessArgv = daemon.ProcessArgv
+	// withheldEnvCause names why the kernel served no environment for a
+	// process (#3584). A package var so tests on Linux, which has no such
+	// redaction, can stage the darwin answer.
+	withheldEnvCause = proctree.WithheldEnvCause
 	// tempHomeLockProbe answers "is a daemon running for this home?" through the
 	// home's daemon.lock — the kernel-guaranteed fact that authorises removing an
 	// abandoned temp home (#1989). A package var so tests can stage each of the
@@ -247,7 +251,19 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	default:
 		report.Pass(sectionDaemon, "autostart", "installed")
 	}
-	if h.PIDFilePID > 0 && !h.PIDVerified && h.PingErr != nil {
+	// An unverifiable pid is NEITHER verified nor stale: the file names a
+	// live af daemon whose home binding could not be proven — possibly this
+	// home's own daemon with an unreadable process frame (the normal shape
+	// on macOS), possibly another home's. It gets an advisory rather than
+	// the stale-file row, because suggesting removal over a pid that might
+	// name this home's live daemon would orphan the very handle recovery
+	// needs (#5188).
+	if h.PIDUnverifiable && h.PingErr != nil {
+		report.Warn(sectionDaemon, "daemon.pid",
+			fmt.Sprintf("records pid %d, a live af daemon whose home could not be verified", h.PIDFilePID),
+			"it may be this home's daemon or another's — check `af daemon status` in the intended home before removing the file or signalling the pid", false)
+	}
+	if h.PIDFilePID > 0 && !h.PIDVerified && !h.PIDUnverifiable && h.PingErr != nil {
 		report.Warn(sectionDaemon, "daemon.pid", fmt.Sprintf("records pid %d but no agent-factory daemon is running under it", h.PIDFilePID),
 			"remove the stale daemon.pid after verifying the pid is not an af daemon", true)
 	}
@@ -271,7 +287,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		report.markIncomplete("root agent program")
 		return
 	}
-	compared, drifted, unresolved := 0, 0, 0
+	compared, drifted, unresolved, unrecorded := 0, 0, 0, 0
 	for _, inst := range instances {
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
 			continue
@@ -382,11 +398,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		runningProgram := inst.RuntimeProgram
 		if strings.TrimSpace(runningProgram) == "" {
 			cancel()
-			unresolved++
-			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
-				"restart the daemon, then kill the root to record a fresh launch command", false)
-			report.markIncomplete("root agent program")
+			// Unknown, not uninspectable: adoption and name-only reattach never
+			// record a launch command, so an empty runtime_program is the designed
+			// steady state for a root this daemon did not spawn. Nothing here is
+			// broken and nothing the user can run fills the field — only the
+			// root's next real launch does. That is a note, not a warning.
+			unrecorded++
+			report.Info(sectionDaemon, "root agent program",
+				fmt.Sprintf("the resolved runtime command is not recorded for %s — the running process was adopted, or launched before runtime commands were recorded; it will be recorded on the root's next launch", rootSessionDisplayPath(inst)))
 			continue
 		}
 		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
@@ -414,8 +433,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 	}
 	if drifted == 0 && unresolved == 0 {
 		detail := "no enabled live root sessions to compare"
-		if compared > 0 {
+		switch {
+		case compared > 0:
 			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)
+			if unrecorded > 0 {
+				detail += fmt.Sprintf("; %d adopted live root(s) have no recorded runtime command", unrecorded)
+			}
+		case unrecorded > 0:
+			detail = "every live root was adopted without a recorded runtime command to compare"
 		}
 		report.Pass(sectionDaemon, "root agent program", detail)
 	}
@@ -545,6 +570,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			}
 			continue
 		}
+		if nameStatus == proctree.EnvUnknown {
+			observations.noteWithheldEnv(pid)
+		}
 		if tmuxEnv, st := proctree.LookupEnv(pid, "TMUX"); st == proctree.EnvFound && tmuxServerDead(ctx, tmuxEnv) {
 			if observations.oldEnough(ctx, p) {
 				possibles = append(possibles, p)
@@ -555,22 +583,68 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	for _, name := range sortedKeys(marked) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		if live[name] {
-			inSession := map[int]bool{}
-			for _, p := range tmux.SessionProcessTrees(ctx.opts.Exec, name) {
-				inSession[p.PID] = true
+		sessionLive := live[name]
+		if sessionLive {
+			// The pane tree comes from the EVIDENCE-BEARING capture. The
+			// best-effort SessionProcessTrees returns nil on any list-panes
+			// failure, and reading that nil as a proven-empty tree is the
+			// defect this arm exists to avoid: with inSession empty, every
+			// marked process for this live session would render as an
+			// escaped-process finding the check has no evidence for, because
+			// the read that would prove membership never returned. A read that
+			// cannot answer is reported once as blindness below (via
+			// observations.blindSessions) rather than classified either way.
+			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+			// Build the captured-PID set from whatever the partial tree
+			// returned (may be non-empty even when paneErr != nil, e.g. one
+			// pane vanished between list-panes and the process snapshot while
+			// other panes' descendants were captured successfully).
+			capturedPIDs := map[int]bool{}
+			for _, p := range tree {
+				capturedPIDs[p.PID] = true
 			}
-			for _, p := range procs {
-				if inSession[p.PID] || !observations.stillPresent(p) {
+			if paneErr != nil {
+				// A session that vanished between the memoized listing and the
+				// pane capture is conclusively gone: route its surviving
+				// candidates through the dead-session (orphaned-process)
+				// classification below, just like a session that was never in
+				// the live list. The vanished sentinel is not a blindness event
+				// because the absence is authoritative, not a failed read.
+				if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
+					sessionLive = false
+				} else {
+					// Revalidate candidates before declaring blindness: if every
+					// marked process for this session already exited (normal churn),
+					// or is already verified by the partial tree, there is nothing
+					// left to be blind about and no row is needed.
+					var anyBlind bool
+					for _, p := range procs {
+						if observations.stillPresent(p) && !capturedPIDs[p.PID] {
+							anyBlind = true
+							break
+						}
+					}
+					if anyBlind {
+						observations.blindSessions = append(observations.blindSessions, name)
+					}
 					continue
 				}
-				report.addAdvisoryFinding(Finding{
-					Check: "escaped-process",
-					Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
-						"(left alone while the session is alive)", describeProc(p), name),
-				})
 			}
-			continue
+			if sessionLive {
+				for _, p := range procs {
+					if capturedPIDs[p.PID] || !observations.stillPresent(p) {
+						continue
+					}
+					report.addAdvisoryFinding(Finding{
+						Check: "escaped-process",
+						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
+							"(left alone while the session is alive)", describeProc(p), name),
+					})
+				}
+				continue
+			}
+			// sessionLive was cleared by ErrSessionVanishedBeforeCapture:
+			// fall through to the orphaned-process classification below.
 		}
 		for _, p := range procs {
 			if !observations.stillPresent(p) {
@@ -658,10 +732,33 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 
 // processLeakObservations keeps every unprovable state visible without mixing
 // it into the leak counts. A vanished process is normal churn and needs no row;
-// missing age or an identity-read failure means the check was blind.
+// missing age or an identity-read failure means the check was blind; a live
+// session whose pane tree could not be read is blind to membership rather than
+// proven empty (added so a failed list-panes no longer renders as a row of
+// false escaped-process findings for that session's ordinary in-pane children).
 type processLeakObservations struct {
 	unknownAge      int
 	unknownIdentity int
+	blindSessions   []string
+	// envWithheld counts processes whose environment the kernel declined to
+	// serve, so none of the classifications below could read their markers
+	// (#3584). envWithheldCause is the first attributed cause.
+	envWithheld      int
+	envWithheldCause string
+}
+
+// noteWithheldEnv records pid when its unreadable environment has a cause the
+// platform can name. An unattributed unknown (a foreign uid, a process that
+// exited) is ordinary and stays uncounted.
+func (o *processLeakObservations) noteWithheldEnv(pid int) {
+	cause, ok := withheldEnvCause(pid)
+	if !ok {
+		return
+	}
+	if o.envWithheld == 0 {
+		o.envWithheldCause = cause
+	}
+	o.envWithheld++
 }
 
 func (o *processLeakObservations) oldEnough(ctx *scanContext, p proctree.Process) bool {
@@ -691,12 +788,39 @@ func (o processLeakObservations) report(report *Report) {
 		blind = append(blind, fmt.Sprintf("could not revalidate the identity of %s",
 			plural(o.unknownIdentity, "candidate process", "candidate processes")))
 	}
-	if len(blind) == 0 {
-		return
+	if len(blind) > 0 {
+		report.Warn(sectionProcesses, "process-leak-inspection",
+			strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
+			"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
 	}
-	report.Warn(sectionProcesses, "process-leak-inspection",
-		strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
-		"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
+	// On a SIP-enabled Mac the kernel withholds the environment of every Apple
+	// system binary, /bin/zsh included, so a leaked shell carries markers doctor
+	// cannot read and lands in none of the counts (#3584). Say so once rather
+	// than let the missing findings read as a clean machine. A Warn, like the
+	// other partial-blindness rows here: the process table was read, and the
+	// only remedy (turning SIP off) is not one to suggest.
+	if o.envWithheld > 0 {
+		report.Warn(sectionProcesses, "process-attribution",
+			fmt.Sprintf("the kernel withheld the environment of %s because %s, so af cannot read "+
+				"their session markers; a leaked process of that kind is not counted as escaped, "+
+				"orphaned, or a possible orphan", plural(o.envWithheld, "process", "processes"), o.envWithheldCause),
+			"missing process findings on this host are not proof that nothing leaked; af leaves "+
+				"processes it cannot attribute alone", false)
+	}
+	// A live session whose pane tree could not be read is not a proven-empty
+	// tree: the escaped-process arm's membership check had no answer, so it
+	// declined to classify that session's marked processes either way. Report
+	// it once per session as blindness rather than letting it render as a row
+	// of false escaped-process findings (the way an unreadable process table or
+	// session list already gets its own row). Reported here, not in the arm
+	// itself, so a single blind session is one row rather than one per pid.
+	for _, name := range o.blindSessions {
+		report.Warn(sectionProcesses, "process-leak-inspection",
+			fmt.Sprintf("could not read the pane tree of live session %s, so whether its "+
+				"marked processes escaped is UNKNOWN rather than empty", name),
+			"that session's processes are unclassified, not proven escapes; restore access to the "+
+				"tmux server and rerun `af doctor`", false)
+	}
 }
 
 // tmuxServerDead parses a TMUX env value ("socketPath,serverPID,sessionIdx")

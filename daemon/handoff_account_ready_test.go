@@ -36,7 +36,8 @@ func TestHandoffAccountReadySettlesRunning(t *testing.T) {
 				require.NotNil(t, saved.PendingAccountSwap)
 				drainSessionUpdates(t, ch)
 				backend.sendPromptErr = nil
-				require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+				_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+				require.NoError(t, err)
 			} else {
 				require.NoError(t, err)
 			}

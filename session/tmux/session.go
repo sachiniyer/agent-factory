@@ -5,11 +5,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 const ProgramClaude = "claude"
@@ -141,6 +144,149 @@ func EnsureDevinWorkspaceTrustSuppressed(command string) string {
 	return command + " " + devinWorkspaceTrustFlag + " false"
 }
 
+// codexUpdateCheckConfigKey is codex's top-level config.toml key for the
+// startup update prompt ("Update available! … 1. Update now 2. Skip …").
+// Verified against codex-cli 0.163.0: it is a ConfigToml field, and codex's
+// get_upgrade_version_for_popup returns nothing when it is false — no check,
+// no picker, no keystroke for af to get wrong (#5238).
+const codexUpdateCheckConfigKey = "check_for_update_on_startup"
+
+// EnsureCodexUpdateCheckDisabled inserts "-c check_for_update_on_startup=false"
+// into a codex launch command so codex's startup update picker never renders
+// and the session reaches ready without af navigating a modal that can exit
+// the process. The picker is answered, not just displayed: confirming "Update
+// now" makes the TUI exit and run the installer synchronously in the same
+// process, which is how a restored session dies seconds after af interacted
+// with the dialog (#5238). Preventing the prompt is strictly safer than
+// answering it — handleCodexUpdatePrompt remains as the fallback for commands
+// launched outside these paths.
+//
+// Same one-helper contract as EnsureDevinWorkspaceTrustSuppressed: every path
+// that launches codex under af calls this — ordinary sessions through
+// injectSystemPrompt (which create, lazy respawn, and Recover all funnel
+// through) and the config-agent spawn directly — so the two cannot drift.
+//
+// The flag is spliced immediately after the codex executable, not appended:
+// `-c`/`--config` is codex's top-level option, accepted there before any
+// subcommand or argument (verified against `codex -c k=v …` on 0.163.0 —
+// `resume --help`, `exec --help`, and `--version` all parse with it). That one
+// position is the only one that is a real option for EVERY shape the launch
+// can take (#5238 review):
+//   - `codex` and `/path/codex` — the ordinary case;
+//   - `exec codex` / `env codex` — the flag belongs to codex's argv, so it
+//     lands after the codex operand, not at the command's tail where env
+//     would read it as its own word;
+//   - `codex -- '-prompt'` — appending would place the flag AFTER the
+//     end-of-options terminator, where clap reads it as prompt text;
+//   - `codex resume <id>` (the account-swap carry build) and `codex exec
+//     --json` — an existing subcommand shifts right, the flag stays global.
+//
+// The restore splice then lands `resume --last` behind it (`codex -c k=v
+// resume --last`, a positional extension of the launch command), so the
+// generated-argument declaration grows by the same two words through either
+// splice position. The splice uses the byte offset right after the executable
+// token, the same technique as resumeProgram, so operator quoting and
+// metachars pass through.
+//
+// Two conditions, both load-bearing:
+//   - A non-codex command is returned unchanged. A program_overrides entry can
+//     point "codex" at another binary (the #1116/#1131 class); appending a
+//     codex flag to it would make that binary exit on an unknown argument.
+//   - A command already carrying the key — any -c/--config spelling, any
+//     value — is left alone, so a user's explicit choice wins. `=true` is the
+//     opt-back-in: codex runs its startup check because the operator asked
+//     for it, and af's dismisser answers the picker exactly as it does on a
+//     launch the flag never touched.
+func EnsureCodexUpdateCheckDisabled(command string) string {
+	tokens, ends := splitShellTokens(command)
+	// The flag must land on codex's own argv, so the executable is located
+	// through the account boundary's own parser — never a later token that
+	// merely names codex (`my-chat --persona codex`), never a bare-name
+	// spelling the boundary would not model (`./env codex` and `/tmp/exec
+	// codex` run a path-qualified file, not GNU env or the exec builtin),
+	// and never a compound or non-literal command the boundary refuses
+	// (#5238 review).
+	execIdx := sessionenv.CommandExecutableIndex(command)
+	if execIdx < 0 || execIdx >= len(tokens) || strings.ToLower(filepath.Base(tokens[execIdx])) != ProgramCodex {
+		return command
+	}
+	agentIdx := execIdx
+	// Only codex's own option surface decides "already set": tokens before
+	// the executable belong to the wrapper prefix (an `env` option or
+	// assignment, never codex's config), and a `--` terminator makes the
+	// rest positional prompt text rather than an override.
+	if _, overridden := codexCommandConfigValue(tokens[agentIdx+1:], codexUpdateCheckConfigKey); overridden {
+		return command
+	}
+	off := ends[agentIdx]
+	return command[:off] + " -c " + codexUpdateCheckConfigKey + "=false" + command[off:]
+}
+
+// codexCommandConfigValue reports the value the tokens' -c/--config overrides
+// assign key, in every spelling clap accepts: `-c k=v`, `-ck=v`, `-c=k=v`,
+// `--config k=v`, `--config=k=v` (#5238 review). The caller passes the tokens
+// AFTER the agent executable so a wrapper's own options (ionice's -c, env's
+// operands) are never mistaken for codex's. A bare substring match cannot
+// make this call — `FOO=/tmp/check_for_update_on_startup codex` or `codex -c
+// model=check_for_update_on_startup` would read as "the operator already
+// chose", launch WITHOUT the flag, and re-expose the picker. Tokens arrive
+// unquoted from splitShellTokens; the key is whatever precedes the operand's
+// first '='. Scanning stops at the end-of-options terminator — `codex -- -c
+// x=y` passes that text as a prompt, not an override. Repeated overrides
+// resolve the way codex resolves them — the last operand wins.
+func codexCommandConfigValue(tokens []string, key string) (string, bool) {
+	var value string
+	found := false
+	for i, tok := range tokens {
+		if tok == "--" {
+			break
+		}
+		var operand string
+		switch {
+		case tok == "-c" || tok == "--config":
+			if i+1 >= len(tokens) {
+				continue
+			}
+			operand = tokens[i+1]
+		case strings.HasPrefix(tok, "--config="):
+			operand = tok[len("--config="):]
+		case strings.HasPrefix(tok, "-c") && len(tok) > 2:
+			operand = tok[2:]
+		default:
+			continue
+		}
+		operand = strings.TrimPrefix(operand, "=")
+		if k, v, ok := strings.Cut(operand, "="); ok && strings.TrimSpace(k) == key {
+			value, found = strings.TrimSpace(v), true
+		}
+	}
+	return value, found
+}
+
+// skipCodexConfigOptions advances past codex's global -c/--config option
+// tokens — the same spellings codexCommandConfigValue reads — so
+// resumeProgram's subcommand check sees the token position that follows them
+// rather than treating the first -c as the subcommand slot. A dangling `-c`
+// at the end cannot consume a missing operand, so the scan stops on it.
+func skipCodexConfigOptions(tokens []string, i int) int {
+	for i < len(tokens) {
+		tok := tokens[i]
+		switch {
+		case tok == "-c" || tok == "--config":
+			if i+1 >= len(tokens) {
+				return i
+			}
+			i += 2
+		case strings.HasPrefix(tok, "--config="),
+			strings.HasPrefix(tok, "-c") && len(tok) > 2:
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
 	// closeReapDone is a test seam, set before Close and never mutated during
@@ -171,6 +317,13 @@ type TmuxSession struct {
 	// selected account's environment without pretending its shell/process command
 	// is the provider executable guarded by the direct-agent launch proof.
 	accountEnvironmentOnly bool
+	// remainOnExit keeps the pane as a held dead pane after its command exits,
+	// so a process tab's completion is provable through pane_dead /
+	// pane_dead_status instead of the session's absence alone (#4479). Set only
+	// on process-tab siblings — agent and shell panes keep the default
+	// exit-destroys-session semantics their own restore contracts rely on.
+	// Guarded by programMu; read by Start's new-session arguments.
+	remainOnExit bool
 	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
 	// pane browser-free (#3854), or nil for every other pane. It is a resolved
 	// list rather than a bool because the operator's own pass-through wins: a name
@@ -200,6 +353,10 @@ type TmuxSession struct {
 	// safety-buffering intervention can prove it did not select the downgrade.
 	// Access only while inputMu is held.
 	codexSafety codexSafetyBufferingState
+	// codexUpdate prevents a delayed picker repaint from repeating navigation or
+	// confirmation while dismissing Codex's launch-time update prompt.
+	// Access only while inputMu is held.
+	codexUpdate codexUpdatePromptState
 	// claudeTrust remembers whether the folder-trust handler has already
 	// reported a dialog it refuses to answer, so the daemon's per-second poll
 	// logs that once rather than every tick. Access only while inputMu is held.
@@ -247,7 +404,14 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
-	provenMu           sync.RWMutex
+	// The teardown mark lives on statusMonitor (io.go), not here: the fact a
+	// status poll needs is the teardown attribution of the session generation
+	// IT is polling, and a shared session-level flag lets a same-object
+	// restart rewrite that attribution out from under an in-flight poll of
+	// the old generation (Codex on #4473). Accessors below proxy the current
+	// monitor's mark for callers — and for the clear sites that fire on
+	// tmux's answered-live evidence.
+	provenMu sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -295,6 +459,25 @@ var ErrSessionGone = errors.New("tmux session no longer exists")
 // by hasStableTmuxSpelling can turn a confirmed absence into this marker.
 var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 
+// ErrSessionNameTaken marks the one ErrSessionNotStarted whose cause is the
+// positive existence gate: a same-named pane was positively present when Start
+// probed. Callers that re-diagnose after the fact must not lose that verdict —
+// a blocker that exits before the second probe leaves the name free while the
+// launch still never ran, which is a launch failure, not a finished flow.
+var ErrSessionNameTaken = errors.New("tmux session already exists")
+
+// ErrSpawnDirMissing marks a refused spawn: the working directory Start was
+// given does not exist (or is not a directory) when tmux is asked to launch
+// into it. Without the refusal, `tmux new-session -c <missing>` silently falls
+// back to the server's current directory and the pane lands in an unrelated
+// checkout or the daemon's $HOME (#5172). Every af spawn passes through
+// Start, so this seam is the invariant's single enforcer: a session never
+// launches into a directory af did not verify exists. The stat-to-chdir race
+// that remains — the directory removed or swapped between this stat and the
+// server's own resolution of -c — is a deliberate follow-up (#5172 slice 2),
+// tracked rather than silently accepted.
+var ErrSpawnDirMissing = errors.New("spawn start directory missing")
+
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
 // session environment or default command could not be upgraded in place.
 var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment refresh failed")
@@ -303,13 +486,26 @@ var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment r
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
 var DetachKeyByte byte = 23
 
-// DetachKeyDisplay is the human-readable name for the detach key (e.g. "ctrl-w").
-var DetachKeyDisplay string = "ctrl-w"
+// DetachKeyDisplay is the human-readable name for the detach key, in the
+// help-overlay spelling ("ctrl+w"). The config file keeps its "ctrl-w" form;
+// SetDetachKey normalises it on the way in (#4176).
+var DetachKeyDisplay string = "ctrl+w"
 
 // SetDetachKey sets the global detach key byte and display name.
 func SetDetachKey(b byte, display string) {
 	DetachKeyByte = b
-	DetachKeyDisplay = display
+	DetachKeyDisplay = detachKeyDisplayForm(display)
+}
+
+// detachKeyDisplayForm renders a config-shaped key name ("ctrl-w") in the
+// spelling the help overlay uses for every other ctrl binding ("ctrl+w").
+// Anything that does not look like a ctrl- combination passes through
+// unchanged rather than being re-spelled.
+func detachKeyDisplayForm(display string) string {
+	if rest, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(display)), "ctrl-"); ok {
+		return "ctrl+" + rest
+	}
+	return display
 }
 
 // repoHash returns a short hex hash of the repo path for use in tmux session names.
@@ -472,8 +668,12 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 	switch {
 	case known && exists:
 		// The name is live again: the stored proof is superseded, not stale-
-		// but-still-usable. Drop it so no later consumer re-checks it.
+		// but-still-usable. Drop it so no later consumer re-checks it. The
+		// teardown mark retires only if the live session is the generation the
+		// monitor polls — a replacement behind the name is not the session af
+		// closed, and its mark still describes af's own teardown.
 		t.setClosedConclusively(false)
+		t.clearTeardownMarkForConfirmedGeneration()
 		return false
 	default:
 		return known && !exists
@@ -513,6 +713,66 @@ func (t *TmuxSession) setClosedConclusively(closed bool) {
 	t.provenMu.Lock()
 	t.closedConclusively = closed
 	t.provenMu.Unlock()
+}
+
+// teardownInitiated reports whether af itself asked for the teardown of the
+// session the CURRENT monitor is polling — the predicate the status monitor
+// uses to keep expected disappearances out of ERROR (#4472).
+//
+// Unexported: the production reader is HasUpdatedWithBaseline, which reads the
+// mark off its own snapshotted monitor rather than through this accessor, so
+// nothing outside the package needs it (#4473 review). It survives as the
+// package's read-side assertion helper.
+func (t *TmuxSession) teardownInitiated() bool {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	return t.monitor != nil && t.monitor.generation != nil && t.monitor.generation.teardownInitiated
+}
+
+// clearTeardownMarkForConfirmedGeneration retires the current monitor's
+// teardown mark at a call site that has already established the NAME is live
+// — close()'s survived-kill answer, Start's exists gate,
+// ClosedConclusivelyAndStillAbsent's re-probe. A live name is only proof that
+// the POLLED generation survived when the monitor is unbound (the pre-binding
+// name semantics) or when the session answering resolves to that same
+// generation: a bound monitor watching a replaced name must keep its mark, or
+// af's own teardown of the old generation reads as an unrequested vanish
+// (Codex on #4473). An unresolvable live session is not proof either way —
+// the mark stays.
+func (t *TmuxSession) clearTeardownMarkForConfirmedGeneration() {
+	// Establish whether anything needs clearing BEFORE asking tmux anything:
+	// a monitor with no marked generation owes no resolution, and running the
+	// display-message query unconditionally spends a bounded tmux call on
+	// every exists-gated Start while reaching test doubles that stub only
+	// RunFunc — which is how an already-exists Start panicked on a nil
+	// OutputFunc instead of returning ErrSessionNotStarted (Codex on #4473).
+	t.monitorMu.Lock()
+	mon := t.monitor
+	if mon == nil || mon.generation == nil || !mon.generation.teardownInitiated {
+		t.monitorMu.Unlock()
+		return
+	}
+	g := mon.generation
+	if g.sessionID == "" {
+		// An unbound monitor's mark is name-scoped, so the live-name answer
+		// the caller already established is the whole proof — there is no id
+		// to resolve and nothing to query.
+		g.teardownInitiated = false
+		g.teardownSettledAt = time.Time{}
+		t.monitorMu.Unlock()
+		return
+	}
+	t.monitorMu.Unlock()
+
+	live, _ := t.confirmedGeneration()
+
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if live == nil || !g.sameAs(live) {
+		return
+	}
+	g.teardownInitiated = false
+	g.teardownSettledAt = time.Time{}
 }
 
 // SanitizedName returns the sanitized tmux session name.

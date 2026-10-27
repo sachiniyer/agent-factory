@@ -71,8 +71,8 @@ func LoadTasksForKnownRepo(repoRoot, repoID string) ([]Task, error) {
 }
 
 // matches reports both whether t belongs to this display scope and whether that
-// answer is known. Lifecycle scopes use LoadTasksForRepoID's stable-binding
-// transaction instead of this intentionally cached display path.
+// answer is known. Lifecycle scopes use LoadTasksForRepoIDWithBindingUpdates'
+// stable-binding transaction instead of this intentionally cached display path.
 func (s *repoScope) matches(t Task) (matched, known bool) {
 	// The RETAINED id wins when present: it was resolved at bind time, while the
 	// recorded path was known to resolve, so it survives that path being deleted

@@ -123,25 +123,47 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the operator's ssh command as a PREFIX: `sh -c '<sandbox.ssh> \"$@\"' af-sandbox <script>`",
 	}},
-	"session/backend_sandbox.go:(*sandboxProvisioner).startTunnel": {{
+	"session/sandbox_tunnel.go:(*sandboxProvisioner).spawnTunnel": {{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
-		note: "the same prefix, with -N -L appended for the port-forward child",
+		note: "the same prefix, with -N -L appended for the port-forward child — the direct-spawn shape (#5564)",
+	}},
+	"session/sandbox_tunnel.go:spawnTunnelViaLifeline": {{
+		class: operatorConfig, keys: []string{"sandbox.ssh"},
+		note: "the same tunnel prefix, handed to the watch lifeline which execs `sh -c <script>` inside the " +
+			"group it owns (#5564)",
 	}},
 
 	// ---- operator-authored, but not from a config file ----
-	"daemon/watcher.go:(*taskWatcher).runOnce": {{
+	"daemon/watcher_lifeline.go:(*watcherSupervisor).startWithLifeline": {{
 		class: operatorOther,
 		note: "a watch task's command, from the task store rather than a config file, so no config load ever " +
 			"sees it. Out of #3566's scope on purpose — the fix is a warning where the value is ADMITTED, " +
-			"which for a task is task creation, not config load.",
+			"which for a task is task creation, not config load. This is the lifeline spawn (#5329): the " +
+			"lifeline execs `<shell> -c <watch_cmd>` from these argv elements unchanged.",
+	}},
+	"daemon/watcher_lifeline.go:(*watcherSupervisor).startWatchProcess": {{
+		class: operatorOther,
+		note: "the same watch task command as startWithLifeline, on the direct-spawn path used when no " +
+			"lifeline binary is available or it does not speak the protocol (#5329).",
 	}},
 
 	// ---- af-authored scripts ----
+	"daemon/watcher_lifeline.go:startWatchGroupAnchor": {{
+		class: afAuthored,
+		note: "the watch run's group anchor: a fixed `trap '' TERM; printf x >&3; while read x; do :; done` " +
+			"that keeps the run's process group non-empty until it is reaped, so no group signal can name " +
+			"a reused number; the fd-3 byte is the anchor's own proof its TERM trap is installed (#5329)",
+	}},
 	"config/claude_probe.go:probeClaudeCommand": {
 		{class: afAuthored, note: "zsh probe: source ~/.zshrc, then `which claude`"},
 		{class: afAuthored, note: "bash probe: -i so aliases are defined, then `type claude`"},
 		{class: afAuthored, note: "fallback probe: `which claude`"},
 	},
+	"internal/testguard/shellproof.go:proveShellSandbox": {{
+		class: afAuthored,
+		note: "`$SHELL -l -i -c env`: the script is the fixed word `env`, and the shell is the environment's own " +
+			"SHELL (else /bin/sh). Only test binaries run it, to prove a pane shell still sees the HOME sandbox (#4469)",
+	}},
 	"daemon/vscode_start_gate.go:newGatedVSCodeCommand": {{
 		class: afAuthored,
 		note: "vscodeStartGateScript, a const in the same file; the binary and its args arrive as \"$@\" " +
@@ -175,11 +197,31 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"internal/sessionenv/account_environment_builtins.go:unwrapIonice": {{
 		class: notAShell, note: "strings.HasPrefix(option, \"-c\") — ionice's scheduling-class flag, matched as text",
 	}},
+	"internal/sessionenv/account_environment_ionice.go:ioniceOriginalOption": {{
+		class: notAShell,
+		note: "strings.HasPrefix(option, \"-c\") — ionice's scheduling-class flag, matched as text to allowlist " +
+			"the options the #4460 proof covers",
+	}},
 	"session/tmux/resume.go:codexGlobalOptionHasAttachedValue": {{
 		class: notAShell, note: "strings.HasPrefix(arg, \"-c\") — codex's --config short flag, matched as text",
 	}},
 	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
 		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
+	}},
+	"session/git/worktree_prune_guard.go:WorktreeDirtyFiles": {{
+		class: notAShell,
+		note: "`git -c core.fsmonitor= status …` — git's per-invocation config override, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136)",
+	}},
+	"session/tmux/session.go:codexCommandConfigValue": {{
+		class: notAShell,
+		note: "strings.HasPrefix(tok, \"-c\") — codex's --config short flag, matched as text to read the " +
+			"operator's own -c overrides (#5238)",
+	}},
+	"session/tmux/session.go:skipCodexConfigOptions": {{
+		class: notAShell,
+		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
+			"codex's global options to the subcommand slot (#5238)",
 	}},
 }
 

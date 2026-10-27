@@ -84,19 +84,34 @@ is created, and adding a project does NOT start an always-on agent for it.
 	}
 }
 
+// rebindProjectViaDaemon is the daemon seam, overridable in tests.
+var rebindProjectViaDaemon = daemon.RebindProject
+
 var projectsRebindCmd = &cobra.Command{
 	Use:   "rebind <project-id> <path>",
 	Short: "Rebind a registered project after its checkout moves",
 	Long: `Rebind a stable project id to a new checkout path.
 
 The project id is preserved. Rebinding refuses to take a path already owned by
-another registered project.`,
+another registered project.
+
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		project, err := config.RebindProject(args[0], args[1])
+		// Same contract as `projects add`: resolve the caller-relative path
+		// here, because the daemon resolves what it is sent against ITS own
+		// filesystem and has no access to this shell's cwd.
+		path, err := config.ResolveUserPath(args[1])
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[1], err))
+		}
+		project, err := rebindProjectViaDaemon(daemon.RebindProjectRequest{ID: args[0], Path: path})
 		if err != nil {
 			return jsonError(err)
 		}

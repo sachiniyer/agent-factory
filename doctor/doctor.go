@@ -77,6 +77,7 @@ type CheckStatus string
 
 const (
 	StatusPass  CheckStatus = "PASS"
+	StatusInfo  CheckStatus = "INFO"
 	StatusWarn  CheckStatus = "WARN"
 	StatusFail  CheckStatus = "FAIL"
 	StatusFixed CheckStatus = "FIXED"
@@ -102,7 +103,7 @@ type CheckResult struct {
 type Report struct {
 	// Header holds the key environment facts printed before the sections.
 	Header []HeaderItem
-	// Checks holds sectioned PASS/WARN/FAIL rows that are not Finding-backed.
+	// Checks holds sectioned PASS/INFO/WARN/FAIL rows that are not Finding-backed.
 	Checks []CheckResult
 	// OK holds informational healthy lines, grouped by section.
 	OK []string
@@ -212,6 +213,11 @@ type Options struct {
 	// remote checks skip cleanly. Defaults to resolving the repo of the current
 	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
 	remoteConfig func() (*config.RemoteHooks, string, error)
+
+	// inRepoUnknownLeaves lists the unknown [docker]/[ssh] leaves in the
+	// current repo's in-repo config (#4599). Defaults to loading the repo of
+	// the current working directory; tests inject a hermetic list.
+	inRepoUnknownLeaves func() []config.InRepoUnknownLeaf
 
 	// The skew checks' injection points (#1044). Every one of them reaches for
 	// real daemon/system state, so each is a func field the tests replace with
@@ -339,6 +345,14 @@ type scanContext struct {
 	fixTmuxScanned bool
 	fixCwds        map[int]string
 	fixCwdsScanned bool
+	// The test-residue check's reading of what holds a harness directory open
+	// or names it (#4170): once for detection, once for the fix pass, for the
+	// reasons liveWorkingDirs and fixTimeTmuxHomes give.
+	residueRefs        residueRefs
+	residueRefsScanned bool
+	fixResidueRefs     residueRefs
+	fixResidueErr      error
+	fixResidueScanned  bool
 	// autostart scope memo (see autostartScope): whether the installed unit is
 	// this home's at all.
 	autostartServes    bool
@@ -444,6 +458,7 @@ func Run(opts Options) (*Report, error) {
 	}
 
 	cfg := checkConfigAndStorage(ctx, report)
+	checkInRepoUnknownLeaves(ctx, report)
 	checkEnvironment(ctx, report, cfg)
 
 	// A failed snapshot is recorded, never discarded: checkProcessInspection
@@ -491,6 +506,10 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedDaemonBinaries(ctx, report)
 	checkStrandedPlaytestSandboxes(report)
 	checkDeadSocketHomes(ctx, report)
+	// Reads the same memoized sweep, but its ROOT listing rather than the
+	// budgeted candidates: the directories af's own test harness leaves behind
+	// sit directly under the temp dir by construction (#4170).
+	checkTestResidue(ctx, report)
 	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)

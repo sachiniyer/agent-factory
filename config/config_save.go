@@ -61,8 +61,10 @@ func withGlobalConfigLock(fn func(lockedTarget) error) error {
 //
 // withGlobalConfigLock's pre-lock LoadConfig has already converted/materialized
 // and validated the file, so a config.toml that is missing or contentless here
-// means it was removed in the window between the two — the same pathological
-// case LoadConfig answers with defaults, answered the same way.
+// is either an empty stub the load deliberately left untouched (#4483 — a
+// zero-byte config.json satisfies the load with defaults while this file stays
+// absent) or a file removed in the window between the two — the same case
+// LoadConfig answers with defaults, answered the same way.
 //
 // The read goes through the LOCKED handle, not through the path it was reached
 // through. Reopening the link by name lets the kernel resolve it again, so a

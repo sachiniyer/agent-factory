@@ -189,6 +189,9 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	// First two has-session calls report missing (the outer Restore check, then
@@ -261,6 +264,9 @@ func TestStartTmuxSession(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false
@@ -438,6 +444,7 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 	t.Helper()
 	var captureCalls atomic.Int32
 	var hasSessionCalls atomic.Int32
+	captureExitErr := exitErrorWithStderr(t, 1, "")
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -454,7 +461,11 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 			if strings.Contains(cmd.String(), "capture-pane") {
 				captureCalls.Add(1)
 				if !captureOK.Load() {
-					return nil, fmt.Errorf("exit status 1")
+					// A genuine *exec.ExitError: tmux ran and answered
+					// failure — the transient shape these tests pin.
+					// A non-ExitError would mean capture-pane never ran,
+					// which now classifies as infrastructure (#5327).
+					return nil, captureExitErr
 				}
 				return []byte("pane content"), nil
 			}
@@ -500,6 +511,49 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 	require.Equal(t, int32(1), hasSessionCalls.Load(), "no further has-session calls while dead")
 }
 
+// TestHasUpdatedExpectedTeardownLogsInfo covers #4472: when af itself asked
+// for the teardown — every kill/archive/task-completion/swap routes through
+// close(), which marks the session — the monitor's "session is gone" line is
+// normal lifecycle and must stay out of ERROR, where routine teardowns were
+// burying real failures. A vanish with no af request behind it keeps ERROR,
+// including after a restore clears a stale mark.
+func TestHasUpdatedExpectedTeardownLogsInfo(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	var infos logtest.Buffer
+	prevInfo := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&infos)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(prevInfo) })
+	errs := captureErrorLog(t)
+
+	// af asks for the teardown: the mock's kill-session answers success and
+	// close() records the request before it runs.
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.True(t, session.teardownInitiated(), "close() must mark af-initiated teardown")
+
+	updated, hasPrompt, _ := session.HasUpdated()
+	require.False(t, updated)
+	require.False(t, hasPrompt)
+	require.True(t, session.monitor.dead)
+	require.Contains(t, infos.String(), "going silent")
+	require.NotContains(t, errs.String(), "going silent",
+		"an af-requested teardown must not land at ERROR")
+
+	// Re-bind the object to a live session: the mark must clear so a later
+	// vanish af did NOT ask for is still the anomaly ERROR exists for.
+	sessionAlive.Store(true)
+	captureOK.Store(true)
+	require.NoError(t, session.Restore("/some/work/dir"))
+	require.False(t, session.teardownInitiated(), "re-binding a live session must clear the mark")
+
+	captureOK.Store(false)
+	sessionAlive.Store(false)
+	session.HasUpdated()
+	require.Contains(t, errs.String(), "going silent")
+}
+
 // TestHasUpdatedRespawnResetsDead documents that a reattach via Restore
 // produces a fresh statusMonitor with dead cleared, so polling resumes after
 // the session comes back without reporting its baseline capture as pane churn.
@@ -527,6 +581,32 @@ func TestHasUpdatedReattachResetsDeadAndBaselinesCapture(t *testing.T) {
 	updated, _, _, baseline = session.HasUpdatedWithBaseline()
 	require.False(t, updated, "unchanged second capture must remain unchanged")
 	require.False(t, baseline, "the reattach baseline must be reported exactly once")
+}
+
+// ReattachInert rebinds persisted state with no directory to name (#5102), so
+// its monitor must baseline exactly like Restore(workDir)'s: a daemon restart
+// is not pane churn. Restore("") — Start's fresh-process path — keeps reporting
+// first output as an update.
+func TestReattachInertBaselinesCapture(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+	_ = captureErrorLog(t)
+	sessionAlive.Store(true)
+	captureOK.Store(true)
+
+	require.NoError(t, session.ReattachInert())
+	require.NotNil(t, session.monitor)
+	updated, _, _, baseline := session.HasUpdatedWithBaseline()
+	require.False(t, updated, "first capture after an inert reattach must only establish a baseline")
+	require.True(t, baseline, "the caller must distinguish a baseline from observed idleness")
+	updated, _, _, baseline = session.HasUpdatedWithBaseline()
+	require.False(t, updated)
+	require.False(t, baseline, "the baseline must be reported exactly once")
+
+	require.NoError(t, session.Restore(""))
+	updated, _, _, baseline = session.HasUpdatedWithBaseline()
+	require.True(t, updated, "control: a fresh-process rebind reports first output")
+	require.False(t, baseline)
 }
 
 func TestSeedDeliveryBaselineComparesTheNextCapture(t *testing.T) {

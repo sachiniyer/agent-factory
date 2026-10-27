@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -96,7 +97,7 @@ func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *Handof
 // recovery proceeds only from mission-scoped proof that delivery did not occur;
 // neither failure is flattened into a false Running state.
 //
-// Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
+// Locking mirrors resumeFromLimitOutcome exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
 // a re-verification under both. The target lock is what serializes this swap's
 // prompt delivery against a concurrent DeliverPrompt to the same pane.
@@ -174,12 +175,98 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
-	}
+	// A scoped account belongs to one agent, so it can never be carried onto a
+	// different one unchanged (#4428). The capability question is judged on the
+	// command the plan froze, in exactly one place: an earlier enum check would
+	// misclassify an override in both directions — `program_overrides.aider =
+	// "codex"` would drop the scope onto a scopable launch, and
+	// `program_overrides.codex = "aider"` would refuse a --account no Aider
+	// namespace could ever honor (#4430 review). An incoming agent WITH an
+	// account namespace must be given its own account explicitly —
+	// handoffAccount owns that transaction, and this refusal names the flag
+	// that reaches it. One WITHOUT has no namespace the name could resolve in,
+	// so there is no identity to guess: the record drops the scope in the same
+	// mutation that rewrites the program, and the response reports the drop on
+	// from_account.
+	fromAccount, _ := instance.AccountSelection()
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
+		// PrepareAgentSwap resolves the command BEFORE preflight checks it, so
+		// a failed plan carries no frozen answer — but the same resolution can
+		// be re-run without preflight, and must be when a scope is at stake: a
+		// target that is BOTH unlaunchable AND scopable-resolved still gets the
+		// refusal, because --account is the remedy the user can act on while
+		// the preflight detail would send them to install an agent they were
+		// never going to reach. The plan failed, so this resolution is the best
+		// available answer — the same one the failed plan computed — and a
+		// retry re-resolves anyway. Only a scopable resolution — or an
+		// unclassifiable one, which can never be proven safe for the scope
+		// either — earns the refusal; anything else leaves preflight to name
+		// the real blocker.
+		if fromAccount != "" {
+			effective := session.HandoffEffectiveAgentForPath(instance.Path, target)
+			if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
+				return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
+			}
+			// Unclassifiable earns the scope refusal for the same reason a
+			// scopable resolution does: the command can never carry this
+			// session's identity, so its classification — not the launch
+			// detail — is the blocker worth naming (#4430 review, D1).
+			if effective == "" {
+				return HandoffSessionResponse{}, fmt.Errorf(
+					"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+					req.Title, instance.CurrentAgentName(), fromAccount, target, target)
+			}
+		}
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
+	}
+	// Unconditional on scopable(effective): gating this on effective != target
+	// would let a config flip between admission and the plan freeze slip a
+	// scopable command past the only check that sees it. The frozen command is
+	// the authority — a refusal here can never describe a launch the plan did
+	// not already commit to.
+	if fromAccount != "" {
+		if _, scopable := sessionenv.SupportsAccounts(plan.EffectiveAgent()); scopable {
+			return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+				req.Title, instance.CurrentAgentName(), fromAccount, target, plan.EffectiveAgent())
+		}
+		// "" means the resolved command is not a provable agent invocation — a
+		// wrapper like `npx codex` may launch a scopable agent underneath. The
+		// --account path refuses the same command because it cannot prove the
+		// target carries a scope; here the refusal is because af cannot prove
+		// the target does NOT carry one, and a durable pin is never dropped on
+		// an unproven answer (#4430 review, D1).
+		if plan.EffectiveAgent() == "" {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, target)
+		}
+		// The descope path clears the account inside the record transaction,
+		// but SwapAgent restarts only the agent pane: a sibling shell or
+		// process tab — and the VS Code editor, which the account-swap family
+		// already refuses for this class — keeps running under the dropped
+		// account's environment while the record reports ambient. One session
+		// cannot carry two identities, so refuse rather than split it; the
+		// account-capable target above is the alternative that keeps the tabs
+		// (#4430 review round 2).
+		if names := credentialBearingHandoffSiblings(instance); len(names) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but tab(s) %s still run under the dropped account's environment — close them first, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, strings.Join(names, ", "))
+		}
+		// The same fence must cover the processes whose close already committed:
+		// a PendingTabCleanup handle is a tmux session whose teardown was never
+		// confirmed, so its process can still be running under the dropped
+		// account's environment while the roster reports it gone (#4430 review).
+		// Closing again is impossible — the tab is already removed — so the
+		// remedy is the cleanup sweep the next daemon start runs, exactly the
+		// refusal the account-swap path gives for the same handle set.
+		if pending := instance.PendingTabCleanup(); len(pending) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but %d prior tab teardown(s) remain unconfirmed and may still run under the dropped account's environment — restart af to retry that cleanup, then retry the handoff, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, len(pending))
+		}
 	}
 
 	outgoing := instance.CurrentAgentName()
@@ -198,7 +285,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.Transition(session.BeginHandoff()); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	entry, err := instance.RecordHandoffSwap(target, reason, "", false)
+	entry, err := instance.RecordHandoffSwap(target, plan.EffectiveAgent(), reason, "", false)
 	if err != nil {
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
@@ -284,7 +371,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA, FromAccount: fromAccount}
 	if err := m.deliverHandoffMission(delivery); err != nil {
 		// SwapAgent already installed the incoming runtime. Preserve the resolved
 		// identity and classify every later delivery/settlement failure as
@@ -305,6 +392,23 @@ func shortSHA(sha string) string {
 		return "(no commits)"
 	}
 	return sha
+}
+
+// scopedAccountHandoffRefusal is the one refusal a scoped session gets for a
+// scopable incoming agent, named at the RESOLVED agent so a program_overrides
+// redirect explains itself. Both admission sites emit it — the frozen plan's
+// EffectiveAgent when PrepareAgentSwap succeeded, and the same resolution
+// re-run when it failed (the refusal, not the preflight detail, is what the
+// user can act on there).
+func scopedAccountHandoffRefusal(title, current, account, target, effective string) error {
+	if effective != target {
+		return fmt.Errorf(
+			"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
+			title, current, account, target, effective)
+	}
+	return fmt.Errorf(
+		"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
+		title, current, account, target)
 }
 
 // IsHandoffUnsupported reports whether err is the backend-restriction sentinel,

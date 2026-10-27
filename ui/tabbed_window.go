@@ -300,13 +300,6 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	return true
 }
 
-// SelectTab sets the pane's tab to idx, clamped into range. Used after a tab
-// close to land on a neighbor.
-func (w *TabbedWindow) SelectTab(idx int) {
-	w.setActiveTab(idx)
-	w.ClampActiveTab()
-}
-
 // tabLabels returns the labels for the bound instance's tabs. The label
 // derivation lives in tree.TabLabels (#1024 PR 3), shared with the sidebar tree
 // and the 1-9 jump keys. Never empty.
@@ -327,9 +320,10 @@ func tabLabelFor(inst *session.Instance, idx int) string {
 
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
 // TabPane gets the area inside the frame minus the header line; that inner
-// size is also what the instances' tmux sessions are resized to (see
-// GetPreviewSize), so the capture matches the visible area exactly — the full
-// workspace width, with no AdjustPreviewWidth-style right buffer (#1024 PR 4).
+// size is the live attachment's VIEW box — asserted as the pane's tmux size
+// only while the attachment owns the pane's dimensions (the focused
+// interactive pane; #4480) — so a viewer's layout change re-crops the render
+// without reflowing the session (see GetPreviewSize).
 func (w *TabbedWindow) SetRect(r layout.Rect) {
 	w.rect = r
 	iw, ih := w.innerSize()
@@ -522,6 +516,20 @@ func (w *TabbedWindow) ScrollDown() {
 	}
 }
 
+// ScrollHalfPageUp is the keyboard's half-page step (ctrl+u); the wheel's
+// one-line step stays on ScrollUp.
+func (w *TabbedWindow) ScrollHalfPageUp() {
+	if err := w.tab.ScrollHalfPageUp(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll up half a page: %v", err)
+	}
+}
+
+func (w *TabbedWindow) ScrollHalfPageDown() {
+	if err := w.tab.ScrollHalfPageDown(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll down half a page: %v", err)
+	}
+}
+
 // GetActiveTab returns the pane's current tab index.
 func (w *TabbedWindow) GetActiveTab() int {
 	return w.activeTab()
@@ -586,7 +594,7 @@ func (w *TabbedWindow) BeginScrollFill() {
 // tree selection, scroll mode — is set off with "—", and only the fragments
 // INSIDE each identity are joined with " · " (#2579). All three used to pick a
 // different mark for the same relationship, and with two sessions whose tab
-// labels match, `alpha · ◆ Agent · selected: beta · ◆ Agent` flattened into four
+// labels match, `alpha · ◆ Agent · cursor: beta · ◆ Agent` flattened into four
 // indistinguishable fragments. That clause is the only signal that the
 // workspace is not showing the row under the cursor, so it has to read at a
 // glance.
@@ -600,7 +608,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
+			text = fmt.Sprintf(" %s · %s — cursor: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
 		text = " Select a session "

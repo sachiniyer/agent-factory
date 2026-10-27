@@ -63,6 +63,7 @@ export type IdleReason =
   | "usage-limit"
   | "process-exited"
   | "restore-gave-up"
+  | "restore-waiting-on-environment"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -77,6 +78,13 @@ export interface AgentModelChange {
 
 /** Durable terminal result of the daemon's automatic Lost-session restore loop. */
 export interface LostRestoreFailure {
+  attempts: number;
+  error: string;
+}
+
+/** Durable non-terminal state while the restore loop waits on the environment
+ * — the last failure was a resource limit external to the session (#5295). */
+export interface LostRestoreWait {
   attempts: number;
   error: string;
 }
@@ -106,9 +114,10 @@ export const Status = {
 /**
  * The subset of session.InstanceData (session/storage.go) the sidebar renders.
  * Field names and JSON tags match the Go struct exactly so this decodes the
- * daemon projection as-is. Optional fields carry Go's `omitempty` semantics:
- * `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at` only present
- * for a LimitReached row.
+ * daemon projection as-is. Optional fields carry Go's `omitempty`/`omitzero`
+ * semantics: `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at`
+ * only present for a LimitReached row with a known reset time (omitzero on a
+ * time.Time, mirroring the TabExitData.at precedent).
  */
 export interface SessionData {
   id?: string;
@@ -139,6 +148,11 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** The recorded program enum (session's Program): the handoff picker's
+   *  opaque-command sameness check compares it against the requested enum —
+   *  for an unprovable override the enum is the only evidence that the request
+   *  would relaunch the same command (#4430 review round 6). */
+  program?: string;
   /** The credential account this session's agent runs as (#3051), or absent for
    *  the ambient identity. It is a DIRECTORY NAME in the daemon host's account
    *  registry and never carries credential material.
@@ -164,6 +178,8 @@ export interface SessionData {
   idle_reason?: IdleReason;
   /** Present while a Lost row has exhausted automatic restore attempts. */
   lost_restore_failure?: LostRestoreFailure;
+  /** Present while the restore loop defers a retry on the environment (#5295). */
+  lost_restore_wait?: LostRestoreWait;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
@@ -344,6 +360,10 @@ export interface TaskData {
    *  armed rather than recomputed from the expression. Absent when the task is
    *  not armed, and that absence is itself the signal. */
   next_run_at?: string;
+  /** The task is enabled and `next_run_at` is more than 60 days out — usually a
+   *  dated cron re-armed for next year (#4843). Decided by the daemon's
+   *  task.NextRunFarOut; read it rather than re-derive the threshold here. */
+  next_run_far?: boolean;
   /** The live arming observation: "armed", "not-armed", or ABSENT when no daemon
    *  has reported on it (none running, or one still starting). Absent must never
    *  be read as "not armed". */
@@ -489,6 +509,12 @@ export interface ConfigSetResult {
 export interface ConfigSetResponse {
   result: ConfigSetResult;
   restart_notice: string;
+  /** Save-time warnings, including a live-apply error whose details the
+   *  restart notice tells the operator to resolve. Optional for older daemons. */
+  warnings?: string[];
+  /** Machine-readable live-apply result. Optional for older daemons; the form
+   * renders the notice and warnings rather than re-deriving their policy. */
+  apply_outcome?: "applied" | "deferred" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
   /** Where the daemon is ACCEPTING now, when the written key moved one of its
    *  listeners (#3722) — absent for every other key. Saving network.listen_addr
    *  from this form moves the very listener the form is talking over, so the
@@ -531,6 +557,14 @@ export interface AccountsResponse {
    *  than this client does not send it at all — in which case the picker simply
    *  offers no preselection, which is what it did before this field existed. */
   defaults?: Record<string, string>;
+  /** Per agent name, the agent its resolved program_overrides command actually
+   *  launches for this repo. A handoff picker classifies a target's account
+   *  capability by this value, not the enum: codex→aider drops the scope rather
+   *  than needing an account no Aider registry could honor (#4430 review).
+   *
+   *  Optional for the same reason as defaults — an older daemon does not send
+   *  it, and the enum fallback restores the old classification. */
+  resolved_agents?: Record<string, string>;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */

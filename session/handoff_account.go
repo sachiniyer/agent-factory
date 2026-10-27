@@ -16,7 +16,14 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 	i.mu.RLock()
 	view := i.lifecycleViewLocked()
 	if view.PendingAccountSwap && i.pendingAccountSwapRetryTargetLocked(agent, account) {
+		// Recovery owns this exact committed transaction, including the
+		// post-commit blind-teardown wedge. The latter marks
+		// StartupStateUnknown and clears Started while preserving the committed
+		// swap; this retry is the inspection the marker waits for, so suppress
+		// those gates alongside the pending-swap one.
 		view.PendingAccountSwap = false
+		view.StartupStateUnknown = false
+		view.Started = true
 	}
 	i.mu.RUnlock()
 	return view.ValidateRuntimeAction(RuntimeActionHandoff)
@@ -24,17 +31,55 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 
 // pendingAccountSwapRetryTargetLocked reports whether agent and account name
 // the committed swap's own target: the account the identity checkpoint already
-// moved this session to and — when the request names an agent — the agent the
-// record already runs. Callers hold i.mu.
+// moved this session to and — when the request names an agent — a target the
+// committed transaction already is. That is the requested enum in i.Program OR
+// the resolved agent the pane now runs: a program_overrides redirect makes the
+// two differ (`--to aider` recording Program=aider while launching codex), and
+// a retry may spell the committed identity either way (#4430 review round 3).
+// Callers hold i.mu.
 func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bool {
 	pending := i.pendingAccountSwap
 	if pending == nil || pending.To != i.Account || strings.TrimSpace(account) != pending.To {
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.currentAgentNameLocked()
+		if agent == i.Program || agent == i.currentAgentNameLocked() {
+			return true
+		}
+		// The committed transaction's own target spelling: a same-agent alias
+		// (`--to aider` where aider resolves to the running codex) keeps
+		// i.Program on the established label while the ledger records To=aider,
+		// so the retry matches neither identity above without this (#4430
+		// review round 6). The trailing ledger entry IS this transaction's —
+		// a pending manual swap exists only because its commit appended it.
+		if pending.Manual && len(i.Tabs) > 0 {
+			h := i.Tabs[0].Handoffs
+			return len(h) > 0 && h[len(h)-1].To == agent
+		}
+		return false
 	}
 	return true
+}
+
+// PendingAccountSwapTarget reports the agent enum the committed manual swap was
+// requested under — the trailing ledger entry's To — or "" when no committed
+// manual transaction is pending. A same-agent alias (`--to aider` whose
+// override resolves to the running codex) keeps Program on the established
+// label while the transaction's true target lives only here, so retry and
+// replay detection must consult it as well as the two identity spellings
+// (#4430 review round 6).
+func (i *Instance) PendingAccountSwapTarget() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.To != i.Account || len(i.Tabs) == 0 {
+		return ""
+	}
+	h := i.Tabs[0].Handoffs
+	if len(h) == 0 {
+		return ""
+	}
+	return h[len(h)-1].To
 }
 
 // BeginManualAccountSwap raises the existing account-replacement fence after
@@ -44,8 +89,16 @@ func (i *Instance) BeginManualAccountSwap() error {
 	defer i.mu.Unlock()
 	view := i.lifecycleViewLocked()
 	if pending := i.pendingAccountSwap; pending != nil && pending.Manual && pending.To == i.Account {
-		// Recovery owns this exact committed transaction, including healthy checkpoints.
+		// Recovery owns this exact committed transaction, including healthy
+		// checkpoints and the post-commit blind-teardown wedge. The latter
+		// (ErrAccountSwapAgentTeardownBlind) marks StartupStateUnknown and
+		// clears Started while preserving the committed swap, so the explicit
+		// retry — the inspection the marker waits for — must reach the alreadySet
+		// recovery branches of resumeFromLimitLockedOutcome. Suppress the gates
+		// that exist to hold automatic retries back until that inspection lands.
 		view.PendingAccountSwap = false
+		view.StartupStateUnknown = false
+		view.Started = true
 	}
 	if err := view.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return err
@@ -55,24 +108,49 @@ func (i *Instance) BeginManualAccountSwap() error {
 
 // SelectAccountForHandoff commits the same identity transaction as automatic
 // rotation, retaining an explicit pin and its durable delivery obligation.
-func (i *Instance) SelectAccountForHandoff(from, name, agent, reason, head, mission string) (HandoffSwap, error) {
+// target and effectiveAgent travel separately for the same reason they do in
+// recordHandoffSwapLocked: an override can redirect the launch — the ledger's
+// To and the recorded Program name the enum the operator asked for, while the
+// scope judgment is made on the agent the command resolves to (#4430 review).
+// crossAgent is the decision ValidateManualAccountSwap froze the launch plan
+// under; passing the same value keeps the record describing that launch.
+func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent string, crossAgent bool, reason, head, mission string) (HandoffSwap, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
 		return HandoffSwap{}, fmt.Errorf("account handoff requires the replacement fence")
 	}
-	entry, err := i.recordHandoffSwapLocked(agent, reason, head, false)
+	entry, err := i.recordHandoffSwapLocked(target, effectiveAgent, crossAgent, reason, head, false)
 	if err != nil {
 		return HandoffSwap{}, err
 	}
 	entry.FromAccount, entry.ToAccount = from, name
 	i.Tabs[0].Handoffs[len(i.Tabs[0].Handoffs)-1] = entry.AgentHandoff
-	if _, err := i.selectAccountLocked(from, name, false); err != nil {
+	if _, err := i.selectAccountLocked(from, name, effectiveAgent, false); err != nil {
 		return HandoffSwap{}, err
 	}
 	i.pendingAccountSwap.Manual = true
 	i.pendingAccountSwap.Mission = mission
+	// The namespace the account was just selected in travels with the durable
+	// transaction: post-commit recovery must answer it even after a restart
+	// under changed program_overrides, when neither the pane's (rewritten)
+	// program metadata nor a fresh resolution can still prove it (#4430 review).
+	i.pendingAccountSwap.AccountAgent = effectiveAgent
 	return entry, nil
+}
+
+// PendingAccountSwapAgent reports the account namespace the committed manual
+// swap's replacement account was selected in, or "" when the pending record
+// predates the field or is not a committed manual swap. Recovery prefers it
+// over any re-derivation: it is the one answer a config flip plus daemon
+// restart cannot move (#4430 review).
+func (i *Instance) PendingAccountSwapAgent() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
+		return ""
+	}
+	return i.pendingAccountSwap.AccountAgent
 }
 
 func (i *Instance) PendingManualAccountSwap() (bool, string) {
@@ -170,23 +248,126 @@ func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
 // CanRetryPendingManualAccountSwapDelivery reports whether an operator can
 // inspect a known replacement pane and explicitly override ambiguous delivery.
 // Startup-unknown is inert because there is no confirmed runtime to inspect.
+//
+// The limit wall is admitted here even though it is excluded from the
+// agent-handoff twin (CanRetryPendingHandoffMissionDelivery): the daemon's
+// manual-swap ResumeFromLimit fork re-pastes the pending mission
+// (deliverManualAccountMission), so the row's restart IS a resend. Admitting
+// LiveLimitReached routes the row to the honest "Retry send — submit the
+// pending mission again" picker label instead of the agent-handoff-twin's
+// "Resume from limit — the pending mission is not resent" label, which is
+// true only for the agent-handoff arm whose daemon sends the session goal
+// (SendPromptWithEvidence) without resending.
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
 	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
-// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and
-// pending delivery transaction onto an existing client projection.
-func (i *Instance) ReconcileAccountHandoffSnapshot(account string, auto bool, pending *AccountSwapData) bool {
+// CanConfirmPendingManualAccountSwapDelivery reports whether an operator can
+// retire a pending manual account swap's mission on the attestation that it
+// already landed — the same "it is already running" exit the agent-handoff
+// path gained in #4429. Unlike the retry predicate this DOES admit
+// startup-unknown and orphaned-fence rows: the daemon probes the pane before
+// honoring the attestation, which is the runtime proof those rows were missing.
+func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
+	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
+	return !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
+		(i.inFlightOp == OpNone || i.inFlightOp == OpRespawning) &&
+		i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwap.ReplacementPanesStarted &&
+		confirmableHandoffDelivery(i.pendingAccountSwap.MissionDeliveryStatus)
+}
+
+// ConfirmPendingManualAccountSwapDelivery retires the pending manual account
+// swap on the operator's attestation that its mission already landed (#4429).
+// It is the account-swap half of ConfirmPendingHandoffDelivery: the daemon has
+// already probed the pane alive, so this method re-checks the durable facts and
+// then clears the transaction and its admitted launch plan, lifts any orphaned
+// replacement fence, and resolves a startup-unknown flag the probe just
+// disproved — all in one critical section so no later reader can rebuild the
+// wedge.
+//
+// The attestation also decides the row's liveness (#5023): a mission the
+// replacement agent already received means the agent HAS work, including on a
+// row a failed delivery left reading idle — clearing the marker there would
+// publish a record indistinguishable from an ordinary settled-idle session,
+// and fleet watch would emit the working → idle edge an automated driver acts
+// on. The row therefore settles on LiveRunning, the same state a successfully
+// delivered prompt leaves, and only the status monitor's own idle observation
+// — real pane evidence — moves it back.
+//
+// A row parked at its usage-limit wall is the one exception: LiveLimitReached
+// is already the honest state (the delivered mission cannot run until quota
+// resets), it already publishes not-idle to fleet watch, and
+// ResumeLimitedSessions only owns rows that still carry it — flattening it to
+// LiveRunning would strand a session whose poll is paused by an attach, since
+// nothing would re-detect the wall to re-park it.
+func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.Account == account && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("manual account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
+	}
+	if !confirmableHandoffDelivery(pending.MissionDeliveryStatus) {
+		return fmt.Errorf("manual account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
+	}
+	if i.userKilled {
+		return fmt.Errorf("session %q has a pending kill", i.Title)
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return fmt.Errorf("session %q has no live runtime to confirm against (liveness %v); restore owns this row", i.Title, i.liveness)
+	}
+	if i.inFlightOp != OpNone && i.inFlightOp != OpRespawning {
+		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
+	}
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.resolveStartupStateLocked()
+	if i.inFlightOp == OpRespawning {
+		// The daemon holds the op lock while calling, so a respawn fence still
+		// up here is orphaned bookkeeping — a crashed/abandoned resume — not a
+		// live operation. ClearOp preserves liveness and releases the row.
+		if err := i.transitionLocked(ClearOp()); err != nil {
+			return err
+		}
+	}
+	// Retire the launch plan with the transaction, as ClearPendingAccountSwap
+	// does: tabSpawnBlockedLocked refuses on either, so leaving the plan behind
+	// would keep new tabs refused until the daemon restarted.
+	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
+	// The confirmed mission is work the incoming agent already has (#5023):
+	// publish working — the same liveness a delivered prompt produces — and
+	// leave the settle back to Ready to the monitor's own pane evidence. A
+	// limit-blocked row keeps its wall so the resume pass can still own it.
+	if i.liveness != LiveLimitReached {
+		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	}
+	i.touchLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return nil
+}
+
+// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity —
+// name, the namespace it was selected in, auto flag — and pending delivery
+// transaction onto an existing client projection.
+func (i *Instance) ReconcileAccountHandoffSnapshot(account, accountAgent string, auto bool, pending *AccountSwapData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Account == account && i.accountAgent == accountAgent && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
 		return false
 	}
 	i.Account = account
+	i.accountAgent = accountAgent
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = cloneAccountSwapData(pending)
 	i.touchLocked()
@@ -221,14 +402,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
-	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-		i.limitAgent = agent
-		i.touchLocked()
-	}
-	if i.limitAccount != i.Account {
-		i.limitAccount = i.Account
-		i.touchLocked()
-	}
+	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded reset.
@@ -236,6 +410,57 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
+
+// SetAccountSwapReplacementPanesStartedForTest seeds the committed account
+// swap's replacement-pane flag. Test-only: the post-commit blind-teardown wedge
+// (ErrAccountSwapAgentTeardownBlind) occurs during the STOP phase, before the
+// respawn that sets this flag, so a committed swap that wedged there carries
+// ReplacementPanesStarted=false. A fixture that strands delivery AFTER a
+// successful respawn cannot reproduce that state through the real flow, so the
+// test seeds it directly to exercise the live-pane repair branch.
+func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.ReplacementPanesStarted != started {
+		i.pendingAccountSwap.ReplacementPanesStarted = started
+		i.touchLocked()
+	}
+}
+
+// ParkAutomaticAccountSwapAtLimit attributes a readiness wall to the incoming
+// replacement identity without releasing the account transaction's fence. It is
+// the automatic-account-swap twin of ParkManualAccountSwapAtLimit: the incoming
+// identity is already committed (commitNewAccountSwapIdentity ran before
+// settleReplacementRuntime), so both i.Account and resetAt belong to the incoming
+// identity — the same invariant under which attributeLimitIdentityLocked and
+// recordAccountLimitObservationLocked are correct.
+//
+// The live LimitIdentity and the durable accountLimitObservations ledger must
+// carry the incoming wall so limitedAccountsForSwap excludes the incoming
+// account from future candidate selection for the wall window. Without
+// attribution the row hetero-binds (outgoing identity + incoming window) and the
+// ledger never gains the incoming entry, so a sibling session may re-admit the
+// still-exhausted incoming account and waste a swap cycle.
+//
+// Deliberately does NOT flip pendingAccountSwap.MissionDeliveryStatus: that
+// non-delivery marker is consulted only on the manual path
+// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
+// swap is not manual), and the automatic resume path retries after the recorded
+// reset unconditionally, with no operator-delivery step.
+func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
+		return fmt.Errorf("automatic account limit requires the pending replacement fence")
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil

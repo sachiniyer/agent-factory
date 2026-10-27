@@ -114,7 +114,7 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 			// With no registered projects the section is hidden; onboarding
 			// names the registration command instead of an empty picker.
 			name: "projects focused with no rows", focus: layout.RegionProjects,
-			want: "Run af projects register <path>", absent: "Press enter",
+			want: "Run af projects add <path>", absent: "Press enter",
 		},
 		{
 			// From the tree ctrl+p reaches the picker and Enter means something else.

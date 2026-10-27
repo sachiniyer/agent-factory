@@ -485,8 +485,26 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
-	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
-		return session.PromptCouldNotConfirm, notAttempted(err)
+	releaseObservationFence := func() {}
+	releaseLimitFence := func() {}
+	if req.TaskOrigin {
+		// The per-instance fence lets any older pane snapshot publish its derived
+		// liveness before this check. The manager fence orders the final read with
+		// direct limit publication, while this session's op lock and observation
+		// fence keep same-instance lifecycle/observation changes outside the send.
+		// Release the manager-wide fence before transport I/O: a wedged target must
+		// not block unrelated task deliveries or limit publication daemon-wide.
+		testHookTaskPromptBeforeObservationFence()
+		releaseObservationFence = instance.HoldAgentObservationSettlement()
+		testHookTaskPromptBeforeLimitFence()
+		m.accountLimitMu.Lock()
+		releaseLimitFence = m.accountLimitMu.Unlock
+	}
+	livenessErr := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin)
+	releaseLimitFence()
+	if livenessErr != nil {
+		releaseObservationFence()
+		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
@@ -494,6 +512,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
 	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	releaseObservationFence()
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.
@@ -501,6 +520,15 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		m.warn().Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
 	}
 	if err != nil {
+		// The adoption-discharge refusal is the ONE send-path error that is not
+		// ambiguous: NoteAdoptionDelivery returns it only after refusing the
+		// write, so this attempt provably delivered nothing and stays refundable
+		// (#4984). notAttempted() supplies the wire marker that carries the
+		// classification across the control socket to the watch path — a
+		// sentinel alone would be flattened to text by net/rpc.
+		if errors.Is(err, session.ErrDischargeRefusedDelivery) {
+			return status, notAttempted(err)
+		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return status, nil
@@ -525,6 +553,18 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 	return nil
 }
 
+// taskPromptTargetLivenessError extends the ordinary target guard only for an
+// automated task delivery. LiveLimitReached is intentionally allowed by the
+// manual helper above: typing into a limit or credits picker can be the only way
+// for an operator to recover the lane. A scheduler has no such intent, and its
+// keystrokes can cancel an agent's own timed auto-continue.
+func taskPromptTargetLivenessError(title string, liveness session.Liveness, taskOrigin bool) error {
+	if taskOrigin && liveness == session.LiveLimitReached {
+		return fmt.Errorf("%w: target session %q is at a usage limit; prompt not delivered", errTargetLimitReached, title)
+	}
+	return promptTargetLivenessError(title, liveness)
+}
+
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
 // agent-server for the WS PTY broker (#1592 Phase 2 PR5). The route multiplexes
 // two authoritative request shapes: TUI/CLI send {title}+repo_id, while Web sends
@@ -533,12 +573,20 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 // return the tracked instance's cached agent-server singleton whose ring
 // buffer/subscribers persist.
 func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, *session.Instance, error) {
-	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
+	return m.agentServerForStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	instance, resolvedRepoID, title, err := m.resolveStreamTarget(target)
 	if err != nil {
 		return nil, nil, err
 	}
 	if instance == nil {
-		return nil, nil, fmt.Errorf("session %q not found", idOrTitle)
+		name := target.title
+		if name == "" {
+			name = target.stableID
+		}
+		return nil, nil, fmt.Errorf("session %q not found", name)
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
@@ -566,7 +614,13 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 // while an unscoped Web ID gets first refusal after refresh before legacy title
 // fallback (#2187/#2279 review).
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
-	target := authoritativeStreamTarget(idOrTitle, repoID)
+	return m.resolveStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) resolveStreamTarget(target streamTarget) (*session.Instance, string, string, error) {
+	if target.idOnly {
+		return m.resolveStreamSessionByIDOnly(target.stableID)
+	}
 	m.mu.Lock()
 	if instance, rid, title := m.trackedStreamSessionLocked(target); instance != nil {
 		m.mu.Unlock()
@@ -580,14 +634,40 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 	return instance, resolvedRepoID, instance.Title, err
 }
 
-// streamTarget makes the route's two authority shapes mutually exclusive. A
-// scoped target can carry only {repo,title}; an unscoped target may carry the
-// stable-id interpretation of the same opaque segment. No resolver phase can
-// accidentally give a foreign global ID precedence over an explicit repo scope.
+// resolveStreamSessionByIDOnly is the by=id shape: the tracked map, then one
+// refresh, then the same id lookup again — and a miss is a refusal. It never
+// consults the title namespace, because the caller has told us the segment is an
+// id: a stale one reinterpreted as a title could open an input stream to a
+// DIFFERENT session (#4760 review).
+func (m *Manager) resolveStreamSessionByIDOnly(id string) (*session.Instance, string, string, error) {
+	if id == "" {
+		return nil, "", "", fmt.Errorf("session id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	if err := m.refreshLocked(); err != nil {
+		return nil, "", "", err
+	}
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	return nil, "", "", fmt.Errorf("session with id %q %w", id, errSessionNotFound)
+}
+
+// streamTarget makes the route's authority shapes mutually exclusive. A scoped
+// target can carry only {repo,title}; an unscoped target may carry the
+// stable-id interpretation of the same opaque segment; an id-only target
+// carries no title at all. No resolver phase can accidentally give a foreign
+// global ID precedence over an explicit repo scope, nor a title precedence
+// over an explicit id.
 type streamTarget struct {
 	stableID string
 	title    string
 	repoID   string
+	idOnly   bool
 }
 
 func authoritativeStreamTarget(idOrTitle, repoID string) streamTarget {

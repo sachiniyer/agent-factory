@@ -117,7 +117,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				)
 			}
 			state.clearSelectionVerification()
-		case safetyPromptPresent || !t.codexSafetyPickerProvenClosed():
+		case safetyPromptPresent || !t.codexPickerProvenClosed():
 			// Either the picker is still on screen with the wrong row selected,
 			// or the capture matches no Codex shape at all because it landed
 			// mid-repaint. Both are pending renders. Releasing here on the
@@ -186,7 +186,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		selectedTarget, selectedPromptPresent, selectedPromptActive := t.inspectCodexSafetyPrompt(selectedContent)
 		selectedDialog, stillPresent := parseCodexSafetyDialog(selectedContent, selectedTarget, selectedPromptActive)
 		if !stillPresent {
-			if selectedPromptPresent || !t.codexSafetyPickerProvenClosed() {
+			if selectedPromptPresent || !t.codexPickerProvenClosed() {
 				t.recordPendingCodexSafetySelection()
 				return true
 			}
@@ -217,10 +217,10 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	return true
 }
 
-// codexSafetyPickerProvenClosed reports POSITIVE evidence that Codex's modal
+// codexPickerProvenClosed reports POSITIVE evidence that Codex's modal
 // picker no longer owns the pane: a visible terminal cursor, which its
 // ListSelectionView never exposes and its ordinary composer always does. It is
-// the same oracle inspectCodexSafetyPrompt trusts to decide the picker IS
+// the same oracle the Codex picker inspectors trust to decide a picker IS
 // active, read in the other direction.
 //
 // The absence of the picker's chrome is deliberately not accepted as that
@@ -231,7 +231,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 // runs only in the narrow window between af moving the cursor and seeing where
 // it landed, and every outcome of holding is recoverable while accepting the
 // wrong row is not.
-func (t *TmuxSession) codexSafetyPickerProvenClosed() bool {
+func (t *TmuxSession) codexPickerProvenClosed() bool {
 	cursor, err := t.readPaneCursorState()
 	if err != nil {
 		return false
@@ -540,7 +540,10 @@ func navigationKeys(selected, target int) []string {
 // codexStatusLineModel reads Codex's default `model-with-reasoning ·
 // current-dir` status line. Requiring the path-shaped second segment and
 // searching only the bottom few visible rows avoids learning a model from
-// ordinary transcript prose that happens to contain a middle dot.
+// ordinary transcript prose that happens to contain a middle dot. The model
+// segment itself must not carry a line-leading prompt marker — a composer
+// line is "glyph · typed text", and typed text ending in " · <path>" is the
+// one shape that could otherwise impersonate the footer (#5383).
 func codexStatusLineModel(content string) string {
 	lines := strings.Split(normalizeCodexPane(content), "\n")
 	seen := 0
@@ -559,7 +562,7 @@ func codexStatusLineModel(content string) string {
 			continue
 		}
 		model := strings.TrimSpace(parts[0])
-		if model != "" && !strings.ContainsAny(model, "›\r\n") {
+		if model != "" && !strings.ContainsAny(model, codexComposerGlyphs+"\r\n") {
 			return model
 		}
 	}

@@ -495,7 +495,7 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		alias, ok := configAliasForCanonical("network.listen_addr")
 		require.True(t, ok, "premise: the key under test is a migrated alias")
 
-		result, err := applyGlobalUnset(target, prettyHomePath(target.link), "network.listen_addr", alias)
+		result, _, err := applyGlobalUnset(target, prettyHomePath(target.link), "network.listen_addr", alias)
 
 		require.Error(t, err, "a no-op report must not be made about a file the link stopped naming")
 		assert.Nil(t, result)
@@ -509,6 +509,22 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		result, err := migrateConfigFile(target)
 
 		require.Error(t, err, "a nothing-to-migrate report must not be made about a file the link stopped naming")
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
+		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")
+	})
+
+	t.Run("migrate refuses instead of reporting nothing to migrate for an empty document", func(t *testing.T) {
+		// The empty-document early return is a second "nothing to migrate"
+		// claim and carries the same obligation: the locked file is zero bytes,
+		// but the retargeted link now names a config that DOES hold a
+		// deprecated key, and reporting the stale pin's emptiness is the same
+		// wrong answer in a different shape (#4485 review).
+		target, pinned, movedTo := movedLink(t, "")
+
+		result, err := migrateConfigFile(target)
+
+		require.Error(t, err, "an empty-document report must not be made about a file the link stopped naming")
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
 		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")

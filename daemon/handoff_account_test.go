@@ -137,7 +137,8 @@ func TestHandoffAccountRecoversPinnedDelivery(t *testing.T) {
 	require.True(t, saved.PendingAccountSwap.Manual)
 	require.Contains(t, saved.PendingAccountSwap.Mission, "finish migration")
 	backend.sendPromptErr = nil
-	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	require.NoError(t, err)
 	_, _, pending := inst.PendingAccountSwap()
 	require.False(t, pending)
 	name, automatic := inst.AccountSelection()
@@ -236,8 +237,8 @@ func TestHandoffAccountRecoversHealthyCheckpoint(t *testing.T) {
 	inst.ClearLimitReached()
 	m.cfg.LimitAutoResume = false
 	require.NoError(t, inst.BeginManualAccountSwap())
-	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude", false))
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
 	inst.EndLimitResume()
@@ -269,4 +270,104 @@ func TestHandoffAccountKeepsLimitInOutgoingAgentNamespace(t *testing.T) {
 	limited, err = m.limitedAccountsForSwap("codex", loadAccountLimitEvidenceForSwap)
 	require.NoError(t, err)
 	require.Contains(t, limited, "work")
+}
+
+// TestHandoffAccountDoesNotRefuseAcrossSiblingResolvedDivergence is the
+// manual-handoff surface of the limitedAccountsForSwap live-wall mis-key. A
+// same-agent account-only handoff resolves its namespace from the subject's
+// RUNNING agent (handoff_account.go:189), then asks limitedAccountsForSwap to
+// skip accounts currently at their limit in that namespace. When a SIBLING's
+// configured enum differs from its resolved runtime agent (a per-session
+// respawn under program_overrides.claude = "codex"), the buggy live-wall loop
+// matched the sibling's CONFIGURED enum and added the sibling's codex-namespaced
+// wall into the subject's claude namespace — so the handoff was refused with a
+// message naming the wrong namespace and a claude account that was not, in
+// fact, limited: "claude account \"work\" is currently at its usage limit".
+//
+// With the fix the live-wall loop keys on the resolved agent the wall was filed
+// under, so the sibling's codex wall does not leak and the handoff proceeds
+// past the limit check. The subject halts at mission delivery (sendPromptErr),
+// the same seam TestHandoffAccountKeepsLimitInOutgoingAgentNamespace uses, so
+// the assertion is that the wrong-namespace limit refusal is gone and the
+// handoff reached execution. The same-namespace companion proves a genuine
+// claude-namespaced wall on "work" is still refused, so the success above is
+// the keying fix and not a broken refusal path.
+func TestHandoffAccountDoesNotRefuseAcrossSiblingResolvedDivergence(t *testing.T) {
+	runHandoffAcrossSiblingDivergence(t, tmux.ProgramCodex, false)
+}
+
+// TestHandoffAccountStillRefusesSameNamespaceSiblingWall is the anti-vacuity
+// companion: when the sibling's configured AND resolved agent both match the
+// subject's claude namespace, its live wall on "work" MUST still refuse the
+// handoff. This passes both before and after the fix — it proves the refusal
+// machinery is wired, so the divergent test's success is the keying fix and not
+// an unrelated ineligibility.
+func TestHandoffAccountStillRefusesSameNamespaceSiblingWall(t *testing.T) {
+	runHandoffAcrossSiblingDivergence(t, tmux.ProgramClaude, true)
+}
+
+// runHandoffAcrossSiblingDivergence builds a claude subject C (configured and
+// running claude, at an ambient usage-limit wall) and a sibling B whose stored
+// Program is claude but whose pane runs siblingAgent, then attempts a
+// same-agent account-only handoff to the claude account "work". When
+// siblingAgent is codex (configured != resolved) the handoff must succeed past
+// the limit check (the sibling's codex wall must not leak into claude's
+// namespace); when siblingAgent is claude (configured == resolved) the genuine
+// claude-namespaced wall must still refuse it. expectRefusal selects the
+// expected outcome.
+func runHandoffAcrossSiblingDivergence(t *testing.T, siblingAgent string, expectRefusal bool) {
+	t.Helper()
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
+	// "work" is the handoff target; register it for claude so Selected passes.
+	configureLimitAccountCandidate(t, m, "work")
+	// The subject's own wall stays ambient (filed by newAutoResumeManager with
+	// an empty account), so it neither limits "work" nor turns the request into
+	// a self-rejection. Run on "personal" so from != "work" and the request is
+	// a real swap rather than a no-op.
+	inst.Account = "personal"
+	// Keep the subject's runtime pinned to claude, matching a pre-override
+	// session that has not been individually respawned.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+	inst.ClearLimitReached()
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+
+	// Sibling B: stored Program=claude (the configured enum the buggy loop
+	// keyed on), pane runs siblingAgent, account-scoped to "work".
+	bBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	b := registerStarted(t, m, repo, inst.Path, "drifted", bBackend, true, session.Running)
+	b.Program = tmux.ProgramClaude
+	b.Account = "work"
+	b.SetTmuxSession(tmux.NewTmuxSession(b.Title, siblingAgent))
+	b.SetLimitReached(time.Now().Add(time.Hour))
+	// registerStarted's seedDiskInstance overwrote the repo's on-disk instance
+	// file with b's entry alone; re-append the subject so HandoffSession's
+	// findSession refresh (which drops memory-only rows not on disk) still finds
+	// it. refreshDaemonInstances preserves existing in-memory instances
+	// wholesale, so the subject's live wall survives the refresh intact.
+	require.NoError(t, appendInstanceData(repo, inst.ToInstanceData()))
+
+	backend.onRespawn = func(i *session.Instance) {
+		i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
+	}
+	backend.sendPromptErr = errors.New("delivery interrupted")
+
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "work"})
+	if expectRefusal {
+		// A genuine claude-namespaced wall on "work" must be refused, naming
+		// the claude namespace and the work account.
+		require.ErrorContains(t, err, `claude account "work" is currently at its usage limit`)
+		_, respawns, _ := backend.snapshot()
+		require.Zero(t, respawns, "a refused handoff must not respawn the pane")
+		return
+	}
+	// The sibling's wall lives under siblingAgent (codex), not claude, so the
+	// claude-namespace scan must not see "work": the wrong-namespace refusal is
+	// gone and the handoff reaches execution, halting at mission delivery.
+	require.NotContains(t, err.Error(), "is currently at its usage limit",
+		"a sibling wall filed under codex must not refuse the claude handoff naming the wrong namespace")
+	require.ErrorContains(t, err, "delivery interrupted",
+		"the handoff must pass the limit check and reach mission delivery")
+	_, respawns, _ := backend.snapshot()
+	require.Equal(t, 1, respawns, "admission passed; the pane must have been respawned before delivery")
 }

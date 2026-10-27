@@ -225,8 +225,14 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     shouldForgetToken: () => false, clearToken() {}, describeError: () => "",
     storeToken() {}, listTasks: () => tasks,
     fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
+    getConfig: async () => null,
+    // The null config read schedules the bounded background reconcile; the
+    // sandbox exercises the connect path, so the reconcile itself is a no-op.
+    reconcileConfigRead() {},
+    setTerminalFontSizes() {}, terminalFontSizesFromConfig: () => ({ phone: 6.5, desktop: 13 }),
     errorText: () => "", connectionAttemptMayCommit: () => true,
     reconcileProject: () => "", loadProjectChoice: () => null,
+    projectRoots: (projects: { root: string }[]) => projects.map((p) => p.root),
     optimisticSessions: { reset() {} }, pickSelection: () => null,
     applySessions: (_sessions: unknown, evidence: Parameters<PendingRestores["observe"]>[1]) => {
       pending.observe(rows, evidence);

@@ -250,3 +250,72 @@ func TestControlServer_RegisterProject_GatedWhenWarming(t *testing.T) {
 	err = notReady.RegisterProject(RegisterProjectRequest{Path: t.TempDir()}, &resp)
 	assert.True(t, IsDaemonStartingErr(err), "RegisterProject on a warming manager: want daemon-starting error, got: %v", err)
 }
+
+// TestControlServer_RegisterProject_RefusesRelativePaths is #4821. The daemon
+// has no access to the caller's working directory, so a path that is not
+// absolute after trimming and ~ expansion is refused at the RPC boundary rather
+// than resolved against the DAEMON's cwd. The test process is chdir'ed into an
+// unrelated checkout — the ad-hoc-daemon case — and every relative spelling
+// below would register that checkout if it reached config.RegisterProject.
+func TestControlServer_RegisterProject_RefusesRelativePaths(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	unrelated := setupControlRepo(t)
+	for _, sub := range []string{"repo", "x"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(unrelated, sub), 0o755))
+	}
+	t.Chdir(unrelated)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	for _, path := range []string{".", "repo", "./x", " .", "  repo  "} {
+		t.Run(path, func(t *testing.T) {
+			_, ch := manager.events.subscribe()
+
+			var resp RegisterProjectResponse
+			err := cs.RegisterProject(RegisterProjectRequest{Path: path}, &resp)
+			require.Error(t, err, "a relative path must be refused, not resolved against the daemon's cwd")
+			assert.Contains(t, err.Error(), "must be absolute")
+			assert.False(t, resp.OK)
+
+			assertNoEvent(t, ch, agentproto.EventProjectsChanged)
+
+			projects, err := config.ListProjects()
+			require.NoError(t, err)
+			assert.Empty(t, projects, "a refused registration must leave the registry unchanged")
+		})
+	}
+}
+
+// TestControlServer_RegisterProject_RegistersTheTrimmedPathItChecked is the
+// other half of #4821: the value the boundary validated is the value
+// registered. A whitespace-prefixed absolute path is trimmed for the check, so
+// it must be trimmed for the registration too — passing the raw " /repo" on
+// would resolve it against the cwd as a relative name (the #4789 round-7 bug).
+// A plain absolute path is the control.
+func TestControlServer_RegisterProject_RegistersTheTrimmedPathItChecked(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	unrelated := setupControlRepo(t)
+	repoPath := setupControlRepo(t)
+	t.Chdir(unrelated)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	for _, path := range []string{repoPath, " " + repoPath, "\t" + repoPath + "\n"} {
+		_, ch := manager.events.subscribe()
+
+		var resp RegisterProjectResponse
+		require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: path}, &resp), "path %q", path)
+		assert.Equal(t, filepath.Clean(repoPath), resp.Project.Root, "path %q must register the checkout it names", path)
+
+		waitForEvent(t, ch, agentproto.EventProjectsChanged)
+	}
+
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1, "every spelling names the same checkout; the cwd's checkout is never registered")
+	assert.Equal(t, filepath.Clean(repoPath), projects[0].Root)
+}

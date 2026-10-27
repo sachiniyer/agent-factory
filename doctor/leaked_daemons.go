@@ -170,7 +170,7 @@ func checkLeakedDaemonBinaries(ctx *scanContext, report *Report) {
 		return
 	}
 	activeHome := normalizeHome(ctx.opts.ConfigDir)
-	tempDir := filepath.Clean(ctx.opts.TempDir)
+	tempDir := normalizeHome(ctx.opts.TempDir)
 
 	for _, d := range ctx.daemonProcs() {
 		if d.isSelfAncestor || !d.ownedByUs {

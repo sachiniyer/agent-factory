@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,6 +125,41 @@ func TestDaemonPIDFileRefusesASymlinkedPath(t *testing.T) {
 	assert.FileExists(t, target)
 }
 
+// The stop-side stale-PID cleanup: StopDaemon's stopDaemonUntil treats a stale
+// PID in daemon.pid as garbage to unlink and used to call os.Remove on the
+// path directly. When the PID file is a symlink writeDaemonPIDFile already
+// refused to write through, os.Remove unlinks the LINK — the asymmetry #3672
+// exists to prevent on the daemon teardown (removeDaemonPIDFile) and the
+// autostart teardown (removeAutostartUnitFile), and which the four stale-PID
+// branches plus cleanupDaemonRuntimeFiles leak through. After the fix these
+// paths route through config.RemoveFileRefusingLink, so a stop of an af that
+// found a stale PID behind a symlink the user planted leaves the link and its
+// target exactly as af left them on the write side (#3672).
+//
+// Uses the same dead-PID shape TestStopDaemon_NonExistentPID does (0x7fffffff,
+// well above Linux's 32768 and macOS's 99999 pid_max), so the signal-0 probe
+// returns non-nil regardless of which errno the kernel returns for an
+// out-of-range PID and the stale branch fires deterministically. Even on a
+// host whose pid_max exceeds 0x7fffffff, the `!isAgentFactoryDaemon` branch
+// fires instead — and it routes through the same refusing helper.
+func TestStopDaemon_DoesNotUnlinkASymlinkedStalePIDFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	deadPID := 0x7fffffff
+	link, target := linkedManagedFile(t, home, "daemon.pid", fmt.Sprintf("%d\n", deadPID))
+
+	stopped, err := StopDaemon()
+	require.NoError(t, err, "StopDaemon must not error on a stale PID")
+	assert.False(t, stopped, "a dead PID is not a stopped daemon")
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err, "the symlink af could not have written through must survive stop")
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
+		"stop must not unlink a symlinked PID file af never wrote through (#3672)")
+	assert.FileExists(t, target, "the target keeps its stale content")
+}
+
 // The cursor's REMOVAL paths, which the refusing writer alone does not cover
 // (#3672 review). Both reach q.remove — the production os.Remove — with no
 // prior cursor write, so before the fix they unlinked the link and the refusing
@@ -157,6 +193,21 @@ func TestEventQueueCursorRemovalRefusesASymlinkedCursor(t *testing.T) {
 		assert.FileExists(t, q.path,
 			"and it refuses before dropping the jsonl, so a refused teardown is not half-done")
 	})
+}
+
+func TestEventQueueDrainRefusesASymlinkedLimitMarkerBeforeDeletingBacklog(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "task-limit-marker")
+	link, target := linkedManagedFile(t, dir, "task-limit-marker.limit-parked", "parked\n")
+	require.NoError(t, os.WriteFile(q.path, []byte("{}\n"), 0644))
+
+	q.mu.Lock()
+	_, err := q.removeDrainedFilesLocked()
+	q.mu.Unlock()
+
+	assertRefusedSymlink(t, err, link, target, "parked\n")
+	assert.FileExists(t, q.path,
+		"limit-marker refusal must happen before deleting the backlog it describes")
 }
 
 // The unit file is what #3672 is titled after. ~/.config/systemd/user/ is a

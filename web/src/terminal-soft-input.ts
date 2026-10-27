@@ -258,7 +258,11 @@ export class TerminalSoftInput {
 
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action: () => void): boolean {
-    if (!this.pending.length) return false;
+    // Also queue behind custom input that is itself still waiting. This soft
+    // input releases a pending range in its own macrotask, before the keys queued
+    // behind it run, and a browser may dispatch a key between the two; that key
+    // finds nothing pending but must not overtake the keys still waiting.
+    if (!this.pending.length && !this.postCompositionTimers.size) return false;
     // compositionend registered xterm's finalizer and our range release before
     // the custom keydown can reach this method. Timer FIFO therefore preserves
     // the user's commit-before-key order even though xterm rejects that keydown.
@@ -413,6 +417,22 @@ export class TerminalSoftInput {
     this.forwardingComposition = text;
     try { this.send(text); } finally { this.forwardingComposition = undefined; }
   }
+  /**
+   * Drop composition state on focus loss — including custom input queued behind
+   * the composition, because the blur discards the commit it was waiting for.
+   *
+   * In the pinned xterm 5.5.0, Terminal._handleTextAreaBlur empties the textarea
+   * synchronously (Terminal.ts:289-292) and nothing flushes the composition
+   * first, while CompositionHelper's finalizer only reads the textarea later, in
+   * its setTimeout(0) (CompositionHelper.ts:152-171), and sends nothing when the
+   * read is empty. A blur in the window therefore loses the committed text. A key
+   * queued behind that text must go with it: sent alone, a Shift+Enter would land
+   * as an orphaned LF, detached from the word it was ordered after.
+   *
+   * Cancelling here is safe because nothing that must arrive is ever queued: a
+   * terminal signal byte, the Ctrl+C interrupt included, bypasses the queue
+   * (TerminalKeybar's SIGNAL_BYTES), which is what #4151 needed.
+   */
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== undefined) clearTimeout(flush.release);

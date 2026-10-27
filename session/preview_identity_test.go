@@ -24,7 +24,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
 		if strings.Contains(cmd.String(), "display-message") {
-			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
+			return []byte("7 11 1 1 0 1 0 0 1 0 80 24"), nil
 		}
 		for i, arg := range cmd.Args {
 			if arg == "-t" && i+1 < len(cmd.Args) {
@@ -37,7 +37,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	repoPath := "/tmp/preview-tab-identity-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -107,7 +107,7 @@ func TestPreview_TabIDSurvivesConcurrentOrdinalShift(t *testing.T) {
 			require.Equal(t, 2, resolved)
 
 			closed := make(chan error, 1)
-			go func() { closed <- inst.CloseTab(1) }()
+			go func() { closed <- inst.CloseTabByID(snapshot[1].ID) }()
 			require.NoError(t, <-closed)
 			requireIndex(t, inst, b.ID, 1)
 			requireIndex(t, inst, c.ID, 2)
@@ -150,7 +150,7 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	defer log.Close()
 
 	inst := previewIdentityInstance(t, "af_preview_remote_bridge")
-	_, err := inst.AddProcessTab("a", "a")
+	a, err := inst.AddProcessTab("a", "a")
 	require.NoError(t, err)
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	closeDone := make(chan error, 1)
 	content, err := inst.previewByIDAsOrdinal(b.ID, func(idx int) (string, error) {
 		require.Equal(t, 2, idx)
-		go func() { closeDone <- inst.CloseTab(1) }()
+		go func() { closeDone <- inst.CloseTabByID(a.ID) }()
 		select {
 		case err := <-closeDone:
 			t.Fatalf("tab close completed during the capture critical section: %v", err)

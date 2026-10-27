@@ -18,6 +18,17 @@ Create a PR for the current branch against `master`.
    scripts/lint-file-length.sh
    go test ./<only the package you changed>/...   # skip if it is daemon/ or app/
 
+   # Generated-artifact drift — only when the diff touched a generator input
+   # (commands/ or api/ Cobra defs, daemon/httproutes.go, session/ usage text,
+   # design/, web/src shells, app/testdata/recovery goldens, or the
+   # generators). The porcelain path list mirrors docs.yml's generated set.
+   scripts/gen-docs.sh
+   git status --porcelain -- docs/reference plugins .agents .claude-plugin \
+       web/src/tokens.css web/src/index.html web/src/manifest.webmanifest \
+       ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md \
+       docs/design/interface-design.md \
+       docs/assets/recovery/tui-model-driver   # must be empty
+
    # Do NOT run make test-container as a routine gate — CI runs
    # `go test -race ./...` on every push, and a local container run rebuilds the
    # whole Go tree, which takes the shared box down when sessions do it in
@@ -55,6 +66,7 @@ Create a PR for the current branch against `master`.
    - [x] `go build ./...` passes
    - [x] `go test` on the changed package passes (CI runs the full matrix)
    - [x] `scripts/lint-file-length.sh` passes
+   - [x] `scripts/gen-docs.sh` run; generated paths clean — or no generator input touched
    - [x] `deadcode` left to CI (whole-program analysis; the Lint job runs it)
    - [ ] Manually tested in TUI (if applicable)
    EOF

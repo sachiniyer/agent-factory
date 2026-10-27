@@ -50,6 +50,11 @@ merges before the next file begins.
    scripts/lint-file-length.sh
    go test ./<the package you split>/...   # skip if it is daemon/ or app/
 
+   # Only if the split moved a generator input (a Cobra def, a route table,
+   # usage text — see CLAUDE.md's Lint section for the list):
+   scripts/gen-docs.sh   # then confirm a clean git status --porcelain on the
+                         # generated paths
+
    # No make test-container — CI runs `go test -race ./...` on every push.
    # A decomposition is exactly the case CI covers well: same code, moved.
    ```

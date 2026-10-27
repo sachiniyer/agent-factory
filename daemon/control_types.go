@@ -250,98 +250,6 @@ type RestoreSessionResponse struct {
 	MutationOutcome
 }
 
-// DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
-// sessions (#1735). Every regular live session is archived (worktree relocated,
-// branch/state preserved, restorable via RestoreArchived); in-place/external
-// sessions are torn down. The repo's root_agents opt-in is removed, as is any
-// durable registration whose root matches RepoPath, and the always-on root agent
-// (if any) is stopped. The user's real git repo is never touched. Restoring an
-// archived session makes the repo active again, but does not restore its
-// registration or root opt-in.
-//
-// RepoPath is the repo root (the stable project id clients group by:
-// worktree.repo_path). RepoID is the precomputed id; when either is omitted the
-// daemon derives it from RepoPath or its durable registry record, respectively.
-// When both are set they must identify the same project. At least one must be
-// set. Deleting an unknown project is a clean no-op; a registered project with no
-// live sessions is deregistered.
-type DeleteProjectRequest struct {
-	RepoPath string `json:"repo_path"`
-	RepoID   string `json:"repo_id"`
-}
-
-type DeleteProjectResponse struct {
-	OK bool `json:"ok"`
-	// ArchivedCount is how many live sessions were archived (restorable).
-	ArchivedCount int `json:"archived_count"`
-	// KilledCount is how many live sessions could not be archived and were torn
-	// down instead — only in-place/external worktrees (the root agent, `--here`
-	// sessions), whose kill never touches the user's tree or branch.
-	KilledCount int `json:"killed_count"`
-	// Deregistered reports whether the durable project record was removed.
-	Deregistered bool `json:"deregistered"`
-	// Warning is the FLAT, pre-#3036 wire field. See ArchiveSessionResponse: it
-	// is what keeps a committed hook failure visible to an OLDER gob client,
-	// which has no slot for the nested envelope.
-	Warning string `json:"warning,omitempty"`
-	// MutationOutcome carries nonfatal on-archive hook failures from sessions
-	// whose archive and project deletion both committed.
-	MutationOutcome
-}
-
-// RegisterProjectRequest asks the daemon to register a git checkout as a durable,
-// sessionless project in the #2355 registry (#2456). Path names a directory on
-// the DAEMON's filesystem; the daemon expands ~, resolves symlinks, and walks to
-// the git checkout's canonical main-repo root, then validates it.
-//
-// Path must already be absolute (or ~-prefixed) — the daemon has no access to the
-// caller's working directory, so a relative path would resolve against the
-// daemon's own cwd, which is not the caller's. Callers whose input can be
-// relative resolve it against the user's cwd BEFORE sending: the CLI's
-// `af projects add` does this (see api/projects.go), and the web only ever
-// supplies daemon-host paths. Registration is idempotent: a known checkout is a
-// no-op success that returns the existing identity.
-type RegisterProjectRequest struct {
-	Path string `json:"path"`
-}
-
-// RegisterProjectResponse carries the durable identity the registration
-// resolved to. The project is now in the registry ON THE DAEMON HOST, and once
-// #2456's UI slices land it shows as an empty row in that daemon's project
-// switcher until a session is created into it.
-//
-// Scope caveat for a REMOTE daemon: `af projects list` and `af projects rebind`
-// still run in-process against the CLIENT's local registry, so they will not see
-// a project that `add` just wrote to the daemon's registry. For the common
-// local daemon the two registries are the same store, so it round-trips as
-// expected. Routing list/rebind through the daemon too is the follow-up needed
-// for full remote parity (#2491).
-//
-// OK is always true on a nil error (a redundant flag kept for wire symmetry with
-// the other project RPCs).
-type RegisterProjectResponse struct {
-	OK      bool           `json:"ok"`
-	Project config.Project `json:"project"`
-}
-
-// ListProjectsRequest asks the daemon for every durable project in ITS registry
-// (#2456). It carries no fields: the registry is machine-local and unscoped, so
-// there is one answer per daemon. This is the READ that makes the local project
-// list a union of derived-from-sessions projects and explicitly-registered ones
-// — a web/TUI client cannot call config.ListProjects in-process the way the CLI
-// does, so the union needs this RPC. It is the read half of #2491 (closed as not
-// worth it for remote parity alone; it turns out load-bearing for the LOCAL
-// union, a different rationale).
-type ListProjectsRequest struct{}
-
-// ListProjectsResponse carries every registered project, each a durable identity
-// plus its last-known root and whether that path still exists. Clients union
-// these roots with the projects they derive from live sessions/tasks so a
-// registered-but-sessionless project is still shown and creatable-into.
-type ListProjectsResponse struct {
-	Projects []config.Project `json:"projects"`
-}
-
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -351,6 +259,11 @@ type SendPromptRequest struct {
 	// can't land on the wrong session under a cross-repo title collision (#1592
 	// Phase 5 follow-up). TUI/CLI/delivery callers omit it and resolve by title.
 	ID string `json:"id"`
+	// TaskOrigin is daemon-internal provenance. Automated task delivery sets it
+	// so the final, op-lock-protected liveness check can park at a usage limit;
+	// manual send-prompt leaves it false because an operator may need to answer a
+	// limit or credits picker in that pane.
+	TaskOrigin bool `json:"-"`
 }
 
 type SendPromptResponse struct {
@@ -387,13 +300,17 @@ type DeliverPromptRequest struct {
 	DeferWhileAttached bool `json:"defer_while_attached,omitempty"`
 }
 
-// DeliverPromptResponse reports how the prompt was delivered. Status is
-// "started" when this call created the target session (the prompt was its
-// initial prompt) and "sent" when it was sent into a session that already
-// existed — the same status vocabulary deliverTaskPrompt records on a task.
+// DeliverPromptResponse reports how the prompt was handled. Status is "started"
+// when this call created the target session, "sent" when it sent into an
+// existing session, and "parked: usage limit" when task provenance made it skip
+// a limit-reached target — the same vocabulary deliverTaskPrompt records.
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
+	// PromptRetained distinguishes a newly created limit-parked target, whose
+	// initial prompt is already owned by resume, from an existing limited target
+	// whose watch event still needs queue replay.
+	PromptRetained bool `json:"prompt_retained,omitempty"`
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's
@@ -712,6 +629,13 @@ type PingResponse struct {
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
+	// PID is the acknowledging daemon's process id (#5007). RequestShutdown
+	// cross-checks it against the PID the pre-shutdown Ping reported on the
+	// same connection and drops the target on a mismatch; it never uses it
+	// alone, because a PID learned only from the ack cannot be pinned before
+	// the daemon may exit. Additive: a daemon built before this field decodes
+	// as 0, which skips the cross-check.
+	PID int `json:"pid,omitempty"`
 }
 
 // ReleaseUpgradeProbationRequest asks a probationary upgrade candidate to leave
@@ -822,9 +746,10 @@ type SetConfigValueResponse struct {
 	// on the next daemon start.
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
-	// Warnings surfaces the tokenless-network exposure notice and any listener
-	// rebind failure at save time (#2480 PR2). The web form shows them after the
-	// echo so a user learns when a socket key did not apply or a posture is exposed.
+	// Warnings carries apply-time notices: tokenless-network exposure, listener
+	// rebind failures, and failed/unconfirmed live-apply details. On a failed or
+	// unconfirmed apply it also retains Result.Warnings, since ApplyConfig did not
+	// return its normal warning set. The web form renders this complete set.
 	Warnings []string `json:"warnings,omitempty"`
 	// ListenerAddr is where the daemon is ACCEPTING right now for a listener key
 	// (network.listen_addr / network.preview_listen_addr) — "" for every other key,
@@ -835,6 +760,10 @@ type SetConfigValueResponse struct {
 	// FAILED, it names the address still serving rather than the one config now
 	// asks for, which is what the deferred notice beside it is about.
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// ApplyOutcome is appended to preserve every established response member's
+	// wire order. It lets automation distinguish applied, deferred, no-daemon,
+	// failed, and unconfirmed saves without parsing RestartNotice or Warnings.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // UnsetConfigValueRequest clears one globally unsettable migrated setting.
@@ -855,6 +784,8 @@ type UnsetConfigValueResponse struct {
 	// two verbs report it identically or one of them is the surface that quietly
 	// does not (#3397 is that lesson, on this same pair of handlers).
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// Keep this additive field last for the same wire-order contract as set.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
@@ -869,7 +800,7 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// failure so a pre-#3231 `af config set` (which applies via the ApplyConfig poke)
 	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)

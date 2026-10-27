@@ -220,8 +220,19 @@ func liveTmuxServerPIDs() []int {
 // A tripped deadline is an error, never an empty list: a server that did not
 // answer has told us nothing about what is running on it.
 func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_name}")
+}
+
+// listSessionIDs is the ListSessionNames contract for #{session_id}: the
+// generation probe's corroboration asks which IDS the server still knows,
+// and a name list cannot answer that.
+func listSessionIDs(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_id}")
+}
+
+func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", "#{session_name}")
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", format)
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {
@@ -240,6 +251,32 @@ func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// SessionCreatedUnix returns the server's recorded creation time for one tmux
+// session — per-launch temporal evidence the env markers alone cannot carry
+// (#5503): a same-named session killed and respawned gets a fresh timestamp, so
+// a leftover created at-or-after a recorded intent can be attributed to that
+// attempt. Any failure — absent session, wedged server, unparseable answer —
+// is an error; the caller must not read it as "not ours". Second granularity
+// is all tmux records; callers comparing against a finer bound should compare
+// at whole seconds.
+func SessionCreatedUnix(cmdExec cmd.Executor, sanitizedName string) (time.Time, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-t", exactTarget(sanitizedName), "-p", "#{session_created}")
+	timedOut := ctx.Err() != nil
+	cancel()
+	if err != nil {
+		if timedOut {
+			return time.Time{}, fmt.Errorf("%w: display-message for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		}
+		return time.Time{}, fmt.Errorf("could not read %s's creation time: %w", sanitizedName, err)
+	}
+	sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if perr != nil {
+		return time.Time{}, fmt.Errorf("could not parse %s's creation time %q: %w", sanitizedName, strings.TrimSpace(string(out)), perr)
+	}
+	return time.Unix(sec, 0), nil
 }
 
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
@@ -357,6 +394,11 @@ func recreateSocketAdvice(pids []int) string {
 // The bare "tmux" fallback is for builds and platforms that do not retitle. It
 // is EXACT, never a prefix, for the reason above: a prefix is what swallowed
 // the client.
+//
+// That fallback also admits every CLIENT on darwin, where tmux cannot retitle
+// and every tmux process is named "tmux" (measured, #4678). This is only the
+// coarse prefilter for "could a server be alive"; proctree.IsTmuxServer decides
+// who is actually signalled.
 func isTmuxServerComm(comm string) bool {
 	return comm == "tmux: server" || comm == "tmux"
 }
@@ -387,17 +429,35 @@ func absentTmuxSocketPath(diagnostic string) string {
 //
 // pids comes from tmuxServerProcessPIDs — deliberately uid-wide, because which
 // server owns an unlinked socket is exactly what cannot be read back. A pid is
-// re-verified as a tmux server at signal time (IsTmuxServer, from its own
-// command line) so a pid reused since the snapshot cannot spray SIGUSR1 — whose
-// default disposition is TERMINATE — into an unrelated process.
+// re-verified as a tmux server at signal time, positively (proctree.IsTmuxServer:
+// the kernel task name tmux gives a server, or the daemon(3) shape a server is
+// left in). SIGUSR1's default disposition is TERMINATE, so anything that is not
+// positively a server must never receive it. That covers a pid reused since the
+// snapshot, and — the defect behind #4678 — a tmux CLIENT, which is killed by
+// SIGUSR1 if it arrives before the client has installed its handler. The
+// command line cannot make this distinction: a daemonised server carries its
+// launching client's argv.
 //
 // Ambiguity survives in one direction only: a table with live servers that
 // could not all be signaled answers "claimed" (unknown), because a live owner
 // was not disproved. An empty table answers "unclaimed" outright.
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
+	unprobedOwnerPossible := false
 	for _, pid := range pids {
-		if pid <= 0 || !proctree.IsTmuxServer(pid) {
+		if pid <= 0 {
+			continue
+		}
+		if !proctree.IsTmuxServer(pid) {
+			// The pid passed the liveTmuxServerPIDs comm prefilter but
+			// could not be positively identified as a server (proctree.
+			// IsTmuxServer is strict: an unreadable command line, a
+			// darwin foreground `tmux -D`, or a same-uid client all fail).
+			// Skip signalling it — SIGUSR1's default disposition is
+			// TERMINATE — but remember it: it occupies a slot the prefilter
+			// admitted, and a skipped owner is never disproved, so a
+			// socket that stays absent is NOT evidence against it.
+			unprobedOwnerPossible = true
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
@@ -413,7 +473,16 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			return true
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			// A prefilter-passing pid was skipped as not positively a
+			// server. It could be the live owner of this unlinked socket
+			// (a darwin `tmux -D` foreground server, a sidUnknown daemon,
+			// or a client the comm prefilter admitted). Socket absence
+			// after signalling the *other* servers does not disprove it,
+			// so the safe direction — the one the doc comment and the
+			// module's "a failed read is not an empty result" invariant
+			// both demand — is "claimed" (unknown), refusing the
+			// destructive cleanup that a false "unclaimed" would license.
+			return unprobedOwnerPossible
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

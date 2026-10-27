@@ -58,17 +58,15 @@ func reportConfigValidity(report *Report, load config.ReadOnlyConfigLoad, err er
 		}
 		report.Fail(sectionConfig, "config", fmt.Sprintf("%s is not valid: %v", path, err),
 			"edit the config file, or delete it to regenerate defaults")
-	case load.DirectoryAccessWarning != "":
-		report.Warn(sectionConfig, "config", load.DirectoryAccessWarning,
-			"run `af` to attempt regeneration; startup reports any failure", false)
 	case load.EmptyStub:
 		// A contentless config.toml with no shadowing config.json is a state
-		// af self-heals on the next start, so it is a WARN (advisory), not a
-		// FAIL: a health check that exits 1 for a state af considers healthy
-		// disagrees with the thing it diagnoses. problem=false keeps it out
-		// of UnresolvedCount so `af doctor` exits 0, matching startup.
-		report.Warn(sectionConfig, "config", fmt.Sprintf("empty config stub at %s; af will attempt to regenerate defaults on the next start", load.Path),
-			"run `af` once to regenerate defaults, or delete the stub", false)
+		// af runs past on in-memory defaults (#4483 — a load never deletes),
+		// so it is a WARN (advisory), not a FAIL: a health check that exits 1
+		// for a state af considers healthy disagrees with the thing it
+		// diagnoses. problem=false keeps it out of UnresolvedCount so
+		// `af doctor` exits 0, matching startup.
+		report.Warn(sectionConfig, "config", fmt.Sprintf("empty config stub at %s; af runs on built-in defaults and leaves the file untouched", load.Path),
+			"write your settings to it, or delete it and run `af` to regenerate defaults", false)
 	case load.Missing:
 		report.Warn(sectionConfig, "config", fmt.Sprintf("no config file at %s; defaults will be created on first write", load.Path),
 			"run `af` once to materialize defaults or create config.toml", false)
@@ -219,7 +217,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 		header = append(header, agent+"=missing")
 		detail := fmt.Sprintf("%q is not runnable: %v", command, err)
-		remediation := fmt.Sprintf("install %s or set program_overrides.%s", agent, agent)
+		remediation := preflight.ProgramError(agent, command, err).Error()
 		if configured {
 			report.Fail(sectionEnvironment, agent, detail, remediation)
 		} else {

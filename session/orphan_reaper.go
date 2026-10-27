@@ -44,6 +44,9 @@ const dockerSweepListFormat = "{{.ID}}\t{{.Label \"" + dockerSessionLabel + "\"}
 //   - `docker ps` runs under the daemon's own docker environment, so the query is
 //     scoped to the currently-targeted engine; the sweep never sees, and so can
 //     never reap, a container on another engine (the #2382 cross-engine hazard).
+//     The environment is first resolved through the same selector check every
+//     other docker caller uses: when DOCKER_HOST and DOCKER_CONTEXT disagree the
+//     sweep is skipped rather than run on the engine the CLI happened to pick.
 //   - A listed container whose af.session slug is in protectedSlugs — the slug of
 //     a live OR still-provisioning session (the #2549 mid-create window) — is
 //     spared. The label is a many-to-one title slug, so this errs toward sparing:
@@ -68,6 +71,17 @@ func SweepOrphanContainers(homeID string, protectedSlugs map[string]bool) Orphan
 	}
 
 	env := sessionenv.DockerCLIEnvironment(os.Environ(), "", nil)
+
+	// The selector refusal every other docker caller already inherits through
+	// resolveDockerEngineEndpoint: with DOCKER_HOST and DOCKER_CONTEXT both set
+	// and disagreeing, the CLI dials DOCKER_HOST while its own reference says
+	// DOCKER_CONTEXT wins — and the sweep would then feed `docker rm -f` a list
+	// read from whichever engine that guess picked. The same refusal applies
+	// here before the sweep's first docker call (#4413 review).
+	if _, _, err := resolveDockerEngineEndpoint(env); err != nil {
+		log.WarningLog.Printf("orphan sweep: cannot resolve the Docker engine endpoint; skipping this sweep: %v", err)
+		return result
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
 	engineID, err := currentDockerEngineID(ctx, env)

@@ -170,7 +170,7 @@ func TestHandoffAccountReadinessLimitRetainsMission(t *testing.T) {
 	require.Equal(t, "personal", observations[len(observations)-1].Account)
 	b.limited = false
 	// Explicit retry preserves the same transaction and delivers exactly once.
-	err = m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
 	require.NoError(t, err)
 	_, _, prompts = base.snapshot()
 	require.Len(t, prompts, 1)
@@ -205,7 +205,9 @@ func TestManualAccountHandoffRetryFencesMissionBeforeSubmission(t *testing.T) {
 		statusAtSubmission = persistedInstanceByTitle(t, repo, inst.Title).
 			RestoreAccountSwapRollbackFence().PendingAccountSwap.MissionDeliveryStatus
 	}
-	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	require.NoError(t, err)
+
 	require.Equal(t, session.PromptCouldNotConfirm, statusAtSubmission,
 		"durable positive non-delivery evidence must be fenced before the composer is touched")
 }

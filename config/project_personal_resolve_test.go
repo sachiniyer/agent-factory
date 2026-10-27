@@ -42,20 +42,37 @@ func TestResolveConfigInRepoWinsWhenNoPersonal(t *testing.T) {
 	assert.Equal(t, "aider", resolved.DefaultProgram, "with no personal override, existing precedence is unchanged")
 }
 
-func TestResolveConfigPersonalBranchPrefixBeatsGlobal(t *testing.T) {
+// TestResolveConfigPersonalBranchPrefixStoredButIgnored pins the #4539 interim
+// state: a project-scoped branch_prefix stays writable and keeps loading, but
+// it can never win — the effective value is the global one, and the stored
+// candidate is relabeled "ignored" so inspection tells the truth.
+func TestResolveConfigPersonalBranchPrefixStoredButIgnored(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
 	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")
 	writePersonalConfig(t, project.ID, "branch_prefix = \"local/\"\n")
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	assert.Equal(t, "local/", resolved.BranchPrefix)
+	assert.Equal(t, "global/", resolved.BranchPrefix,
+		"a stored personal branch_prefix is not applied until #4539 — the global prefix names every branch")
 
 	value, ok := resolved.ResolvedValue("branch_prefix")
 	require.True(t, ok)
 	require.NotNil(t, value.Winner)
-	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer,
-		"branch_prefix has no in-repo layer, so the personal override sits directly above global")
+	assert.Equal(t, SourceGlobal.String(), value.Winner.Layer)
+	assert.True(t, PersonalBranchPrefixIgnored(value),
+		"the stored personal candidate must be visible so get/list can mark the shown value")
+
+	var personal *CandidateTrace
+	for i, c := range value.Candidates {
+		if c.Layer == SourceProjectPersonal.String() {
+			personal = &value.Candidates[i]
+		}
+	}
+	require.NotNil(t, personal)
+	assert.True(t, personal.Present)
+	assert.Equal(t, "ignored", personal.Result)
+	assert.Contains(t, personal.Reason, "#4539")
 }
 
 func TestResolveConfigPersonalLimitAccountCandidatesReplaceGlobal(t *testing.T) {
@@ -88,14 +105,14 @@ func TestResolveConfigForIdentityDecisionFromGlobalKeepsOneGlobalGeneration(t *t
 
 func TestResolveConfigPersonalEmptyValueStillOverrides(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
-	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")
-	writePersonalConfig(t, project.ID, "branch_prefix = \"\"\n")
+	writeGlobalTOML(t, home, "on_archive_command = \"global-hook\"\n")
+	writePersonalConfig(t, project.ID, "on_archive_command = \"\"\n")
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	assert.Equal(t, "", resolved.BranchPrefix, "an explicit empty personal value is a present override, not absence")
+	assert.Equal(t, "", resolved.OnArchiveCommand, "an explicit empty personal value is a present override, not absence")
 
-	value, ok := resolved.ResolvedValue("branch_prefix")
+	value, ok := resolved.ResolvedValue("on_archive_command")
 	require.True(t, ok)
 	require.NotNil(t, value.Winner)
 	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer)

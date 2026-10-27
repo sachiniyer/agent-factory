@@ -45,7 +45,8 @@ function rig(opts: { selection?: string; composerNewline?: boolean }) {
     },
     copy: (t) => clipboard.push(t),
     // Byte-identical to terminal.ts's input path, so `wire` holds real OpInput frames.
-    sendInput: (t) => wire.push(encode(inputFrame(enc.encode(t)))),
+    // Whether a byte waits behind a pending IME commit is the terminal keybar's
+    // decision, covered in terminal-keybar.test.ts against a real soft input.
     sendUserInput: (t) => {
       userInput.push(t);
       wire.push(encode(inputFrame(enc.encode(t))));

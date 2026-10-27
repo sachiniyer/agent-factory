@@ -61,9 +61,12 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// (#3624 review).
 	converting := !fileExists(tomlPath) && fileExists(filepath.Join(configDir, ConfigFileName))
 
-	// Precondition, exactly as `af config set` uses it: materialize or convert
-	// so config.toml exists, and prove the current file loads, so a later parse
-	// failure is unambiguously this migration's fault.
+	// Precondition, exactly as `af config set` uses it: convert a legacy
+	// config.json or materialize first-run defaults so config.toml exists when
+	// it should, and prove the current file loads, so a later parse failure is
+	// unambiguously this migration's fault. An empty stub stays a stub — the
+	// load answers it with defaults and leaves it (#4483) — so the locked body
+	// below tolerates a missing or contentless file as an empty document.
 	if _, err := LoadConfig(); err != nil {
 		return nil, fmt.Errorf("refusing to migrate: the current config does not load: %w", err)
 	}
@@ -155,8 +158,28 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// file and land it on another (#3688, #3697).
 	prettyPath := prettyHomePath(locked.link)
 	raw, err := locked.read()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+	}
+	// A missing or contentless config.toml under the lock is an empty document
+	// — the same answer loadConfigLocked gives. It gets here when a zero-byte
+	// config.json satisfied the pre-lock LoadConfig with in-memory defaults
+	// (#4483 review), when the file is the empty stub that load now leaves
+	// untouched, or when it was removed in the gap before acquisition. Every
+	// one of those has no deprecated keys to move: "nothing migrated" is the
+	// honest result, and writing a fresh file to say so would touch a file a
+	// mid-flight rewrite may be holding open.
+	if len(raw) == 0 || isEffectivelyEmptyToml(raw) {
+		// "Nothing to migrate" is a claim about a file, so it has to be about
+		// the right one — the same obligation the no-migrations path below
+		// carries. A config.toml link or symlinked AF home retargeted after
+		// the entry confirmation could now name a config that DOES have
+		// deprecated keys; returning here without the confirm would report a
+		// stale pinned target as a confident empty result (#4485 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
+		return &MigrationResult{Path: locked.link, Migrated: []MigratedKey{}}, nil
 	}
 	// The loader supports a leading BOM, so a migration must not quietly strip
 	// one. Edits run on the stripped text — every surgical helper expects that —
@@ -194,7 +217,9 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 			}
 			// Same value in both spellings: the flat line carries no information
 			// the grouped one does not, so dropping it changes nothing at all.
-			updated, removed := deleteTOMLScalar(content, "", alias.legacy)
+			// The dropped line's comment associations go with it — left in
+			// place they would read as notes about an unrelated key (#4872).
+			updated, _, _, removed := deleteTOMLScalarForMove(content, "", alias.legacy)
 			if !removed {
 				// The decoded shape says the key is there, so a delete that finds
 				// no line means the two disagree about the file. Reporting success
@@ -226,7 +251,12 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		// the string. Deleting the source first takes that text out of the document
 		// before anything scans it. The value was lifted above, so nothing is lost
 		// by removing the line early (#3624 review).
-		updated, removed := deleteTOMLScalar(content, "", alias.legacy)
+		// The key's comment associations move with it (#4872): the contiguous
+		// leading block goes above the moved line, its own trailing comment
+		// stays on it — anything left at the site reads as a note about
+		// whatever line the delete exposes next, including as the NEXT
+		// migrated key's leading block.
+		updated, comments, trailing, removed := deleteTOMLScalarForMove(content, "", alias.legacy)
 		if !removed {
 			return nil, unremovableKeyError(alias.legacy, prettyPath)
 		}
@@ -234,9 +264,9 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		if tomlRootDottedTable(content, alias.section) {
 			// The destination table is already open as a dotted key, and TOML will
 			// not let a [header] re-open it. Join it in the same form.
-			content = setTOMLScalar(content, "", alias.section+"."+alias.leaf, encoded)
+			content = setTOMLScalarWithLeadingComments(content, "", alias.section+"."+alias.leaf, encoded+trailing, comments)
 		} else {
-			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
+			content = setTOMLScalarWithLeadingComments(content, alias.section, alias.leaf, encoded+trailing, comments)
 		}
 		// Value is the EFFECTIVE value, never the raw TOML token: a --json caller
 		// comparing two migrations of the same setting must not get "0.0.0.0:8443"

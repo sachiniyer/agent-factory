@@ -85,6 +85,10 @@ const guardContainerLen = 9 * guardUnitLen
 var verbatimInstanceFields = map[string]string{
 	"ID":     "minted instance id, never derived from user text",
 	"TaskID": "minted task id (#1892), never derived from user text",
+	// The durable on_complete obligation (#4162) records WHOSE teardown is
+	// owed — the same minted task id the TaskID row above already carries
+	// verbatim — and WHEN the obligation was filed; no user text reaches it.
+	"PendingOnComplete.TaskID": "minted task id (#1892), the same value TaskID above already carries verbatim",
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",
@@ -125,6 +129,7 @@ var verbatimInstanceFields = map[string]string{
 	"Tabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"Tabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"Tabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"Tabs[].Exit.StoppedBy":              "bounded TabStoppedBy* constant (#4506)",
 
 	"PendingTabs[].ID":                          "minted tab id (#1738)",
 	"PendingTabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",
@@ -134,6 +139,7 @@ var verbatimInstanceFields = map[string]string{
 	"PendingTabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"PendingTabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"PendingTabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"PendingTabs[].Exit.StoppedBy":              "same bounded TabStoppedBy* constant under the staging roster",
 
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",
@@ -156,11 +162,17 @@ var verbatimInstanceFields = map[string]string{
 	// tmux or git, and blanking it costs triage the reason automatic recovery
 	// stopped (#3588).
 	"LostRestoreFailure.Error": "af-authored restore diagnostic, sanitized by scrubDiagnostic in redactInstanceData (titles, tmux names, path roots, $HOME, username, credentials) rather than blanked, because it is the only record of why recovery gave up — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#3588)",
+	// Same class as the line above: daemon/lostrestore.go stores the
+	// environmental error that armed the wait, and it quotes tmux/git output
+	// the same way — so it gets the identical scrubDiagnostic pass rather than
+	// a blank, and the same end-to-end test proves it (#5295).
+	"LostRestoreWait.Error": "af-authored environmental-wait diagnostic, sanitized by scrubDiagnostic in redactInstanceData alongside LostRestoreFailure.Error — it is the only record of why restore is waiting on the environment — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#5295)",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",
 	"Worktree.RelocationRecovery.CleanupGeneration":                            "minted cleanup-generation token",
 	"Worktree.RelocationRecovery.CleanupLifecycle":                             "bounded RelocationRecoveryState enum",
+	"Worktree.RelocationRecovery.MissingFencedState":                           "bounded RelocationRecoveryState enum",
 	"Worktree.RelocationRecovery.State":                                        "bounded RelocationRecoveryState enum",
 }
 
@@ -208,6 +220,10 @@ var unplantableInstanceFields = map[string]string{
 	"PendingTabs[].Kind":                 "same bounded TabKind enum under the staging roster",
 	"Tabs[].Handoffs[].Automatic":        "bool — whether the handoff was automatic rather than user-initiated",
 	"PendingTabs[].Handoffs[].Automatic": "same handoff bool under the staging roster",
+	"Tabs[].Exit.Status":                 "exit code tmux reported for a finished process tab (#4479); machine-minted int",
+	"PendingTabs[].Exit.Status":          "same machine-minted exit code under the staging roster",
+	"Tabs[].Exit.StatusKnown":            "bool — whether tmux reported an exit code at all",
+	"PendingTabs[].Exit.StatusKnown":     "same exit-code bool under the staging roster",
 	"TabKinds[].Allowed":                 "bool — whether this backend admits the kind (#3060)",
 }
 

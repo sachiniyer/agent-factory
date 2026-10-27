@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/terminal"
@@ -21,7 +22,11 @@ import (
 // WebSocket subscription to that pane's (session, tab) PTY stream — fanned from
 // the daemon's clientless capture — and renders the streamed grid instead of a
 // capture. The FOCUSED pane routes keystrokes (interactive mode) and mouse events
-// to its subscription's INPUT; resize sends RESIZE (last-resize-wins, server-side).
+// to its subscription's INPUT. Exactly one subscription drives a pane's size —
+// the focused interactive pane's, via SetSizeOwner (#4480): every other
+// attachment is a VIEWER that never writes a RESIZE, so opening a pane, closing
+// a sibling, or resizing the outer terminal while watching a session does not
+// reflow its tmux scrollback.
 //
 // The reliability payoff over the old #1089 tmux attach client: a dropped WS
 // subscriber reconnects and replays the gap it missed with ?since — there is NO
@@ -54,13 +59,20 @@ type liveTermAttachment interface {
 	// authoritative repaint re-establishes it. Zero modes are a valid primary-screen
 	// state.
 	TerminalModes() (terminal.Modes, bool)
+	// SetSizeOwner promotes/demotes this attachment as the pane's dimension
+	// writer — the live-term counterpart of an attach client's SIGWINCH push
+	// (#4480). Promotion asserts the view box as the pane's size; demotion is
+	// local-only (leaving interactive never reflows the pane). Only the focused
+	// interactive attachment is ever an owner; every other one is a pure viewer
+	// whose Resize only re-frames its render crop.
+	SetSizeOwner(on bool)
 }
 
 // newLiveTermPaneFn is the attachment creation seam. Production dials the daemon
-// WS PTY stream for (title, repoID, tab); tests swap in a fake factory. Read on
-// the event loop only.
-var newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
-	return termpane.New(streamDialer(title, repoID, tabID, tab), width, height)
+// WS PTY stream for (session, tab); tests swap in a fake factory.
+// Read on the event loop only.
+var newLiveTermPaneFn = func(s apiclient.StreamSession, tabID string, tab, width, height int) liveTermAttachment {
+	return termpane.New(streamDialer(s, tabID, tab), width, height)
 }
 
 // syncLiveTermPane reconciles the live attachments with current focus, pane
@@ -69,8 +81,23 @@ var newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int
 // steady-state cost is a per-visible-pane eligibility check plus map lookups.
 func (m *home) syncLiveTermPane() {
 	m.reconcileLiveTermPanes()
+	m.reconcileSizeOwners()
 	m.syncPaneScrollOwners()
 	m.enforceInteractiveInvariant()
+}
+
+// reconcileSizeOwners keeps the #4480 invariant: exactly the focused
+// interactive attachment owns its pane's size; every other attachment is a
+// viewer. setInteractive already flips ownership on entry/exit — this
+// reconciler covers the drift paths that bypass it: a rebind swapping the
+// attachment object mid-interaction (same pane, new subscription — the new one
+// starts as a viewer), and focus/pane changes a stale-mode tick hasn't caught
+// yet. Idempotent — SetSizeOwner no-ops on an unchanged flag.
+func (m *home) reconcileSizeOwners() {
+	focused := m.focusedOpenPane()
+	for id, lt := range m.liveTerms {
+		lt.SetSizeOwner(m.interactive && focused != nil && id == focused.ID())
+	}
 }
 
 // reconcileLiveTermPanes binds a live attachment to every visible, eligible pane
@@ -138,7 +165,7 @@ func (m *home) reconcileLiveTermPanes() {
 // rather than the pane itself (full-screen attach, an active preview); this
 // function only answers whether the pane can stream.
 func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool) {
-	key, title, repoID, tabID, tab, ok := m.liveBindCandidate(p)
+	key, addr, tabID, tab, ok := m.liveBindCandidate(p)
 	if !ok {
 		return "", false
 	}
@@ -162,7 +189,7 @@ func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool
 		return key, true
 	}
 	m.closeLiveTermPaneFor(p.ID())
-	tp := newLiveTermPaneFn(title, repoID, tabID, tab, width, height)
+	tp := newLiveTermPaneFn(addr, tabID, tab, width, height)
 	m.liveTerms[p.ID()] = tp
 	m.liveKeys[p.ID()] = key
 	w.SetLive(tp)
@@ -360,7 +387,11 @@ func (m *home) enforceInteractiveInvariant() {
 // setInteractive flips interactive mode (#1089, RFC §2.3) and keeps every
 // dependent surface coherent: the status bar collapses to (or restores from) the
 // Ctrl-] escape hatch, and the pane windows' green interactive cue follows the
-// focused pane. Idempotent; event-loop only.
+// focused pane. Interactive entry also hands the focused attachment size
+// ownership (#4480) and exit revokes it — an owner promotion asserts the view
+// box as the pane's size, so entering interactive resizes the session to the
+// box the user will type into, while leaving it (or closing the pane) never
+// pushes the viewer's box back onto the session. Idempotent; event-loop only.
 func (m *home) setInteractive(on bool) {
 	m.interactive = on
 	m.menu.SetInteractive(on)
@@ -368,6 +399,7 @@ func (m *home) setInteractive(on bool) {
 	for id, w := range m.paneWindows {
 		w.SetInteractive(on && focused != nil && id == focused.ID())
 	}
+	m.reconcileSizeOwners()
 }
 
 // focusedLiveTerm returns the focused pane's live attachment (and the pane), or
@@ -381,19 +413,19 @@ func (m *home) focusedLiveTerm() (liveTermAttachment, *store.OpenPane) {
 	return m.liveTerms[p.ID()], p
 }
 
-// liveBindCandidate resolves a pane to its bind key + stream coordinates (title,
-// repoID, tab), or ok=false when the pane is not eligible for a live attachment
+// liveBindCandidate resolves a pane to its bind key + stream coordinates
+// (the session address — see streamAddress — then tabID, tab), or ok=false when the pane is not eligible for a live attachment
 // (remote instances, not-started/transitional/dead instances, tabs with no
 // session). The key changes whenever the pane, its tab index, or the underlying
 // session name changes, which is exactly when a rebind is needed.
-func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID string, tab int, ok bool) {
+func (m *home) liveBindCandidate(p *store.OpenPane) (key string, addr apiclient.StreamSession, tabID string, tab int, ok bool) {
 	if p == nil {
-		return "", "", "", "", 0, false
+		return "", apiclient.StreamSession{}, "", 0, false
 	}
 	tab = p.Tab()
 	name := liveSessionName(p.Instance(), tab)
 	if name == "" {
-		return "", "", "", "", 0, false
+		return "", apiclient.StreamSession{}, "", 0, false
 	}
 	inst := p.Instance()
 	// Address the stream by the tab's STABLE id (#1738) so a reorder/close can't
@@ -407,7 +439,7 @@ func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID s
 	// connection forever and could send keystrokes to a different tab after another
 	// client reorders/closes a lower one. Keying on the id makes id adoption itself
 	// a rebind, so the pane reconnects with ?tab_id= the moment one is known.
-	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), inst.Title, m.repoID, tabID, tab, true
+	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), streamAddress(inst, m.repoID), tabID, tab, true
 }
 
 // liveSessionName resolves an (instance, tab) to the tmux session a live

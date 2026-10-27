@@ -203,8 +203,8 @@ func normalizeRoot(path string) string {
 func (r *redactor) rootReplacements() []pathRoot {
 	out := make([]pathRoot, 0, 2*len(r.roots)+2)
 	out = append(out, r.roots...)
-	if r.home != "" && r.home != "/" {
-		out = append(out, pathRoot{path: r.home, token: "~"})
+	if home := normalizeRoot(r.home); home != "" {
+		out = append(out, pathRoot{path: home, token: "~"})
 	}
 	for _, root := range out[:len(out):len(out)] {
 		if display := strings.ToValidUTF8(root.path, "\uFFFD"); display != root.path {
@@ -224,76 +224,6 @@ func (r *redactor) rootReplacements() []pathRoot {
 		return out[i].path < out[j].path
 	})
 	return out
-}
-
-// collapseKnownRoots rewrites every complete directory this run can name to its
-// token, most specific first. It is the text-pass half of the root policy: the
-// field half (collapsePathField) rewrites the path FIELDS, and this one catches
-// the same roots wherever else they appear — a daemon log line, a diagnostic
-// string, the daemon status block, a task's project path. Text boundaries are
-// explicit: a registered "/srv/repo" must not consume the prefix of its unrelated
-// sibling "/srv/repo-backup" and strand that sibling's private suffix (#4099).
-func (r *redactor) collapseKnownRoots(s string) string {
-	for _, root := range r.rootReplacements() {
-		s = replaceKnownRoot(s, root.path, root.token)
-	}
-	return s
-}
-
-// scrubWorktreePathTitles removes the title-derived segment only in the exact
-// sibling path context that gives it meaning. A derived spelling is not swept
-// globally: an equal bounded diagnostic or branch value remains intact. Any
-// numeric collision suffix is AF-authored and survives as triage information.
-func (r *redactor) scrubWorktreePathTitles(s string) string {
-	titles := make([]worktreePathTitle, 0, len(r.worktreePathTitles))
-	for title := range r.worktreePathTitles {
-		titles = append(titles, title)
-	}
-	sort.Slice(titles, func(i, j int) bool {
-		iLen := len(titles[i].repoPath) + len(titles[i].segment)
-		jLen := len(titles[j].repoPath) + len(titles[j].segment)
-		if iLen != jLen {
-			return iLen > jLen
-		}
-		if titles[i].repoPath != titles[j].repoPath {
-			return titles[i].repoPath < titles[j].repoPath
-		}
-		return titles[i].segment < titles[j].segment
-	})
-	for _, title := range titles {
-		needle := title.repoPath + "-" + title.segment
-		replacement := title.repoPath + "-" + redactedMarker
-		s = replaceSiblingWorktreeTitle(s, needle, replacement)
-	}
-	return s
-}
-
-func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
-	var out strings.Builder
-	scan, copied := 0, 0
-	changed := false
-	for scan <= len(s)-len(needle) {
-		rel := strings.Index(s[scan:], needle)
-		if rel < 0 {
-			break
-		}
-		start := scan + rel
-		end := start + len(needle)
-		if derivedWorktreePathBoundary(s, start, end) {
-			out.WriteString(s[copied:start])
-			out.WriteString(replacement)
-			copied = end
-			scan = end
-			changed = true
-			continue
-		}
-		scan = start + 1
-	}
-	if !changed {
-		return s
-	}
-	out.WriteString(s[copied:])
-	return out.String()
 }
 
 func derivedWorktreePathBoundary(s string, start, end int) bool {
@@ -336,34 +266,6 @@ func pathEndsAt(s string, start, end int) bool {
 	}
 	after, size := utf8.DecodeRuneInString(s[end:])
 	return isPathTextDelimiter(after) || uriPathEndsAt(s, start, end, size)
-}
-
-func replaceKnownRoot(s, root, token string) string {
-	var out strings.Builder
-	scan, copied := 0, 0
-	changed := false
-	for scan <= len(s)-len(root) {
-		rel := strings.Index(s[scan:], root)
-		if rel < 0 {
-			break
-		}
-		start := scan + rel
-		end := start + len(root)
-		if knownRootTextBoundary(s, start, end) {
-			out.WriteString(s[copied:start])
-			out.WriteString(token)
-			copied = end
-			scan = end
-			changed = true
-			continue
-		}
-		scan = start + 1
-	}
-	if !changed {
-		return s
-	}
-	out.WriteString(s[copied:])
-	return out.String()
 }
 
 func knownRootTextBoundary(s string, start, end int) bool {
@@ -470,6 +372,26 @@ func isURISchemeByte(b byte) bool {
 
 func isASCIIAlpha(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// The URI-path boundary pair: inside a percent-decoded URI path view, a
+// registered path starts only at the view's start and ends only at a path
+// separator or the view's end — the URI grammar's own delimiters, none of
+// which are general filesystem text boundaries.
+func uriWorktreePathBoundary(s string, start, end int) bool {
+	return derivedWorktreePathBoundaryWithContext(s, start, end, uriPathStartsAt, uriLogicalPathEndsAt)
+}
+
+func uriKnownRootBoundary(s string, start, end int) bool {
+	return knownRootTextBoundaryWithContext(s, start, end, uriPathStartsAt, uriLogicalPathEndsAt)
+}
+
+func uriPathStartsAt(_ string, start int) bool {
+	return start == 0
+}
+
+func uriLogicalPathEndsAt(s string, _, end int) bool {
+	return end == len(s) || end < len(s) && s[end] == '/'
 }
 
 // isPathTextDelimiter names punctuation and whitespace used by renderers around

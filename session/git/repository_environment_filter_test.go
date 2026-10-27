@@ -19,6 +19,14 @@ func TestRepositoryPathEnvironmentPreservesRuntime(t *testing.T) {
 	require.NotNil(t, repositoryPathEnvironment(nil), "nil Cmd.Env would inherit ambient selectors")
 }
 
+// The compatibility test below sees only the host Git's list. Git 2.11 through
+// 2.39 also report GIT_INTERNAL_SUPER_PREFIX, which 2.40 removed, so a host with
+// a newer Git never exercises it (#4567).
+func TestRepositoryPathEnvironmentDropsSuperprojectPrefix(t *testing.T) {
+	source := []string{"PATH=/custom/bin", "GIT_INTERNAL_SUPER_PREFIX=superproject/sub/"}
+	require.Equal(t, []string{"PATH=/custom/bin"}, repositoryPathEnvironment(source))
+}
+
 func TestRepositoryPathEnvironmentCoversGitLocalVariables(t *testing.T) {
 	out, err := exec.Command("git", "rev-parse", "--local-env-vars").Output()
 	require.NoError(t, err)

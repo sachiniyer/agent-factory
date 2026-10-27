@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	stdlog "log"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,10 +100,10 @@ type Manager struct {
 	// config swap alone would not reach it. Read lock-free by the poll loop via
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
-	// accountLimitMu serializes publication of live named-account limits with
-	// the final evidence read, runtime teardown, and durable identity commit of
-	// automatic account replacement. Manager.mu protects roster shape; it cannot
-	// cover per-instance liveness writes without inverting existing lock order.
+	// accountLimitMu serializes limit publication with automated delivery
+	// admission, account-swap evidence, runtime teardown, and identity commit.
+	// Manager.mu protects roster shape; it cannot cover
+	// per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
@@ -130,6 +129,39 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
+	// skippedRepos names repos whose instances.json was corrupted or unreadable
+	// and dropped at daemon startup (#603, #4783), seeded by restoreInstances and
+	// trimmed by the polling refresh — only once it re-reads a repo successfully
+	// — without ever adding one that fails mid-life. The Snapshot RPC reads it to carry the drop to
+	// clients instead of silently serving a partial list as complete (#730's
+	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
+	// m.mu.
+	skippedRepos []SkippedRepo
+	// deferredOrphanSweepArmed is set at startup when the orphan-container sweep
+	// was deferred because skippedRepos was non-empty — the daemon's session view
+	// is known-incomplete, so the sweep's protected-slug set cannot distinguish a
+	// skipped repo's live container from a genuine orphan. The poll loop runs the
+	// deferred sweep once the skip set drains to empty (every skipped repo's
+	// instances.json parsed), by which point the protected set is complete again.
+	// Guarded by m.mu.
+	deferredOrphanSweepArmed bool
+	// deferredOrphanSweepInFlight tracks whether the deferred orphan sweep
+	// worker is currently running, so the poll loop does not launch a second
+	// worker while one is still mid-sweep — the sweep's Docker list/reap can
+	// take many seconds or stall on an unavailable engine, and the poll loop
+	// ticks on a fixed cadence. Guarded by m.mu.
+	deferredOrphanSweepInFlight bool
+	// createSweepMu is the create/sweep admission barrier: it serializes the
+	// deferred orphan sweep with CreateSession's pendingCreates publication so a
+	// create admitted after the protected-slug snapshot cannot publish a
+	// mid-sweep container whose slug is absent from the protected set (#2632). It
+	// is separate from m.mu because the deferred sweep's Docker list/reap can take
+	// many seconds (or stall on an unavailable engine), and holding m.mu through
+	// it would block Snapshot, RefreshInstances, and every other manager
+	// operation; createSweepMu blocks only CreateSession admission for that
+	// window, which is exactly the exclusion the race needs. Always taken before
+	// m.mu (createSweepMu -> m.mu) so the two never invert.
+	createSweepMu sync.Mutex
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before
@@ -180,6 +212,7 @@ type Manager struct {
 	// reservedArchiveDestinations holds active archive moves by (repoID, path).
 	// The owning instance identifies both the refusal and the release authority.
 	reservedArchiveDestinations map[string]*session.Instance
+	worktreeMissingUndurable    map[string]struct{} // owed flag writes (#5102); guarded by mu — see worktree_missing_poll.go
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -397,10 +430,6 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
-	// lateGhostCleanupWG joins detached finalizers before tests restore their
-	// seams. Launchers must return before waiting so every Add precedes Wait;
-	// the production kill path never waits for these retrying workers.
-	lateGhostCleanupWG sync.WaitGroup
 	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
 	// control/poll paths: conversation capture, task on-complete teardown, and
 	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
@@ -422,6 +451,14 @@ type Manager struct {
 	// an episode describes one runtime's failures, so a later session that merely
 	// reuses the title must not inherit them (#2868).
 	lostRestoreStates map[string]*lostRestoreState
+	// lostRestoreConfirmations is the confirmed-restore flap history: the
+	// timestamps of CONFIRMED automatic lost-session restores for each session,
+	// keyed by stableSessionKey for the same reason as lostRestoreStates
+	// (#2868). It is a separate map rather than a field of lostRestoreState on
+	// purpose: the retry episode is retired at confirmation, while this is the
+	// memory that must survive that retirement so the confirmed-restore-then-
+	// died cycle can be bounded (#5238). Guarded by m.mu.
+	lostRestoreConfirmations map[string][]time.Time
 	// limitResumeStates tracks per-session retry state for the usage-limit
 	// auto-resume scheduler (#1146 PR3) — the opt-in sibling of lostRestoreStates,
 	// and keyed the same way for the same reason: by stableSessionKey (the stable
@@ -441,6 +478,18 @@ type Manager struct {
 	// one survives to the next daemon (#2781, #2883). flushOwedSettlements drains
 	// it on the poll. Guarded by m.mu.
 	settleOwed map[string]settleOwedEntry
+	// dischargeOwed holds stand-down discharges whose durable marker-CLEAR did not
+	// land, so the poll can re-run them (#4738). Keyed by stable instance identity
+	// like settleOwed, but in its OWN map: a generic settlement's
+	// recordSettlementWrite must NOT touch this obligation. The whole-row writes
+	// that retire a settleOwed entry (a status/churn checkpoint, a handoff, a
+	// recovery) re-write the restored marker along with the row, so retiring a
+	// discharge retry on one would lose the clear while disk still carries the
+	// marker and re-arm a teardown the stand-down decided against. The retry is
+	// re-run as a discharge on the poll rather than persisted as a stale snapshot,
+	// and carries the discharged marker so it only clears THAT marker. Guarded by
+	// m.mu; drained by FlushOwedSettlements alongside settleOwed.
+	dischargeOwed map[string]dischargeRetryEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// stableSessionKey — the stable instance ID, which is what every writer and
 	// every clearRemoteLoss call site actually passes. This said "daemon instance
@@ -505,6 +554,14 @@ type Manager struct {
 	// whose session was torn down, so the map tracks pausedPolls and never grows
 	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time
+
+	// taskRunTurnWatches holds each in-flight task run's pane-chrome watcher —
+	// the stateful detector that folds consecutive captures into "the agent's
+	// own in-turn row is ticking" evidence (#5219). Keyed by stableSessionKey,
+	// created lazily by the poll while a run is active, rebuilt when the
+	// resolved agent changes mid-run, and reclaimed by sweepTaskRunTurnWatches
+	// once the run ends or the row is gone. Guarded by pausedMu.
+	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
 
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
@@ -750,10 +807,13 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		backgroundMutationStop:    make(chan struct{}),
 		restoresInFlight:          make(map[string]struct{}),
 		lostRestoreStates:         make(map[string]*lostRestoreState),
+		lostRestoreConfirmations:  make(map[string][]time.Time),
 		limitResumeStates:         make(map[string]*limitResumeState),
 		handoffRetryDue:           make(map[string]time.Time),
 		settleOwed:                make(map[string]settleOwedEntry),
+		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
+		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),
@@ -804,7 +864,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, skipped, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -825,7 +885,16 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
+	// instances.json was corrupted and dropped at startup. A full restart always
+	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
+	// recomputes the set from scratch (#603 closed over the wire).
+	m.skippedRepos = skipped
 	m.registerLoadRuntimeSettlementsLocked(owed)
+	// Re-park every on_complete obligation the previous generation left durable
+	// on its rows (#4162): the completion edge cannot re-fire, so without this a
+	// marked session would sit forever with nothing scheduled to reap it.
+	m.armOwedTaskLifecyclesLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -851,33 +920,6 @@ func (m *Manager) Ready() bool {
 	}
 }
 
-// dockerReapProtectedSlugs returns the af.session label slugs of every session
-// the manager knows about — live instances AND still-provisioning pending creates
-// (the #2549 window where a container exists but no Instance does yet) — so the
-// orphan-container sweep (#2194) never reaps a container whose session is alive or
-// mid-create. Titles are collected under the lock; slugging happens after so the
-// lock stays short.
-func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
-	m.mu.Lock()
-	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for _, inst := range m.instances {
-		titles = append(titles, inst.Title)
-	}
-	for key, pending := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		titles = append(titles, pending.Title)
-	}
-	m.mu.Unlock()
-
-	slugs := make(map[string]bool, len(titles))
-	for _, t := range titles {
-		slugs[session.Slugify(t)] = true
-	}
-	return slugs
-}
-
 // Snapshot returns the authoritative InstanceData for every session the manager
 // owns, scoped to repoID (all repos when repoID is empty). It is the read side
 // of the single-writer model (#960 PR 3): the manager's settled instance map plus
@@ -889,112 +931,12 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
 // not repaint on map-iteration jitter. Each operation lock is probed without
 // waiting after its row is serialized; a free lock is released immediately.
+//
+// This is the instance-only view; the Snapshot RPC handler reads it together
+// with the skip set via SnapshotWithSkipped (see snapshot.go), which captures
+// both under one acquisition of m.mu so a polling refresh cannot leave the
+// response carrying the old instance list with a cleared skip set.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
-	m.mu.Lock()
-	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for key := range m.instances {
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	for key := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	type snapshotEntry struct {
-		instance *session.Instance
-		pending  session.InstanceData
-	}
-	entries := make([]snapshotEntry, 0, len(keys))
-	for _, key := range keys {
-		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst})
-			continue
-		}
-		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending})
-		}
-	}
-	m.mu.Unlock()
-
-	data := make([]session.InstanceData, 0, len(entries))
-	for _, entry := range entries {
-		projected := entry.pending
-		if entry.instance != nil {
-			projected = entry.instance.ToInstanceData()
-		}
-		data = append(data, projected)
-	}
-	return data
-}
-
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	return nil
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
-}
-
-// opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
-// 2, #1473).
-func (m *Manager) opLockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.instanceOpLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.instanceOpLocks[key] = lock
-	}
-	return lock
+	instances, _ := m.SnapshotWithSkipped(repoID)
+	return instances
 }

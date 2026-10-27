@@ -11,6 +11,9 @@ const (
 	ConversationCaptureInjected         = "injected"
 	ConversationCaptureCodexRollout     = "codex_rollout"
 	ConversationCaptureClaudeTranscript = "claude_transcript"
+	// ConversationCaptureCarried marks a conversation a same-agent account
+	// swap copied into the incoming account's home and resumed (#4367).
+	ConversationCaptureCarried = "carried"
 )
 
 // AgentConversationData is the provider-specific conversation identity for a
@@ -92,11 +95,17 @@ func (i *Instance) AgentRuntimeToken() AgentRuntimeToken {
 func (i *Instance) SetAgentConversationForRuntime(token AgentRuntimeToken, conv AgentConversationData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.userKilled || token.agent == "" || token.generation != i.agentRuntimeGeneration ||
-		conv.Agent != token.agent || i.resolvedAgentLocked() != token.agent {
+	if !i.runtimeTokenCurrentLocked(token, conv) {
 		return false
 	}
 	return i.setAgentConversationLocked(conv)
+}
+
+// runtimeTokenCurrentLocked reports whether token still names the live process
+// generation and conv belongs to its provider. Callers hold i.mu.
+func (i *Instance) runtimeTokenCurrentLocked(token AgentRuntimeToken, conv AgentConversationData) bool {
+	return !i.userKilled && token.agent != "" && token.generation == i.agentRuntimeGeneration &&
+		conv.Agent == token.agent && i.resolvedAgentLocked() == token.agent
 }
 
 // noteAgentRuntimeReplaced invalidates every capture bound to the prior process.
@@ -110,11 +119,23 @@ func (i *Instance) noteAgentRuntimeReplaced() {
 	i.clearAgentModelChangeLocked()
 }
 
+// resolvedAgentLocked detects the agent from the command the session actually
+// runs. Two forms of that evidence, in precedence order: the live pane's
+// program locally, and the launch-boundary runtime record — which is what a
+// REMOTE session has instead of a local tmux binding (#5108). Either way a
+// known command decides the answer outright, even when the answer is "no
+// known agent": a program_overrides entry pointing an agent name at a plain
+// shell must not resurrect the enum and start waiting on that agent's prompt
+// glyph. Only with no recorded command at all does detection fall back to the
+// configured enum.
 func (i *Instance) resolvedAgentLocked() string {
 	if ts := i.tmuxLocked(); ts != nil {
 		if program := ts.Program(); strings.TrimSpace(program) != "" {
 			return tmux.DetectAgentFromCommand(program)
 		}
+	}
+	if program := strings.TrimSpace(i.runtimeProgram); program != "" {
+		return tmux.DetectAgentFromCommand(program)
 	}
 	return tmux.DetectAgentFromCommand(i.Program)
 }

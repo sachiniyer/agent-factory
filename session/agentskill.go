@@ -443,7 +443,7 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 	if i == nil {
 		return skillTarget{}
 	}
-	return resolveSkillTargetForAccount(program, i.AgentProgram(), strings.TrimSpace(i.Account))
+	return resolveSkillTargetForAccount(program, i.AccountAgent(), strings.TrimSpace(i.Account))
 }
 
 // resolveSkillTargetForAccount is resolveSkillTarget for an account this session
@@ -454,10 +454,11 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 // i.Account still names the identity being replaced. Resolving the skill root
 // from it would write the af skill into the OLD account's directory and declare
 // a --plugin-dir the replacement pane will never read. The candidate name and
-// requested launch identity are the only correct inputs there, and both are
-// passed rather than read for exactly the reason the fields cannot be written
-// early: validation must not mutate the instance before teardown has succeeded.
-func resolveSkillTargetForAccount(program, requestedProgram, name string) skillTarget {
+// the namespace its account was selected in are the only correct inputs there,
+// and both are passed rather than read for exactly the reason the fields cannot
+// be written early: validation must not mutate the instance before teardown has
+// succeeded.
+func resolveSkillTargetForAccount(program, accountNamespace, name string) skillTarget {
 	agent := tmux.DetectAgentFromCommand(program)
 	if agent == "" {
 		// An opaque command names no agent, so there is no per-agent skills base to
@@ -495,15 +496,15 @@ func resolveSkillTargetForAccount(program, requestedProgram, name string) skillT
 		// guess a directory.
 		return skillTarget{unresolved: true}
 	}
-	// The account name was validated in the requested launch identity's namespace,
-	// and account namespaces are separate — the same name means a DIFFERENT
-	// identity for a different agent (#3082/#3108). So a resolved command that is
-	// another agent must not resolve this name against that agent's registry: a
-	// cross-agent program_override would otherwise write into an account the
-	// operator never selected, moments before the launch refuses for exactly that
-	// reason (#3645 review). requestedProgram is explicit because handoff validation
-	// runs before the instance is rewritten to the incoming identity.
-	if requested := sessionenv.AgentForCommand(requestedProgram); requested != agent {
+	// The account name was validated in ONE agent's namespace, and account
+	// namespaces are separate — the same name means a DIFFERENT identity for a
+	// different agent (#3082/#3108). The namespace the selection used — the
+	// resolved command's agent for a fresh swap, the durable account_agent pin
+	// for an established scope — is the only honest comparand: a launch whose
+	// detected agent differs must not resolve this name against the selected
+	// registry, while a redirect whose selection namespace already IS the
+	// detected agent must still write the skill (#4430 review round 5).
+	if accountNamespace != agent {
 		return skillTarget{unresolved: true}
 	}
 	home, err := config.GetConfigDir()

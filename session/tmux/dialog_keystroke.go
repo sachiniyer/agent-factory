@@ -38,6 +38,7 @@ const (
 	// honest about what af confirmed.
 	codexDirectoryTrustDialogName  = "Codex directory-trust"
 	codexDirectoryTrustAffirmative = "Yes, continue"
+	codexUpdateDialogName          = "Codex update"
 	docTrustDialogName             = "documentation-link trust"
 )
 

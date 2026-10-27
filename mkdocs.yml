@@ -164,6 +164,7 @@ nav:
   - Develop and maintain:
       - Start here · reading order: dev/index.md
       - Container testing: dev/container-testing.md
+      - Fail-first probe runs: dev/probe-runs.md
       - File-length lint: dev/file-length-lint.md
       - Surface parity: dev/surface-parity.md
       - Web client selftest: dev/web-selftest.md

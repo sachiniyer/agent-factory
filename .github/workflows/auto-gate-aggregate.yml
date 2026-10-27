@@ -122,6 +122,30 @@ jobs:
                   readFailureReason: process.env.READ_FAILURE,
                 });
               } catch (error) {
+                // A could-not-evaluate error — an exhausted read, or a check
+                // write the API rate limit rejected — is infrastructure, not a
+                // defect verdict (#4461), so it warns instead of reddening the
+                // job. But only when THIS transaction left the fixed aggregate
+                // non-passing: when every write was refused, including the
+                // invalidation, no replacement generation exists and a prior
+                // PASS is still the one the ruleset reads. That case stays
+                // fatal — a green run would be the only signal, and it would
+                // say nothing happened while a stale PASS permits a merge.
+                const couldNotEvaluate =
+                  autoGate.isReadFailure?.(error) === true ||
+                  autoGate.isRateLimitFailure?.(error) === true;
+                const leftNonPassing =
+                  autoGate.isNonPassingAggregate?.(ownedAggregateCheck) === true;
+                if (couldNotEvaluate && leftNonPassing) {
+                  const detail = error && error.message ? error.message : String(error);
+                  core.warning(`Auto Gate could not evaluate ${process.env.HEAD_SHA}: ${detail}`);
+                  core.notice(
+                    `The fixed aggregate on ${process.env.HEAD_SHA} was left non-passing ` +
+                      `(check ${ownedAggregateCheck.id}: ${ownedAggregateCheck.output?.title || "untitled"}); ` +
+                      "a later subscribed event re-runs the evaluation.",
+                  );
+                  return;
+                }
                 if (!error?.autoGateMergeConceded) throw error;
               }
               return;

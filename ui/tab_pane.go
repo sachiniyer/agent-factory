@@ -759,17 +759,41 @@ func (p *TabPane) String() string {
 		lines = lines[len(lines)-p.height:]
 	}
 
+	// A preview-only tab keeps the pane's own width (e.g. 80 cols from a prior
+	// interactive session or spawn) while the preview box is narrower (#4175):
+	// ClampToRect would silently amputate the right side of every line. Mark
+	// each row whose cut drops real content with an ellipsis so the clip is
+	// visible. Trailing pad spaces are trimmed first — capture pads every row
+	// to the window width, so the raw measure would mark blank tails as losses.
+	for i := range lines {
+		lines[i] = fitLine(strings.TrimRight(lines[i], " "), p.width)
+	}
+
 	return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
 }
 
-// ScrollUp enters scroll mode (if not already) and scrolls up.
+// ScrollUp enters scroll mode (if not already) and scrolls up one line — the
+// wheel's step. The keyboard's ctrl+u is ScrollHalfPageUp.
 func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineUp)
 }
 
-// ScrollDown enters scroll mode (if not already) and scrolls down.
+// ScrollDown enters scroll mode (if not already) and scrolls down one line.
 func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineDown)
+}
+
+// ScrollHalfPageUp enters scroll mode (if not already) and scrolls up half a
+// viewport — the conventional ctrl+u step (vim, less, tmux copy-mode). The
+// magnitude stays semantic until the intent applies, so a gesture queued
+// across the off-loop history fill measures the geometry it lands on (#4173).
+func (p *TabPane) ScrollHalfPageUp(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageUp)
+}
+
+// ScrollHalfPageDown is ScrollHalfPageUp toward newer content — ctrl+d.
+func (p *TabPane) ScrollHalfPageDown(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageDown)
 }
 
 // scrollBy is the single keyboard/wheel-independent input path. It validates a

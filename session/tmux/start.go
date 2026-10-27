@@ -1,13 +1,74 @@
 package tmux
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// socketFSProbe is the test seam over the shared bounded filesystem probe on
+// the tmux launch path. The fsprobe implementation answers with the
+// filesystem's own errno from THIS process — the verdict a tmux server's
+// internal failure loses into its output text.
+var socketFSProbe = fsprobe.Write
+
+// statSocketDir is the test seam over fsprobe.Stat — the bounded metadata
+// lookup that decides whether the uid socket root exists. It must be
+// bounded: a launch failure reaches this lookup while the daemon's
+// synchronous restore poll holds the instance, and an unbounded os.Stat on
+// an existing-but-wedged bind/NFS mount would block Start forever instead
+// of entering environmental backoff (#5295 review).
+var statSocketDir = fsprobe.Stat
+
+// tmuxSocketFilesystemDir returns the directory whose filesystem must accept
+// tmux's own server-state writes — the socket file and the tmux-<uid>
+// directory the server creates it under — for a launch from THIS process's
+// environment. It mirrors the socket-identity resolution the dedicated-server
+// scope names itself after: $TMUX names a live socket path (probe the
+// directory that hosts it), otherwise the default socket resolves under
+// ${TMUX_TMPDIR:-/tmp}/tmux-<uid> — probe the base, because the uid dir may
+// not exist yet while its parent must be writable for tmux to create it.
+// The returned error carries a failed uid-dir stat as evidence; the dir is
+// still the right probe target, so callers join the error and probe anyway.
+func tmuxSocketFilesystemDir() (string, error) {
+	if identity := os.Getenv("TMUX"); identity != "" {
+		if socket, _, ok := strings.Cut(identity, ","); ok && socket != "" {
+			return filepath.Dir(socket), nil
+		}
+	}
+	base := os.Getenv("TMUX_TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	// The server creates its socket under base/tmux-<uid>, not base itself —
+	// and an EXISTING uid dir is the filesystem the socket write actually
+	// lands on. If that child is a bind mount or its own (full) filesystem,
+	// probing the healthy parent would answer the wrong filesystem's
+	// question while tmux's failure stays an opaque ExitError (#5295
+	// review). Fall back to base only when the uid dir does not exist yet:
+	// then base is where tmux will create it. A stat that FAILS is not a
+	// fallback to base — the uid dir stays the probe target so the write
+	// probe's own bounded verdict lands for the filesystem tmux actually
+	// uses, and the stat error returns as joined evidence.
+	uidDir := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()))
+	st, err := statSocketDir(uidDir)
+	switch {
+	case err == nil && st != nil && st.IsDir():
+		return uidDir, nil
+	case err != nil && !os.IsNotExist(err):
+		return uidDir, err
+	default:
+		return base, nil
+	}
+}
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
@@ -16,6 +77,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
+	// same-object restart (agent swap) it describes the session af just closed,
+	// which is still what the status monitor would report gone if this Start
+	// fails before a replacement exists. It clears below only on tmux's answer
+	// that a session is live behind the name (Codex on #4473).
+	//
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -23,16 +90,52 @@ func (t *TmuxSession) Start(workDir string) error {
 	// caller learns the server never answered rather than that the name collided.
 	exists, known := t.ProbeSession()
 	if !known {
-		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
+		// The pre-spawn gate's non-answer is environmental evidence in its
+		// own right: a wedged or filesystem-stuck server cannot answer
+		// has-session, and every retry would charge the structural budget
+		// for a condition that resolves on its own. Pair a distinct
+		// sentinel with the deadline so the classifier's
+		// deadline+sentinel arm reads the bounded environmental class —
+		// NOT every ErrTmuxTimeout, since the later readiness timeout can
+		// also mean the pane command exited instantly (#5295 review).
+		return fmt.Errorf("%w: has-session probe for session %q did not answer: %w: %w",
+			ErrTmuxTimeout, t.sanitizedName, ErrTmuxServerNoAnswer, context.DeadlineExceeded)
 	}
 	if exists {
-		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
+		// A live session af did not just create holds the name, so no teardown
+		// request describes it — but only when the live session IS the
+		// generation the current monitor polls. An old monitor bound to a
+		// prior generation keeps its mark while a replacement owns the name:
+		// its poll must still read af's own teardown of that generation as
+		// expected (Codex on #4473).
+		t.clearTeardownMarkForConfirmedGeneration()
+		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
+	}
+	// Refuse to spawn into a directory that is not there: `new-session -c`
+	// silently falls back to the tmux server's current directory when the path
+	// is missing, so without this check a respawn of a deleted worktree lands
+	// the agent in an unrelated checkout or the daemon's $HOME (#5172). This is
+	// the one seam every af spawn — create, restore, respawn, tab — passes
+	// through. The name is already proved absent above and nothing has run
+	// new-session, so a refusal here can leave no pane behind.
+	if workDir != "" {
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			// Not just "missing": an unreadable or un-stat-able directory is
+			// equally unverifiable, and either verdict refuses the spawn.
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			t.proveNoPaneIfDeterminatelyAbsent()
+			return fmt.Errorf("%w: %w: session %q cannot start in %s: %w",
+				ErrSessionNotStarted, ErrSpawnDirMissing, t.sanitizedName, workDir, err)
+		}
 	}
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
 	// the command string without re-execing the existing pane.
 	t.resetCodexSafetyState()
+	t.resetCodexUpdateState()
 	// Same proven boundary: a key af sent to the PREVIOUS pane process cannot
 	// explain anything the new one does (#3579).
 	t.resetDialogKeystroke()
@@ -44,12 +147,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	// No separate program read here: launchEnvironment snapshots the command and
 	// its generated-args declaration together, so the two cannot be torn apart by a
 	// concurrent rewrite (#3083 review).
-	wrappedProgram, launchEnv, importNames, sessionEnv, defaultCommand, envErr := t.prepareLaunchEnvironment()
+	wrappedProgram, launchEnv, importNames, sessionEnv, defaultCommand, envErr := t.prepareLaunchEnvironment(workDir)
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
 		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
+		return fmt.Errorf("%w: prepare filtered session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
@@ -59,6 +162,45 @@ func (t *TmuxSession) Start(workDir string) error {
 	args = append(args, wrappedProgram)
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)
+	}
+	t.programMu.RLock()
+	remainOnExit := t.remainOnExit
+	account := t.account
+	accountAgent := t.accountAgent
+	t.programMu.RUnlock()
+	if remainOnExit {
+		// Atomic with new-session so even a command that exits instantly is
+		// held as a dead pane rather than racing the option (#4479). The pane's
+		// own @af_pane_pid stamp is written by the launch shim inside the pane
+		// (sessionenv stamps its own pid — the shim IS the pane root), so no
+		// spawn-side command is needed and nothing here races death (#5319).
+		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	}
+	// Mask the UNSELECTED account boundary names so a shell tab or
+	// default-command process in this account's session can never inherit
+	// another account's identity or shell-startup variable from the server's
+	// global environment — e.g. a user `set-environment -g`, an
+	// update-environment import, or a server that predates the current
+	// allowlist. The selected names are written by new-session's -e flags
+	// above; the refresh's -r half used to mask the rest on the Start path,
+	// and folding it into this same new-session queue keeps the mask without
+	// a separate bounded command: a transient set-environment failure here
+	// cannot Close() the freshly created, healthy pane, because the existence
+	// poll below confirms the pane before a failed command's exit is ever
+	// observed (review of #5347).
+	if account != "" {
+		selected := make(map[string]struct{}, len(sessionEnv))
+		for _, entry := range sessionEnv {
+			if name, _, ok := strings.Cut(entry, "="); ok {
+				selected[name] = struct{}{}
+			}
+		}
+		for _, name := range accountSessionBoundaryNames(accountAgent) {
+			if _, ok := selected[name]; ok {
+				continue
+			}
+			args = append(args, ";", "set-environment", "-r", "-t", exactTarget(t.sanitizedName), name)
+		}
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits
@@ -70,7 +212,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
+		return fmt.Errorf("%w: prepare existing tmux session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
@@ -101,7 +243,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName))
 			cancel()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			} else if len(leaked) > 0 {
 				// Start failed and we are tearing the partial session down ourselves;
 				// its processes are going with it by design, not escaping (#2765).
@@ -111,16 +253,32 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
 	}
 
+	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
 	// mid-poll wedge exit the loop as if the session had come up, so Start reported
 	// success for a session tmux never confirmed (#1962). A !known probe means keep
 	// waiting until the 2s deadline, then take the timeout path below — which
 	// threads pane-state / ErrTmuxTimeout correctly.
+	//
+	// Each probe is bounded by what is LEFT of the 2s budget, NOT the flat
+	// tmuxCommandTimeout. The select's `case <-timeout` (the give-up path) only
+	// runs AFTER this synchronous probe returns, so bounding the probe at the
+	// flat 10s would let one wedged has-session hold the goroutine for the whole
+	// 10s and leave that give-up case unreachable past the poll's own 2s deadline
+	// (#2099 poll-loop class). probeSessionWithin/tmuxTimeoutContextWithin are what
+	// make the deadline actually fire on time. Mirrors the paste-delivery poll.
 	timeout := time.After(2 * time.Second)
+	pollDeadline := time.Now().Add(2 * time.Second)
 	sleepDuration := 5 * time.Millisecond
 	for {
-		if exists, known := t.ProbeSession(); known && exists {
+		if exists, known := t.probeSessionWithin(time.Until(pollDeadline)); known && exists {
+			// The replacement is live: from here on a vanish is this session's,
+			// and af has not asked for it. There is no mark to clear here — the
+			// inner Restore installs a fresh monitor, which starts unmarked,
+			// while the OLD monitor keeps its mark so a poll in flight across
+			// this confirmation still attributes the old session's death to
+			// the teardown af asked for (Codex on #4473).
 			break
 		}
 		select {
@@ -138,6 +296,25 @@ func (t *TmuxSession) Start(workDir string) error {
 					launchErr = fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
 				} else {
 					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
+				}
+
+				// tmux's own resource failure mode the exit status cannot
+				// carry: the server dying on its socket/state filesystem
+				// (ENOSPC creating the socket or the tmux-<uid> dir) reports
+				// only as "can't create socket"/"no space" text in the
+				// child's output — invisible to errors.Is by design, and the
+				// lost-restore classifier never reads message text. Probe
+				// that filesystem from THIS process so a real resource verdict
+				// rides the chain instead of the launch failure charging the
+				// structural retry budget (#5295 review).
+				socketDir, statErr := tmuxSocketFilesystemDir()
+				if probeErr := socketFSProbe(socketDir); probeErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
+				}
+				if statErr != nil {
+					launchErr = errors.Join(launchErr,
+						fmt.Errorf("could not inspect tmux socket filesystem %s: %w", socketDir, statErr))
 				}
 
 				// The launch process began. Its exit status, even paired with later
@@ -176,7 +353,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			// already cancelled; recorded as a residual on #2998.
 			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
-				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
+				timeoutErr = fmt.Errorf("%w (cleanup error: %w)", timeoutErr, cleanupErr)
 			}
 			// A successful close+pane-exit confirmation on a positive-policy name
 			// establishes that the exact launch identity is gone. The old blanket
@@ -218,8 +395,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	cancel()
 
 	// Attach to the session we just created. Pass empty workDir so a missing
-	// session here surfaces as an error rather than recursively re-spawning.
-	err = t.Restore("")
+	// session here surfaces as an error rather than recursively re-spawning,
+	// and confirmedFresh because the existence poll above already answered for
+	// the session THIS Start created — an unanswered rebind probe here is a
+	// wedged server, not the retired generation coming back (Codex on #4473).
+	t.observeStart(StartBeforeAttachProbe)
+	_, err = t.restoreWithResult("", true)
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll
 		// above saw the session, so if it is gone again by attach time the
@@ -236,7 +417,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		// Launch now independently fails closed on every post-spawn Start error.
 		state, cleanupErr := t.Close()
 		if cleanupErr != nil {
-			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		if state != PaneStateKnown {
 			err = fmt.Errorf("%w: %w", err, ErrTmuxTimeout)
@@ -322,6 +503,9 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if t.handleCodexSafetyBuffering(content) {
 			return true
 		}
+		if t.handleCodexUpdatePrompt(content) {
+			return true
+		}
 		if CodexTrustPromptPresent(content) {
 			// Codex's directory-trust modal is a ListSelectionView that hides
 			// the terminal cursor, while the ordinary composer exposes one. The
@@ -352,6 +536,34 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 				return true
 			}
 			t.noteDialogKeystroke(docTrustDialogName, "", "D", "Enter")
+			return true
+		}
+	}
+	return false
+}
+
+// codexComposerGlyphs is the set of glyphs Codex draws at the START of its
+// composer line: "›" (U+203A) at every reasoning effort, and "»" (U+00BB)
+// while the Ultra tier is active — upstream codex-rs/tui
+// bottom_pane/effort_ignition.rs EffortTier::prompt_glyph (Max→"›",
+// Ultra→"»"), consumed by chat_composer.rs's prompt span and the ONLY place
+// "»" is rendered at rust-v0.163.0. Picker, trust-dialog, and update-dialog
+// selection markers keep "›" at every effort (bottom_pane/picker_option.rs
+// numbered_row), so a line-leading "»" never carries the selected-option
+// ambiguity a line-leading "›" can — it can only be the composer (#5383).
+const codexComposerGlyphs = "›»"
+
+// IsCodexComposerLine reports whether the line's first non-blank character is
+// a Codex composer glyph. Position is the whole contract — the composer is
+// drawn at the START of its line, so the same glyph mid-line is prose, not a
+// prompt (#3085). Distinguishing the composer from a selected option that
+// shares the "›" marker is the CALLER's job, not the glyph's: readiness runs
+// CodexTrustPromptPresent first, and the safety/update pickers gate on their
+// hidden-cursor modal state.
+func IsCodexComposerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, glyph := range codexComposerGlyphs {
+		if strings.HasPrefix(trimmed, string(glyph)) {
 			return true
 		}
 	}
@@ -557,15 +769,43 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
-	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
+	return t.restoreWithResult(workDir, false)
+}
+
+// restoreWithResult is RestoreWithResult plus confirmedFresh: the caller
+// already proved THIS operation's new-session answers the name (Start's inner
+// attach), so an unanswered rebind must not inherit the outgoing monitor's
+// generation — that generation is retired, and binding the live replacement
+// to it latches the fresh monitor dead the moment the server answers again
+// (Codex on #4473).
+func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (RestoreResult, error) {
+	// !existsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
 	// a server that is merely wedged around a still-live session would create a
 	// duplicate. The #386 respawn design has always fired only on definitive
 	// absence, and this preserves it.
-	if !t.ExistsOrUnknown() {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+		}
+		// The respawn launches new-session -c <workDir>; a worktree deleted
+		// since the session persisted means tmux silently falls back to the
+		// server's cwd instead of failing (#5172). Refuse up front, naming the
+		// path, so the caller routes the session to the lost/rebuild loop
+		// rather than launching an agent into an unrelated directory. (Start
+		// itself refuses too — this check keeps the refusal typed for restore
+		// callers before the program rewrite happens.) The live-session
+		// reattach branch below is unaffected: a live pane is not re-launched
+		// into anything.
+		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			return RestoreReattached, fmt.Errorf(
+				"%w: tmux session %q missing on Restore and its worktree %s is unavailable: %w",
+				ErrSpawnDirMissing, t.sanitizedName, workDir, err)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
@@ -593,15 +833,138 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
+	return RestoreReattached, t.reattach(reattachOptions{
+		answered: answered, confirmedFresh: confirmedFresh, refreshAccount: true, baseline: workDir != "",
+	})
+}
+
+// ReattachOnly performs only the live-session rebind half of
+// RestoreWithResult: it never takes the definitive-absence respawn branch, so
+// it is the restore primitive for a process tab, whose command must run
+// exactly once at creation and never be re-executed by af (#4479). Call it only
+// when the session exists or its state is unknown — a confirmed-absent session
+// gets no rebind and no respawn, because the pane it named is gone either way.
+//
+// answered is the caller's own existence probe's known (ProbeSession): true
+// only when tmux answered that the session exists, false when the probe did not
+// answer. It carries the same meaning as RestoreWithResult's has-session answer
+// and binds the fresh monitor the same way (#4473). The rebind does not probe
+// existence again, so a wedged server costs the caller one bounded has-session,
+// not two.
+//
+// On a pane held by remain-on-exit the rebind is equally correct: the session
+// still exists, the monitor simply never fires, and the pane's retained output
+// stays previewable.
+func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
+	return t.reattach(reattachOptions{answered: answered, refreshAccount: true, baseline: workDir != ""})
+}
+
+// ReattachInert rebinds a session that is still alive and does nothing else:
+// no definitive-absence respawn (there is no directory to spawn into) and no
+// account-environment refresh. It is the load path of a row whose worktree was
+// deleted outside af (#5102), kept only so its live pane stays bound and the
+// row stays archivable. The refresh exists to heal the scope env a later spawn
+// inherits, and nothing will spawn into a deleted worktree; running it anyway
+// is a dozen bounded tmux commands whose transient failure would load the row
+// startup-unknown — excluded from reconciliation and refused by archive, the
+// one remedy the row is being kept for. A confirmed-absent session is reported
+// exactly as RestoreWithResult("") reports it.
+//
+// Its monitor baselines like any reattach of persisted state: the pane predates
+// this process, so its first capture is not new output. A fresh monitor would
+// report it as an update across a mere daemon restart, recording false churn and
+// overwriting a persisted Ready or LimitReached with Running.
+func (t *TmuxSession) ReattachInert() error {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
+		return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+	}
+	return t.reattach(reattachOptions{answered: answered, baseline: true})
+}
+
+// reattachOptions are the choices reattach's callers make explicitly.
+type reattachOptions struct {
+	// answered is whether the existence probe that routed here answered.
+	answered bool
+	// confirmedFresh is restoreWithResult's: Start's own new-session is what
+	// answered the name.
+	confirmedFresh bool
+	// refreshAccount re-derives the pane's account environment; false only for
+	// ReattachInert.
+	refreshAccount bool
+	// baseline is whether this rebinds persisted state, whose first capture
+	// only establishes the monitor's baseline. It used to be inferred from a
+	// non-empty workDir, which is what Restore's callers with persisted state
+	// pass — but ReattachInert reattaches persisted state with no directory to
+	// name (#5102), so the choice is the caller's to state.
+	baseline bool
+}
+
+// reattach is the live-session rebind shared by restoreWithResult,
+// ReattachOnly and ReattachInert.
+func (t *TmuxSession) reattach(opts reattachOptions) error {
+	answered, confirmedFresh := opts.answered, opts.confirmedFresh
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
-	if workDir != "" {
+	if opts.baseline {
 		monitor = newReattachStatusMonitor()
 	}
-	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	// Bind the fresh monitor to the generation that just answered live: the
+	// resolved (id, server pid, created) tuple names exactly that tmux
+	// session, which neither the reused name nor the bare id can do — a poll
+	// holding the OLD monitor across this swap must not land a capture on
+	// the replacement and read the old mark against the new generation's
+	// death, and a replacement server reissuing the same $id must not
+	// impersonate it either (#4473 review). nil degrades to the name target.
+	// The probe runs only when the existence check answered: a wedged
+	// has-session already spent a full tmuxCommandTimeout, and a second
+	// command here would pay the same deadline for the same non-answer —
+	// once per persisted tab on the local restore path (Codex on #4473).
+	// resolvedAt is stamped BEFORE the probe runs, not after: it is the
+	// ordering evidence setMonitor uses to decide whether a settled teardown
+	// mark may retire, and only a resolution that BEGAN after the close
+	// returned proves the teardown did not take (#4473 review).
+	var resolved *tmuxGeneration
+	var resolvedAt time.Time
+	if answered {
+		resolvedAt = time.Now()
+		resolved, _ = t.confirmedGeneration()
 	}
-	t.setMonitor(monitor)
-	return RestoreReattached, nil
+	// The refresh heals a PRE-EXISTING live session whose boundary environment
+	// predates or lost its account scope — the restore path's legitimate use
+	// (pinned by TestAccountScopedShellTabInheritsSelectedCredentials). It must
+	// NOT run when confirmedFresh: Start's new-session queue already wrote the
+	// -e session-env entries and default-command atomically in the same call, so
+	// re-deriving them here is pure redundancy whose only effect is a dozen extra
+	// bounded tmux commands — and a single transient failure there makes Start
+	// call t.Close() and destroy the freshly created, healthy pane. It must not
+	// run when the probe went unanswered either: a wedged has-session already
+	// spent a full tmuxCommandTimeout, and the refresh's first set-environment
+	// would pay the same deadline for the same non-answer — twelve times over —
+	// violating the one-bounded-has-session discipline the generation probe
+	// above and ReattachOnly's doc both promise (Codex on #4473).
+	if opts.refreshAccount && !confirmedFresh && answered {
+		if err := t.refreshRestoredAccountEnvironment(); err != nil {
+			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+		}
+	}
+	// Teardown attribution follows the GENERATION, not the monitor slot: a
+	// resolved id matching the outgoing monitor's generation shares its mark
+	// (retiring a settled one — the session just answered live), a resolved
+	// different generation starts unmarked, and only a fully unanswered
+	// rebind carries the old generation — a wedged probe is no evidence the
+	// request resolved, so carrying keeps af's own teardown at INFO once the
+	// server answers (Codex on #4473). The exception is confirmedFresh:
+	// Start's own existence poll already answered for a session THIS Start
+	// created, so an unanswered rebind cannot be the retired generation and
+	// the fresh monitor must not be bound to it. Either way the OLD monitor
+	// keeps its generation, so an in-flight poll still reads its own
+	// attribution.
+	t.setMonitor(monitor, generationResolution{
+		generation: resolved,
+		answered:   answered || confirmedFresh,
+		startedAt:  resolvedAt,
+	})
+	return nil
 }

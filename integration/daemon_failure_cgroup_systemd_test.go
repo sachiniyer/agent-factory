@@ -44,6 +44,10 @@ func TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux(t *testing.T) {
 	if os.Getenv(systemdLifecycleTestEnv) != "1" || os.Getenv("CI") != "true" {
 		t.Skip("real systemd lifecycle test requires an explicitly prepared ephemeral CI runner")
 	}
+	// The user manager searches the runner's real ~/.config/systemd/user, so
+	// `af daemon install` has to write there rather than into the package's
+	// HOME sandbox (#4469).
+	testguard.UseAmbientHome(t)
 	requireTool(t, "systemctl")
 	requireTool(t, "systemd-run")
 	realTmux, err := exec.LookPath("tmux")

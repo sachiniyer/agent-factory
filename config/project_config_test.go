@@ -135,7 +135,7 @@ func TestRootAgentInspectionPropagatesCompletedCheckoutProbeFailure(t *testing.T
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = ResolveRootAgentForInspectionWithConfigContext(ctx, cfg, repoRoot, false)
+	_, err = ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, cfg, repoRoot, false)
 	require.Error(t, err, "a failed checkout probe must not read as an absent personal layer")
 	require.Contains(t, err.Error(), "exit status 7")
 	require.NotErrorIs(t, err, context.DeadlineExceeded)
@@ -322,7 +322,7 @@ func TestResolveProjectSelectorUnregisteredPath(t *testing.T) {
 	_, err := ResolveProjectSelector(unregistered)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a registered project")
-	require.Contains(t, err.Error(), "af projects register", "the error must name the real registration command")
+	require.Contains(t, err.Error(), "af projects add", "the error must name the real registration command")
 }
 
 func TestResolveProjectSelectorNonGitPath(t *testing.T) {

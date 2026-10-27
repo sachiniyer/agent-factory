@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -42,118 +43,6 @@ func (i *Instance) GetPrompt() string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.Prompt
-}
-
-// SetPendingHandoffMission records the rendered takeover brief before the
-// irreversible runtime-swap checkpoint. A daemon restart can then recover the
-// exact context that still needs delivery instead of guessing from Prompt.
-func (i *Instance) SetPendingHandoffMission(mission string) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.pendingHandoffMission != mission {
-		i.pendingHandoffMission = mission
-		// Recording the obligation precedes submission, so this is positive
-		// mission-scoped evidence that an automatic attempt is initially safe.
-		i.handoffDeliveryStatus = PromptNotDelivered
-		i.touchLocked()
-	}
-}
-
-// PendingHandoffMission returns the takeover brief awaiting confirmed delivery.
-func (i *Instance) PendingHandoffMission() string {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.pendingHandoffMission
-}
-
-// BeginPendingHandoffMissionDelivery fails closed before submission. The caller
-// persists this marker before touching the composer, closing the crash window in
-// which an attempt may land without its verdict becoming durable.
-func (i *Instance) BeginPendingHandoffMissionDelivery(mission string) error {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.pendingHandoffMission != mission || mission == "" {
-		return fmt.Errorf("pending handoff mission changed before delivery")
-	}
-	if i.handoffDeliveryStatus != PromptCouldNotConfirm {
-		i.handoffDeliveryStatus = PromptCouldNotConfirm
-		i.touchLocked()
-	}
-	return nil
-}
-
-// RecordPendingHandoffMissionDelivery binds the runtime verdict to this exact
-// mission. Empty and future verdicts are ambiguity, never retry authorization.
-func (i *Instance) RecordPendingHandoffMissionDelivery(mission string, status PromptDeliveryStatus) error {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.pendingHandoffMission != mission || mission == "" {
-		return fmt.Errorf("pending handoff mission changed during delivery")
-	}
-	if !status.Valid() {
-		status = PromptCouldNotConfirm
-	}
-	if i.handoffDeliveryStatus != status {
-		i.handoffDeliveryStatus = status
-		i.touchLocked()
-	}
-	return nil
-}
-
-// PendingHandoffMissionAutoRetryable permits automatic redelivery only after a
-// mission-scoped observation proved that the exact pending mission did not land.
-func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.pendingHandoffMission != "" && i.handoffDeliveryStatus == PromptNotDelivered
-}
-
-// CanRetryPendingHandoffMissionDelivery reports whether an operator can inspect
-// the known incoming pane and explicitly override an ambiguous mission verdict.
-// Positive non-delivery belongs to automatic recovery; delivered evidence and
-// an unknown/missing runtime never authorize another submission.
-func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
-	ambiguous := i.handoffDeliveryStatus == PromptSentUnverified ||
-		i.handoffDeliveryStatus == PromptCouldNotConfirm
-	return i.pendingHandoffMission != "" && ambiguous && knownLive &&
-		!i.startupStateUnknown && !i.userKilled &&
-		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing)
-}
-
-// ReconcilePendingHandoffSnapshot mirrors the daemon-owned agent handoff
-// obligation onto an existing client projection. Open TUIs update rows in place,
-// so copying only OpReplacing would leave the explicit retry predicate blind to
-// the mission and its mission-scoped verdict until the client restarted.
-func (i *Instance) ReconcilePendingHandoffSnapshot(mission string, status PromptDeliveryStatus) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.pendingHandoffMission == mission && i.handoffDeliveryStatus == status {
-		return false
-	}
-	i.pendingHandoffMission = mission
-	i.handoffDeliveryStatus = status
-	i.touchLocked()
-	return true
-}
-
-// ClearPendingHandoffMission clears the marker only if it still names mission.
-// The compare makes a delayed recovery attempt unable to erase a newer handoff's
-// brief after the same session has moved on.
-func (i *Instance) ClearPendingHandoffMission(mission string) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.pendingHandoffMission != mission {
-		return false
-	}
-	if i.pendingHandoffMission != "" {
-		i.pendingHandoffMission = ""
-		i.handoffDeliveryStatus = ""
-		i.touchLocked()
-	}
-	return true
 }
 
 // GetBranch returns the current worktree branch name under the Instance's
@@ -248,6 +137,11 @@ func (i *Instance) MarkUserKilled() {
 		// tombstone, including when OpNone means noteStateChangeLocked is a no-op.
 		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
+		// The tombstone permanently disables automatic restore, so an armed
+		// environmental wait becomes a promise nothing can keep — every client
+		// would report "waiting on the environment" while only the tombstone's
+		// cleanup loop runs. It commits clear with the tombstone (#5295 review).
+		i.lostRestoreWait = LostRestoreWait{}
 		i.touchLocked()
 	}
 	i.inFlightOp = OpNone
@@ -270,6 +164,10 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	if userKilled && !i.userKilled {
 		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
+		// Same retirement as the daemon's own commit: a tombstoned row can
+		// never be auto-restored, so a mirrored armed-wait is a lie here too
+		// (#5295 review).
+		i.lostRestoreWait = LostRestoreWait{}
 		i.touchLocked()
 		if i.inFlightOp != OpKilling {
 			i.inFlightOp = OpNone
@@ -287,56 +185,6 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
-// MarkStartupStateUnknown retains an uncertain create or restore as an inert
-// record. Clearing started prevents attach/probe paths from treating the
-// requested runtime name as confirmed; StartupStateUnknown keeps storage
-// checkpoints from dropping the record merely because it is not started.
-func (i *Instance) MarkStartupStateUnknown() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	lv, op, resetAt := i.lifecycleStateLocked()
-	if !i.startupStateUnknown {
-		// RuntimeProgram stops being proof of a current runtime at this edge.
-		// Advance the lock-free evidence generation before publishing the fence so
-		// an asynchronous drift check cannot latch the previously known command.
-		i.runtimeEvidenceGeneration.Add(1)
-		i.startupStateUnknown = true
-		i.touchLocked()
-	}
-	if i.started {
-		i.started = false
-		i.touchLocked()
-	}
-	// Startup-unknown is a terminal delivery outcome, not a run still consuming
-	// the task's concurrency budget. Store that fact on the same transition that
-	// stores the terminal marker so projections, persistence, and unloadable-row
-	// accounting cannot disagree about whether the slot was released.
-	// Same section, same reason as the completion transition (#3865): this is the
-	// other edge that clears the run marker, so it is the other place the adoption
-	// baseline has to be pinned. On the EDGE, not beside the assignment below,
-	// which is unconditional — a second call once the run has already ended must
-	// not pin a fresh baseline over a teardown's, since that would fold a delivery
-	// made in between into the baseline and read as though nothing had happened.
-	if i.taskRunActive {
-		i.captureAdoptionBaselineLocked()
-		i.taskRunActive = false
-		i.touchLocked()
-	}
-	// The create attempt has settled into an explicit blocked outcome. Leaving
-	// OpCreating set makes projections report an operation that no goroutine owns
-	// and can keep old clients polling forever.
-	i.inFlightOp = OpNone
-	i.noteStateChangeLocked(lv, op, resetAt)
-}
-
-// StartupStateUnknown reports whether a create may have launched a runtime but
-// could not confirm its identity or liveness.
-func (i *Instance) StartupStateUnknown() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.startupStateUnknown
-}
-
 // TaskRunActive reports whether this session's task run is still in flight
 // (#1892). Prefer LifecycleView when the answer is combined with any other piece
 // of state: a verdict assembled from separate accessor calls can straddle a
@@ -345,6 +193,16 @@ func (i *Instance) TaskRunActive() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.taskRunActive
+}
+
+// TaskRunPromptAttemptAt is the run's own prompt boundary (#5219). The daemon's
+// pane-chrome watcher keys its state to it: a redelivery must discard primed
+// rows that predate the new boundary, or a turn already in flight releases the
+// fresh window as though it were the redelivered prompt's (#5221 review).
+func (i *Instance) TaskRunPromptAttemptAt() time.Time {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunPromptAttemptAt
 }
 
 // GetGitWorktree returns the git worktree for the instance
@@ -502,10 +360,13 @@ func (i *Instance) TmuxAlive() bool {
 // with, and an override may point it at a different program entirely (#1116).
 //
 // Once the tmux session exists, its program string (override-resolved and
-// flag-injected by Start) is the ground truth. Before Start — or in tests
-// that never attach a tmux session — detection falls back to the raw Program
-// value, which also covers legacy free-form persisted values like
-// "/home/foo/bin/claude --plugin-dir x" (#677).
+// flag-injected by Start) is the ground truth. A remote session has no local
+// tmux binding; the command its runtime launched is still on record, because
+// the remote launch boundary writes the same runtime_program evidence the
+// local backend writes (#5067, #5108). Only when neither exists — before
+// Start, or for a runtime that recorded nothing — does detection fall back to
+// the raw Program value, which also covers legacy free-form persisted values
+// like "/home/foo/bin/claude --plugin-dir x" (#677).
 func (i *Instance) ResolvedAgent() string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -602,16 +463,37 @@ func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence,
 // owns UpdatedAt and the durable checkpoint; touching here would count one
 // runtime replacement twice.
 func (i *Instance) setRuntimeProgram(program string) {
+	i.setRuntimeLaunch(program, nil)
+}
+
+// setRuntimeLaunch records a positively established launch: the resolved base
+// command plus, when the pane answers, the pane root's (pid, kernel start-time)
+// identity — the pair that lets a later reattach prove the process standing
+// behind the reused tmux name is still the launch af made (#5066). A pane query
+// that cannot answer records the command alone; the record then verifies
+// nothing on reattach and ages out exactly like a pre-evidence launch.
+func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession) {
 	if strings.TrimSpace(program) == "" {
 		return
 	}
+	pid := 0
+	var startID uint64
+	if ts != nil {
+		if pane, err := ts.PaneRootProcess(); err == nil {
+			pid, startID = pane.PID, pane.StartID
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setRuntimeProgramLocked(program)
+	i.setRuntimeEvidenceLocked(program, pid, startID)
 }
 
 func (i *Instance) setRuntimeProgramLocked(program string) {
-	if i.runtimeProgram == program {
+	i.setRuntimeEvidenceLocked(program, 0, 0)
+}
+
+func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uint64) {
+	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
 	// Invalidate lock-free consumers before publishing the replacement value.
@@ -619,20 +501,42 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 	// cannot take i.mu to close this ordering edge.
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = program
+	i.runtimePID = pid
+	i.runtimeStartID = startID
 }
 
 // clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
-// claim when load can establish only that a tmux name exists, not that it still
-// names the process AF launched. It reports whether durable state changed so a
-// load caller can checkpoint the clear before publishing the restored row.
-func (i *Instance) clearRuntimeProgramForUnverifiedReattach() bool {
+// claim when the reattach cannot prove the pane is still the launch that
+// recorded it. The proof is the pane root's (pid, start-time) identity
+// captured at that launch: a surviving tmux name reporting the recorded pair
+// keeps the claim, while a different process, a pane that cannot be probed,
+// and a record carrying no identity are all unverified. It reports whether
+// durable state changed so a load caller can checkpoint the clear before
+// publishing the restored row.
+func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession) bool {
+	i.mu.RLock()
+	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid > 0 && ts != nil {
+		if same, err := ts.PaneRootProcessMatches(pid, startID); err == nil && same {
+			// Provably the same launch: keep the claim.
+			return false
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.runtimeProgram == "" {
+	// Re-check under the write lock: a launch boundary that committed fresh
+	// evidence while the pane query ran must not lose it to this verdict.
+	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
+		return false
+	}
+	if i.runtimeProgram == "" && i.runtimePID == 0 {
 		return false
 	}
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = ""
+	i.runtimePID = 0
+	i.runtimeStartID = 0
 	return true
 }
 
@@ -662,6 +566,18 @@ func (i *Instance) SetStartedForTest(started bool) {
 	}
 }
 
+// SetBranchForTest sets the branch name recorded on the instance. Test-only:
+// the real flow sets it inside LocalBackend.Start, which unit tests that wire a
+// worktree with SetGitWorktreeForTest never run.
+func (i *Instance) SetBranchForTest(branch string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Branch != branch {
+		i.Branch = branch
+		i.touchLocked()
+	}
+}
+
 // MarkLoadRuntimeReplacedForTest seeds the loader settlement owed by a
 // confirmed Start(false) respawn. Production sets it only from LocalBackend.
 func (i *Instance) MarkLoadRuntimeReplacedForTest() {
@@ -687,6 +603,16 @@ func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.setGitWorktreeLocked(gw)
+}
+
+// GitWorktreeForTest returns the instance's git worktree. Test-only: daemon
+// tests need the restored worktree itself to install an adopted-hook surrogate
+// (GitWorktree.SetHooksDoneForTest) — the channel a real restart would rebuild
+// via AdoptRunningHookRuns (#4162).
+func (i *Instance) GitWorktreeForTest() *git.GitWorktree {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.gitWorktree
 }
 
 // AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -111,8 +112,17 @@ func leakedDaemonOptions(t *testing.T, fix bool, p proctree.Process, home string
 
 // tempBinaryDaemon is the #3842 shape: an af daemon whose own binary lives under
 // a `go test` temp directory.
+//
+// The path is resolved the way the kernel resolves it: /proc/<pid>/exe returns a
+// CANONICAL spelling (every directory-component symlink evaluated), so the stub
+// must do the same. When the test host's temp dir is itself reached through a
+// symlink — every macOS runner, where t.TempDir() lives under /var and /var is
+// a symlink to /private/var — a lexical spelling diverges from the canonicalised
+// tempDir guard and the daemon silently falls out of the temp bucket. Building
+// the path from normalizeHome(tempDir) keeps the stub and the guard on one
+// spelling on every host, matching what production actually compares.
 func tempBinaryDaemon(tempDir string) daemonBinary {
-	return daemonBinary{path: filepath.Join(tempDir, "TestSomething123", "001", "af"), known: true}
+	return daemonBinary{path: filepath.Join(normalizeHome(tempDir), "TestSomething123", "001", "af"), known: true}
 }
 
 func TestADaemonRunningFromATempBinaryIsReportedAndOfferedForAKill(t *testing.T) {
@@ -130,7 +140,8 @@ func TestADaemonRunningFromATempBinaryIsReportedAndOfferedForAKill(t *testing.T)
 		"a daemon running af from the temp dir is not an install; it is debris")
 	require.NotEmpty(t, findings[0].FixAction, "it must be offered for a kill")
 	require.Contains(t, findings[0].Detail, "which is not an install")
-	require.Contains(t, findings[0].Detail, otherHome, "the row must name the home it serves")
+	require.Contains(t, findings[0].Detail, normalizeHome(otherHome),
+		"the row must name the home it serves (canonicalised: d.home is read in the daemon's frame)")
 }
 
 // Paired with a leaked daemon in the SAME run, deliberately. "No finding" is
@@ -193,6 +204,65 @@ func TestADeletedTempBinaryIsStillRecognisedAsATempBinary(t *testing.T) {
 	require.True(t, findings[0].Actionable,
 		"the deleted suffix must be stripped before the temp-dir test, or a deleted test binary escapes")
 	require.Contains(t, findings[0].Detail, "since deleted")
+}
+
+// checkLeakedDaemonBinaries guards on a temp-dir comparison, and that comparison
+// must be against the CANONICAL spelling the kernel reports. /proc/<pid>/exe
+// symlink-resolves the exec path, while the guard used to compare it against a
+// LEXICAL tempDir (filepath.Clean only). When a directory component of the temp
+// path is itself a symlink — a real configuration (TMPDIR=/scratch where
+// /scratch -> /mnt/fasttmp), and the everyday state of a macOS runner whose
+// t.TempDir() lives under /var -> /private/var — the two spellings diverged and
+// a leaked temp daemon was either silently dropped (on-disk binary) or
+// mislabelled as upgrade residue (deleted binary), losing the --fix kill.
+//
+// Both branches are staged under a SYMLINKED TempDir spelling that resolves to a
+// different canonical path, with the daemon's bin.path canonicalised the way
+// /proc/<pid>/exe canonicalises it. The fix (tempDir := normalizeHome, matching
+// the sibling checkDeadSocketHomes / checkStaleTempHomes guards) reports both as
+// "not an install" with the kill path intact.
+func TestLeakedDaemonUnderSymlinkedTempDirIsReportedOnDiskAndDeleted(t *testing.T) {
+	proc := spawnWithEnv(t, "leaky-daemon", nil, nil)
+	otherHome := t.TempDir()
+	opts := leakedDaemonOptions(t, false, proc, otherHome)
+	realDir := opts.TempDir
+	// A symlink spelling of the temp dir, alongside its real target. bin.path is
+	// built from the canonical target (what /proc/<pid>/exe returns); opts.TempDir
+	// is the symlink spelling (what a symlinked TMPDIR hands the tool). The guard
+	// must bridge the two via EvalSymlinks.
+	symDir := filepath.Join(filepath.Dir(realDir), filepath.Base(realDir)+"-sym")
+	require.NoError(t, os.Symlink(realDir, symDir))
+	canonDir := normalizeHome(realDir)
+
+	opts.TempDir = symDir
+
+	// Branch A: an on-disk leaked temp binary. Pre-fix this was the SILENT drop
+	// (line-196 `continue` fired, double-gated on the symlinked TMPDIR).
+	onDisk := daemonBinary{path: filepath.Join(canonDir, "TestSomething123", "001", "af"), known: true}
+	stubDaemonExe(t, map[int]daemonBinary{proc.PID: onDisk})
+	rep, err := Run(opts)
+	require.NoError(t, err)
+	rows := findByCheck(rep, checkLeakedDaemon)
+	require.Len(t, rows, 1, "on-disk leaked daemon under a symlinked TempDir must be reported")
+	require.True(t, rows[0].Actionable, "it must carry the --fix kill, not be silently dropped")
+	require.NotEmpty(t, rows[0].FixAction)
+	require.Contains(t, rows[0].Detail, "which is not an install")
+
+	// Branch B: a deleted leaked temp binary (the common `go test` shape — the
+	// suite unlinks its work tree on exit). Pre-fix this was the MISLABEL:
+	// routed to the upgrade-residue advisory with "run `af daemon restart`"
+	// (which never reaches a temp-home daemon) and no kill path.
+	stubDaemonExe(t, map[int]daemonBinary{proc.PID: {path: onDisk.path, deleted: true, known: true}})
+	rep2, err := Run(opts)
+	require.NoError(t, err)
+	rows2 := findByCheck(rep2, checkLeakedDaemon)
+	require.Len(t, rows2, 1, "deleted leaked daemon under a symlinked TempDir must also be reported")
+	require.True(t, rows2[0].Actionable, "it must carry the --fix kill, not be mislabelled upgrade residue")
+	require.NotEmpty(t, rows2[0].FixAction)
+	require.Contains(t, rows2[0].Detail, "which is not an install")
+	require.Contains(t, rows2[0].Detail, "since deleted")
+	require.NotContains(t, rows2[0].Detail, "af upgrade",
+		"the upgrade-residue advisory must not fire for a temp-dir binary")
 }
 
 // The daemon serving THIS home is the one answering this very run. However odd
@@ -285,6 +355,95 @@ func TestFixStopsALeakedTempBinaryDaemon(t *testing.T) {
 	require.True(t, findings[0].Fixed, "fix error: %v", findings[0].FixErr)
 	require.Eventually(t, func() bool { return !proctree.AliveSame(proc) },
 		5*time.Second, 20*time.Millisecond, "the leaked daemon should be gone")
+}
+
+// TestFixOnAMixedLeakedDaemonGroupLeavesAdvisoryWARNRow is the end-to-end
+// reproduction of the presentation defect: after `af doctor --fix` stops the one
+// proven debris daemon in a leaked-daemons group that ALSO holds an advisory
+// (upgraded) daemon, the collapsed row must read WARN — the only severity still
+// outstanding — and stay actionable:false, while UnresolvedCount stays 0. Pre-fix,
+// strongestDeclaredSeverity read the FIXED finding's StatusFail and returned FAIL,
+// so the human row read "FAIL  leaked-daemons" beside its own
+// "no issues require action" summary.
+//
+// The two spawned processes are real; the debris one is killed by --fix (Fixed
+// stays true with Severity=StatusFail left in place, exactly as Run does), and the
+// advisory upgrade is reported, not stopped.
+func TestFixOnAMixedLeakedDaemonGroupLeavesAdvisoryWARNRow(t *testing.T) {
+	debris := spawnWithEnv(t, "leaky-daemon-to-kill", nil, nil)
+	advisory := spawnWithEnv(t, "upgraded-daemon", nil, nil)
+	opts := testOptions(t, true, debris.PID, advisory.PID) // Fix: true
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"/tmp/whatever/af", "--daemon"} })
+	stubProcessHomes(t, map[int]string{debris.PID: t.TempDir(), advisory.PID: t.TempDir()})
+	opts.minLeakedDaemonAge = time.Nanosecond
+	stubDaemonExe(t, map[int]daemonBinary{
+		debris.PID:   tempBinaryDaemon(opts.TempDir),
+		advisory.PID: {path: "/usr/local/bin/af", deleted: true, known: true},
+	})
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, checkLeakedDaemon)
+	require.Len(t, findings, 2, "both daemons surface as findings in one collapsed group")
+	var fixedDebris, advisoryFinding *Finding
+	for i := range findings {
+		if findings[i].Actionable {
+			fixedDebris = &findings[i]
+		} else {
+			advisoryFinding = &findings[i]
+		}
+	}
+	require.NotNil(t, fixedDebris, "the proven debris daemon is an actionable finding")
+	require.NotNil(t, advisoryFinding, "the replaced-binary daemon is an advisory finding")
+	require.True(t, fixedDebris.Fixed, "the debris daemon must have been stopped by --fix: %v", fixedDebris.FixErr)
+	require.Equal(t, StatusFail, fixedDebris.Severity,
+		"--fix sets Fixed but leaves the declared Severity, which is the input to the bug")
+	require.False(t, advisoryFinding.Fixed, "the advisory upgrade is never fixed")
+	require.Equal(t, StatusWarn, advisoryFinding.Severity)
+
+	// The authoritative signals all stay correct regardless of the rendering bug.
+	require.Zero(t, report.UnresolvedCount(),
+		"the run is healthy on every axis a conformant consumer gates on")
+	require.Eventually(t, func() bool { return !proctree.AliveSame(debris) },
+		5*time.Second, 20*time.Millisecond, "the leaked debris daemon should be gone")
+	require.True(t, proctree.AliveSame(advisory), "the advisory upgrade must survive --fix")
+
+	// The presentation must now match the authoritative signals: the collapsed
+	// row reads the outstanding WARN, not the resolved FAIL.
+	var leakRow *renderRow
+	rows := renderRows(report, true, false)
+	for i := range rows {
+		if rows[i].name == "leaked-daemons" {
+			leakRow = &rows[i]
+		}
+	}
+	require.NotNil(t, leakRow, "the leaked-daemons collapsed row must be present")
+	require.Equal(t, StatusWarn, leakRow.status,
+		"a fixed FAIL must not harden the row; only the advisory WARN is outstanding")
+	require.False(t, leakRow.actionable, "the one actionable finding is fixed, so the row is not actionable")
+
+	var buf bytes.Buffer
+	Render(&buf, report, true, false)
+	require.Contains(t, buf.String(), "WARN  leaked-daemons:",
+		"the human row label must read the outstanding WARN")
+	require.NotContains(t, buf.String(), "FAIL  leaked-daemons:",
+		"a row contradicting its own healthy summary is the defect this fixes")
+	require.Contains(t, buf.String(), "no issues require action",
+		"the summary the row sits under must stay internally consistent with it")
+
+	payload := BuildJSONReport(report, true, false)
+	var jsonRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "leaked-daemons" {
+			jsonRow = &payload.Checks[i]
+		}
+	}
+	require.NotNil(t, jsonRow)
+	require.Equal(t, "WARN", jsonRow.Status,
+		"the JSON row reuses renderRows, so it must agree with the human row")
+	require.False(t, jsonRow.Actionable)
+	require.Zero(t, payload.Summary.Unresolved, "unresolved excludes fixed findings")
 }
 
 // ---- dead-socket homes ----

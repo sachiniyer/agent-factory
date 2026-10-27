@@ -208,11 +208,11 @@ func TestLoadTasksForRepo_NonRepoPathsFallBackToPathEquality(t *testing.T) {
 	assert.Empty(t, none)
 }
 
-// TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion protects a
+// TestLoadTasksForRepoIDWithBindingUpdates_StabilizesLegacyBindingBeforeExclusion protects a
 // lifecycle decision from a later path rebind. Once the fresh lookup proves
 // which real repository owns a legacy row, it must persist that identity before
 // excluding the task from another repo's blockers.
-func TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion(t *testing.T) {
+func TestLoadTasksForRepoIDWithBindingUpdates_StabilizesLegacyBindingBeforeExclusion(t *testing.T) {
 	alpha := mkScopeRepo(t, "alpha")
 	beta := mkScopeRepo(t, "beta")
 	bound := filepath.Join(t.TempDir(), "bound")
@@ -225,7 +225,7 @@ func TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion(t *testing.T)
 		ProjectPath: bound, Enabled: true, CreatedAt: time.Now(),
 	}})
 
-	alphaTasks, err := LoadTasksForRepoID(repoIDForPath(alpha))
+	alphaTasks, _, err := LoadTasksForRepoIDWithBindingUpdates(repoIDForPath(alpha))
 	require.NoError(t, err)
 	require.Len(t, alphaTasks, 1)
 	stored, err := GetTask("rebind01")
@@ -234,12 +234,12 @@ func TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion(t *testing.T)
 	require.NoError(t, os.Remove(bound))
 	require.NoError(t, os.Symlink(beta, bound))
 
-	betaTasks, err := LoadTasksForRepoID(repoIDForPath(beta))
+	betaTasks, _, err := LoadTasksForRepoIDWithBindingUpdates(repoIDForPath(beta))
 	require.NoError(t, err)
 	assert.Empty(t, betaTasks, "a later path rebind must not move the stabilized task to another project")
 }
 
-func TestLoadTasksForRepoID_UnresolvedLegacyBindingFailsClosed(t *testing.T) {
+func TestLoadTasksForRepoIDWithBindingUpdates_UnresolvedLegacyBindingFailsClosed(t *testing.T) {
 	repo := mkScopeRepo(t, "project")
 	bound := filepath.Join(t.TempDir(), "bound")
 	require.NoError(t, os.Symlink(repo, bound))
@@ -249,14 +249,14 @@ func TestLoadTasksForRepoID_UnresolvedLegacyBindingFailsClosed(t *testing.T) {
 	}})
 	require.NoError(t, os.Remove(bound))
 
-	_, err := LoadTasksForRepoID(repoIDForPath(repo))
+	_, _, err := LoadTasksForRepoIDWithBindingUpdates(repoIDForPath(repo))
 	require.Error(t, err, "an unresolved legacy binding is unknown, not evidence that the task belongs elsewhere")
 	assert.Contains(t, err.Error(), "could not determine")
 	assert.Contains(t, err.Error(), "unknown1")
 	assert.Contains(t, err.Error(), bound)
 }
 
-func TestLoadTasksForRepoID_UnresolvedIrrelevantLegacyRowsDoNotBlock(t *testing.T) {
+func TestLoadTasksForRepoIDWithBindingUpdates_UnresolvedIrrelevantLegacyRowsDoNotBlock(t *testing.T) {
 	repo := mkScopeRepo(t, "project")
 	missing := filepath.Join(t.TempDir(), "missing")
 	setupTestTasks(t, []Task{
@@ -264,7 +264,7 @@ func TestLoadTasksForRepoID_UnresolvedIrrelevantLegacyRowsDoNotBlock(t *testing.
 		{ID: "freshrun", Name: "fresh run", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: missing, Enabled: true, CreatedAt: time.Now()},
 	})
 
-	got, err := LoadTasksForRepoID(repoIDForPath(repo))
+	got, _, err := LoadTasksForRepoIDWithBindingUpdates(repoIDForPath(repo))
 	require.NoError(t, err, "disabled and untargeted tasks cannot create an archived-target retry")
 	assert.Empty(t, got)
 }

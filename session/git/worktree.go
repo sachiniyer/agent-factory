@@ -79,6 +79,24 @@ type GitWorktree struct {
 	// is unlinked. The daemon installs it only for an explicit kill transaction;
 	// it is process-local and never part of the persisted worktree shape.
 	repoGoneFinalizationCheckpoint func() error
+	// adoptedWorktree is the directory identity AdoptLandedWorktreeMove proved
+	// at the path it adopted (#5102), kept so the archive can re-confirm that
+	// the same directory is still there after teardown. Process-local; it names
+	// a point-in-time proof, not durable state. Cleared whenever the recorded
+	// path changes. Guarded by relocationMu.
+	adoptedWorktree *adoptedWorktreeIdentity
+	// absentStallSettled records that this process discharged an identity-unknown
+	// stall because the recorded path conclusively answered ENOENT (#5102). The
+	// row then carries no record and, unless the worktree-missing poll got there
+	// first, no flag either, yet whatever appears at the path afterwards is as
+	// unverified as an occupant of a flagged row; kill teardown reads it to keep
+	// the deletion-boundary recheck armed. Process-local and never persisted: a
+	// restarted daemon has only the durable record, which the discharge already
+	// removed, and re-derives absence at teardown entry instead. Cleared whenever
+	// af itself places a worktree at the recorded path or moves the record to
+	// another one, because the proof was about the path's previous occupant.
+	// Guarded by relocationMu.
+	absentStallSettled bool
 	// archiveReport is durable metadata for every archive copy that deliberately
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.
@@ -216,6 +234,14 @@ func (g *GitWorktree) HooksDone() <-chan struct{} {
 	return g.hooksDone
 }
 
+// SetHooksDoneForTest installs an in-flight hook-completion channel without
+// launching a real hook run — the test-side analogue of adoptRunningHooks,
+// which is how a restored worktree reports a survivor from a previous daemon
+// (#4162's restart tests need exactly that shape without systemd).
+func (g *GitWorktree) SetHooksDoneForTest(done chan struct{}) {
+	g.hooksDone = done
+}
+
 // IsExternalWorktree returns true if this worktree was not created by agent-factory
 func (g *GitWorktree) IsExternalWorktree() bool {
 	return g.externalWorktree
@@ -308,6 +334,17 @@ func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (t
 // repo. The base path is validated to sit strictly inside worktreeDir (#461) and
 // a numeric suffix is appended when it is already occupied.
 func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
+	basePath, err := preferredWorktreePlacement(cfg, repoRoot, worktreeDir, sessionName, branchName)
+	if err != nil {
+		return "", err
+	}
+	return firstFreeWorktreePath(basePath)
+}
+
+// preferredWorktreePlacement is resolveWorktreePlacement before the collision
+// suffix: the validated base path the placement mode derives, whether or not
+// something already occupies it. It is a pure function of its inputs.
+func preferredWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
 	var basePath string
 	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
 		// Subdirectory mode nests the branch name under the worktrees root. A
@@ -351,7 +388,7 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
 	}
-	return firstFreeWorktreePath(basePath)
+	return basePath, nil
 }
 
 // DerivedWorktreePathTitleSegment returns the user-title-derived part of the

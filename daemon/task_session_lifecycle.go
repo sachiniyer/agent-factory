@@ -112,6 +112,9 @@ func (m *Manager) deferTaskSessionLifecycleWhilePaused(repoID string, instance *
 	// re-create would otherwise inherit the original's owed teardown.
 	m.deferredTaskLifecycle[key] = instance.ID
 	m.mu.Unlock()
+	// The parked intent is in-memory; the marker is its durable form, so a
+	// restart before the attach ends cannot lose the obligation (#4162).
+	m.fileOwedTaskLifecycle(repoID, instance)
 }
 
 // sweepDeferredTaskLifecycle drops parked intents whose session is gone or has
@@ -158,7 +161,24 @@ func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *ses
 	if instance.GetLiveness() != session.LiveReady || instance.TaskRunActive() {
 		// The user picked the work back up during the attach. Drop the intent rather
 		// than carrying it forward: a verb owed to a finished run must not land on
-		// new work.
+		// new work. The durable marker comes down with it (#4162).
+		m.dischargeOwedTaskLifecycle(repoID, owedID, instance.Title)
+		return
+	}
+	// The durable marker is the obligation this drain exists for (#4162): a
+	// delivery that already discharged it also counts as adoption evidence, so
+	// a parked intent with no marker left means the session is the user's.
+	marker := instance.OwedOnComplete()
+	if marker == nil {
+		return
+	}
+	// Pane churn after the filing is the attach-path adoption evidence the
+	// delivery counter cannot see — typing into an attached tmux reaches no
+	// agent-server entry point — and unlike the count it survives a restart.
+	if churn := instance.LastPaneChurnAt(); churn.After(marker.FiledAt) {
+		m.info().Printf("task %s: dropping the lifecycle owed to session %q's finished run: pane churn postdates the obligation filed at %s — the work is the user's now",
+			instance.TaskID, instance.Title, marker.FiledAt.Format(time.RFC3339))
+		m.dischargeOwedTaskLifecycle(repoID, owedID, instance.Title)
 		return
 	}
 	// And the same re-validation the hook-wait teardown performs under the fence
@@ -169,6 +189,7 @@ func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *ses
 	// applyTaskSessionLifecycleOnRunEnd below.
 	if err := taskLifecycleStillOwed(instance, owedID, instance.AdoptionDeliveriesAtRunEnd(), instance.AdoptionDeliveries()); err != nil {
 		m.info().Printf("task %s: dropping the lifecycle owed to session %q's finished run: %v", instance.TaskID, instance.Title, err)
+		m.dischargeOwedTaskLifecycle(repoID, owedID, instance.Title)
 		return
 	}
 	// The run genuinely ended and nothing has happened since, so this is the same
@@ -213,19 +234,44 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	verb, err := m.taskSessionLifecycle(repoID, taskID)
 	if err != nil {
 		// An unreadable or unscopable task store is not permission to tear a
-		// session down. Keep it — the conservative outcome, and the same one an
-		// older daemon produced — and say so once, on the tick that could not
-		// decide. A later run's completion asks again.
-		m.warn().Printf("could not read the session lifecycle for task %s (session %q): %v; leaving the session in place",
-			taskID, title, err)
+		// session down. Keep it — the conservative outcome — but keep the
+		// obligation TOO: the decision is owed whether or not the store answered
+		// this tick, and a restart must re-ask rather than forget (#4162). Warn
+		// only when the marker is first filed; a re-drive of an already-durable
+		// obligation re-asks every poll and must not spam.
+		if instance.OwedOnComplete() == nil {
+			m.warn().Printf("could not read the session lifecycle for task %s (session %q): %v; leaving the session in place and recording the obligation so a restart can ask again",
+				taskID, title, err)
+			m.fileOwedTaskLifecycle(repoID, instance)
+		}
 		return
 	}
 	if verb == task.OnCompleteKeep {
+		// Keep is a decision: discharge the marker a pause or a restart parked
+		// (#4162). An edge-path keep never filed one, so this is a no-op there.
+		if instance.OwedOnComplete() != nil {
+			m.dischargeOwedTaskLifecycle(repoID, sessionID, title)
+		}
 		return
 	}
-	m.launchBackgroundMutation(func(stop <-chan struct{}) {
+	// Durable BEFORE the wait: the worker below is exactly what a shutdown
+	// drops, so the obligation it carries must already be on disk (#4162).
+	m.fileOwedTaskLifecycle(repoID, instance)
+	// One worker per obligation per generation: the marker stays set for the
+	// whole hook wait, so a refresh re-arm can park the intent again while this
+	// one is still waiting — the claim is what keeps that a re-drive, not a
+	// second teardown.
+	if !instance.ClaimOwedDrain() {
+		return
+	}
+	if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		defer instance.ReleaseOwedDrain()
 		m.runTaskSessionLifecycleUntil(stop, repoID, sessionID, title, taskID, verb, hooksDone, adoptedAt)
-	})
+	}) {
+		// Shutdown closed admission: no worker exists to drive this, so the
+		// claim comes back — the durable marker still re-arms next generation.
+		instance.ReleaseOwedDrain()
+	}
 }
 
 // taskSessionLifecycle resolves the on_complete verb for one task in a repo.
@@ -352,10 +398,16 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 		select {
 		case <-hooksDone:
 		case <-stop:
+			// The obligation stays durable: the next daemon generation re-arms
+			// the drain and re-waits on whatever hook run it adopts (#4162).
 			return
 		case <-timer.C:
 			m.warn().Printf("task %s: post-worktree hooks for session %q have run for over %s; leaving the session in place rather than tearing down a worktree they may still be writing to",
 				taskID, title, taskLifecycleHookWait)
+			// "Leave it" is a decision, so it is durable: the marker comes down
+			// and the session stays put, visibly, rather than re-waiting the
+			// same stuck hooks after every restart.
+			m.dischargeOwedTaskLifecycle(repoID, sessionID, title)
 			return
 		}
 	}
@@ -383,8 +435,14 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 	}()
 	guard := func(current *session.Instance) error {
 		var deliveries uint64
+		var marker *session.PendingOnCompleteData
 		if current != nil {
+			// The shut fence makes these reads atomic-equivalent: once it
+			// closes, no delivery can bump the count or clear the marker, and a
+			// delivery that beat it discharged both in the same section that
+			// counted it — the two reads can never disagree.
 			deliveries = current.CloseAdoptionFence()
+			marker = current.OwedOnComplete()
 		}
 		if err := taskLifecycleStillOwed(current, sessionID, adoptedAt, deliveries); err != nil {
 			// Reopened HERE rather than left to the defer: a refusal means the
@@ -397,6 +455,34 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 			}
 			standDown = err
 			return err
+		}
+		if marker == nil {
+			if current != nil {
+				current.ReopenAdoptionFence()
+			}
+			standDown = errors.New("the on_complete obligation was already discharged")
+			return standDown
+		}
+		if current.GetLiveness() == session.LiveArchived {
+			// Archived by hand — or by a concurrent op — while the worker
+			// waited. The session is already at its kept-end state, so no owed
+			// verb may run on it; on_complete=kill least of all, which would
+			// destroy the record an explicit archive just chose to keep.
+			current.ReopenAdoptionFence()
+			standDown = errors.New("the session was archived while the teardown waited")
+			return standDown
+		}
+		if churn := current.LastPaneChurnAt(); churn.After(marker.FiledAt) {
+			// The same attach-path adoption the deferred drain checks: typing
+			// into an attached tmux moves the pane without moving the delivery
+			// count, and the timestamp is durable — it still answers after a
+			// restart wiped the counter (#4162).
+			if current != nil {
+				current.ReopenAdoptionFence()
+			}
+			standDown = fmt.Errorf("pane churn at %s postdates the obligation filed at %s, so the work is the user's now",
+				churn.Format(time.RFC3339), marker.FiledAt.Format(time.RFC3339))
+			return standDown
 		}
 		fenced = current
 		testHookTaskLifecycleGuardPassed()
@@ -429,7 +515,21 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 		// is ordinary, and the verb going unapplied is the correct result.
 		m.info().Printf("task %s: not applying on_complete=%s to session %q — %v; leaving the session in place",
 			taskID, verb, title, standDown)
+		// A stand-down IS the decision — settle the marker so the next daemon
+		// generation does not re-drive a teardown the evidence already refused.
+		// For the delivery path this is a no-op: the delivery discharged it.
+		m.dischargeOwedTaskLifecycle(repoID, sessionID, title)
 		return
+	}
+	// Whatever the op committed settles the obligation on disk: archive's own
+	// persist writes the row without the marker (the archived serialize gate)
+	// and kill deletes the row outright. Clearing memory too keeps a later
+	// unarchive from resurrecting an obligation the disk no longer carries —
+	// and writes nothing, so a just-deleted kill row cannot be written back.
+	if err == nil || isMutationCommitted(err) {
+		if fenced != nil {
+			fenced.SetOwedOnComplete(nil)
+		}
 	}
 	if isMutationCommitted(err) {
 		m.warn().Printf("task %s: applied on_complete=%s to session %q with a committed warning: %v",
@@ -445,4 +545,356 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 		return
 	}
 	m.info().Printf("task %s: applied on_complete=%s to session %q after its run finished", taskID, verb, title)
+}
+
+// ── The durable obligation (#4162) ───────────────────────────────────────────
+//
+// A declared on_complete teardown used to live in exactly one place: the
+// lifecycle goroutine parked on the post-worktree hook wait. A shutdown dropped
+// the goroutine, the completion edge behind it was already spent
+// (task_run_active is persisted false and flips only once), and nothing after a
+// restart could re-derive that a teardown was owed — the session and its
+// worktree simply stayed, forever, one leak per interrupted run.
+//
+// The fix is a marker on the session's own row: InstanceData.PendingOnComplete,
+// filed BEFORE the wait begins and discharged only by a decision. These four
+// helpers are its whole vocabulary: fileOwed writes it, dischargeOwed settles
+// it, installOwedTaskLifecycleNotify makes an adoption's discharge durable, and
+// armOwedTaskLifecyclesLocked is what a restart does with a marked row.
+
+// fileOwedTaskLifecycle records the durable form of the teardown obligation on
+// the session's own instances.json row — BEFORE the hook wait a shutdown would
+// otherwise drop. Refiling is a no-op: the earliest FiledAt stays the adoption
+// watermark, and a marker that is already set is already durable (filed this
+// generation or restored from disk).
+//
+// The filed-or-refuse decision is taken under i.mu by FileOwedOnCompleteIfNotDischarged
+// so a pre-filing adoption delivery in the paused-path window (#4162's race) is the
+// whole stand-down signal: it cannot clear a marker that does not exist yet, but it
+// does leave adoption.deliveries > adoption.atRunEnd, which the helper reads in the
+// same critical section the delivery mutates and refuses to file from. Filing a
+// marker whose FiledAt postdates that keystroke would, on a restart, leave only the
+// durable marker and the pre-keystroke pane-churn watermark — and the unpaused drain
+// would authorize the posting the user vetoed. The helper refuses; the unpaused drain
+// stands down on the in-memory deliveries check; a restart that wipes that in-memory
+// check wipes the (never-filed) marker too, leaving the pre-#4162 shape the churn
+// watermark is designed to cover.
+func (m *Manager) fileOwedTaskLifecycle(repoID string, instance *session.Instance) {
+	m.installOwedTaskLifecycleNotify(repoID, instance)
+	if instance.OwedOnComplete() != nil {
+		return
+	}
+	if instance.FileOwedOnCompleteIfNotDischarged(&session.PendingOnCompleteData{
+		TaskID:  instance.TaskID,
+		FiledAt: nowFunc(),
+	}) {
+		_ = m.persistOwedTaskLifecycle(repoID, instance)
+	}
+}
+
+// dischargeOwedTaskLifecycle settles the obligation durably. It re-resolves the
+// session by stable id so a same-titled replacement never loses state it does
+// not own, and it is a no-op when the row or the marker is already gone — a
+// killed session's row delete IS the discharge, and a delivery can beat a late
+// drain to the same decision.
+//
+// The in-memory clear installs an in-flight discharge future in the same
+// critical section that takes the marker, so a concurrent NoteAdoptionDelivery
+// arriving while the durable clear is still in flight parks on that future
+// instead of proceeding past a nil marker to a PTY write a failed persist would
+// leave on top of a durable marker the restart re-arms — the stand-down
+// analogue of the future NoteAdoptionDelivery installs for its own notify.
+// CompleteAdoptionDischarge closes the future with the persist result: on
+// success a parked delivery may proceed (the marker is durably gone); on
+// failure it is refused (the durable marker survived) and the in-memory marker
+// is restored for a re-attempt. That restore is why the durable clear is retried
+// by RE-RUNNING the discharge (persistOwedTaskLifecycleDischargeRetryable records
+// a discharge retry keyed on the discharged marker) rather than persisting a
+// snapshot of the cleared row: a snapshot would be retired by a later status
+// checkpoint that re-wrote the restored marker (losing the clear while disk
+// still carries it) and would overwrite a tab mutation that landed after the
+// failed clear. The retry lives in its own map, so those whole-row writes do not
+// retire it; the poll re-runs the discharge against a FRESH row.
+func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
+	m.mu.Lock()
+	inst := m.instances[daemonInstanceKey(repoID, title)]
+	m.mu.Unlock()
+	if inst == nil || inst.ID != sessionID {
+		return
+	}
+	marker, discharge := inst.TakeOwedOnCompleteForDischarge()
+	if marker == nil {
+		return
+	}
+	err := m.persistOwedTaskLifecycleDischargeRetryable(repoID, inst, marker)
+	inst.CompleteAdoptionDischarge(discharge, marker, err)
+}
+
+// installOwedTaskLifecycleNotify wires the adoption discharge to disk: a
+// delivery clears the marker inside NoteAdoptionDelivery's critical section
+// and then fires this callback after unlocking. The callback is the DURABLE
+// half of the discharge, and it returns any persist error so NoteAdoptionDelivery
+// can refuse the PTY write rather than proceed on top of a durable marker the
+// failed write left set. The in-memory retry settleOwed offers is NOT taken
+// here: that retry is drained by the next poll, so a unclean exit before it
+// loses the discharge while leaving the durable marker set, and the
+// agent-server path has no other durable adoption signal. The caller's
+// re-attempted delivery is the retry instead. The callback is in-memory, so it
+// must be re-installed on every marked row a generation materializes — filing
+// does it for live sessions and armOwedTaskLifecyclesLocked does it for
+// restored ones.
+func (m *Manager) installOwedTaskLifecycleNotify(repoID string, instance *session.Instance) {
+	instance.SetOwedOnCompleteNotify(func(i *session.Instance) error {
+		return m.persistOwedTaskLifecycleDischarge(repoID, i)
+	})
+}
+
+// persistOwedTaskLifecycleDischarge is the synchronous, caller-blocking variant
+// of persistOwedTaskLifecycle, used by the adoption-discharge notify. It writes
+// the discharge — the current in-memory row, whose owedOnComplete the delivery
+// has just cleared — and returns any persist error so NoteAdoptionDelivery can
+// propagate it and refuse the PTY write. The agent-server path's only durable
+// adoption signal must land before the caller proceeds, or be honest about not
+// landing; an in-memory-only retry drained by the next poll is exactly the
+// backstop this path has no durable replacement for.
+//
+// Unlike persistOwedTaskLifecycle it does NOT record a settleOwed retry. That
+// retry is a whole-row write of live memory drained by the next poll, so it
+// races the in-memory marker restore NoteAdoptionDelivery performs on this
+// call's failure (the retry would read the restored marker and write it back to
+// disk), and even without that race its in-memory-only bookkeeping is the loss
+// vector the bug exists to close. The retry is the caller's instead: the
+// refused delivery returns an error, the user re-attempts it, and
+// NoteAdoptionDelivery re-runs this write. A unclean exit before that
+// re-attempt loses the in-memory marker and leaves the durable marker set, but
+// the PTY write never landed, so the durable state ("marker set, no churn") is
+// honest — the narrow sub-window the bug report distinguishes from the
+// work-losing one this fixes.
+func (m *Manager) persistOwedTaskLifecycleDischarge(repoID string, instance *session.Instance) error {
+	key := daemonInstanceKey(repoID, instance.Title)
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	if err != nil {
+		return fmt.Errorf("the on_complete discharge for session %q could not be written to disk (the caller's delivery is refused; re-attempt it once the write can land): %w",
+			instance.Title, err)
+	}
+	return nil
+}
+
+// persistOwedTaskLifecycleDischargeRetryable is the stand-down discharge's
+// persist — the retryable twin of persistOwedTaskLifecycleDischarge. The delivery
+// notify (persistOwedTaskLifecycleDischarge) records NO retry: the refused
+// delivery is the retry, and an in-memory settleOwed retry would race the marker
+// restore. The stand-down has no caller to re-attempt it (a hook-timeout decision
+// leaves the session in place and returns), so a transient clear failure must be
+// retried by the poll. But the generic settleOwed retry re-reads the LIVE
+// instance, and CompleteAdoptionDischarge restores the in-memory marker after
+// the failed clear, so a live re-read would write that restored marker back to
+// disk instead of the intended clear — leaving the durable marker set to re-arm
+// a teardown after a restart (a hook-timeout stand-down reloaded with the marker
+// would proceed to archive or kill).
+//
+// The retry therefore lives in its OWN map (m.dischargeOwed, keyed by stable
+// identity) and is RE-RUN as a discharge on the poll (flushDischargeRetry) rather
+// than persisted as a stale snapshot. A snapshot would be retired by a later
+// status checkpoint that re-wrote the restored marker — losing the clear while
+// disk still carries it — and would overwrite a tab mutation that landed after
+// the failed clear with the stale row. Re-running the discharge persists a FRESH
+// row whose marker is cleared, shares the durable verdict with concurrent
+// deliveries through the discharge future, and on success leaves the in-memory
+// marker nil so a later checkpoint cannot re-set it. The retry carries the
+// discharged marker so the flush clears only THAT marker; a marker filed after
+// the stand-down retires this retry (persistOwedTaskLifecycle) and is left alone.
+func (m *Manager) persistOwedTaskLifecycleDischargeRetryable(repoID string, instance *session.Instance, marker *session.PendingOnCompleteData) error {
+	key := daemonInstanceKey(repoID, instance.Title)
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	m.recordDischargeRetry(repoID, key, instance, marker, err)
+	if err != nil {
+		return fmt.Errorf("the on_complete discharge for session %q could not be written to disk "+
+			"(the daemon retries the cleared row on its poll; an unclean exit before it lands would re-arm the teardown): %w",
+			instance.Title, err)
+	}
+	return nil
+}
+
+// recordDischargeRetry keeps a failed stand-down clear eligible for a poll-driven
+// re-run, or retires the obligation when the clear landed. The marker-discharge
+// twin of recordSettlementWrite, but for the dedicated discharge-retry map: a
+// generic settlement's recordSettlementWrite must NOT touch this obligation, or a
+// later whole-row write that re-wrote the restored marker (a status checkpoint,
+// a handoff, a recovery) would lose the clear while disk still carries it.
+// Invoked before the repo start lock is released, like its twin, so completion
+// ordering cannot invert the retry and the write it retries.
+func (m *Manager) recordDischargeRetry(repoID, key string, instance *session.Instance, marker *session.PendingOnCompleteData, err error) {
+	owedKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	if err != nil {
+		if m.dischargeOwed == nil {
+			m.dischargeOwed = make(map[string]dischargeRetryEntry)
+		}
+		m.dischargeOwed[owedKey] = dischargeRetryEntry{repoID: repoID, key: key, instance: instance, marker: marker}
+	} else {
+		delete(m.dischargeOwed, owedKey)
+	}
+	m.mu.Unlock()
+}
+
+// flushDischargeRetry re-runs a stand-down discharge's durable clear on the poll.
+// It takes the marker only while it is still the one the stand-down failed to
+// clear (a marker filed since ret the retry and is left in place), then persists
+// a FRESH row with the marker cleared — not a stale snapshot, so a tab mutation
+// that landed after the failed clear is preserved — and closes the same in-flight
+// discharge future a concurrent NoteAdoptionDelivery parks on, sharing the durable
+// verdict instead of racing it to a PTY write on top of the surviving marker. On
+// success the marker is durably and in-memory gone (so a later checkpoint cannot
+// re-set it) and the retry is retired; on failure the marker is restored and the
+// retry stays for the next tick. When the marker is nil because a delivery or
+// stand-down is still mid-discharge, the flush retries on the next poll rather
+// than retire on a transient nil an in-flight caller may restore.
+func (m *Manager) flushDischargeRetry(entry dischargeRetryEntry) error {
+	opLock := m.opLockFor(entry.key)
+	if !opLock.TryLock() {
+		return nil
+	}
+	defer opLock.Unlock()
+
+	// Re-verify under the lock. Registration can change while the lock is acquired,
+	// and an op raised outside it must not be flattened by this write — the same
+	// fence flushOneOwedSettlement holds for the generic retry.
+	m.mu.Lock()
+	registered := m.instances[entry.key] == entry.instance
+	m.mu.Unlock()
+	if !registered || entry.instance.GetInFlightOp() != session.OpNone {
+		return nil
+	}
+
+	discharge, taken, retry := entry.instance.TakeOwedOnCompleteForDischargeRetry(entry.marker)
+	if !taken {
+		if !retry {
+			// The marker is durably gone (a delivery cleared it) or replaced by a new
+			// filing; the obligation this retry represented is moot.
+			m.mu.Lock()
+			delete(m.dischargeOwed, stableSessionKey(entry.repoID, entry.instance))
+			m.mu.Unlock()
+		}
+		return nil
+	}
+	err := m.persistOwedTaskLifecycleDischarge(entry.repoID, entry.instance)
+	entry.instance.CompleteAdoptionDischarge(discharge, entry.marker, err)
+	if err == nil {
+		m.mu.Lock()
+		delete(m.dischargeOwed, stableSessionKey(entry.repoID, entry.instance))
+		m.mu.Unlock()
+	}
+	return err
+}
+
+// persistOwedTaskLifecycle checkpoints a marker change, but only while THIS
+// instance still owns its row: a kill plus a same-titled re-create hands the key
+// to a different session, and writing the predecessor's snapshot back would
+// resurrect it. persistSettlement cannot express that — the registration
+// re-check must sit inside the same repo-ordered critical section as the write
+// or it reopens exactly the window it exists to close — so this holds the repo
+// lock across both and reuses persistSettlement's write and retry bookkeeping.
+func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Instance) error {
+	key := daemonInstanceKey(repoID, instance.Title)
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	m.recordSettlementWrite(repoID, key, instance, err)
+	// A marker filed here supersedes any stand-down's durable-clear obligation for
+	// this row: the row now carries a fresh marker a pending discharge retry would
+	// clobber, so retire that retry and let the new marker's own lifecycle proceed.
+	// Reads/writes its own map under m.mu, so a poll's flushDischargeRetry cannot
+	// race this retirement past the read that gates it.
+	owedKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	delete(m.dischargeOwed, owedKey)
+	m.mu.Unlock()
+	if err != nil {
+		m.warn().Printf("the on_complete obligation for session %q could not be written to disk "+
+			"(the daemon retries it on its poll; an unclean exit before it lands would lose it): %v",
+			instance.Title, err)
+	}
+	return err
+}
+
+// armOwedTaskLifecyclesLocked is the restart half of the contract: every
+// restored row still carrying the marker gets its notify re-installed and its
+// intent re-parked, so the first unpaused poll tick drains it through
+// applyDeferredTaskSessionLifecycle — the same re-validation and the same
+// fenced teardown the dropped worker was driving. Runs under m.mu, immediately
+// after m.instances is published, from both restoreInstances and refreshLocked.
+//
+// Three marked-row shapes are NOT parked. A tombstoned row belongs to the kill
+// that will finish it — the row delete takes the marker with it. An archived
+// row has already discharged it: archive's own persist drops the marker (the
+// serialize gate), and only the in-memory copy is left for the lifecycle worker
+// to clear once the archive call returns. A refresh inside that window — any
+// session lookup refreshes — is the ordinary order of an on_complete=archive
+// run, not a fault, so it is settled in memory at INFO (#4853). An inert row
+// (never started, or settled startup-unknown) can never reach the drain because
+// the poll returns before it; that marker is settled instead, by a detached
+// writer because the discharge performs storage I/O and m.mu is held.
+func (m *Manager) armOwedTaskLifecyclesLocked() {
+	for key, inst := range m.instances {
+		marker := inst.OwedOnComplete()
+		if marker == nil {
+			continue
+		}
+		repoID, _ := splitDaemonInstanceKey(key)
+		m.installOwedTaskLifecycleNotify(repoID, inst)
+		switch {
+		case inst.UserKilled():
+			// finishUserKill owns this row now; the delete takes the marker.
+		case inst.IsArchived():
+			// Checked before the inert case: SetArchived clears started, so an
+			// archived row would otherwise read as inert and warn on every
+			// archived task run.
+			inst.SetOwedOnComplete(nil)
+			m.info().Printf("task %s: session %q is archived; its on_complete obligation filed at %s is settled",
+				marker.TaskID, inst.Title, marker.FiledAt.Format(time.RFC3339))
+		case !inst.Started() || inst.StartupStateUnknown():
+			m.warn().Printf("task %s: session %q is owed an on_complete teardown filed at %s, but af cannot confirm its runtime (it never started, or its startup state is unknown), so the teardown will not run; the obligation is dropped and the session left in place — check it and archive or kill it by hand if its work is done",
+				marker.TaskID, inst.Title, marker.FiledAt.Format(time.RFC3339))
+			m.launchBackgroundMutation(func(<-chan struct{}) {
+				m.dischargeOwedTaskLifecycle(repoID, inst.ID, inst.Title)
+			})
+		default:
+			if m.deferredTaskLifecycle == nil {
+				m.deferredTaskLifecycle = make(map[string]string)
+			}
+			m.deferredTaskLifecycle[key] = inst.ID
+		}
+	}
 }

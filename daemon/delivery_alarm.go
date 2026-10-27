@@ -40,7 +40,7 @@ func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 	if err == nil {
 		w.lastDeliveredAt = now
 	}
-	if err == nil || errors.Is(err, errTargetBusy) || errors.Is(err, errAtConcurrencyLimit) {
+	if err == nil || errors.Is(err, errTargetBusy) || errors.Is(err, errAtConcurrencyLimit) || errors.Is(err, errTargetLimitReached) {
 		// A success clears the failure run. A deferral (target attached, #1586)
 		// clears it too: it is not a delivery failure, and the pipeline is now
 		// intentionally paused, not broken — so the delivery-failure alarm (#1238)
@@ -49,7 +49,8 @@ func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 		// deliver, so nothing else would reset it). If delivery is genuinely still
 		// broken, the drainer's next real attempt after detach re-stamps the run.
 		//
-		// A concurrency park (#1892) is the same shape of non-failure: the task is
+		// A concurrency park (#1892), and a known target usage-limit park (#4223),
+		// are the same shape of non-failure: the task is
 		// at its own configured cap and the pipeline is working exactly as asked.
 		// Alarming on it would fire the delivery-failure alarm on every healthy
 		// task that ever saturates its cap.

@@ -3,8 +3,6 @@ package tmux
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +27,7 @@ var ErrSessionStillAlive = errors.New("tmux session is still alive")
 
 // ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
 // tmux says the session does not exist. Whether that is a determinate EMPTY or a
-// lost ancestry depends on the caller: see captureSessionProcessTrees.
+// lost ancestry depends on the caller: see CaptureSessionProcessTrees.
 var ErrSessionVanishedBeforeCapture = errors.New("tmux session was gone before its panes could be listed")
 
 // PaneState is what a bounded teardown could ESTABLISH about a tmux session, and
@@ -135,13 +133,36 @@ func (t *TmuxSession) Close() (PaneState, error) {
 // false for interactive teardown (the captured-tree reaper remains asynchronous)
 // and true only when a caller will mutate the worktree immediately afterward.
 func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProcessOutcome) {
+	// Every af-initiated teardown of a tracked session routes here, so marking
+	// before kill-session runs is what lets the status monitor tell "af asked"
+	// from "vanished on its own" (#4472). A capture already in flight during
+	// teardown then reads the mark on its error path. The mark lands on the
+	// CURRENT monitor — scoped to this session generation, so a same-object
+	// restart can neither inherit it nor wipe an old poll's attribution — and
+	// settles on return, which is what lets a later post-settle successful
+	// poll retire a mark whose teardown demonstrably did not take (Codex on
+	// #4473).
+	markedMon, probeAnswered := t.markTeardownInitiated()
+	defer t.settleTeardown(markedMon)
 	var errs []error
 	r := &closeRun{t: t}
+	if !probeAnswered {
+		// The mark's identity probe already spent a full tmuxCommandTimeout
+		// without an answer — the server is wedged, so list-panes and
+		// kill-session would each pay the same deadline for the same
+		// non-answer. Report the run unknown from the probe's own failure
+		// instead of stacking two more budgets onto a wedged Close (Codex on
+		// #4473). No mark was set: no kill-session was ever sent, so no af
+		// request exists to attribute a later vanish to.
+		r.unknown = true
+		errs = append(errs, fmt.Errorf("%w: session identity probe after %s", ErrTmuxTimeout, tmuxCommandTimeout))
+		return r.state(), errors.Join(errs...), closeProcessOutcome{}
+	}
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -171,6 +192,15 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				leaked = nil
 			case exists:
 				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
+				// tmux refused the teardown and answered that the session is live, so
+				// no af request describes it any more — provided the live session is
+				// the generation the monitor polls; a replacement behind the name
+				// does not discharge af's teardown of the bound one (Codex on
+				// #4473). Callers such as the account swap keep monitoring it, and
+				// a later vanish af never asked for must reach ERROR. The timed-out
+				// branches above leave the mark: af asked, and nothing answered
+				// that the request failed.
+				t.clearTeardownMarkForConfirmedGeneration()
 				// Idempotent teardown (#967): a kill-session that fails because the
 				// session is already gone has achieved Close's goal — a dead session is
 				// the desired end state. Only a session that survives the kill is a
@@ -187,6 +217,13 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		}
 	}
 
+	// The process that asked for this teardown is still blocked on its reply
+	// (#5182): it cannot exit inside the grace period, and reaping it would
+	// kill the reply it is waiting to read. It stays IN the captured set —
+	// reapSessionProcesses spares it per-signal while the registry still
+	// tracks it — rather than dropping out here, where a reprieve that ended
+	// mid-reap could never be reconsidered (Codex on #5186).
+
 	// Async so the SIGHUP grace period never adds latency to user-driven
 	// teardown; the daemon and TUI processes are long-lived, so the sweep
 	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
@@ -194,8 +231,8 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	if len(leaked) > 0 {
 		// Close IS the requested teardown (#2765): a caller asked for this session
 		// to die, so every process in its pane tree dying with it is the operation
-		// succeeding, not a leak — most visibly the `af sessions archive --self`
-		// caller, which lives in this very tree and is blocked on this very call.
+		// succeeding, not a leak. The requester is skipped by the reaper itself
+		// while its registration holds — never waited on, never signalled.
 		if waitForProcesses {
 			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		} else {
@@ -307,13 +344,18 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	// a live pane (#703b4a70 follow-up). Clear here and re-latch below only on
 	// conclusive non-blind success.
 	t.setClosedConclusively(false)
-	pid, pidErr := t.panePID()
+	row, pidErr := t.panePID()
+	pid := row.pid
 	var (
 		paneProcess proctree.Process
 		waitForPane bool
 		processErr  error
 	)
-	if pidErr == nil {
+	// A held dead pane's pid is not followed on its own (#4506 review): once tmux
+	// reaped the root, the pid may name an unrelated process. The captured process
+	// set below still holds the root whenever it is still this pane's, and the
+	// bounded reap waits for every process in that set.
+	if pidErr == nil && !row.dead {
 		// Capture the process IDENTITY before kill-session. Polling the bare PID
 		// afterwards confuses both an unreaped zombie and a recycled PID with the
 		// original pane still running (#2103). The process-table identity makes
@@ -404,9 +446,16 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	case len(processes.remaining) > 0:
 		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown",
 			processPIDList(processes.remaining)))
-	case waitForPane && !waitForProcessExit(paneProcess, paneExitWait):
+	case waitForPane && !waitForPaneExitOrRequester(paneProcess, paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.
+		//
+		// A tracked teardown requester is never waited on here (#5182): when it
+		// IS the captured pane root it cannot exit while this teardown's reply
+		// is outstanding, so the wait could only burn paneExitWait to a refusal
+		// its own request caused. It exits when the reply lands — and the wait
+		// re-checks the registry on every poll because registration can land
+		// mid-wait.
 		return refuse(fmt.Errorf("pane process %d is still alive %v after kill-session", pid, paneExitWait))
 	}
 
@@ -522,52 +571,32 @@ func capturePaneProcess(pid int) (proctree.Process, bool, error) {
 	return proctree.Process{}, false, fmt.Errorf("pane process %d still exists but was absent from the process-table snapshot", pid)
 }
 
-// panePID returns the PID of the root process running in the session's pane
-// (the agent program). Must be called before kill-session — afterwards there
-// is nothing left to query.
-func (t *TmuxSession) panePID() (int, error) {
-	// exactTarget forces an exact session match, mirroring ExistsOrUnknown.
-	// (The bare `=name` form returns an empty pane_pid for display-message —
-	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
-	//
-	// Bounded by tmuxCommandTimeout (#1917): this is the FIRST tmux command on
-	// the kill teardown, so an unbounded stall here wedges the kill before
-	// kill-session is even attempted.
-	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_pid}")
-	if err != nil {
-		if ctx.Err() != nil {
-			return 0, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
-		}
-		// Diagnostic-only, deliberately: this is the half of
-		// sessionGoneWithNoPaneObserved that gates a worktree deletion, and
-		// display-message has no `no current target` gap to close. Measured on a
-		// server holding no sessions, it answers exit 0 with EMPTY output — the
-		// branch below — rather than the exit 1 that made has-session and
-		// list-panes need tmuxProvedSessionAbsent (#3469).
-		if missingTmuxSession(err, t.sanitizedName) {
-			return 0, errPaneQueryFoundNoPane
-		}
-		return 0, fmt.Errorf("failed to query pane pid: %w", err)
-	}
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		// tmux answered and named no pane. Measured: this is what a missing
-		// session produces — exit 0, empty output — so it is the one panePID
-		// failure that is evidence of ABSENCE rather than of an unreadable answer.
-		return 0, errPaneQueryFoundNoPane
-	}
-	pid, err := strconv.Atoi(trimmed)
-	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("unexpected pane pid output %q", string(output))
-	}
-	return pid, nil
-}
-
 // waitForProcessExit waits on the pre-teardown process identity, not merely its
 // PID. proctree treats zombies as exited and PID reuse as a different identity,
 // so neither can masquerade as a pane that is still writing (#2103).
 func waitForProcessExit(process proctree.Process, timeout time.Duration) bool {
 	return len(proctree.WaitForExits([]proctree.Process{process}, timeout)) == 0
+}
+
+// waitForPaneExitOrRequester is waitForProcessExit with the late-registration
+// window closed (#5182): the requester registry is consulted on every poll, so
+// a pane root that becomes a tracked requester mid-wait — now blocked on THIS
+// teardown's reply — stops counting as a survivor at once rather than burning
+// the whole bounded wait into a refusal its own request caused.
+func waitForPaneExitOrRequester(process proctree.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if isTeardownRequester(process) {
+			log.InfoLog.Printf("pane process %d (%s) is a teardown requester blocked on this "+
+				"teardown's reply; not counting it as a survivor (#5182)", process.PID, process.Comm)
+			return true
+		}
+		if !proctree.AliveSame(process) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

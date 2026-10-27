@@ -54,6 +54,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -70,7 +71,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
-- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID or name
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
@@ -193,7 +194,7 @@ limit observation, says which identity changed in the session, and waits normall
 when none is usable. Docker account-scoped creates remain supported, but
 automatic Docker replacement is disabled until af can durably identify and reap a
 crash-surviving container and freeze its complete provision plan. An explicit
---account is a permanent pin and is never overridden.
+--account is a pin that automatic switching never overrides.
 
 ```
 af accounts
@@ -863,6 +864,9 @@ Settable keys:
   root_agent.enabled         true | false
   root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
+  web                        compact JSON object of browser-terminal display preferences
+  web.terminal_font_size_phone   number in [4, 32] — xterm font size at the phone breakpoint (default 6.5)
+  web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -915,8 +919,11 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
-is rejected with the location it actually belongs to. Clear an override with
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
+is rejected with the location it actually belongs to. One caveat: a
+per-project branch_prefix is accepted and stored but ignored for now — the
+global prefix applies to every project until #4539 lands the real feature.
+Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
@@ -927,6 +934,8 @@ Examples:
   af config set root_agent.enabled true --project .
   af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
+  af config set web.terminal_font_size_phone 8
+  af config set web.terminal_font_size_desktop 14
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config set default_accounts.codex work --project ~/work/myrepo
@@ -969,8 +978,10 @@ still a present, winning override.
 
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
---project, it clears one migrated global backend setting: docker.mount_agent_credentials,
-ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+--project, it clears one migrated global setting — a network.* key
+(listen_addr, preview_listen_addr, require_token, require_loopback_token,
+cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
@@ -1011,9 +1022,7 @@ materializes nothing — a read-only check.
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means no config defect was found, while a
-non-zero exit names what must be fixed before the next launch. An inconclusive
-read-only directory-access probe does not prove that a later startup can
-regenerate an empty stub; text output warns, and JSON appends uncertain=true.
+non-zero exit names what must be fixed before the next launch.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -1265,6 +1274,14 @@ accumulate silently on a machine running agent-factory:
     residue an abandoned daemon's bind left behind. --fix removes one with
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
+  - directories af's own test harness left under the temp dir when a test run
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1299,6 +1316,12 @@ that the run is unhealthy. A CI step or health probe should fail on the command
 exit code: 1 means unresolved actionable issues remain or a check did not finish
 looking. Advisory warnings alone do not fail the run.
 
+Rows can also carry INFO: a deliberate unknown — something visible but not
+comparable, like a root session the daemon adopted rather than launched, whose
+resolved runtime command therefore was never recorded. An INFO row is neither a
+problem nor an unfinished check; it appears in the report and in summary.info
+in --json output, and never contributes to the exit code.
+
 A check that stops early — for example, the temp-home sweep hits a candidate
 budget on a machine with a very large temp dir — now exits 1 even if it found
 no unhealthy condition. The summary line ends with "INCOMPLETE" naming the
@@ -1310,15 +1333,17 @@ unresolved == 0 means incomplete; unresolved > 0 means actionable issues remain
 (and summary.incomplete may also be non-empty).
 
 High-volume findings are summarized by default so the actionable problem is
-visible first — process findings, abandoned temp homes, and dead-socket
-directories, all of which run to hundreds or thousands on a busy machine. Use
---verbose to show each item behind those summaries.
+visible first — process findings, abandoned temp homes, dead-socket
+directories, and test-harness directories, all of which run to hundreds or
+thousands on a busy machine. Use --verbose to show each item behind those
+summaries. A summary from a check that did not finish reads "at least N … a
+lower bound" in its own row, so its count is never mistaken for the total.
 
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, removing
-stale temp homes, stopping daemons proven to be running a temp-dir binary, and
-removing directories holding nothing but a dead daemon socket — logging each
-action. Ambiguous cases are always reported rather than acted on, and remain
+stale temp homes, stopping daemons proven to be running a temp-dir binary,
+removing directories holding nothing but a dead daemon socket, and removing the
+test-harness directories described above — logging each action. Ambiguous cases are always reported rather than acted on, and remain
 advisory unless another check establishes a specific unhealthy condition.
 
 Exits 1 when unresolved actionable issues remain or summary.incomplete is
@@ -1512,6 +1537,11 @@ Rebind a stable project id to a new checkout path.
 The project id is preserved. Rebinding refuses to take a path already owned by
 another registered project.
 
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.
+
 ```
 af projects rebind <project-id> <path>
 ```
@@ -1618,6 +1648,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -1691,7 +1722,7 @@ af sessions archive [title] [flags]
 
 Attach to a session's terminal
 
-Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).
+Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).
 
 ```
 af sessions attach <title>
@@ -1831,20 +1862,41 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
+
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
 Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
@@ -1994,6 +2046,54 @@ af sessions preview <title> [flags]
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af sessions prune
+
+List disk reclaimable from old archived sessions (dry run)
+
+Report archived sessions older than --older-than, measured from each
+session's archive time.
+
+This is a dry run: it lists each archived session a reclaim would remove
+(title, archive time, allocated bytes) plus a total, and the reasons every
+other session was skipped. af writes nothing — no deletion, no record
+update, no git mutation — so it is safe to run at any time.
+
+Only archived sessions are eligible; live, lost, dead or in-flight sessions,
+archives whose move is incomplete, and worktrees still holding uncommitted or
+ignored files are skipped with their reasons. A session whose origin
+repository is gone is refused too: the archived tree may be the work's last
+copy, so it is reported, not counted reclaimable.
+
+Bytes are ALLOCATED disk space, not apparent file size — sparse holes and
+hard links whose other end lives outside the tree are not counted. It is an
+upper bound on what a reclaim frees: extents shared with a copy-on-write
+reflink clone outside the tree are still counted, so on Btrfs/XFS the free
+space recovered can be less than the total.
+
+The listing reads the running daemon's in-flight claims and will not spawn
+one — a read must not write even a socket or a log. With no daemon up it
+refuses with guidance; pass --daemon-url or start af first.
+
+```
+af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Span every project instead of only the current/--repo one |
+| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af sessions restore
 
 Restore an archived, lost, or dead session
@@ -2051,16 +2151,28 @@ clears the limit state after delivery succeeds.
 
 Before retrying an unconfirmed handoff, inspect its pane: the first submission
 may already have landed, and this command is the operator's explicit decision to
-send the pending mission again. The command fails when neither recovery
-obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
-badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered
 
 ```
-af sessions retry-limit <title>
+af sessions retry-limit <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--delivered` |  | Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it |
 
 **Global flags**
 
@@ -2135,7 +2247,19 @@ canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
-command's basename.
+command's basename. The command runs once, at creation, and af never runs it
+again. If it exits non-zero immediately (a mistyped command, for example),
+tab-create fails with the exit status and the command's last output, and no tab
+is added. Across a daemon/af restart, af reattaches to the pane: a running
+command keeps running, and a finished one keeps its output and records its exit
+status in the tab's "exit" field. A process tab whose tmux session is gone
+entirely restores inert.
+
+In an account-scoped session, af stops a running process tab it did not start
+under the session's account, once, at restart; an account swap stops every
+running process tab. Neither runs the command again, and the tab's exit.stopped_by
+says why ("account-scope" or "account-swap"). A finished process tab with nothing
+left running is kept as it is.
 
 Web tab (--kind web): a URL/iframe tab with NO process — an agent injects a live
 browser view into the user's screen. Point it at a local dev server with --port
@@ -2145,7 +2269,9 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
-The tab persists and reconnects across a daemon/af restart like every other tab.
+The tab persists and reconnects across a daemon/af restart like every other
+tab — for a process tab "reconnect" means reattach-only, never re-running the
+command (see above).
 
 --name sets a process, web, or VS Code tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
@@ -2533,7 +2659,7 @@ af tasks
 **Subcommands**
 
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
-- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID or name
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
@@ -2595,16 +2721,18 @@ af tasks add [flags]
 
 ## af tasks get
 
-Get a task in the current project by ID
+Get a task in the current project by ID or name
 
-Get a task in the current project by ID.
+Get a task in the current project by ID or name.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
 
-With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks get <id>
+af tasks get <id-or-name>
 ```
 
 **Global flags**
@@ -2653,12 +2781,14 @@ Remove a task in the current project
 
 Remove a task in the current project.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
 
-With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks remove <id>
+af tasks remove <id-or-name>
 ```
 
 **Global flags**
@@ -2676,12 +2806,14 @@ Restart an enabled watch task without process overlap
 
 Restart an enabled watch task in the current project. The command waits for the old process tree to exit before starting one replacement, so an edited script is re-read without double-emitting events.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id or name resolves globally.
 
-With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks restart <id>
+af tasks restart <id-or-name>
 ```
 
 **Global flags**
@@ -2703,14 +2835,16 @@ Overdue is derived, never stored: a cron task is overdue when it has gone more t
 
 "Enabled but not armed" means the task is enabled on disk and the running daemon is not holding it: it will not fire until that is fixed. When nothing has reported on it — no daemon running, or one still starting up — the arming state is reported as unknown rather than guessed.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
 
 Pass --json for the same record `af tasks get` returns, in the {data,error} envelope.
 
-With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a Daemon row names it beside the project path, and the schedule verdict is the one the DAEMON derived — a cron expression is evaluated in the scheduler's timezone, and re-deriving it here would answer in this terminal's. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a Daemon row names it beside the project path, and the schedule verdict is the one the DAEMON derived — a cron expression is evaluated in the scheduler's timezone, and re-deriving it here would answer in this terminal's. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks show <id>
+af tasks show <id-or-name>
 ```
 
 **Global flags**
@@ -2728,12 +2862,14 @@ Trigger a task in the current project to run immediately
 
 Trigger a task in the current project to run immediately.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
 
-With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks trigger <id>
+af tasks trigger <id-or-name>
 ```
 
 **Global flags**
@@ -2751,14 +2887,16 @@ Update a task in the current project
 
 Update a task in the current project.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
 
 --repo scopes which task may be updated; it never re-binds one. Pass --project-path to move that task to another existing git repository. The new path becomes the task's working directory and project binding.
 
-With --daemon-url/AF_DAEMON_URL set, the patch is applied on that daemon and never to this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused; --project-path names a path on the DAEMON's host and is sent as typed for it to resolve.
+With --daemon-url/AF_DAEMON_URL set, the patch is applied on that daemon and never to this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused; --project-path names a path on the DAEMON's host and is sent as typed for it to resolve.
 
 ```
-af tasks update <id> [flags]
+af tasks update <id-or-name> [flags]
 ```
 
 **Flags**

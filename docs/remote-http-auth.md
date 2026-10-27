@@ -322,10 +322,12 @@ connects. The web client reads the daemon's answer from `/v1/auth-info` and skip
 its login screen whenever no token is required.
 
 The trade-off is deliberate: `af` ships open rather than closed, and the
-loopback-only `network.listen_addr` is what bounds the blast radius — the tokenless
-posture is only ever allowed to front a listener nothing off-box can reach.
-Exposing the daemon to a network is an explicit act, and it carries the token
-with it: af will not start a network listener without one.
+loopback-only `network.listen_addr` is what bounds the blast radius — out of the
+box, the tokenless posture fronts a listener nothing off-box can reach.
+Exposing the daemon to a network is an explicit act: af serves the bind and
+warns once at daemon start rather than refusing it (see
+[the tokenless network warning](#the-tokenless-network-warning)); carrying the
+token is your decision.
 
 ### Loopback is exempt even with the token on
 
@@ -429,8 +431,13 @@ require_token = true
 request — no rebind, no restart (a raw hand-edit still needs `af daemon restart`).
 Network peers must then present the token
 (401 without it); loopback peers stay exempt on a loopback bind unless you also
-set `network.require_loopback_token = true`. The web client picks the change up on its
-next load and shows its paste-token login. Get the credential with
+set `network.require_loopback_token = true`. The web client has no polling
+loop, so an idle, already-open client stays in the app until an event or a
+reconnect triggers a Snapshot resync; only that resync's 401 flips
+`authRequired` and routes to the paste-token form — an arbitrary request such
+as a config edit surfaces a tab error instead and leaves the app running. The
+login therefore appears on the next Snapshot resync after the flip, not
+immediately. Get the credential with
 `af token show`.
 
 Set it whenever `network.listen_addr` is anything but loopback, unless you genuinely

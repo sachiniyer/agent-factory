@@ -813,6 +813,10 @@ func TestMouse_TransientPreviewUsesTargetSnapshotOwner(t *testing.T) {
 func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	h, alpha, beta := mouseTestHome(t)
 	clock := newFakeClock(h)
+	// A completed, no-op loss check: this test is about clicks, not git.
+	origCheck := killLossCheck
+	t.Cleanup(func() { killLossCheck = origCheck })
+	killLossCheck = func(session.WorktreeCleanupImpact) killLossAssessment { return killLossAssessment{} }
 
 	// Open the kill dialog and click background, then "n or esc to cancel".
 	_, _ = h.handleKill()
@@ -828,10 +832,22 @@ func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
 	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
 
-	// Re-open and click "y/enter to confirm".
+	// Re-open. While the loss checks are pending (#4848) the confirm is
+	// withheld: no yes zone is drawn, and a click resolved to it does nothing.
 	clock.advance(time.Second)
-	_, _ = h.handleKill()
+	_, checkCmd := h.handleKill()
 	require.Equal(t, stateConfirm, h.state)
+	require.NotEmpty(t, h.confirmationOverlay.Pending(), "alpha owns a local worktree, so its kill dialog opens pending")
+	_ = h.View()
+	_, drawn := h.zones.Find(zones.OverlayConfirmYes)
+	assert.False(t, drawn, "a pending dialog must not draw a confirm zone")
+	_, _ = h.handleModalClick(zones.OverlayConfirmYes)
+	assert.Equal(t, stateConfirm, h.state, "clicking yes while pending must not confirm")
+	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "clicking yes while pending must not kill")
+	// Let the (injected, no-op) check land so the dialog is final, then click
+	// "y/enter to confirm".
+	settleKillCheck(t, h, checkCmd)
+	require.Empty(t, h.confirmationOverlay.Pending())
 	cmd := clickZone(t, h, zones.OverlayConfirmYes)
 	assert.Equal(t, stateDefault, h.state)
 	assert.Equal(t, session.Deleting, alpha.GetStatus(),
@@ -892,9 +908,7 @@ func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
 		"precondition: the click seeds the double-click tracker")
 	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
 
-	// Open the kill confirmation through Update — 'D' first highlights the menu
-	// hint and re-emits itself, so it takes two dispatches to reach handleKill.
-	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	// Open the kill confirmation through Update, the real keyboard path.
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
 	require.Equal(t, stateConfirm, h.state, "D opens the kill confirmation")
 	require.Empty(t, h.lastClickZone,
@@ -930,6 +944,43 @@ func TestMouse_SelectionOverlayRowClick(t *testing.T) {
 	assert.Equal(t, stateNew, h.state, "a row click submits the selection")
 	assert.Equal(t, tmux.SupportedPrograms[2], h.pendingProgram,
 		"the clicked row's program is chosen")
+}
+
+// TestMouse_HandoffResolveOverlayRowClick (#4528, Codex): the delivery-resolve
+// picker is the same selection overlay as the program/tab/agent/backend/account
+// ones, so its rows must submit on a click. Without routing, `c` on a
+// confirmable row opened a picker that answered the keyboard and swallowed the
+// mouse — and "Mark delivered" is not a verb to leave mouse-only users unable
+// to reach.
+func TestMouse_HandoffResolveOverlayRowClick(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	target := captureSessionActionTarget(h.store.GetInstances()[0], h.repoID)
+	var confirmed daemon.ConfirmHandoffDeliveryRequest
+	restore := SetHandoffDeliveryConfirmerForTest(func(req daemon.ConfirmHandoffDeliveryRequest) error {
+		confirmed = req
+		return nil
+	})
+	defer restore()
+	h.handoffResolve = handoffResolveState{
+		actions: []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		target:  target,
+	}
+	h.selectionOverlay = overlay.NewSelectionOverlay("Resolve delivery", []string{
+		"Retry send — submit the pending mission again",
+		"Mark delivered — retire the pending mission without resending",
+	})
+	h.selectionOverlay.SetWidth(60)
+	h.state = stateSelectHandoffResolve
+
+	cmd := clickZone(t, h, zones.OverlaySelectRow(1))
+	assert.Equal(t, stateDefault, h.state, "a row click submits the picker")
+	require.NotNil(t, cmd, "the clicked row dispatches its verb")
+	if msg, ok := cmd().(handoffDeliveryConfirmedMsg); ok {
+		assert.NoError(t, msg.err)
+	}
+	assert.Equal(t, target.title, confirmed.Title,
+		"the mark-delivered row confirms against the captured identity")
 }
 
 // TestMouse_SearchOverlayRowClick: clicking a search result selects it and

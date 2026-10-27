@@ -1,16 +1,14 @@
 package agentproto
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/redactx"
+)
 
 type accessTokenTextSpan struct {
 	start int
 	end   int
-}
-
-type percentDecodedByte struct {
-	value       byte
-	sourceStart int
-	sourceEnd   int
 }
 
 // redactAccessTokenRawQuery treats separators and escaping as query grammar,
@@ -45,8 +43,8 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	if keyEnd < 0 {
 		keyEnd = len(pair)
 	}
-	keyView, _ := fullyPercentDecodedView(pair[:keyEnd], true)
-	if strings.EqualFold(percentDecodedText(keyView), AccessTokenQueryParam) {
+	keyView, _ := redactx.PercentDecode(pair[:keyEnd], true)
+	if strings.EqualFold(keyView.Text, AccessTokenQueryParam) {
 		if equals < 0 {
 			return pair + "=" + accessTokenRedaction, true
 		}
@@ -56,16 +54,43 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	// Remaining query text may itself carry a URL or access_token field. Match
 	// that decoded logical text too, but project only the sensitive span back
 	// onto this original pair so neighbouring syntax stays byte-for-byte.
-	return redactPercentEncodedAccessTokenText(pair, true)
+	redacted, found := redactPercentEncodedAccessTokenText(pair, true)
+
+	// A valid %HH escape can overlap the leading characters of an otherwise
+	// literal access_token<...> substring (e.g. %access_token=SECRET, where
+	// %ac is a valid hex pair that consumes the 'a'). The decode-based matcher
+	// above collapses %ac to a single byte, so the decoded view's text no
+	// longer contains the access_token= needle, while the raw pair bytes
+	// still carry a literal access_token=<value> that net/url re-emits
+	// verbatim from RawQuery. Scan the decoded-pass output directly so any
+	// span the decoded matcher redacted stays untouched. Run unconditionally
+	// rather than gating on the decoded scan missing: a co-located pair can
+	// carry both such an overlap and a later literal access_token=, where the
+	// single-anchor decoded matcher anchors at the trailing literal and a
+	// gate would short-circuit this raw scan for the entire pair. The decoded
+	// pass's redacted span is the literal REDACTED marker, which contains no
+	// access_token= needle, so idempotency (not code-path exclusion) keeps
+	// this from reprocessing a span the structured pass already redacted.
+	// redactAccessToken split the query on its field separators before this is
+	// called, so a pair contains no & or ; and the value cannot extend into a
+	// neighbouring field.
+	if rawRedacted, rawFound := redactRawAccessTokenValue(redacted, ""); rawFound {
+		return rawRedacted, true
+	}
+	if found {
+		return redacted, true
+	}
+	return pair, false
 }
 
 // redactPercentEncodedAccessTokenText fully decodes a parser-proven URI
-// component while retaining a byte map to the original representation. The
-// stable view covers nested percent encoding, while the decoder's reducing
-// stack keeps work bounded by the input length.
+// component while retaining a byte map to the original representation — the
+// shared nested decoder in redactx. Its stable view covers nested percent
+// encoding, while the decoder's reducing stack keeps work bounded by the
+// input length.
 func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, bool) {
-	view, _ := fullyPercentDecodedView(raw, plusAsSpace)
-	spans := accessTokenURIValueSpans(percentDecodedText(view))
+	view, _ := redactx.PercentDecode(raw, plusAsSpace)
+	spans := accessTokenURIValueSpans(view.Text)
 	if len(spans) == 0 {
 		return raw, false
 	}
@@ -79,84 +104,50 @@ func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, 
 	return replaceAccessTokenTextSpans(raw, sourceSpans), true
 }
 
-// fullyPercentDecodedView returns the stable decoded text and whether the raw
-// representation itself contained a malformed escape. A suffix-reducing stack
-// resolves escapes exposed by earlier decoding without rescanning the input, so
-// arbitrarily nested encoding still takes linear work. Malformed percent bytes
-// in the stable view are ordinary data at the proven outer URI layer.
-func fullyPercentDecodedView(raw string, plusAsSpace bool) ([]percentDecodedByte, bool) {
-	view := make([]percentDecodedByte, 0, len(raw))
-	malformedRaw := false
-	for i := 0; i < len(raw); i++ {
-		if raw[i] == '%' &&
-			(i+2 >= len(raw) || !isHex(raw[i+1]) || !isHex(raw[i+2])) {
-			malformedRaw = true
-		}
-		current := percentDecodedByte{
-			value:       raw[i],
-			sourceStart: i,
-			sourceEnd:   i + 1,
-		}
-		// '+' belongs only to the outer application/x-www-form-urlencoded
-		// grammar. A plus produced from %2B is decoded data, not syntax to
-		// reinterpret at the next nesting depth.
-		if plusAsSpace && current.value == '+' {
-			current.value = ' '
-		}
-		view = append(view, current)
-
-		for len(view) >= 3 {
-			start := len(view) - 3
-			if view[start].value != '%' {
-				break
-			}
-			high, highOK := hexValue(view[start+1].value)
-			low, lowOK := hexValue(view[start+2].value)
-			if !highOK || !lowOK {
-				break
-			}
-			decoded := percentDecodedByte{
-				value:       high<<4 | low,
-				sourceStart: view[start].sourceStart,
-				sourceEnd:   view[start+2].sourceEnd,
-			}
-			view = append(view[:start], decoded)
-		}
-	}
-	return view, malformedRaw
-}
-
-func isHex(char byte) bool {
-	_, ok := hexValue(char)
-	return ok
-}
-
-func hexValue(char byte) (byte, bool) {
-	switch {
-	case char >= '0' && char <= '9':
-		return char - '0', true
-	case char >= 'a' && char <= 'f':
-		return char - 'a' + 10, true
-	case char >= 'A' && char <= 'F':
-		return char - 'A' + 10, true
-	default:
-		return 0, false
-	}
-}
-
-func percentDecodedText(view []percentDecodedByte) string {
-	text := make([]byte, len(view))
-	for i := range view {
-		text[i] = view[i].value
-	}
-	return string(text)
-}
-
-func percentDecodedBoundary(view []percentDecodedByte, offset, rawLength int) int {
-	if offset >= len(view) {
+// percentDecodedBoundary projects a decoded-view offset to the raw coordinate
+// where that offset begins: the source start of the byte at offset, or the
+// raw length when the offset lands past the view's end — which is what lets a
+// value spanning to the decoded end claim the whole raw tail.
+func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
+	if offset >= len(view.Source) {
 		return rawLength
 	}
-	return view[offset].sourceStart
+	return view.Source[offset].Start
+}
+
+// redactRawAccessTokenValue scans raw — a raw, pre-decode URI component or
+// query pair that net/url re-emits verbatim (RawQuery/RawPath/RawFragment,
+// Opaque) — for a case-insensitive access_token= key and redacts the value
+// span following each one. The value ends at the first byte in terminators,
+// or at the end of raw when terminators is empty or none of its bytes occurs
+// after the '='.
+//
+// This is the raw-bytes mirror of accessTokenURIValueSpans. The decode-based
+// matcher in redactPercentEncodedAccessTokenText needs a literal access_token=
+// needle in the decoded view, but a valid %HH escape (e.g. %ac) can borrow its
+// literal characters from the very word it overlaps: %ac decodes to a single
+// byte 0xAC, so the decoded text loses access_token= while the raw bytes still
+// carry a literal access_token=<value>. Scanning the raw bytes catches the
+// overlap that the decoded view cannot. Callers run the decoded scan first and
+// feed its output here, so a span the decoded pass redacted is the literal
+// REDACTED marker, which contains no access_token= needle — the raw scan can
+// only match a genuine surviving access_token= overlap, so idempotency (not a
+// code-path gate) keeps this from reprocessing a span the structured pass
+// already redacted.
+//
+// Each needle character may also be spelled as a percent escape, nested or
+// not (%5F, %255F, %25%35%46 for '_'; %3D for '='), because the overlap and an
+// in-needle escape combine: in %access%5Ftoken=SECRET the %ac hides the key
+// from the decoded view and the %5F hides it from a literal raw match (#4690).
+// scanRawAccessTokenValues says how that stays linear.
+//
+// terminators is the component's structural separator set (/ ; ? # for path,
+// fragment, and opaque; empty for a query pair, whose separator was already
+// split out), so a value never claims a neighbouring field. The function is
+// iterative so the same component can carry more than one access_token field.
+func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
+	redacted, found, _ := scanRawAccessTokenValues(raw, terminators)
+	return redacted, found
 }
 
 // accessTokenURIValueSpans consumes the rest of the parser-proven URI field.

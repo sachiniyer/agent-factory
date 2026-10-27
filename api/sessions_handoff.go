@@ -31,20 +31,41 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
+
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
 Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.

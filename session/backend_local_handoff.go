@@ -13,7 +13,14 @@ import (
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
 	resolved := resolveProgramForAgent(i, target)
-	program := injectSystemPrompt(resolved, resolveSkillTarget(i, resolved))
+	// A plain handoff never carries the outgoing scope: a scoped session can
+	// only reach this preflight when the target cannot hold an account —
+	// scoped-to-scopable without --account is refused at admission — so the
+	// record will clear i.Account before this command launches. Resolving the
+	// skill against the still-recorded outgoing account would mark a
+	// non-scopable target unresolved and drop the ambient af skill the
+	// replacement pane should read (#4430 review round 7).
+	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, "", ""))
 	program, conversation := planLaunchConversation(i.ID, program)
 	workDir := i.GetWorktreePath()
 	if workDir == "" {

@@ -54,6 +54,10 @@ const (
 	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
 	// hand-edited.
 	cfgStringList
+	// cfgFloat is a fractional scalar — today the [web] terminal font sizes
+	// (#5500), whose 6.5 phone pitch no integer kind can carry. It is written as a
+	// real TOML float (8 → "8.0") so the file stays unambiguous about the type.
+	cfgFloat
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -211,6 +215,14 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"enabled": {kind: cfgBool},
 		"program": {kind: cfgString},
 	}},
+	// The browser client's display preferences (#5500). The leaf form —
+	// `af config set web.terminal_font_size_phone 8` — is what the web terminal's
+	// +/- controls write through SetConfigValue, and the compact-JSON whole-table
+	// form is what the config panes post back.
+	"web": {structured: true, subkeys: map[string]settableLeafSpec{
+		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
+		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
+	}},
 	"keys": {structured: true},
 }
 
@@ -314,14 +326,17 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart is true for every ordinary write: config.toml is read at
+	// startup, so a change applies to af and the daemon on their next start,
+	// exactly like a hand-edit. The exception is a project-scoped branch_prefix
+	// (#4539): stored but never applied, so no restart can apply it and the
+	// field reports false rather than promising one.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -363,6 +378,21 @@ type SetResult struct {
 // the change the user just made, and warning on every unrelated `config set`
 // would train them to ignore it.
 //
+// network.preview_listen_addr is the parallel surface for the web-tab preview
+// listener (#1856). It has NO "other half" pairing: the preview origin never
+// serves the control plane, and its own credential is the per-tab hostname, so
+// the notice depends on preview_listen_addr ALONE and does NOT gate on
+// network.require_token (see PreviewListenerExposureNotice). That notice replaces
+// the control-plane text and the ListenerServesUnauthenticatedNetwork gate for
+// this case, and warns whenever the resulting preview bind is network-reachable
+// — matching this emitter's "warn on every exposed write of the changed key"
+// discipline, so an operator moving an ALREADY network-bound preview between
+// two non-loopback addresses is still warned (the apply-time transition emitter
+// in daemon/config_apply.go handles the once-per-transition INTO exposure, and
+// is not transition-gated for "still exposed, just moving"). The flat alias
+// spelling "preview_listen_addr" canonicalizes to "network.preview_listen_addr"
+// before the switch, so both CLI spellings warn.
+//
 // The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
 // the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
 // gate derives from. Two definitions of "is this exposed" drifting apart is
@@ -372,18 +402,27 @@ func exposureWarning(cfg *Config, key string) string {
 		return ""
 	}
 	key = canonicalConfigKey(key)
-	if key != "network.listen_addr" && key != "network.require_token" {
+	switch key {
+	case "network.listen_addr", "network.require_token":
+		addr := cfg.ListenAddr
+		if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
+			return ""
+		}
+		return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
+			"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
+			"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
+			"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
+			"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
+	case "network.preview_listen_addr":
+		// PreviewListenerExposureNotice is itself non-transition-gated: it returns
+		// a notice whenever cfg.PreviewListenAddr is non-empty and non-loopback,
+		// so a write that moves an already-exposed preview between two non-loopback
+		// addresses still warns — parity with the control-plane case above, which
+		// warns on every exposed write of the changed key.
+		return PreviewListenerExposureNotice(cfg)
+	default:
 		return ""
 	}
-	addr := cfg.ListenAddr
-	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
-		return ""
-	}
-	return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
-		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
-		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
-		"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
-		"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
@@ -426,25 +465,42 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
+	result, _, err := SetGlobalConfigValueWithDigest(key, rawValue)
+	return result, err
+}
+
+// SetGlobalConfigValueWithDigest is SetGlobalConfigValue plus the digest of the
+// config.toml bytes this save left on disk, for the callers that then ask a
+// running daemon to apply them: comparing this against the digest the apply's
+// own load reports is how a save decides whether it may claim the daemon is
+// serving THIS save's value (#4247).
+//
+// The digest is returned BESIDE SetResult rather than on it. SetResult crosses
+// the net/rpc control socket and is the `af config set --json` payload, and gob
+// encodes every exported field whatever its json tag says — so a digest hung on
+// SetResult would silently become part of two wire contracts to serve a
+// comparison that never leaves this process. config.ConfigDigest's own fields
+// are unexported for the same reason.
+func SetGlobalConfigValueWithDigest(key, rawValue string) (*SetResult, ConfigDigest, error) {
 	if err := RetiredThemeKeyError(key); err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+		return nil, ConfigDigest{}, RemovedAutoYesError()
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, unsettableConfigKeyError(key, "")
+		return nil, ConfigDigest{}, unsettableConfigKeyError(key, "")
 	}
 	key = canonicalConfigKey(key)
 	structured := spec.structured && section == ""
 	canonical, encoded, err := canonicalizeConfigValue(key, spec, structured, rawValue)
 	if err != nil {
-		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
+		return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
 	if !structured && spec.validate != nil {
 		if err := spec.validate(leaf, canonical); err != nil {
-			return nil, err
+			return nil, ConfigDigest{}, err
 		}
 	}
 
@@ -454,11 +510,11 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	// PRECONDITION only — the loaded values are deliberately not carried into the
 	// write. See scalarWrite.apply for why (#2412).
 	if _, err := LoadConfig(); err != nil {
-		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
@@ -467,18 +523,19 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
+	var digest ConfigDigest
 	writeErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		var err error
-		result, err = write.apply(locked, prettyPath)
+		result, digest, err = write.apply(locked, prettyPath)
 		return err
 	})
 	if writeErr != nil {
-		return nil, writeErr
+		return nil, ConfigDigest{}, writeErr
 	}
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
-	return result, nil
+	return result, digest, nil
 }
 
 // SetProjectConfigValue is the per-project counterpart of SetGlobalConfigValue
@@ -521,7 +578,8 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 	prettyPath := prettyHomePath(path)
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
+		rawStructured: rawValue}
 
 	var result *SetResult
 	writeErr := WithFileLock(path, func() error {
@@ -537,6 +595,16 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	// to say "that account is not registered yet" at the moment it is typed.
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
+	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself. And
+	// because no restart can ever apply it (the daemon names branches from its
+	// frozen global prefix), the write bypasses the generic restart
+	// result/notice: printing "restart them to apply" for a value that can
+	// never take effect would contradict the warning.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+		result.RequiresRestart = false
 	}
 	return result, nil
 }
@@ -655,7 +723,13 @@ type scalarWrite struct {
 // into a snapshot of the other one, because parseConfigTOML has already
 // produced the exact config this write lands on. Whichever racer writes second
 // now sees the full pairing and warns.
-func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, error) {
+//
+// The second return is the digest of the bytes this write left on disk — the
+// evidence a save needs to tell whether a later apply loaded ITS file or one a
+// competing writer replaced (#4247). It is taken from `updated` at the moment
+// locked.write commits it, so nothing can have re-read or re-encoded it in
+// between.
+func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, ConfigDigest, error) {
 	// Every byte read and written here is the file the caller's lock covers,
 	// reached through the directory it holds open. Reading by path instead would
 	// let a retarget between acquisition and write compute the edit against one
@@ -663,7 +737,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// user is shown.
 	current, err := locked.read()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		return nil, ConfigDigest{}, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
 	current = stripUTF8BOM(current)
 	updated := string(current)
@@ -675,20 +749,24 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	guarded := !isEffectivelyEmptyToml(current)
 	if guarded {
 		if before, err = parseConfigTOML(current, prettyPath); err != nil {
-			return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+			return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
-		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, true)
 		if err != nil {
-			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
 	}
 	switch {
 	case w.structured:
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
-			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
+			return nil, ConfigDigest{}, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
 		}
 	case w.clear:
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
@@ -738,7 +816,24 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// what the exposure judgment below is made against.
 	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
 	if err != nil {
-		return nil, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+	}
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
 	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's
@@ -747,12 +842,16 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// written just above — is a refusal that names what would have moved.
 	if guarded {
 		if drift := configRewriteDrift(before, resulting, w.key, SchemaVersionField); drift != "" {
-			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
 	if err := locked.write([]byte(updated), 0644); err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
+	// Hashed from the same bytes that were just committed, not from a re-read of
+	// the file: a re-read would be a readback, and could only report what some
+	// LATER writer left there.
+	digest := digestConfigBytes([]byte(updated))
 	value := w.canonical
 	if w.structured {
 		value, _ = CurrentValue(resulting, w.key)
@@ -761,7 +860,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	if warn := exposureWarning(resulting, w.key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
-	return result, nil
+	return result, digest, nil
 }
 
 // applyProject is the personal-project counterpart of apply. It reuses the same
@@ -785,7 +884,15 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("refusing to write: the current personal project config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, false)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
 			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)

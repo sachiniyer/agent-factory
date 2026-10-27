@@ -59,12 +59,21 @@ jobs:
     # tests while still compiling the tree and running the fast unit tests. The
     # required PR gates (pr.yml Test + Test (macOS), both -race) run the FULL suite
     # with no -short, so native E2E/integration coverage is unchanged.
+    #
+    # -timeout is explicit on both branches: Go's default is 10m PER PACKAGE, and
+    # the daemon package sits close to it. Run 35205849014 (v1.0.290) measured
+    # daemon at 404.5s, 402.0s and 399.7s in three cells and 600.014s — a panic —
+    # in the fourth, a uniformly slow runner (per-test time summed to 599.4s,
+    # 1.5x its siblings across ~550 tests, no test over 13.4s; it needed ~603s).
+    # -short barely touches daemon (2-3 skips), so both branches get one number.
+    # 20m is 2x that slow-runner run and 3x the ordinary one; only a real wedge
+    # reaches it. scripts/go_test_timeout_test.go keeps every lane explicit.
     - name: Run tests
       run: |
         if [ "${{ matrix.goos }}/${{ matrix.goarch }}" = "linux/amd64" ]; then
-          go test -v ./...
+          go test -v -timeout=20m ./...
         else
-          go test -short -v ./...
+          go test -short -v -timeout=20m ./...
         fi
 
     - name: Build

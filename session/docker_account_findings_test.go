@@ -152,6 +152,8 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 		{name: "env file", args: []string{"--env-file", "repo.env"}, wantErr: "env-file"},
 		{name: "account mount", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}, wantErr: "account mount"},
 		{name: "account volume", args: []string{"-v", "/tmp/other:/af-account"}, wantErr: "account mount"},
+		{name: "account volume equals form", args: []string{"-v=/tmp/other:/af-account"}, wantErr: "account mount"},
+		{name: "account volume equals single path", args: []string{"-v=/af-account/.config"}, wantErr: "account mount"},
 		{name: "volumes from", args: []string{"--volumes-from", "repo-donor"}, wantErr: "--volumes-from"},
 		{name: "volumes from inline", args: []string{"--volumes-from=repo-donor"}, wantErr: "--volumes-from"},
 	}
@@ -621,6 +623,114 @@ func TestDockerAccount_RejectsProtectedTargetsInColonMountForms(t *testing.T) {
 			err := validateAccountDockerRunArgs(tt.args, "codex")
 			require.Errorf(t, err, "a colon-form mount reached the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_RejectsProtectedTargetsInVolumeEqualsForm pins the `-v=`
+// short-option equals form. pflag resolves `-v=<value>` by stripping both `-v`
+// and the `=` together (before it consults the option's kind at all), so a
+// `-v=/af-account/.config` installs exactly the mount `-v /af-account/.config`
+// does. The minus-equals form was previously intercepted by the generic
+// `HasPrefix(arg, "-v") && len(arg) > 2` case, which strips only `-v` and leaves
+// the leading `=`, so accountProtectedPath never matched and the lexical guard
+// accepted a mount over the account boundary. The runtime verifier caught the
+// same input against the running container, but the lexical guard's job is to
+// refuse BEFORE the container is created — its failure here started the
+// container and reaped it, and Docker left a root-owned mountpoint residue
+// inside the account bind mount on the host.
+//
+// The equivalent `-v <path>` (separate) and `-v<path>` (attached, no `=`) forms
+// are already covered by TestDockerAccount_RejectsProtectedTargetsInColonMountForms;
+// this holds the missing `-v=<path>` form to the same standard. The single-path
+// rows are the cases the colon-split fallback inside checkMount does NOT catch
+// (no colon to leave the protected field intact), so they pin the fix itself,
+// while the colon rows are regression checks that the fallback still fires.
+func TestDockerAccount_RejectsProtectedTargetsInVolumeEqualsForm(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "account root", args: []string{"-v=/af-account"}},
+		{name: "account subdirectory anonymous volume", args: []string{"-v=/af-account/.config"}},
+		{name: "account auth file", args: []string{"-v=/af-account/auth.json"}},
+		{name: "runtime home root", args: []string{"-v=/af-home"}},
+		{name: "runtime home subdirectory", args: []string{"-v=/af-home/.config"}},
+		{name: "normalized account root trailing dot", args: []string{"-v=/af-account/."}},
+		{name: "normalized account subdir with redundant segment", args: []string{"-v=/af-account/./auth.json"}},
+		{name: "colon form to account", args: []string{"-v=/tmp/other:/af-account"}},
+		{name: "colon form to account subdir", args: []string{"-v=/tmp/other:/af-account/.config"}},
+		{name: "colon form to runtime home", args: []string{"-v=/tmp/other:/af-home"}},
+		{name: "colon form to runtime home subdir", args: []string{"-v=/tmp/other:/af-home/.config"}},
+		{name: "read-only colon form", args: []string{"-v=/tmp/other:/af-account/.config:ro"}},
+		{name: "relabelled colon form", args: []string{"-v=/tmp/other:/af-home/.config:z"}},
+		{name: "colon form with trailing slash on account", args: []string{"-v=/tmp/other:/af-account/"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a -v= form mount reached the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsHarmlessTargetsInVolumeEqualsForm holds the
+// over-refusal boundary for the `-v=` form. The fix strips the leading `=`, so
+// the check must still accept the paths the colon-form and attached-form tests
+// already allow: harmless destinations and the similarly-named paths that are
+// NOT the account boundary. The #3398 boundary is at-or-under the path, never a
+// substring, so /af-account-cache and /AF-ACCOUNT stay accepted alongside
+// ordinary mounts outside the boundary.
+func TestDockerAccount_AllowsHarmlessTargetsInVolumeEqualsForm(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "harmless anonymous volume", args: []string{"-v=/workspace/data"}},
+		{name: "harmless colon form", args: []string{"-v=/tmp/cache:/workspace"}},
+		{name: "named volume to harmless path", args: []string{"-v=repo-vol:/workspace"}},
+		{name: "similarly named path", args: []string{"-v=/af-account-cache"}},
+		{name: "similarly named path colon form", args: []string{"-v=/tmp/cache:/af-account-cache"}},
+		{name: "another similarly named path", args: []string{"-v=/tmp/cache:/af-accountant"}},
+		{name: "differently cased path", args: []string{"-v=/AF-ACCOUNT"}},
+		{name: "runtime similarly named path", args: []string{"-v=/tmp/cache:/af-homework"}},
+		{name: "harmless colon form with options", args: []string{"-v=/tmp/cache:/workspace:ro"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless -v= mount was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_VolumeEqualsFormMatchesOtherForms pins parity across the
+// three spellings of the same `-v` mount. pflag treats `-v <path>`, `-v<path>`,
+// and `-v=<path>` as the same option with the same value, so the lexical guard
+// must give the same verdict for all three. Before the fix the `-v=` spelling
+// was the lone accept against a protected path while the other two refused.
+func TestDockerAccount_VolumeEqualsFormMatchesOtherForms(t *testing.T) {
+	cases := []struct {
+		name     string
+		onePath  string   // value used for the -v= spelling (single argument)
+		twoArg   []string // -v <value> spelling (two arguments)
+		attached string   // -v<value> spelling (attached, no =)
+	}{
+		{name: "account subdir", onePath: "/af-account/.config", twoArg: []string{"-v", "/af-account/.config"}, attached: "-v/af-account/.config"},
+		{name: "runtime home", onePath: "/af-home", twoArg: []string{"-v", "/af-home"}, attached: "-v/af-home"},
+		{name: "colon form to account", onePath: "/tmp/other:/af-account", twoArg: []string{"-v", "/tmp/other:/af-account"}, attached: "-v/tmp/other:/af-account"},
+		{name: "harmless subdir", onePath: "/workspace/data", twoArg: []string{"-v", "/workspace/data"}, attached: "-v/workspace/data"},
+		{name: "similarly named path", onePath: "/af-account-cache", twoArg: []string{"-v", "/af-account-cache"}, attached: "-v/af-account-cache"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			equalsErr := validateAccountDockerRunArgs([]string{"-v=" + tt.onePath}, "codex")
+			twoArgErr := validateAccountDockerRunArgs(tt.twoArg, "codex")
+			attachedErr := validateAccountDockerRunArgs([]string{tt.attached}, "codex")
+			require.Equalf(t, twoArgErr == nil, equalsErr == nil,
+				"-v= verdict (err=%v) does not match -v <path> verdict (err=%v) for %q", equalsErr, twoArgErr, tt.onePath)
+			require.Equalf(t, attachedErr == nil, equalsErr == nil,
+				"-v= verdict (err=%v) does not match -v<path> verdict (err=%v) for %q", equalsErr, attachedErr, tt.onePath)
 		})
 	}
 }

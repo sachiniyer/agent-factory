@@ -48,11 +48,18 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"pane churn", nil, func(t *testing.T, i *Instance) { i.RecordPaneChurnAtEpoch(clock, i.stateEpoch) }},
 		{"pane churn checkpoint", nil, func(t *testing.T, i *Instance) { i.RecordPaneChurnCheckpointAtEpoch(clock, i.stateEpoch) }},
 		{"clear idle evidence", func(t *testing.T, i *Instance) { i.lastPromptAttemptAt = clock }, func(t *testing.T, i *Instance) { i.ClearIdleEvidence() }},
-		{"idle snapshot", nil, func(t *testing.T, i *Instance) { i.ReconcileIdleEvidence(clock, PromptDelivered, clock) }},
+		{"idle snapshot", nil, func(t *testing.T, i *Instance) {
+			i.ReconcileIdleEvidence(clock, PromptDelivered, clock, clock, clock)
+		}},
 		{"restore failure", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreFailure(3, errors.New("gone")) }},
 		{"clear restore failure", func(t *testing.T, i *Instance) { i.lostRestoreFailure = LostRestoreFailure{Attempts: 3, Error: "gone"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreFailure() }},
 		{"restore failure snapshot", nil, func(t *testing.T, i *Instance) {
 			i.ReconcileLostRestoreFailure(&LostRestoreFailure{Attempts: 3, Error: "gone"})
+		}},
+		{"restore wait", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreWait(2, errors.New("enospc")) }},
+		{"clear restore wait", func(t *testing.T, i *Instance) { i.lostRestoreWait = LostRestoreWait{Attempts: 2, Error: "enospc"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreWait() }},
+		{"restore wait snapshot", nil, func(t *testing.T, i *Instance) {
+			i.ReconcileLostRestoreWait(&LostRestoreWait{Attempts: 2, Error: "enospc"})
 		}},
 		{"root context", nil, func(t *testing.T, i *Instance) { i.ReconcileRootRecreateContext(RootRecreateContextFresh) }},
 		{"root acknowledgement", func(t *testing.T, i *Instance) { i.rootRecreateContext = RootRecreateContextFresh }, func(t *testing.T, i *Instance) { i.AcknowledgeRootRecreateContext() }},
@@ -66,18 +73,20 @@ func TestUpdatedAtMutations(t *testing.T) {
 			_, err := i.SelectAccountAutomatically("", "work")
 			require.NoError(t, err)
 		}},
-		{"account rollback", func(t *testing.T, i *Instance) { i.inFlightOp = OpRespawning; i.Account = "work" }, func(t *testing.T, i *Instance) {
-			require.NoError(t, i.RestoreAccountSelectionUnderResumeFence("personal", false, AgentConversationData{}))
+		{"account rollback", func(t *testing.T, i *Instance) {
+			i.inFlightOp = OpRespawning
+			i.Account = "work"
+			i.accountAgent = "codex"
+		}, func(t *testing.T, i *Instance) {
+			require.NoError(t, i.RestoreAccountSelectionUnderResumeFence("personal", "claude", false, AgentConversationData{}))
 		}},
 		{"clear account swap", func(t *testing.T, i *Instance) { i.pendingAccountSwap = &AccountSwapData{From: "old", To: "new"} }, func(t *testing.T, i *Instance) { i.ClearPendingAccountSwap("old", "new") }},
 		{"account panes", func(t *testing.T, i *Instance) { i.pendingAccountSwap = &AccountSwapData{} }, func(t *testing.T, i *Instance) { require.NoError(t, i.markAccountSwapReplacementPanesStarted()) }},
 		{"add tab", nil, func(t *testing.T, i *Instance) { i.AddTabForTest("extra", TabKindShell) }},
 		{"add web tab fixture", nil, func(t *testing.T, i *Instance) { i.AddWebTabForTest("extra", "https://example.com") }},
-		{"rename tab", nil, func(t *testing.T, i *Instance) { _, err := i.RenameTab(1, "renamed"); require.NoError(t, err) }},
 		{"rename tab by id", nil, func(t *testing.T, i *Instance) { _, err := i.RenameTabByID("web1", "renamed"); require.NoError(t, err) }},
 		{"reorder tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.ReorderTab(1, 2)) }},
 		{"reorder tab by id", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.ReorderTabByID("web1", 2)) }},
-		{"close tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.CloseTab(1)) }},
 		{"close tab by id", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.CloseTabByID("web1")) }},
 		{"drop tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.DropClosedTab(1)) }},
 		{"cleanup roster", nil, func(t *testing.T, i *Instance) {
@@ -106,7 +115,7 @@ func TestUpdatedAtMutations(t *testing.T) {
 			require.NoError(t, err)
 		}},
 		{"program swap under fence", func(t *testing.T, i *Instance) { i.inFlightOp = OpReplacing }, func(t *testing.T, i *Instance) {
-			_, err := i.RecordHandoffSwap("codex", "switch", "", false)
+			_, err := i.RecordHandoffSwap("codex", "codex", "switch", "", false)
 			require.NoError(t, err)
 		}},
 		{"revert program", func(t *testing.T, i *Instance) {

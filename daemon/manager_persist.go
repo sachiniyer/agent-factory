@@ -223,8 +223,8 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 // miss a readable second project it used to catch, i.e. strictly worse than the
 // fail-open being fixed. Caught in review of #3479 bucket 1.
 //
-// Defence in depth today: refreshDaemonInstances runs
-// config.MigrateAllRepoInstancesForDaemonLoad first, which already refuses hard
+// Defence in depth today: refreshDaemonInstances runs the per-repo file cache
+// (config.RepoInstancesFileCache.LoadAll) first, whose loadRepoFile refuses hard
 // on an unreadable per-repo file, so findSession never reaches here in that
 // state (pinned by TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution).
 // Correct on its own terms anyway: an identity guard should not depend on an
@@ -768,10 +768,13 @@ func deleteLateGhostSessionRecord(
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
 // The row remains the retry handle on any error; only a successful delete plus
 // the normal editor fence may remove it.
+//
+// The finalizer is a background mutation, so shutdown both stops its retry loop
+// and joins it; stopAndWaitBackgroundMutationsForShutdown is also how a test
+// joins it before restoring a seam it reads (#4125). A launch refused because
+// shutdown has begun leaves the retained row for the next daemon.
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
-	m.lateGhostCleanupWG.Add(1)
-	if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
-		defer m.lateGhostCleanupWG.Done()
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		var lateErr error
 		select {
 		case <-stop:
@@ -814,9 +817,7 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			case <-timer.C:
 			}
 		}
-	}) {
-		m.lateGhostCleanupWG.Done()
-	}
+	})
 }
 
 // reconcileSettledGhostCleanup gives a synchronous descriptor success the same
