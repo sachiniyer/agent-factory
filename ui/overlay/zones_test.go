@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -262,4 +263,125 @@ func TestConfirmationOverlayPendingRegistersOnlyCancel(t *testing.T) {
 	require.True(t, ok, "the cancel zone stays clickable")
 	line := strings.Split(c.Render(), "\n")[no.Y]
 	assert.Equal(t, "n/esc cancel", cellSliceAt(line, no.X, no.W))
+}
+
+// TestProjectPickerRegistersRowZones pins the #1461 mouse fix: the project
+// picker is the one keyboard-navigable list overlay built as its own widget
+// rather than reusing *SelectionOverlay, so it shipped without the
+// RegisterZones call every sibling picker has — and a left click on any row
+// fell through handleModalClick to a silent swallow. It now registers one
+// full-width zone per visible project row (and the trailing "+ Add project…"
+// row), each sitting on the exact line Render painted it on.
+func TestProjectPickerRegistersRowZones(t *testing.T) {
+	p := pickerFixture() // afterburner, agent-factory, widgets; cursor on widgets
+	p.SetMaxSize(80, 24)
+	reg := zones.NewRegistry()
+	origin := layout.Point{X: 8, Y: 4}
+	p.RegisterZones(reg, origin)
+
+	lines := strings.Split(p.Render(), "\n")
+	// All four navigable rows (three projects + the add row) are visible at
+	// this size, so each must have a zone on the line that renders it.
+	for i := 0; i < p.rowCount(); i++ {
+		r, ok := reg.Find(zones.OverlaySelectRow(i))
+		require.True(t, ok, "row %d must register a zone; got %v", i, reg.IDs())
+		assert.Equal(t, origin.X, r.X, "row %d zone spans the full overlay width", i)
+		line := xansi.Strip(lines[r.Y-origin.Y])
+		if i == len(p.all) {
+			assert.Contains(t, line, "Add project", "the add row's zone sits on its rendered line")
+		} else {
+			assert.Contains(t, line, p.all[i].Name, "row %d's zone sits on the line rendering %q", i, p.all[i].Name)
+		}
+	}
+}
+
+// TestProjectPickerRegistersBudgetedWindowZones: once the list windows, only the
+// visible rows register (keyed by their FULL-LIST indices), exactly like the
+// sibling *SelectionOverlay — a click cannot resolve to a row scrolled off the
+// frame, and cannot resolve to the chrome the windowed rows were replaced with.
+func TestProjectPickerRegistersBudgetedWindowZones(t *testing.T) {
+	projects := make([]Project, 12)
+	for i := range projects {
+		projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
+	}
+	p := NewProjectPickerOverlay(projects, "/repos/p05") // cursor on p05
+	p.SetMaxSize(60, 10)
+	reg := zones.NewRegistry()
+	p.RegisterZones(reg, layout.Point{})
+
+	// The cursor (p05) and a window around it are visible; rows far from it
+	// are not. The add row (index == len(projects)) is scrolled off the top
+	// of the window and must NOT register.
+	for _, hidden := range []int{0, 11, len(projects)} {
+		_, ok := reg.Find(zones.OverlaySelectRow(hidden))
+		assert.False(t, ok, "off-window row %d must not register a zone; got %v", hidden, reg.IDs())
+	}
+	// The cursor's own row is visible and registered.
+	r, ok := reg.Find(zones.OverlaySelectRow(5))
+	require.True(t, ok, "the cursor's row must register; got %v", reg.IDs())
+	lines := strings.Split(p.Render(), "\n")
+	assert.Contains(t, xansi.Strip(lines[r.Y]), "p05", "the cursor row's zone sits on its rendered line")
+}
+
+// TestProjectPickerRegisterZonesEmptyInFormModes: the add and rebind path-input
+// forms have no clickable rows — their only interactive surface is the text
+// field, which a row click could not submit — so they register nothing and a
+// stray click on the form stays swallowed, exactly as it already does in
+// keyboard mode (the keyboard drives the input, not a row).
+func TestProjectPickerRegisterZonesEmptyInFormModes(t *testing.T) {
+	p := pickerFixture()
+	p.SetMaxSize(80, 24)
+	// Enter add mode: list-mode Enter on the add row drops into the form.
+	for range [5]struct{}{} {
+		p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	p.HandleKeyPress(keyEnter())
+	require.True(t, p.adding)
+
+	reg := zones.NewRegistry()
+	p.RegisterZones(reg, layout.Point{})
+	assert.Empty(t, reg.IDs(), "add mode must register no row zones")
+
+	// Rebind mode is the same: a registry-backed row, then `b`.
+	p2 := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_z", MissingPath: true},
+	}, "")
+	p2.SetMaxSize(80, 24)
+	p2.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	require.True(t, p2.rebinding)
+	reg2 := zones.NewRegistry()
+	p2.RegisterZones(reg2, layout.Point{})
+	assert.Empty(t, reg2.IDs(), "rebind mode must register no row zones")
+}
+
+// TestProjectPickerSetSelectedIndexIsClickPrimitive: SetSelectedIndex is the
+// click primitive the sibling *SelectionOverlay exposes — a row index moves the
+// cursor there and the subsequent Enter submits it, and out-of-range indices
+// no-op so a malformed/stale zone cannot move the cursor off the list. The
+// add-row index is a valid target: it drops into add mode, mirroring the
+// keyboard.
+func TestProjectPickerSetSelectedIndexIsClickPrimitive(t *testing.T) {
+	p := pickerFixture() // cursor on widgets (idx 2)
+	p.SetSelectedIndex(0)
+	require.Equal(t, 0, p.selectedIdx, "SetSelectedIndex moves the cursor onto the row")
+	require.True(t, p.HandleKeyPress(keyEnter()), "Enter on a project row submits and closes")
+	proj, ok := p.SelectedProject()
+	require.True(t, ok)
+	assert.Equal(t, "afterburner", proj.Name, "the clicked row's project is chosen")
+
+	// Clicking the add row enters add mode rather than switching.
+	p2 := pickerFixture()
+	p2.SetSelectedIndex(p2.rowCount() - 1) // the add row
+	require.True(t, p2.addRowSelected())
+	require.False(t, p2.HandleKeyPress(keyEnter()), "Enter on the add row enters add mode, not closes")
+	require.True(t, p2.adding, "the add row's click primitive drops into add mode")
+
+	// Out-of-range indices are refused — a stale zone id off the list cannot
+	// move the cursor.
+	p3 := pickerFixture()
+	before := p3.selectedIdx
+	p3.SetSelectedIndex(-1)
+	p3.SetSelectedIndex(p3.rowCount()) // == len(all)+1, past the add row
+	p3.SetSelectedIndex(999)
+	assert.Equal(t, before, p3.selectedIdx, "out-of-range indices must not move the cursor")
 }
