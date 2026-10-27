@@ -55,6 +55,20 @@ var goSurfaces = map[string][]string{
 // surface actually constructs; any type it finds that is missing here fails the
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
+	"StartProposalRequest":          reflect.TypeOf(daemon.StartProposalRequest{}),
+	"AttachProposalRequest":         reflect.TypeOf(daemon.AttachProposalRequest{}),
+	"DetachProposalRequest":         reflect.TypeOf(daemon.DetachProposalRequest{}),
+	"ListProposalsRequest":          reflect.TypeOf(daemon.ListProposalsRequest{}),
+	"GetProposalRequest":            reflect.TypeOf(daemon.GetProposalRequest{}),
+	"AddProposalDocRequest":         reflect.TypeOf(daemon.AddProposalDocRequest{}),
+	"PullProposalChangesRequest":    reflect.TypeOf(daemon.PullProposalChangesRequest{}),
+	"CheckpointProposalRequest":     reflect.TypeOf(daemon.CheckpointProposalRequest{}),
+	"ReadProposalDocRequest":        reflect.TypeOf(daemon.ReadProposalDocRequest{}),
+	"WriteProposalDocRequest":       reflect.TypeOf(daemon.WriteProposalDocRequest{}),
+	"SaveProposalDocRequest":        reflect.TypeOf(daemon.SaveProposalDocRequest{}),
+	"SetProposalPushModeRequest":    reflect.TypeOf(daemon.SetProposalPushModeRequest{}),
+	"HoldProposalPushRequest":       reflect.TypeOf(daemon.HoldProposalPushRequest{}),
+	"SendProposalChangesRequest":    reflect.TypeOf(daemon.SendProposalChangesRequest{}),
 	"AccountLoginRequest":           reflect.TypeOf(daemon.AccountLoginRequest{}),
 	"ListAccountsRequest":           reflect.TypeOf(daemon.ListAccountsRequest{}),
 	"RegisterAccountRequest":        reflect.TypeOf(daemon.RegisterAccountRequest{}),
@@ -70,6 +84,7 @@ var auditedRequests = map[string]reflect.Type{
 	"HandoffSessionRequest":         reflect.TypeOf(daemon.HandoffSessionRequest{}),
 	"KillSessionRequest":            reflect.TypeOf(daemon.KillSessionRequest{}),
 	"ListBackendsRequest":           reflect.TypeOf(daemon.ListBackendsRequest{}),
+	"ListProgramsRequest":           reflect.TypeOf(daemon.ListProgramsRequest{}),
 	"ListTasksRequest":              reflect.TypeOf(daemon.ListTasksRequest{}),
 	"PauseStatusPollRequest":        reflect.TypeOf(daemon.PauseStatusPollRequest{}),
 	"PingRequest":                   reflect.TypeOf(daemon.PingRequest{}),
