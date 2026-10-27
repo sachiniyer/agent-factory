@@ -1714,21 +1714,30 @@ test("a group blocks on a constituent whose own decision is red", async () => {
 });
 
 test("a merged constituent's stale head in a rebuilt group needs no decision", async () => {
-  // The queue rebuilt the group after the constituent merged: the head it
-  // still names as a second parent is now ordinary base history, which no
-  // decision needs to certify.
+  // The constituent landed before this group's decision ran. Under SQUASH its
+  // landing wrote a different commit, so the original head compares diverged
+  // against master — "it was a merged PR's head" is only durable in the
+  // commit's pull-request association, never in ancestry (Codex on #5586).
   const github = mergeGroupGithub({
-    associatedPullRequests: [],
+    associatedPullRequests: [
+      {
+        number: 1466,
+        state: "closed",
+        merged_at: "2026-10-27T08:00:00Z",
+        base: { ref: "master" },
+        head: { sha: CONSTITUENT_HEAD },
+      },
+    ],
     compareStatusByTarget: {
       [GROUP_BASE_PARENT]: "behind",
-      [CONSTITUENT_HEAD]: "behind",
+      [CONSTITUENT_HEAD]: "diverged",
     },
   });
 
   const result = await evaluateGroup(github);
 
   assert.equal(result.state, "pass");
-  assert.match(result.notes.join("\n"), /already master history/);
+  assert.match(result.notes.join("\n"), /PR #1466 already merged to master; its head .* needs no decision/);
 });
 
 test("a group carrying content the queue never assembled fails closed", async () => {
@@ -2005,7 +2014,8 @@ test("a decision that goes red ejects the pull request from the merge queue", as
     mergeQueueEnabled: true,
   });
 
-  assert.deepEqual(github.dequeuedEntries, ["MQE_1"]);
+  // dequeuePullRequest's id is the PULL REQUEST node, not the queue entry's.
+  assert.deepEqual(github.dequeuedEntries, ["PR_node_1465"]);
 });
 
 test("a red decision on a pull request that is not queued writes no dequeue", async () => {
@@ -2036,6 +2046,7 @@ test("a queue-landed merge re-raises master verification", async () => {
       number: 1465,
       merged: true,
       merge_commit_sha: MERGE_SHA,
+      base: { ref: "master" },
       head: {
         sha: HEAD_SHA,
         ref: "gate-queue-landed",
@@ -2070,6 +2081,36 @@ test("an unmerged closed event verifies nothing", async () => {
 
   assert.equal(result.verified, false);
   assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+// A closed event fires for a merge into ANY branch, but this step re-raises
+// master's verification set — a release-branch merge must not dispatch five
+// master workflows on a sha master's checkout cannot diff (Codex on #5586).
+test("a merge into a non-master branch verifies nothing", async () => {
+  const github = fakeGateGithub();
+  const context = fakeContext({
+    pull_request: {
+      number: 1465,
+      merged: true,
+      merge_commit_sha: "4444444444444444444444444444444444444444",
+      base: { ref: "release" },
+      head: {
+        sha: HEAD_SHA,
+        ref: "release-work",
+        repo: { full_name: "sachiniyer/agent-factory" },
+      },
+    },
+  });
+
+  const result = await autoGate.verifyMergeQueueLanding({
+    github,
+    context,
+    core: fakeCore(),
+  });
+
+  assert.equal(result.verified, false);
+  assert.deepEqual(github.dispatchedWorkflows, []);
+  assert.deepEqual(github.deletedRefs, []);
 });
 
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
@@ -18125,7 +18166,7 @@ function fakeGateGithub({
           throw dequeueError;
         }
         github.operations.push("merge-queue:dequeue");
-        github.dequeuedEntries.push(variables.entryId);
+        github.dequeuedEntries.push(variables.pullRequestId);
         return { dequeuePullRequest: { clientMutationId: null } };
       }
       if (query.includes("query MergeQueueEntry")) {
@@ -18135,7 +18176,14 @@ function fakeGateGithub({
           Object.prototype.hasOwnProperty.call(override, "mergeQueueEntry")
             ? override.mergeQueueEntry
             : mergeQueueEntry;
-        return { repository: { pullRequest: { mergeQueueEntry: entry } } };
+        return {
+          repository: {
+            pullRequest: {
+              id: override.id || `PR_node_${variables.number}`,
+              mergeQueueEntry: entry,
+            },
+          },
+        };
       }
       if (query.includes("query MergeQueueEjections")) {
         github.ejectionReads += 1;

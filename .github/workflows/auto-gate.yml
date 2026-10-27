@@ -508,7 +508,8 @@ jobs:
           vars.AUTO_GATE_MERGE_QUEUE == 'true' &&
           github.event_name == 'pull_request_target' &&
           github.event.action == 'closed' &&
-          github.event.pull_request.merged == true
+          github.event.pull_request.merged == true &&
+          github.event.pull_request.base.ref == 'master'
         uses: actions/github-script@v8
         with:
           github-token: ${{ github.token }}

@@ -1935,6 +1935,7 @@ const MERGE_QUEUE_ENTRY_QUERY = `
   query MergeQueueEntry($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $number) {
+        id
         mergeQueueEntry { id }
       }
     }
@@ -1952,8 +1953,8 @@ const MERGE_QUEUE_ENQUEUE_MUTATION = `
   }`;
 
 const MERGE_QUEUE_DEQUEUE_MUTATION = `
-  mutation DequeuePullRequest($entryId: ID!) {
-    dequeuePullRequest(input: {id: $entryId}) {
+  mutation DequeuePullRequest($pullRequestId: ID!) {
+    dequeuePullRequest(input: {id: $pullRequestId}) {
       clientMutationId
     }
   }`;
@@ -1992,9 +1993,11 @@ const MERGE_QUEUE_EJECTIONS_QUERY = `
 // content — the shape a hand-pushed commit on a queue branch would take.
 //
 // Each candidate second parent is either an open master pull request's
-// current head — which must then carry its own passing decision — or already
-// base history (a merged constituent's squash commit still names its old head
-// as a second parent once the queue has rebuilt), which needs no decision.
+// current head — which must then carry its own passing decision — or a head
+// that needs none: a constituent that already merged (recognized by the
+// commit's pull-request association, never by ancestry — a SQUASH landing
+// writes a different commit, so the original head is diverged, not base
+// history; Codex on #5586), or ordinary base history.
 async function mergeGroupConstituentHeads({ github, context, headSha, baseRefName, subject }) {
   const { owner, repo } = context.repo;
   const containedInBase = async (sha) => {
@@ -2124,6 +2127,34 @@ async function evaluateMergeGroup({ github, context, core, headSha, baseRefName 
     for (const candidate of shape.candidateShas) {
       const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: candidate });
       if (pulls.length === 0) {
+        // A constituent that merged before this decision ran: the queue may
+        // still carry its head as a second parent in a not-yet-rebuilt group.
+        // Under SQUASH the landed commit is a different sha, so ancestry of
+        // the original head is diverged — the association read is the only
+        // place "this sha was a merged PR's head" is durable.
+        const associated = await retryRead(
+          `could not enumerate pull requests at merge-group candidate ${candidate}`,
+          () =>
+            github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: candidate,
+              per_page: 100,
+            }),
+        );
+        const landed = associated.find(
+          (pull) =>
+            normalizeHeadSha(pull?.head?.sha) === candidate &&
+            pull?.base?.ref === "master" &&
+            pull?.merged_at,
+        );
+        if (landed) {
+          notes.push(
+            `constituent PR #${landed.number} already merged to ${baseRefName}; ` +
+              `its head ${candidate} needs no decision`,
+          );
+          continue;
+        }
         const comparison = await retryRead(
           `could not compare ${baseRefName} with merge-group candidate ${candidate}`,
           () =>
@@ -2236,17 +2267,23 @@ async function evaluateMergeGroup({ github, context, core, headSha, baseRefName 
   return { state: conclusion === "success" ? "pass" : "blocked", blockers, notes, checkRunId: write.checkRunId };
 }
 
-// The queue entry a pull request currently holds, or null. Reads never fabricate
-// membership: an entry the API cannot show is treated as absent, and the
-// enqueue call itself is the membership write with its own expected-head guard.
-async function mergeQueueEntryId({ github, context, number, subject }) {
+// The queue membership a pull request currently holds, or null. Reads never
+// fabricate membership: an entry the API cannot show is treated as absent, and
+// the enqueue call itself is the membership write with its own expected-head
+// guard. The pull-request node id comes back too — dequeuePullRequest's `id`
+// is the PULL REQUEST, not the entry (Codex on #5586).
+async function mergeQueueMembership({ github, context, number, subject }) {
   const { owner, repo } = context.repo;
   const response = await retryRead(
     `could not read the merge-queue entry for PR #${number}`,
     () => github.graphql(MERGE_QUEUE_ENTRY_QUERY, { owner, repo, number: Number(number) }),
     subject,
   );
-  return response?.repository?.pullRequest?.mergeQueueEntry?.id || null;
+  const pullRequest = response?.repository?.pullRequest;
+  if (!pullRequest?.mergeQueueEntry?.id) {
+    return null;
+  }
+  return { entryId: pullRequest.mergeQueueEntry.id, pullRequestId: pullRequest.id };
 }
 
 // How many times THIS head has been removed from the merge queue, counted off
@@ -2378,18 +2415,18 @@ async function ensureMergeQueueCapComment({ github, context, core, number, headS
 // backstop for what the write missed, and Auto Gate red keeps meaning "a
 // merge decision went wrong".
 async function dequeueIfQueued({ github, context, core, number, reason, subject }) {
-  let entryId;
+  let membership;
   try {
-    entryId = await mergeQueueEntryId({ github, context, number, subject });
+    membership = await mergeQueueMembership({ github, context, number, subject });
   } catch (error) {
     core.warning(`could not read merge-queue membership for PR #${number}: ${formatError(error)}`);
     return { dequeued: false };
   }
-  if (!entryId) {
+  if (!membership) {
     return { dequeued: false };
   }
   try {
-    await github.graphql(MERGE_QUEUE_DEQUEUE_MUTATION, { entryId });
+    await github.graphql(MERGE_QUEUE_DEQUEUE_MUTATION, { pullRequestId: membership.pullRequestId });
     core.notice(`Dequeued PR #${number}: ${reason}.`);
     return { dequeued: true };
   } catch (error) {
@@ -2514,7 +2551,11 @@ async function dispatchMasterVerification({ github, context, core, verify_sha, p
 // dispatches verify (#5585).
 async function verifyMergeQueueLanding({ github, context, core }) {
   const pull = context.payload?.pull_request;
-  if (!pull || pull.merged !== true) {
+  // Master merges only: a closed event fires for a merge into ANY branch, but
+  // this step re-raises master's verification set — an unrelated branch's
+  // merge would dispatch five master workflows and hand docs.yml a merge sha
+  // its master checkout cannot diff (Codex on #5586).
+  if (!pull || pull.merged !== true || pull.base?.ref !== "master") {
     return { verified: false };
   }
   const mergeSha = normalizeHeadSha(pull.merge_commit_sha);
