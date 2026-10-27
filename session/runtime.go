@@ -97,6 +97,12 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// Branch is the git branch the daemon named for this session (its frozen
+	// branch_prefix over the title). Off-box runtimes hand it to the
+	// agent-server so the in-sandbox worktree uses exactly this name instead of
+	// re-deriving it from the host's own config, and the instance records it at
+	// create (#5571 W2.4). Empty leaves the agent-server to derive it.
+	Branch string
 	// Account scopes this session to a registered credential account (#3082), for
 	// the off-box kinds that can carry one. Zero value means unscoped.
 	//
@@ -134,6 +140,9 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
+	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
+	// recorded on the new Instance so surfaces show it from the first frame.
+	Branch string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session

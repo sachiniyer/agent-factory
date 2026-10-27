@@ -393,6 +393,7 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
 | `--program` | `string` | Agent program to run (default: the configured default_program) |
 | `--program-resolved` |  | Treat --program as an already-resolved runtime command |

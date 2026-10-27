@@ -252,6 +252,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
 	}
+	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no launch-side identity comparison: there is none
 	// here — policy and the agent-server effect are derived from the same

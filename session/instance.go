@@ -342,6 +342,9 @@ type Instance struct {
 	// direct constructor that should resolve the value when provisioning begins.
 	branchPrefix         string
 	branchPrefixResolved bool
+	// branchName is a caller-chosen branch that overrides the prefix+title
+	// derivation for a fresh local worktree (InstanceOptions.BranchName).
+	branchName string
 
 	// carriedConversation is a provider conversation a PREVIOUS record held that
 	// this create should come up on instead of starting a new one (#2616). It
