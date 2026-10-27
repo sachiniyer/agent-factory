@@ -146,6 +146,13 @@ type lostRestoreState struct {
 	// counter has moved PAST it — i.e. a poll actually got an answer out of the new
 	// runtime. Never a timestamp: see the note above the state type.
 	observedAtSpawn uint64
+	// confirmCountsFlap marks a restore armed by the AUTOMATIC lost-restore
+	// loop: only its confirmation feeds the flap bound (#5238). A manual
+	// restore arms the same confirmation gate but resets the flap window
+	// instead — the operator's explicit off-ramp must not be charged against
+	// the automatic bound. Limit-resume and account-swap respawns never arm a
+	// lost-restore confirmation at all, so they cannot count by construction.
+	confirmCountsFlap bool
 	// remoteLogged dedupes the "not restoring a remote session" note to once
 	// per Lost episode.
 	remoteLogged bool
@@ -258,6 +265,13 @@ func (m *Manager) RestoreLostSessions() {
 				entry:    entry{key: key, repoID: repoID, instance: inst},
 				attempts: st.restoreAttempts(),
 			})
+			// One confirmed automatic restore is one flap-cycle datapoint: the
+			// bound fires if enough of them cluster inside the window (#5238).
+			// Manual arms carry confirmCountsFlap=false, and limit-resume /
+			// account-swap respawns never arm — neither can feed the history.
+			if st.confirmCountsFlap {
+				m.noteLostRestoreConfirmationLocked(stateKey, nowFunc())
+			}
 		}
 		delete(m.lostRestoreStates, stateKey)
 		episodeRetired = append(episodeRetired, entry{key: key, repoID: repoID, instance: inst})
@@ -265,6 +279,11 @@ func (m *Manager) RestoreLostSessions() {
 	for key := range m.lostRestoreStates {
 		if _, ok := live[key]; !ok {
 			delete(m.lostRestoreStates, key)
+		}
+	}
+	for key := range m.lostRestoreConfirmations {
+		if _, ok := live[key]; !ok {
+			delete(m.lostRestoreConfirmations, key)
 		}
 	}
 	m.mu.Unlock()
@@ -398,6 +417,12 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	confirmedPriorAttempts := 0
 	if st.awaitingConfirm && m.confirmedAliveSinceSpawnLocked(repoID, inst, st) {
 		confirmedPriorAttempts = st.restoreAttempts()
+		// The same confirmation the sweep records for a still-live row — this
+		// runtime answered enough polls, then died before a live poll could
+		// retire the episode. One datapoint either way (#5238).
+		if st.confirmCountsFlap {
+			m.noteLostRestoreConfirmationLocked(stateKey, nowFunc())
+		}
 		st = &lostRestoreState{}
 		m.lostRestoreStates[stateKey] = st
 	}
@@ -499,6 +524,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.clearRemoteLoss(stableSessionKey(repoID, inst))
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
+		// Deliberately NOT clearing lostRestoreConfirmations here: the flap
+		// history is the bound's only memory of prior restore-die cycles, and a
+		// lucky blip-heal is not an operator intervention — clearing on an
+		// automatic heal would let a flapping session reset its own bound
+		// (#5238). The manual restore.go path is the off-ramp that clears it.
 		m.mu.Unlock()
 		if err := m.persistSettlement(repoID, key, inst); err != nil {
 			m.warn().Printf("restore of lost session %q was confirmed alive but its healed state is not yet durable: %v", inst.Title, err)
@@ -532,6 +562,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		//
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		//
+		// The confirmed-flap bound outranks preservation (#5238 review): a
+		// runtime already restored-confirmed-then-died enough times gets the
+		// terminal verdict NOW, before this arm can spend another pass — and
+		// hold the watch-task slot — on a preserve push that may keep failing
+		// under its own retry policy.
+		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
+			return
+		}
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
 			// The durable terminal verdict is a session fact, safe to read
 			// before the state lock — the same discipline lostRestoreFailed
@@ -655,6 +694,16 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.clearLostRestoreWaitDurable(repoID, inst)
 	}
 
+	// The last gate before the irreversible respawn, after the cheaper verdicts
+	// above: enough CONFIRMED restores inside the window means this runtime is
+	// not surviving even though every spawn lands (#5238). The check sits here,
+	// not at the top of the function, so a remote whose Lost mark was a blip the
+	// sandbox probe just healed never gets charged a cycle — and an arm on the
+	// very pass that confirms the previous cycle is included in the count.
+	if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
+		return
+	}
+
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
@@ -727,7 +776,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	}
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
-	attempt := m.armRestoreConfirmation(repoID, inst)
+	attempt := m.armRestoreConfirmation(repoID, inst, lostRestoreAutomatic)
 	m.info().Printf("restore of lost session %q (repo %s) started attempt %d: agent re-spawned; awaiting liveness confirmation", inst.Title, repoID, attempt)
 }
 
@@ -756,7 +805,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 // so a successor's zeroed counter could never advance past a value its
 // predecessor had earned, and the sweep kept a state that belonged to a session
 // the user had already discarded.
-func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) int {
+func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance, trigger lostRestoreTrigger) int {
 	// A spawn that returned proves the environment answered this attempt —
 	// any environmental wait it was showing is stale regardless of how the
 	// confirmation window ends. Make the clear durable: the caller's write
@@ -772,6 +821,15 @@ func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) 
 	}
 	st.awaitingConfirm = true
 	st.observedAtSpawn = m.aliveObservations[key]
+	// Only an AUTOMATIC restore's confirmation feeds the flap bound (#5238).
+	// The manual RPC arms the same confirmation gate but is the operator's
+	// off-ramp, so it resets the flap window instead: the cleared history is
+	// what keeps an explicit restore from immediately re-tripping a bound the
+	// operator is actively working around.
+	st.confirmCountsFlap = trigger == lostRestoreAutomatic
+	if trigger == lostRestoreManual {
+		delete(m.lostRestoreConfirmations, key)
+	}
 	return st.restoreAttempts()
 }
 
@@ -896,10 +954,14 @@ func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Ins
 		// A daemon restart drops the in-memory retry map but deliberately keeps
 		// the terminal session fact: an explicit retry's failure continues the
 		// recorded count and stays terminal rather than promising an automatic
-		// retry the durable gate refuses.
+		// retry the durable gate refuses. The floor matters: a persisted
+		// failure's Attempts is the evidence that earned the verdict, not a
+		// structural budget burn — the flap bound records 4 confirmations, and
+		// seeding 4 would arm "retrying in …" for a retry LostRestoreGaveUp
+		// refuses to run (#5238 review).
 		if persistedFailure != nil {
-			st.consecutiveFailures = persistedFailure.Attempts
-			st.totalAttempts = persistedFailure.Attempts
+			st.consecutiveFailures = max(persistedFailure.Attempts, lostRestoreMaxAttempts)
+			st.totalAttempts = st.consecutiveFailures
 		}
 		m.lostRestoreStates[stateKey] = st
 	}
