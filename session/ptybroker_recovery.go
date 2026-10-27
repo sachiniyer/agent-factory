@@ -468,3 +468,53 @@ func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot)
 		s.wake()
 	}
 }
+
+// paneDeathPollInterval is how often a live capture asks whether its pane has
+// died. A var so tests can compress it.
+var paneDeathPollInterval = time.Second
+
+// watchPaneDeath notices a watched pane dying under a live capture (#5618).
+//
+// tmux keeps pipe-pane attached to a remain-on-exit dead pane, so the capture
+// never EOFs: readLoop never exits and redialLoop — the only other driver of the
+// dead-pane repaint (#5330) — never runs. Death must therefore be polled. One
+// bounded display-message per interval per live capture, none per frame; the
+// watcher lives exactly as long as the capture it was started with (quit is
+// closed by that capture's teardown).
+//
+// On death it latches captureEnded, exactly as a spontaneous readLoop exit
+// would, and runs the guarded recovery: that stops the stale capture, arms the
+// barrier, finds the pane dead on restart, and releases every attached
+// subscriber onto the dead screen. The capture is not restarted, so the watcher
+// ends there; a later subscribe consults PaneDead up front.
+func (b *ptyBroker) watchPaneDeath(quit <-chan struct{}) {
+	t := time.NewTicker(paneDeathPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-b.closedCh:
+			return
+		case <-t.C:
+		}
+		if !b.ch.PaneDead() {
+			continue
+		}
+		b.mu.Lock()
+		select {
+		case <-quit: // a teardown replaced this capture while we were asking
+			b.mu.Unlock()
+			return
+		default:
+		}
+		if b.closed || !b.capturing {
+			b.mu.Unlock()
+			return
+		}
+		b.captureEnded = true
+		b.mu.Unlock()
+		b.recoverDeadUpstream()
+		return
+	}
+}
