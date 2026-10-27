@@ -16,10 +16,13 @@ import (
 	"strings"
 )
 
-// SnapshotRef is the private ref the snapshot commit is bundled under. It lives
-// outside refs/heads and refs/stash so nothing in the source repo — and no
-// sibling worktree sharing it — can observe or consume it.
-const SnapshotRef = "refs/af-move/snapshot"
+// SnapshotRef returns the ref the snapshot commit is bundled under, keyed per
+// session. Everything under refs/ except refs/worktree/, refs/bisect/ and
+// refs/rewritten/ is shared by every worktree of the repo, so a fixed name
+// would let two concurrent moves clobber each other.
+func SnapshotRef(sessionKey string) string {
+	return "refs/af-move/" + sessionKey + "/snapshot"
+}
 
 const snapshotMessage = "af: move snapshot (uncommitted + untracked work)"
 
@@ -36,7 +39,9 @@ type Snapshot struct {
 	// Dirty reports whether Commit differs from Head, i.e. whether the sandbox
 	// must overlay uncommitted work after seeding the branch.
 	Dirty bool
-	// BundlePath is a git bundle carrying Branch and SnapshotRef. The caller
+	// Ref is the ref name the snapshot commit carries inside the bundle.
+	Ref string
+	// BundlePath is a git bundle carrying Branch and Ref. The caller
 	// owns it and removes it with Cleanup.
 	BundlePath string
 }
@@ -64,10 +69,14 @@ func (s *Snapshot) OverlayCommand() string {
 // any shared ref: the working tree is captured through a throwaway index file.
 // .gitignored files are deliberately not captured — they are the move
 // script's job.
-func TakeSnapshot(ctx context.Context, worktree, branch, dir string) (*Snapshot, error) {
+func TakeSnapshot(ctx context.Context, worktree, branch, sessionKey, dir string) (*Snapshot, error) {
 	if strings.TrimSpace(branch) == "" {
 		return nil, fmt.Errorf("move snapshot: session has no branch")
 	}
+	if !validSessionKey(sessionKey) {
+		return nil, fmt.Errorf("move snapshot: invalid session key %q", sessionKey)
+	}
+	ref := SnapshotRef(sessionKey)
 	head, err := git(ctx, worktree, nil, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return nil, fmt.Errorf("move snapshot: branch %q not found in %s: %w", branch, worktree, err)
@@ -121,22 +130,23 @@ func TakeSnapshot(ctx context.Context, worktree, branch, dir string) (*Snapshot,
 		}
 	}
 
-	// The snapshot commit is dangling; bundling needs a ref. Name it in the
-	// private namespace for the bundle's lifetime only.
-	if _, err := git(ctx, worktree, nil, "update-ref", SnapshotRef, commit); err != nil {
-		return nil, err
+	// The snapshot commit is dangling; bundling needs a ref, per session, for the
+	// bundle's lifetime only. The empty old value makes creation fail rather than
+	// overwrite a ref another move (or a crashed earlier one) left behind.
+	if _, err := git(ctx, worktree, nil, "update-ref", ref, commit, ""); err != nil {
+		return nil, fmt.Errorf("move snapshot: %s already exists (another move of this session in progress, or one that crashed; remove it with `git update-ref -d %s`): %w", ref, ref, err)
 	}
-	defer git(ctx, worktree, nil, "update-ref", "-d", SnapshotRef) //nolint:errcheck
+	defer git(ctx, worktree, nil, "update-ref", "-d", ref) //nolint:errcheck
 	f, err := os.CreateTemp(dir, "af-move-*.bundle")
 	if err != nil {
 		return nil, err
 	}
 	f.Close()
-	if _, err := git(ctx, worktree, nil, "bundle", "create", f.Name(), "refs/heads/"+branch, SnapshotRef); err != nil {
+	if _, err := git(ctx, worktree, nil, "bundle", "create", f.Name(), "refs/heads/"+branch, ref); err != nil {
 		os.Remove(f.Name())
 		return nil, fmt.Errorf("move snapshot: bundling failed: %w", err)
 	}
-	return &Snapshot{Branch: branch, Head: head, Commit: commit, Dirty: commit != head, BundlePath: f.Name()}, nil
+	return &Snapshot{Branch: branch, Head: head, Commit: commit, Dirty: commit != head, Ref: ref, BundlePath: f.Name()}, nil
 }
 
 func git(ctx context.Context, dir string, env []string, args ...string) (string, error) {
@@ -149,4 +159,17 @@ func git(ctx context.Context, dir string, env []string, args ...string) (string,
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// validSessionKey accepts only characters that are safe in a ref component.
+func validSessionKey(k string) bool {
+	if k == "" || len(k) > 128 {
+		return false
+	}
+	for _, r := range k {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }

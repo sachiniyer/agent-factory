@@ -7,27 +7,38 @@
 #
 # stdin : JSON — session_id, title, branch, source_worktree, host,
 #         dest_workspace, account (optional)
-# env   : AF_SSH — the exact ssh command af uses for this host
+# env   : AF_SSH       ssh command WITHOUT the destination (options only)
+#         AF_SSH_DEST  the destination (user@host or an ssh alias)
+#         AF_SSH_FULL  the complete command incl. destination. For a free-form
+#                      sandbox.ssh target AF_SSH and AF_SSH_DEST are EMPTY and
+#                      only this is set — see the fallback at the bottom.
 set -eu
 
 spec=$(cat)
 field() { printf '%s' "$spec" | python3 -c 'import json,sys; print(json.load(sys.stdin)["'"$1"'"])'; }
 src=$(field source_worktree)
 dest=$(field dest_workspace)
-host=$(field host)
+if [ -z "${AF_SSH_DEST:-}" ]; then
+  # Free-form target: rsync -e cannot be used, so pipe tar over AF_SSH_FULL.
+  for f in "$src"/.env*; do
+    [ -f "$f" ] || continue
+    tar -C "$src" -c "$(basename "$f")" | $AF_SSH_FULL "tar -C '$dest' -x"
+  done
+  exit 0
+fi
 
 # 1. .env files from the worktree root.
 for f in "$src"/.env*; do
   [ -f "$f" ] || continue
-  rsync -a -e "$AF_SSH" "$f" "$host:$dest/"
+  rsync -a -e "$AF_SSH" "$f" "$AF_SSH_DEST:$dest/"
 done
 
 # 2. A credentials file outside the repo (adjust to taste).
 if [ -f "$HOME/.config/myservice/credentials.json" ]; then
-  $AF_SSH "$host" 'mkdir -p ~/.config/myservice && chmod 700 ~/.config/myservice'
-  rsync -a -e "$AF_SSH" "$HOME/.config/myservice/credentials.json" "$host:.config/myservice/"
+  $AF_SSH "$AF_SSH_DEST" 'mkdir -p ~/.config/myservice && chmod 700 ~/.config/myservice'
+  rsync -a -e "$AF_SSH" "$HOME/.config/myservice/credentials.json" "$AF_SSH_DEST:.config/myservice/"
 fi
 
 # 3. A build cache so the first build on the sandbox is warm.
-[ -d "$src/.cache" ] && rsync -a -e "$AF_SSH" "$src/.cache/" "$host:$dest/.cache/"
+[ -d "$src/.cache" ] && rsync -a -e "$AF_SSH" "$src/.cache/" "$AF_SSH_DEST:$dest/.cache/"
 exit 0

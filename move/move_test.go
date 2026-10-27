@@ -38,7 +38,7 @@ func TestSnapshotCapturesDirtyTreeWithoutTouchingTheSource(t *testing.T) {
 	statusBefore := run(t, dir, "status", "--porcelain")
 	refsBefore := run(t, dir, "for-each-ref")
 
-	snap, err := TakeSnapshot(context.Background(), dir, "feat", t.TempDir())
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "sess-1", t.TempDir())
 	require.NoError(t, err)
 	defer snap.Cleanup()
 	require.True(t, snap.Dirty)
@@ -46,12 +46,13 @@ func TestSnapshotCapturesDirtyTreeWithoutTouchingTheSource(t *testing.T) {
 
 	require.Equal(t, statusBefore, run(t, dir, "status", "--porcelain"))
 	require.Equal(t, refsBefore, run(t, dir, "for-each-ref"), "no ref may leak into the source repo")
+	require.Equal(t, "refs/af-move/sess-1/snapshot", snap.Ref)
 
 	// Seed a fresh repo from the bundle and overlay: dirty work arrives
 	// uncommitted, ignored files do not travel.
 	dst := t.TempDir()
 	run(t, dst, "init", "-q", "-b", "main")
-	run(t, dst, "fetch", "-q", snap.BundlePath, "refs/heads/feat:refs/heads/feat", SnapshotRef+":"+SnapshotRef)
+	run(t, dst, "fetch", "-q", snap.BundlePath, "refs/heads/feat:refs/heads/feat", snap.Ref+":"+snap.Ref)
 	run(t, dst, "checkout", "-q", "feat")
 	require.Equal(t, snap.Head, run(t, dst, "rev-parse", "HEAD"))
 	cmd := exec.Command("sh", "-c", snap.OverlayCommand())
@@ -72,7 +73,7 @@ func TestSnapshotCleanTree(t *testing.T) {
 	dir := t.TempDir()
 	run(t, dir, "init", "-q", "-b", "feat")
 	run(t, dir, "commit", "-q", "--allow-empty", "-m", "c")
-	snap, err := TakeSnapshot(context.Background(), dir, "feat", t.TempDir())
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "sess-1", t.TempDir())
 	require.NoError(t, err)
 	defer snap.Cleanup()
 	require.False(t, snap.Dirty)
@@ -80,18 +81,44 @@ func TestSnapshotCleanTree(t *testing.T) {
 	require.Equal(t, "true", snap.OverlayCommand())
 }
 
+func TestSnapshotRefIsPerSessionAndNeverClobbers(t *testing.T) {
+	dir := repoWithWork(t)
+	run(t, dir, "update-ref", SnapshotRef("busy"), "HEAD")
+	_, err := TakeSnapshot(context.Background(), dir, "feat", "busy", t.TempDir())
+	require.ErrorContains(t, err, "already exists")
+	require.Equal(t, run(t, dir, "rev-parse", "HEAD"), run(t, dir, "rev-parse", SnapshotRef("busy")), "foreign ref untouched")
+	other, err := TakeSnapshot(context.Background(), dir, "feat", "other", t.TempDir())
+	require.NoError(t, err)
+	other.Cleanup()
+	require.NotContains(t, run(t, dir, "for-each-ref", "refs/af-move/other"), "snapshot", "own ref deleted after the snapshot")
+	_, err = TakeSnapshot(context.Background(), dir, "feat", "bad/key", t.TempDir())
+	require.Error(t, err)
+}
+
 func TestRunScriptContract(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "got")
 	spec := ScriptSpec{Title: "t", Branch: "b", Host: "h", SourceWorktree: dir, DestWorkspace: "/w"}
-	require.NoError(t, RunScript(context.Background(), `cat > `+out+`.json; printf %s "$AF_SSH" > `+out+`.ssh`, spec, "ssh -p 2 box"))
+	dump := `cat > ` + out + `.json; printf '%s|%s|%s' "$AF_SSH" "$AF_SSH_DEST" "$AF_SSH_FULL" > ` + out + `.env`
+
+	// Split shape: AF_SSH excludes the destination.
+	require.NoError(t, RunScript(context.Background(), dump, spec, Host{SSH: "ssh -p 2", SSHDest: "u@box"}))
+	e, _ := os.ReadFile(out + ".env")
+	require.Equal(t, "ssh -p 2|u@box|ssh -p 2 u@box", string(e))
 	j, _ := os.ReadFile(out + ".json")
 	require.Contains(t, string(j), `"dest_workspace":"/w"`)
-	s, _ := os.ReadFile(out + ".ssh")
-	require.Equal(t, "ssh -p 2 box", string(s))
-	err := RunScript(context.Background(), `echo boom >&2; exit 3`, spec, "ssh x")
+	require.Contains(t, string(j), `"ssh":"ssh -p 2"`)
+	require.Contains(t, string(j), `"ssh_dest":"u@box"`)
+	require.Contains(t, string(j), `"ssh_full":"ssh -p 2 u@box"`)
+
+	// Free-form shape: only the full command exists.
+	require.NoError(t, RunScript(context.Background(), dump, spec, Host{SSHFullCmd: "ssh -J jump box"}))
+	e, _ = os.ReadFile(out + ".env")
+	require.Equal(t, "||ssh -J jump box", string(e))
+
+	err := RunScript(context.Background(), `echo boom >&2; exit 3`, spec, Host{})
 	require.ErrorContains(t, err, "boom")
-	require.NoError(t, RunScript(context.Background(), "  ", spec, "ssh x"))
+	require.NoError(t, RunScript(context.Background(), "  ", spec, Host{}))
 }
 
 type fakeSteps struct {
@@ -119,8 +146,8 @@ func (f *fakeSteps) ArchiveLocal(context.Context, Session) error      { return f
 
 func TestRunOrderingAndAbortSemantics(t *testing.T) {
 	dir := repoWithWork(t)
-	s := Session{Title: "t", Branch: "feat", Worktree: dir}
-	h := Host{Name: "h", SSHCmd: "ssh h", MoveCmd: "true"}
+	s := Session{ID: "sess-1", Title: "t", Branch: "feat", Worktree: dir}
+	h := Host{Name: "h", SSH: "ssh", SSHDest: "h", MoveCmd: "true"}
 	opt := Options{TempDir: t.TempDir()}
 
 	f := &fakeSteps{}
@@ -157,5 +184,5 @@ func TestDescribe(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, p.Dirty)
 	require.Equal(t, "./m.sh", p.MoveScript)
-	require.Equal(t, []string{"AF_SSH"}, p.ScriptEnvNames)
+	require.Equal(t, []string{"AF_SSH", "AF_SSH_DEST", "AF_SSH_FULL"}, p.ScriptEnvNames)
 }

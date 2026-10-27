@@ -10,8 +10,13 @@ import (
 // Host is a move destination.
 type Host struct {
 	Name string
-	// SSHCmd is the exact ssh command af uses to reach the host (AF_SSH).
-	SSHCmd string
+	// SSH is the ssh command af uses for the host WITHOUT the destination
+	// (options only); SSHDest is the destination. Both are empty for a free-form
+	// sandbox.ssh command that embeds the host, which sets SSHFullCmd instead.
+	SSH, SSHDest string
+	// SSHFullCmd is the complete command when it cannot be split; otherwise it is
+	// derived as SSH + " " + SSHDest.
+	SSHFullCmd string
 	// MoveCmd is the operator's move script command line; empty falls back to
 	// the global default, and empty again means no script.
 	MoveCmd string
@@ -21,6 +26,13 @@ type Host struct {
 // list) replaces; until then DefaultHostLookup serves the one configured
 // sandbox.
 type HostLookup func(name string) (Host, error)
+
+func (h Host) fullSSH() string {
+	if h.SSHFullCmd != "" {
+		return h.SSHFullCmd
+	}
+	return strings.TrimSpace(h.SSH + " " + h.SSHDest)
+}
 
 // Session is the part of a live local session a move needs.
 type Session struct {
@@ -95,7 +107,7 @@ func Describe(ctx context.Context, s Session, h Host, opt Options) (Plan, error)
 		Title: s.Title, Branch: s.Branch, Host: h.Name, Dirty: strings.TrimSpace(out) != "",
 		Steps: steps, MoveScript: cmd,
 		ScriptInput:    ScriptSpec{SessionID: s.ID, Title: s.Title, Branch: s.Branch, SourceWorktree: s.Worktree, Host: h.Name, DestWorkspace: "<assigned at provision>", Account: s.Account},
-		ScriptEnvNames: []string{"AF_SSH"},
+		ScriptEnvNames: []string{"AF_SSH", "AF_SSH_DEST", "AF_SSH_FULL"},
 	}, nil
 }
 
@@ -106,7 +118,7 @@ func Run(ctx context.Context, st Steps, s Session, h Host, opt Options) (err err
 	if err := st.Quiesce(ctx, s, opt.Force); err != nil {
 		return fmt.Errorf("quiesce: %w", err)
 	}
-	snap, err := TakeSnapshot(ctx, s.Worktree, s.Branch, opt.TempDir)
+	snap, err := TakeSnapshot(ctx, s.Worktree, s.Branch, s.ID, opt.TempDir)
 	if err != nil {
 		return err
 	}
@@ -127,7 +139,7 @@ func Run(ctx context.Context, st Steps, s Session, h Host, opt Options) (err err
 	}()
 
 	spec := ScriptSpec{SessionID: s.ID, Title: s.Title, Branch: s.Branch, SourceWorktree: s.Worktree, Host: h.Name, DestWorkspace: workspace, Account: s.Account}
-	if err = RunScript(ctx, firstNonEmpty(h.MoveCmd, opt.DefaultMoveCmd), spec, h.SSHCmd); err != nil {
+	if err = RunScript(ctx, firstNonEmpty(h.MoveCmd, opt.DefaultMoveCmd), spec, h); err != nil {
 		return err
 	}
 	if err = st.SyncAccount(ctx, s, h); err != nil {

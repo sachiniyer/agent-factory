@@ -30,13 +30,26 @@ type ScriptSpec struct {
 	DestWorkspace string `json:"dest_workspace"`
 	// Account is the session's account name; empty when unscoped.
 	Account string `json:"account,omitempty"`
+	// SSH, SSHDest and SSHFull mirror AF_SSH, AF_SSH_DEST and AF_SSH_FULL.
+	SSH     string `json:"ssh,omitempty"`
+	SSHDest string `json:"ssh_dest,omitempty"`
+	SSHFull string `json:"ssh_full"`
 }
 
-// ScriptEnv returns the extra environment the script runs with. AF_SSH is the
-// exact ssh command af uses for the destination, so `rsync -e "$AF_SSH" …` and
-// `$AF_SSH host 'cmd'` reach the same machine af does.
-func ScriptEnv(sshCmd string) []string {
-	return []string{"AF_SSH=" + sshCmd}
+// ScriptEnv returns the extra environment the script runs with:
+//
+//   - AF_SSH      the ssh command WITHOUT the destination (options only), so
+//     `rsync -e "$AF_SSH" f "$AF_SSH_DEST:path"` and `$AF_SSH "$AF_SSH_DEST" cmd`
+//     reach the same machine af does.
+//   - AF_SSH_DEST the destination (user@host or an ssh alias).
+//   - AF_SSH_FULL the complete command including the destination. Always set.
+//
+// A free-form sandbox.ssh command already embeds the host and af cannot split it
+// reliably, so for those AF_SSH and AF_SSH_DEST are empty and only AF_SSH_FULL
+// is set: use `$AF_SSH_FULL 'cmd'` and, in place of rsync -e, pipe tar:
+// `tar -C "$src" -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+func ScriptEnv(h Host) []string {
+	return []string{"AF_SSH=" + h.SSH, "AF_SSH_DEST=" + h.SSHDest, "AF_SSH_FULL=" + h.fullSSH()}
 }
 
 // RunScript runs the operator's move script on the daemon box through `sh -c`
@@ -44,10 +57,11 @@ func ScriptEnv(sshCmd string) []string {
 // continues the move; anything else is an error that aborts it. The script's
 // output is returned for the error text only; callers must not log it as a
 // matter of course since it may name credentials paths.
-func RunScript(ctx context.Context, cmdline string, spec ScriptSpec, sshCmd string) error {
+func RunScript(ctx context.Context, cmdline string, spec ScriptSpec, h Host) error {
 	if strings.TrimSpace(cmdline) == "" {
 		return nil
 	}
+	spec.SSH, spec.SSHDest, spec.SSHFull = h.SSH, h.SSHDest, h.fullSSH()
 	body, err := json.Marshal(spec)
 	if err != nil {
 		return err
@@ -57,7 +71,7 @@ func RunScript(ctx context.Context, cmdline string, spec ScriptSpec, sshCmd stri
 	cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Dir = spec.SourceWorktree
-	cmd.Env = append(os.Environ(), ScriptEnv(sshCmd)...)
+	cmd.Env = append(os.Environ(), ScriptEnv(h)...)
 	cmd.WaitDelay = 5 * time.Second
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
