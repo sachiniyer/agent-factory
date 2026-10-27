@@ -97,7 +97,7 @@ func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 // nothing (#5278). It carries the "errored:" prefix the TUI keys on to render
 // a failed run (ui/task_pane.go), the same family RunTask writes for a run
 // whose send errored.
-const taskStatusErroredPromptUndelivered = "errored: prompt not delivered"
+const taskStatusErroredPromptUndelivered = task.RunFailedUndeliveredStatus
 
 // stampTaskRunFailed records the failed run's outcome on the owning task. The
 // session knows the verdict — it raises the one-shot flag where the run ends —
@@ -111,49 +111,25 @@ func (m *Manager) stampTaskRunFailed(instance *session.Instance) {
 		return
 	}
 	now := nowFunc()
-	peers := m.taskRunPeerSnapshot()
-	updated, applied, err := task.UpdateTaskStatusIf(instance.TaskID, &now, taskStatusErroredPromptUndelivered,
-		func(cur task.Task) bool { return failedRunOwnsStatus(instance, peers, cur) })
+	updated, applied, err := task.RecordRunStatus(instance.TaskID, taskRunKey(instance), &now, taskStatusErroredPromptUndelivered)
 	if err != nil {
 		m.warn().Printf("could not record the failed run for task %q (session %q): %v",
 			instance.TaskID, instance.Title, err)
 		return
 	}
-	// Settled either way: applied, or refused because the status is not this
-	// run's to write. Only a store error (above) keeps the durable flag armed.
+	// Settled either way: applied, or a no-op because the row already holds this
+	// failure or a newer run (the state machine, task/run_status.go). Only a
+	// store error (above) keeps the durable flag armed.
 	instance.AckTaskRunFailureStamped()
 	if applied {
 		m.publishEvent(agentproto.EventTaskUpdated, updated)
 	}
 }
 
-// failedRunOwnsStatus is the compare-and-set guard of the failure stamp
-// (#5645): the write is this run's only while the task's status is not already
-// the failure (idempotent across restarts) and no NEWER session of the same
-// task is registered — LastRunStatus is task-wide, and a stale stamp landing
-// after a newer fire began would report that run as failed.
-func failedRunOwnsStatus(instance *session.Instance, peers []*session.Instance, cur task.Task) bool {
-	if cur.LastRunStatus == taskStatusErroredPromptUndelivered {
-		return false
-	}
-	for _, peer := range peers {
-		if peer != instance && peer.TaskID == instance.TaskID && peer.CreatedAt.After(instance.CreatedAt) {
-			return false
-		}
-	}
-	return true
-}
-
-// taskRunPeerSnapshot copies the manager's registered sessions so the guard can
-// iterate after the manager lock is released.
-func (m *Manager) taskRunPeerSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	peers := make([]*session.Instance, 0, len(m.instances))
-	for _, peer := range m.instances {
-		peers = append(peers, peer)
-	}
-	return peers
+// taskRunKey is the run identity of the task run a session carries: its
+// instance id, ordered by its creation time (assigned at delivery start).
+func taskRunKey(instance *session.Instance) task.RunKey {
+	return task.RunKey{ID: instance.ID, StartedAt: instance.CreatedAt}
 }
 
 // deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED

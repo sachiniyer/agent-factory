@@ -59,6 +59,14 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 // public run status: whether a newly parked session already retained this exact
 // prompt for resume. Such a prompt must not also enter the watch replay queue.
 func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bool) (string, bool, error) {
+	var run task.RunKey
+	return deliverTaskPromptRun(t, prompt, deferWhileAttached, &run)
+}
+
+// deliverTaskPromptRun is deliverTaskPromptOutcome that also reports the run's
+// identity through run when the delivery created a session (zero for a send
+// into a target session): the key its status write must carry (#5661).
+func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, run *task.RunKey) (string, bool, error) {
 	_, err := config.LoadConfig()
 	if err != nil {
 		// Pre-flight: this returns before any create or send, so the watch paths
@@ -108,6 +116,7 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 			}
 			return "", false, wrapped
 		}
+		*run = task.RunKey{ID: data.ID, StartedAt: data.CreatedAt}
 		// The freshly created session hit a usage-limit wall during startup and
 		// was parked, not failed (#1146 PR4). Record the parked status so the run
 		// is NOT counted as a failure; the resume machinery re-delivers the
@@ -116,8 +125,15 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
 			return TaskStatusLimitParked, true, nil
 		}
+		// A create whose prompt send PROVED it never landed carries the verdict
+		// home on the session record (#5278): report the failed outcome here,
+		// at the status write's owner, rather than "started".
+		if data.LastPromptDeliveryStatus == session.PromptNotDelivered {
+			log.InfoLog.Printf("task %s started instance %q but its prompt provably did not land", t.ID, data.Title)
+			return taskStatusErroredPromptUndelivered, false, nil
+		}
 		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
-		return "started", false, nil
+		return task.RunStartedStatus, false, nil
 	}
 
 	// Route through the daemon's serialized create-or-send path. When several
@@ -189,8 +205,15 @@ func taskParkedLogMessage(taskID, title string) string {
 // crashed/stale client can never wedge the delivery — it lands on the next poll
 // once the lease lapses.
 func deliverCronTaskPrompt(t *task.Task, prompt string) (string, error) {
+	var run task.RunKey
+	return deliverCronTaskPromptRun(t, prompt, &run)
+}
+
+// deliverCronTaskPromptRun is deliverCronTaskPrompt that also reports the run's
+// identity (see deliverTaskPromptRun).
+func deliverCronTaskPromptRun(t *task.Task, prompt string, run *task.RunKey) (string, error) {
 	for {
-		status, err := deliverTaskPrompt(t, prompt, true)
+		status, _, err := deliverTaskPromptRun(t, prompt, true, run)
 		if err != nil || status != StatusDeferredAttached {
 			return status, err
 		}
@@ -447,8 +470,8 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		}
 	}
 
-	deliveryStart := time.Now()
-	status, err := deliverCronTaskPrompt(t, t.Prompt)
+	var run task.RunKey
+	status, err := deliverCronTaskPromptRun(t, t.Prompt, &run)
 	if err != nil {
 		return err
 	}
@@ -457,15 +480,11 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
 	//
-	// Compare-and-set (#5645): a run whose prompt was proven undelivered may
-	// have had its failure stamped by the status sweep after the session was
-	// registered but before this write. That outcome is newer than this
-	// delivery's start and strictly more informative than "started".
+	// Run-keyed (#5645, #5661): the write goes through the one run-status state
+	// machine, so a failure stamped for this run during its delivery is not
+	// overwritten by "started", and a stale writer cannot claim a newer run.
 	now := time.Now()
-	if _, _, err := task.UpdateTaskStatusIf(taskID, &now, status, func(cur task.Task) bool {
-		return !(cur.LastRunStatus == taskStatusErroredPromptUndelivered &&
-			cur.LastRunAt != nil && !cur.LastRunAt.Before(deliveryStart))
-	}); err != nil {
+	if _, _, err := task.RecordRunStatus(taskID, run, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	// The delivery completed — the occurrence is consumed whether or not the

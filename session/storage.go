@@ -152,6 +152,12 @@ type InstanceData struct {
 	// acknowledged as written (#5646). omitempty + additive: an older record
 	// decodes to false, the pre-fix behaviour.
 	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
+	// TaskRunPromptBound records that the run's prompt boundary was bound at
+	// least once (#5644). A cleared task_run_prompt_attempt_at can mean "never
+	// bound" or "bound then retired by a runtime replacement" (handoff); only
+	// the former may end the run failed on a PromptNotDelivered verdict.
+	// Persisted while the run is in flight, same as the boundary it qualifies.
+	TaskRunPromptBound bool `json:"task_run_prompt_bound,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.

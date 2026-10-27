@@ -166,6 +166,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+		data.TaskRunPromptBound = i.taskRunPromptBound
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -470,6 +471,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// next run's delivery window.
 		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
+		taskRunPromptBound:       data.TaskRunActive && data.TaskRunPromptBound,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
@@ -514,6 +516,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// archived, or startup-unknown row keeps its own outcome instead.
 	if instance.taskRunActive && taskRunAttemptAt.IsZero() &&
 		data.LastPromptDeliveryStatus == PromptNotDelivered &&
+		!data.TaskRunPromptBound &&
 		!instance.userKilled && !instance.startupStateUnknown && liveness != LiveArchived {
 		instance.taskRunActive = false
 		instance.taskRunIdleEdgeHeld = false
