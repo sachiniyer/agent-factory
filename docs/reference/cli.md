@@ -51,6 +51,8 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
 - [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
@@ -1588,6 +1590,8 @@ af proposal
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
 - [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
 
@@ -1771,6 +1775,56 @@ Print the absolute folder path of a proposal. With --daemon-url, the path is on 
 ```
 af proposal path <slug>
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal push-mode
+
+Set whether the Docs tab sends the user's edits to this session by itself
+
+Set the push mode of this session's Docs tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
+
+```
+af proposal push-mode auto|manual [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal send
+
+Send the user's unsent edits to this session now
+
+Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Docs tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
+
+```
+af proposal send [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
 
 **Global flags**
 
