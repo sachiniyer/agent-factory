@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,4 +75,72 @@ func TestSanitizeDetachKeys(t *testing.T) {
 	// The default we fall back to must itself parse, or the fallback is a lie.
 	_, err := ParseDetachKey(DefaultDetachKeys())
 	require.NoError(t, err, "DefaultDetachKeys() must parse")
+}
+
+// withDefaultDetachKey snapshots the process-global detach key for one test and
+// restores it on cleanup, so ApplyConfiguredDetachKey's mutation of the global
+// cannot leak into a sibling test (apiclient's matcher reads it live).
+func withDefaultDetachKey(t *testing.T) {
+	t.Helper()
+	prevByte, prevDisplay := tmux.DetachKeyByte, tmux.DetachKeyDisplay
+	t.Cleanup(func() { tmux.SetDetachKey(prevByte, prevDisplay) })
+	// Start every case from the built-in default so a prior test's mutation is
+	// not the baseline.
+	tmux.SetDetachKey(23, "ctrl+w")
+}
+
+// TestApplyConfiguredDetachKey pins the shared wiring site both attach paths
+// (the TUI's newHome and `af sessions attach`) call: it parses the configured
+// value and arms the global, warn-and-defaults an unparseable value instead of
+// crashing, and leaves the default in place when the value is empty (the path a
+// caller takes when config is unset or failed to load).
+func TestApplyConfiguredDetachKey(t *testing.T) {
+	t.Run("valid key arms the global with its byte and display form", func(t *testing.T) {
+		withDefaultDetachKey(t)
+		ApplyConfiguredDetachKey("ctrl-a")
+		assert.Equal(t, byte(1), tmux.DetachKeyByte, "ctrl-a parses to byte 1")
+		assert.Equal(t, "ctrl+a", tmux.DetachKeyDisplay, "SetDetachKey normalizes ctrl-a to ctrl+a for the help overlay (#4176)")
+	})
+
+	t.Run("a punctuation binding arms its byte and preserves the config spelling", func(t *testing.T) {
+		withDefaultDetachKey(t)
+		ApplyConfiguredDetachKey("ctrl-]")
+		assert.Equal(t, byte(29), tmux.DetachKeyByte)
+		assert.Equal(t, "ctrl+]", tmux.DetachKeyDisplay)
+	})
+
+	t.Run("invalid value warns and falls back to the default ctrl+w", func(t *testing.T) {
+		withDefaultDetachKey(t)
+		// First arm a non-default key, so a fallback that left the global
+		// untouched would be caught: the contract is that it RESETS to the
+		// default, not that it ignores the input.
+		ApplyConfiguredDetachKey("ctrl-a")
+		require.Equal(t, byte(1), tmux.DetachKeyByte, "fixture: ctrl-a armed first")
+
+		ApplyConfiguredDetachKey("not-a-key")
+		assert.Equal(t, byte(23), tmux.DetachKeyByte, "an unparseable value must reset to the default byte")
+		assert.Equal(t, "ctrl+w", tmux.DetachKeyDisplay, "an unparseable value must reset to the default display")
+	})
+
+	t.Run("empty value is a no-op and keeps whatever is armed", func(t *testing.T) {
+		withDefaultDetachKey(t)
+		// The default itself stays put — the documented behavior for an unset
+		// detach_keys (the CLI path with no config, or a load failure).
+		ApplyConfiguredDetachKey("")
+		assert.Equal(t, byte(23), tmux.DetachKeyByte, "empty must leave the built-in default armed")
+		assert.Equal(t, "ctrl+w", tmux.DetachKeyDisplay)
+	})
+
+	t.Run("empty value does not reset a previously-armed non-default key", func(t *testing.T) {
+		withDefaultDetachKey(t)
+		ApplyConfiguredDetachKey("ctrl-q")
+		require.Equal(t, byte(17), tmux.DetachKeyByte, "fixture: ctrl-q armed first")
+		// A caller that loads config but finds detach_keys empty (e.g. a load
+		// failure) passes "" and must not clobber a key armed earlier in the
+		// same process. The global is the caller's to manage; "" is "do
+		// nothing", not "reset to default".
+		ApplyConfiguredDetachKey("")
+		assert.Equal(t, byte(17), tmux.DetachKeyByte, "empty must not undo a prior arm")
+		assert.Equal(t, "ctrl+q", tmux.DetachKeyDisplay)
+	})
 }
