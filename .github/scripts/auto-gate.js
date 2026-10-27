@@ -146,6 +146,7 @@ const MASTER_PUSH_WORKFLOWS = [
   "build.yml",
   "docs.yml",
   "lint.yml",
+  "pr.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];

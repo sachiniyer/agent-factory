@@ -207,7 +207,7 @@ func TestNewTab_ProjectsFocusHandlerRefuses(t *testing.T) {
 // active tab — the gate allows a workspace region through.
 func TestCloseTab_TreeFocusStillOpensConfirm(t *testing.T) {
 	h, alpha := multiTabHome(t)
-	h.store.SetActiveTab(2) // shell-2 (renders "3 › Terminal")
+	h.store.SetActiveTab(2) // shell-2 (the confirmation quotes it as "3 Terminal")
 	h.focusRegion(layout.RegionTree)
 	require.Equal(t, layout.RegionTree, h.ring.Active())
 
@@ -215,7 +215,10 @@ func TestCloseTab_TreeFocusStillOpensConfirm(t *testing.T) {
 
 	require.Equal(t, stateConfirm, h.state, "w with tree focus must open the confirmation")
 	require.NotNil(t, h.confirmationOverlay)
-	require.Contains(t, h.confirmationOverlay.Render(), `Delete tab "3 › Terminal"`,
+	// The quotation names the tab's TEXT, not its tree row: no "›" kind glyph
+	// (#4630). The three shells share the text "Terminal", so the slot number
+	// still tells them apart — "3 Terminal" is slot 2, the tree's active tab.
+	require.Contains(t, h.confirmationOverlay.Render(), `Delete tab "3 Terminal"`,
 		"the confirmation must target the tree's active tab")
 	require.Equal(t, 4, alpha.TabCount(), "nothing is deleted before consent")
 }
@@ -238,9 +241,9 @@ func TestNewTab_TreeFocusStillOpensPicker(t *testing.T) {
 // the FOCUSED PANE's tab (#1884) — not the tree's active tab.
 func TestCloseTab_PaneFocusStillOpensConfirm(t *testing.T) {
 	h, alpha := multiTabHome(t)
-	h.store.SetActiveTab(1) // tree active = shell (slot 1, renders "2 › Terminal")
+	h.store.SetActiveTab(1) // tree active = shell (slot 1, quoted as "2 Terminal")
 	pane := openTestPane(t, h, alpha, 1)
-	_, _ = h.handleTabJump(4) // pane jumps to shell-3 (slot 3, renders "4 › Terminal"); tree stays on 1
+	_, _ = h.handleTabJump(4) // pane jumps to shell-3 (slot 3, quoted as "4 Terminal"); tree stays on 1
 	require.Equal(t, 3, pane.Tab())
 	require.Equal(t, 1, h.store.ActiveTab())
 	require.True(t, layout.IsPaneRegion(h.ring.Active()), "precondition: a pane holds focus")
@@ -249,9 +252,11 @@ func TestCloseTab_PaneFocusStillOpensConfirm(t *testing.T) {
 
 	require.Equal(t, stateConfirm, h.state, "w with pane focus must open the confirmation")
 	require.NotNil(t, h.confirmationOverlay)
-	// The pane-focused close targets the pane's tab (shell-3 → "4 › Terminal"),
-	// not the tree's active tab (shell → "2 › Terminal") — the #1884 rule.
-	require.Contains(t, h.confirmationOverlay.Render(), `Delete tab "4 › Terminal"`,
+	// The pane-focused close targets the pane's tab (shell-3 → "4 Terminal"),
+	// not the tree's active tab (shell → "2 Terminal") — the #1884 rule. The
+	// quotation is the tab's text without the "›" kind glyph (#4630); the slot
+	// number is what tells the same-text shells apart.
+	require.Contains(t, h.confirmationOverlay.Render(), `Delete tab "4 Terminal"`,
 		"the confirmation must target the focused pane's tab, not the tree's (#1884)")
 	require.Equal(t, 4, alpha.TabCount(), "nothing is deleted before consent")
 }
