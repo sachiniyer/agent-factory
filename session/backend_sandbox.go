@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -87,13 +86,21 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 
 	p := &sandboxProvisioner{
-		spec:    spec,
-		sshCmd:  strings.TrimSpace(cfg.SandboxSSH),
-		afBin:   afBin,
-		program: config.ResolveProgram(&cfg.Config, spec.Program),
+		spec:   spec,
+		sshCmd: strings.TrimSpace(cfg.SandboxSSH),
+		afBin:  afBin,
+		// The wire program is the configured name and flags — never af's
+		// auto-detected daemon path, which the sandbox's filesystem does not
+		// have. The agent-server resolves it on the host's login PATH (#5571).
+		program: remoteProgramForHost(cfg, spec.Program),
 	}
 	res, err := p.provision()
 	if err != nil {
+		// Probe BEFORE the reap: removing the partial workspace frees space and
+		// could mask the very condition being measured (#5382 item 1).
+		if evidence := p.remoteCapacityEvidence(err); evidence != nil {
+			err = errors.Join(err, evidence)
+		}
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
@@ -120,6 +127,10 @@ type sandboxProvisioner struct {
 
 	sessionDir string
 	remotePID  string
+	// hostProgram is the program the sandbox host actually resolved and bound,
+	// reported back in the startup banner (#5571 W2.1). Empty until the banner
+	// arrives; remoteAgentBackend falls back to the wire program without it.
+	hostProgram string
 
 	// tunnel is the currently published generation of the supervised ssh
 	// transport (#5571 W1.2): nil between a death and its re-dial, and after
@@ -184,6 +195,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
 	}
+	// Re-check the callback credential at the LAST step that can still keep a
+	// dead grant out of the launched agent-server's environment (#5571 W3.1,
+	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
+	callbackLost := w.revalidateCallbackBeforeEnv()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
@@ -194,6 +209,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
+	}
+	// The banner's program is the command the HOST resolved and bound — the
+	// true runtime evidence (#5108); the wire value is only its pre-resolution
+	// form, kept as the fallback for a banner from an older agent-server.
+	p.hostProgram = banner.Program
+	if p.hostProgram == "" {
+		p.hostProgram = p.program
 	}
 	localAddr, err := p.startTunnel(banner.Addr)
 	if err != nil {
@@ -208,8 +230,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		Backend: &sandboxBackend{
 			// The command the sandbox's agent-server was bound to launch
 			// (#5108) — recorded as runtime evidence when the launch RPC
-			// returns.
-			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			// returns. The host resolved it (#5571 W2.1), so the banner's
+			// value is the truth, not the wire program af sent.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
 			provisioner:        p,
 			cleanup: &SandboxRuntimeCleanupData{
 				SSHCommand: p.sshCmd,
@@ -219,6 +242,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		},
 		Endpoint: endpoint,
 		Teardown: teardown,
+		// A credential that died mid-provision (the re-check above, before the
+		// env commit) is reported here — the caller's own revalidation names the
+		// residual window after launch, and the later write must not clobber an
+		// earlier, more precise reason.
+		CallbackUnavailable: callbackLost,
 	}, nil
 }
 

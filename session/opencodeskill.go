@@ -118,7 +118,7 @@ func ensureOpencodeAfConfig() (string, error) {
 // QUOTED value containing spaces in an assignment BEFORE an OPENCODE_CONFIG one
 // (`FOO='a b' OPENCODE_CONFIG=x opencode`) ends the scan early and misses it. The
 // cost is only the warning: the user's assignment still wins at runtime, so their
-// config is honored regardless. tmux's splitShellTokens would handle it but is
+// config is honored regardless. tmux's SplitShellTokens would handle it but is
 // package-private, and duplicating a shell tokenizer here to recover a log line is
 // not worth the second parser.
 func opencodeCarriesConfigEnv(resolved string) bool {

@@ -32,7 +32,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude", skillTarget{})
+	result := injectSystemPrompt("claude", skillTarget{}, false)
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -51,7 +51,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
 	// injectSystemPrompt appends --plugin-dir to it.
-	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{})
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{}, false)
 
 	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -75,7 +75,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
 
-	result := injectSystemPrompt("codex", skillTarget{})
+	result := injectSystemPrompt("codex", skillTarget{}, false)
 
 	if result != "codex -c check_for_update_on_startup=false" {
 		t.Errorf("expected codex command carrying the startup update check suppression, got %q", result)
@@ -101,7 +101,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("codex --full-auto", skillTarget{})
+	result := injectSystemPrompt("codex --full-auto", skillTarget{}, false)
 
 	if result != "codex -c check_for_update_on_startup=false --full-auto" {
 		t.Errorf("expected the update-check suppression in codex's global -c position (right after the executable), got %q", result)
@@ -119,7 +119,7 @@ func TestInjectSystemPrompt_CodexRespectsUserUpdateCheckSetting(t *testing.T) {
 		"codex -c check_for_update_on_startup=true",
 		"codex -c check_for_update_on_startup=false",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
 			t.Errorf("expected %q untouched (user's own value wins), got %q", resolved, got)
 		}
 	}
@@ -131,7 +131,7 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("aider", skillTarget{})
+	result := injectSystemPrompt("aider", skillTarget{}, false)
 
 	if !strings.HasPrefix(result, "aider --read ") {
 		t.Errorf("expected aider to gain a --read flag, got %q", result)
@@ -163,7 +163,7 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
 
-	result := injectSystemPrompt("gemini", skillTarget{})
+	result := injectSystemPrompt("gemini", skillTarget{}, false)
 
 	if result != "gemini" {
 		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
@@ -193,7 +193,7 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("amp", skillTarget{})
+	result := injectSystemPrompt("amp", skillTarget{}, false)
 
 	// The launch command must come back byte-identical — that is what keeps the
 	// amp spawn safe (#1582), since amp dies on unknown flags (#1116/#1131).
@@ -225,7 +225,7 @@ func TestInjectSystemPrompt_DevinSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("devin", skillTarget{})
+	result := injectSystemPrompt("devin", skillTarget{}, false)
 	if result != "devin --respect-workspace-trust false" {
 		t.Errorf("expected devin trust flag, got %q", result)
 	}
@@ -256,7 +256,7 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("opencode", skillTarget{})
+	result := injectSystemPrompt("opencode", skillTarget{}, false)
 
 	// The command word must survive verbatim; only an env assignment leads it.
 	if !strings.HasSuffix(result, " opencode") {
@@ -315,7 +315,7 @@ func TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	injectSystemPrompt("opencode", skillTarget{})
+	injectSystemPrompt("opencode", skillTarget{}, false)
 
 	// Nothing may appear in the user's opencode config dir — under either the
 	// XDG path or the $HOME/.config fallback.
@@ -351,7 +351,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 		// OPENCODE_CONFIG can arrive behind an env wrapper too.
 		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
 			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
 		}
 	}
@@ -361,7 +361,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	// case above with a bare strings.Contains, which would silently drop af
 	// guidance for anyone whose prompt mentions the variable.
 	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
-	if got := injectSystemPrompt(arg, skillTarget{}); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt(arg, skillTarget{}, false); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
@@ -383,7 +383,7 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if got := injectSystemPrompt("opencode", skillTarget{}); got != "opencode" {
+	if got := injectSystemPrompt("opencode", skillTarget{}, false); got != "opencode" {
 		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
 	}
 	back, err := os.ReadFile(instructionsPath)
@@ -435,7 +435,7 @@ func TestInjectSystemPrompt_Devin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{})
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
 			if got != tt.want {
 				t.Errorf("injectSystemPrompt(%q) = %q, want %q", tt.resolved, got, tt.want)
 			}
@@ -517,7 +517,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{})
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
@@ -898,7 +898,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	path, err := ensureAiderReadFile()
+	path, err := ensureAiderReadFile(false)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() failed: %v", err)
 	}
@@ -922,7 +922,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(userFile), 0644); err != nil {
 		t.Fatalf("seed user file: %v", err)
 	}
-	got, err := ensureAiderReadFile()
+	got, err := ensureAiderReadFile(false)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() on foreign file: %v", err)
 	}
@@ -942,9 +942,9 @@ func TestEnsurePluginDir(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir()
+	pluginDir, err := ensurePluginDir(false)
 	if err != nil {
-		t.Fatalf("ensurePluginDir() failed: %v", err)
+		t.Fatalf("ensurePluginDir(false) failed: %v", err)
 	}
 
 	expectedDir := filepath.Join(tmpDir, "plugin")
@@ -981,12 +981,12 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	dir1, err := ensurePluginDir()
+	dir1, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
 
-	dir2, err := ensurePluginDir()
+	dir2, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
@@ -1000,7 +1000,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir()
+	pluginDir, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Fatalf("failed to seed keep file: %v", err)
 	}
 
-	if _, err := ensurePluginDir(); err != nil {
+	if _, err := ensurePluginDir(false); err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
 
@@ -1028,7 +1028,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Errorf("expected non-.md file %s to survive prune: %v", keep, err)
 	}
 
-	for name := range pluginCommands {
+	for name := range pluginCommands(false) {
 		if _, err := os.Stat(filepath.Join(commandsDir, name)); err != nil {
 			t.Errorf("expected %s to still exist after prune: %v", name, err)
 		}

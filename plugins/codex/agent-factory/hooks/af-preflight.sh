@@ -17,7 +17,7 @@ set -uo pipefail
 # reported as broken, not masked as healthy by a || true.
 af_version_bounded() {
 	if command -v timeout >/dev/null 2>&1; then
-		timeout 10s af version 2>/dev/null
+		timeout -k 2s 10s bash -c 'af version' 2>/dev/null
 	else
 		af version 2>/dev/null
 	fi
