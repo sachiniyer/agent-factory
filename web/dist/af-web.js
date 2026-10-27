@@ -7734,7 +7734,10 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 }
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
