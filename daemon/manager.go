@@ -575,6 +575,9 @@ type Manager struct {
 	// the webtab proxy resolves a vscode tab's target through it. Immutable after
 	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// relayTransports caches one workspace-loopback transport per off-box session
+	// (W5.3); see relayTransport.
+	relayTransports sync.Map
 	// proposals runs the proposal routes and the poll-time doc scan.
 	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They

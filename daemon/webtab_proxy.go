@@ -172,6 +172,18 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 		if strings.TrimSpace(tabURL) == "" {
 			return webTabTarget{Kind: kind}, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
 		}
+		// An off-box session's loopback is the WORKSPACE's, not the daemon host's:
+		// dial it through the agent-server relay (W5.1). It never falls back to the
+		// daemon's own TCP stack — a relay that cannot be had is an error, because
+		// serving the daemon's 127.0.0.1:N under this session's tab would surface an
+		// unrelated daemon-local service (#3062).
+		if instance.Capabilities().Workspace == session.WorkspaceRemote && session.IsLoopbackWebTarget(tabURL) {
+			tr, terr := m.relayTransport(instance, repoID, title)
+			if terr != nil {
+				return webTabTarget{Kind: kind}, terr
+			}
+			return webTabTarget{URL: tabURL, Transport: tr, Kind: kind}, nil
+		}
 		return webTabTarget{URL: tabURL, Kind: kind}, nil
 	case session.TabKindVSCode:
 		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)

@@ -89,6 +89,7 @@ var pluginReleaseDigests = []string{
 	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
 	"338d85ab38d72bffdb161020f6110f118965535f33266c90564cbd5273bbee0e", // 3.25 — Codex preflight capture: run af version to completion and take the first line via parameter expansion, so a real (non-zero) af version failure is reported as broken instead of masked by || true
 	"9f9af14485acb7d9f3c385d2bce7d4d56fb4fd190ddc9b8dcd297c8ae65b89b4", // 3.26 — Codex preflight: bound the af version capture with a 10s timeout so a hanging/flooding wrapper cannot stall SessionStart, and exit 0 on the broken-CLI branch so Codex surfaces the reinstall report instead of discarding it on a non-zero exit
+	"b57fc1ff7d0cce8a1e6002b75839843a06bed08d6c8cc6b7b4bdb65f9af03484", // 3.27 — web tabs on remote sessions: loopback targets are served from the workspace through the agent-server port relay (W5.3)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
