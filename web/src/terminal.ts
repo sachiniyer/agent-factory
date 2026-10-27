@@ -73,6 +73,11 @@ import { TouchScroll } from "./touch-scroll.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
+import {
+  stepTerminalFontSize,
+  subscribeTerminalFontSizes,
+  terminalFontSizeFor,
+} from "./terminal-font.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
@@ -112,9 +117,40 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
+
+/** The timer twin every scheduled activation fit arms alongside its rAF. rAF
+ *  callbacks starve outright on a page the compositor has parked — exactly the
+ *  state a multi-client strand needs repair during — while timers still fire
+ *  (throttled, not dropped), so the reclaim cannot be lost with the frame. */
+const VISIBLE_FIT_TIMER_MS = 250;
+
+/** Bound on how many delivered attempts a scheduled fit may retry when xterm
+ *  cannot yet measure the host (metrics mid-invalidation, element mid-move).
+ *  The no-polling design still holds: a genuinely hidden pane reports settled
+ *  and the intersection observer owns its retry — this covers only a host that
+ *  HAS geometry whose measurement failed transiently. */
+const VISIBLE_FIT_MAX_ATTEMPTS = 60;
 // How many wrapped rows either side of the pressed one a long press will read. It
 // bounds work done synchronously in touchstart for EVERY touch; see snapshotPress.
 const TOUCH_PRESS_MAX_ROWS = 32;
+
+// The default cell pitch halves at the phone breakpoint (#5492): 13px gives a
+// ~390px viewport only ~50 columns, so agent TUIs wrap or truncate; at phone
+// pixel densities 6.5px stays legible. The breakpoint is the ONE the mobile
+// layout already uses — (max-width: 768px), the same media query ui.ts,
+// terminal-keybar.ts, and appbarControls() hold — so the terminal crosses
+// with the rest of the shell rather than on a width of its own.
+//
+// Since #5500 those defaults are only the fallback: the persisted
+// web.terminal_font_size_* config values (already landed by the time a
+// terminal is constructed — connect() awaits the config read) are what this
+// returns, and terminal-font.ts holds them and the shared subscription.
+
+/** The xterm font size for a viewport's device class — the persisted value,
+ *  or the #5492 defaults when the config carries none. */
+export function terminalFontSize(phone: boolean): number {
+  return terminalFontSizeFor(phone);
+}
 
 /** A long press resolved at touchstart: the flattened wrapped block, the index the
  *  finger landed on, and the grid it was all read against. */
@@ -221,6 +257,10 @@ export class AttachTerminal {
   private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
+  // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
+  // appbarControls() hold the same query. It picks the halved default pitch
+  // (#5492) at construction, and its "change" listener re-fits across it.
+  private readonly phone = window.matchMedia("(max-width: 768px)");
 
   private ws: WebSocket | null = null;
   private stopped = false;
@@ -230,6 +270,26 @@ export class AttachTerminal {
   private reconnectTimer: number | null = null;
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
+  private visibleFitTimer: number | null = null;
+  private visibleFitAttempts = 0;
+  /** Whether this page is currently unpaintable, detected the only way the
+   *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
+   *  250ms timer had to deliver instead. An occluded page keeps
+   *  visibilityState='visible' while its frames starve — document.hidden is
+   *  not a sufficient probe — so the starved frame IS the parked signal. A
+   *  parked page must never write the shared PTY grid: with no user present its
+   *  resizes cannot be activations, and a parked client stealing the grid is
+   *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
+   *  any genuinely page-coupled signal — a delivered frame, an observer
+   *  callback, window focus, or a TRUSTED input event.
+   *
+   *  Null until the first probe delivery classifies the page — UNKNOWN, not
+   *  "not parked": a socket that opens inside the probe window (the onopen
+   *  force-resize included) must not let a write through on the default, or a
+   *  terminal constructed on an occluded page would stamp its grid onto the
+   *  shared PTY before its frames had a chance to starve. Every signal that
+   *  writes a boolean here IS itself a classification. */
+  private parked: boolean | null = null;
   private viewportRestoreFrame: number | null = null;
   private readonly mouseOverride: TerminalMouseOverride;
   private readonly mouseCaptureHint: HTMLDivElement;
@@ -307,12 +367,16 @@ export class AttachTerminal {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   private pendingViewport: PendingViewportAnchor | null = null;
   private exited = false;
+  private unsubscribeFontSizes: (() => void) | null = null;
 
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  private readonly onWindowFocus = (): void => this.scheduleVisibleFit();
+  private readonly onWindowFocus = (): void => {
+    this.parked = false;
+    this.scheduleVisibleFit();
+  };
   private readonly onWindowBlur = (): void => {
     // A modifier released in another tab/window never sends this terminal keyup.
     this.mouseOverrideKeyHeld = false;
@@ -322,15 +386,28 @@ export class AttachTerminal {
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
+      this.parked = false;
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
     }
   };
+  // A crossing of the phone boundary re-picks the default pitch (#5492) —
+  // rotation past 768px, or a desktop window dragged narrow and back.
+  private readonly onPhoneChange = (): void => {
+    // A media-query change cannot evaluate without layout — the page is awake.
+    this.parked = false;
+    this.applyDeviceFontSize();
+  };
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  private readonly onPointerEnter = (): void => this.fitVisibleHost();
+  private readonly onPointerEnter = (event: PointerEvent): void => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
+    this.fitVisibleHost();
+  };
   // A scroll can target an already-focused window after another client resized the
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
@@ -340,6 +417,7 @@ export class AttachTerminal {
       // The touch→wheel bridge's synthetics are not a user scroll (#4982).
       return;
     }
+    this.parked = false;
     // A real wheel is a new scroll intent — the coast must not fight it.
     this.stopCoast();
     this.handleUserScroll("wheel");
@@ -434,6 +512,9 @@ export class AttachTerminal {
     event.preventDefault();
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.handleUserScroll("touch");
     const touch = event.touches[0];
     const moved = event.touches.length !== 1 ||
@@ -509,6 +590,9 @@ export class AttachTerminal {
     // an ordinary terminal click targets the screen and keeps the saved anchor.
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
+      if (event.isTrusted) {
+        this.parked = false;
+      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -577,11 +661,12 @@ export class AttachTerminal {
     if (this.pendingViewport === null) {
       return;
     }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    const plan = terminalUserScrollPlan(source,
+      this.visibleFitFrame !== null || this.visibleFitTimer !== null);
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
-    this.disposeTouchPressMarker();
-    this.cancelVisibleFitFrame();
+      this.disposeTouchPressMarker();
+      this.cancelVisibleFitFrame();
     }
     this.fitVisibleHost();
     // fitVisibleHost schedules from the pre-input revision. xterm consumes the
@@ -601,7 +686,9 @@ export class AttachTerminal {
       allowProposedApi: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      // Half the desktop pitch at phone width (#5492); the "change" listener
+      // below re-picks it if the viewport crosses the breakpoint.
+      fontSize: terminalFontSize(this.phone.matches),
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
       theme: terminalSurface(container, currentXtermTheme()),
@@ -624,7 +711,13 @@ export class AttachTerminal {
       // block a desktop Ctrl+V produces — and the delivery hold reads the
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
-      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
+      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize);
+    // A stepped or re-read font size refits through the same path a breakpoint
+    // crossing takes: new metrics → fit → OpResize, so the PTY's grid follows.
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -724,7 +817,12 @@ export class AttachTerminal {
 
     // Re-fit + re-announce size whenever the container changes (window resize,
     // rail collapse, devtools). Debounced; the server echo reconciles multi-writer.
-    this.ro = new ResizeObserver(() => this.scheduleFit());
+    // An observer delivery cannot happen on a page that is not being painted —
+    // both are rendering-step signals, so either one clears the parked flag.
+    this.ro = new ResizeObserver(() => {
+      this.parked = false;
+      this.scheduleFit();
+    });
     this.ro.observe(container);
 
     // ResizeObserver alone cannot express two important transitions:
@@ -732,10 +830,12 @@ export class AttachTerminal {
     //     host already has its final border-box; and
     //   * a peer's authoritative resize changes xterm's grid, not this host's box.
     // Intersection/activation schedule a one-frame-later fit at those boundaries.
-    // A zero-size hidden pane is rejected by fitVisibleHost and retried when it
-    // intersects; there is no polling timer.
+    // A zero-size hidden pane is rejected by fitVisibleHost and refit when it
+    // intersects; the scheduled attempt retries only a measurable host that
+    // still cannot be read, never a hidden one — it is not a poller.
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.parked = false;
         this.scheduleVisibleFit();
       }
     });
@@ -743,6 +843,7 @@ export class AttachTerminal {
     window.addEventListener("focus", this.onWindowFocus);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.addEventListener("change", this.onPhoneChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
@@ -794,6 +895,7 @@ export class AttachTerminal {
     window.removeEventListener("focus", this.onWindowFocus);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.removeEventListener("change", this.onPhoneChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
@@ -806,6 +908,8 @@ export class AttachTerminal {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -1212,7 +1316,7 @@ export class AttachTerminal {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   private rowHeight(): number {
     const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
 
   private handleHistoryWheel(event: WheelEvent): boolean {
@@ -1429,23 +1533,128 @@ export class AttachTerminal {
 
   // --- resize ----------------------------------------------------------------
 
-  /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
-  private scheduleVisibleFit(): void {
-    if (this.stopped || this.visibleFitFrame !== null) {
+  /** Re-derives the default pitch from the phone breakpoint (#5492). A real
+   *  crossing re-assigns xterm's fontSize — its option setter re-measures cell
+   *  metrics synchronously — then refits on the next painted frame, where the
+   *  changed grid goes out as an ordinary OpResize. The size guard keeps a
+   *  repeated call from scheduling a no-op fit. */
+  private applyDeviceFontSize(): void {
+    const size = terminalFontSize(this.phone.matches);
+    if (this.term.options.fontSize === size) {
       return;
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
+    this.term.options.fontSize = size;
+    this.scheduleVisibleFit();
+  }
+
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one scheduled attempt; unlike the
+   *  resize debounce, this is not a time guess and never repeats on its own.
+   *
+   *  The attempt is delivered two ways: the frame, and a timer armed beside it.
+   *  A page the compositor has parked — exactly what a stranded multi-client pane
+   *  looks like, with a peer's tab holding the screen — starves rAF outright, and
+   *  a frame that never fires would leave visibleFitFrame set forever, coalescing
+   *  every later activation into a no-op. The timer still fires on that page, so
+   *  the reclaim cannot be lost with the frame. */
+  private scheduleVisibleFit(): void {
+    if (this.stopped) {
+      return;
+    }
+    this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    this.queueVisibleFit();
+  }
+
+  /** Arms the delivery pair. The frame side is RE-armed, not trusted: an armed
+   *  handle is only a promise — the callback can already have been eaten by a
+   *  parked epoch, leaving a latched handle that would suppress every later
+   *  trigger — the strand. cancelAnimationFrame on a dead handle is a no-op,
+   *  and re-requesting a live one just moves the fit to the next frame. The
+   *  timer side coalesces: one live timer is enough to verify the frame. */
+  private queueVisibleFit(): void {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    if (this.visibleFitTimer === null) {
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    }
+  }
+
+  /** Arms ONLY the frame probe — the wake detector for a resize this page is
+   *  not allowed to write yet. A parked or hidden page defers rAF until it
+   *  paints again, so a queued frame costs nothing while withheld and its
+   *  delivery IS the reactivation. The timer twin is never armed here: on a
+   *  withheld write its delivery can change nothing — it would fit, suppress,
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
+  private armWakeProbe(): void {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+  }
+
+  /** Whichever of the twin triggers delivers first runs the fit and drops the
+   *  other. The channel the delivery arrived on is the parked detector: the
+   *  timer only wins when the frame armed beside it starved, so a timer
+   *  delivery marks the page parked and this fit writes nothing. A fit that
+   *  still cannot measure the host retries within the attempt budget — a
+   *  transient bail used to be FINAL, which is how one bad instant could strand
+   *  the pane on a peer's grid permanently. */
+  private onVisibleFit(deliveredByFrame: boolean): void {
+    this.parked = !deliveredByFrame;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
+    }
+    if (this.stopped) {
+      return;
+    }
+    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+      // A frame still armed is the wake probe a withheld write queued inside
+      // this fit — its delivery retries a transient bail through the delivery
+      // pair like any scheduled fit, so the budget it runs on is preserved
+      // rather than zeroed with this fit's. Nothing armed means truly done.
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
+      return;
+    }
+    this.queueVisibleFit();
   }
 
   /** Drops activation work queued before a direct user scroll. Leaving that frame
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   private cancelVisibleFitFrame(): void {
+    this.visibleFitAttempts = 0;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
     if (this.visibleFitFrame === null) {
       return;
     }
@@ -1456,34 +1665,51 @@ export class AttachTerminal {
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
-  private fitVisibleHost(): void {
+   *  writer once, without a resize-echo ping-pong between visible clients.
+   *
+   *  Returns whether the pane reached a settled answer — measured the host and
+   *  either fit or decided no fit was due. False means the measurement itself
+   *  failed (xterm metrics mid-invalidation, the element mid-move, a detach
+   *  between proposal and fit): a transient the scheduled path retries within
+   *  its attempt budget. A zero-size pane reports settled — it is genuinely
+   *  hidden, and the intersection observer already owns refitting it when it
+   *  comes back. */
+  private fitVisibleHost(): boolean {
     if (this.stopped) {
-      return;
+      return true;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (host.width <= 0 || host.height <= 0) {
+      return true;
     }
     let proposed;
     try {
       proposed = this.fit.proposeDimensions();
     } catch {
-      return; // xterm has not painted metrics yet, or the container detached
+      return false; // xterm has not painted metrics yet, or the element detached
     }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
+    if (proposed === undefined) {
+      return false;
     }
     const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
     if (needsFit) {
       try {
         this.fit.fit();
       } catch {
-        return; // container detached between proposal and fit
+        return false; // detached between proposal and fit
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    // Deduped internally: a no-op when the PTY already knows this grid. The
+    // important case is a grid that diverged while this page was parked — a
+    // parked fit is local-only (sendResize refuses the wire write), so the
+    // first fit after an unpark must flush the owed resize even when xterm
+    // itself needed no refit.
+    this.sendResize(this.term.rows, this.term.cols, false);
     // A second peer can already have returned xterm to this host's local grid. No
     // fit is needed in that case, but its reflow still displaced the saved line.
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
+    return true;
   }
 
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
@@ -1556,17 +1782,63 @@ export class AttachTerminal {
   }
 
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A parked page never writes the shared grid: its fit still runs so xterm's
+   *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
+   *  cannot be an activation, and it must not steal a live visible peer's grid.
+   *  document.visibilityState covers hidden pages; `parked` covers occluded
+   *  pages that still report 'visible' while their frames starve.
+   *
+   *  An owed write re-arms only a channel that can change its outcome.
+   *  Withheld on a parked/hidden page, that is the frame probe alone — its
+   *  delivery IS the reactivation, and it costs nothing while queued. The
+   *  timer twin is never armed for a withheld write (each tick would just
+   *  fit-and-withhold again — a perpetual poll), and a dead socket arms
+   *  nothing at all: the connect path force-sends the current size on open.
+   *  lastRows/lastCols are only credited once send() reports the frame
+   *  actually left — crediting a dropped write would erase the divergence
+   *  marker and silence every later attempt (the phantom-sent strand). */
   private sendResize(rows: number, cols: number, force: boolean): void {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    // Before the first probe delivery, parked is UNKNOWN — this may be an
+    // occluded page still reporting visibilityState='visible'. The write
+    // defers to whichever twin delivers first: that fit carries or withholds
+    // the size. Nothing extra is armed (the constructor's pair already is),
+    // and lastRows/lastCols stay un-credited so the classified fit converges
+    // on its own.
+    if (this.parked === null) {
+      return;
+    }
+    if (this.parked ||
+        (typeof document !== "undefined" && document.visibilityState !== "visible")) {
+      this.retryOwedResize(rows, cols);
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
+    if (this.send(encode(resizeFrame(rows, cols)))) {
+      this.lastRows = rows;
+      this.lastCols = cols;
+      return;
+    }
+    // The socket could not carry the frame. It stays owed — lastSent is
+    // deliberately NOT touched — and the connect path force-sends the current
+    // size on open: socket-open is the only channel that can change this
+    // outcome, so nothing here is armed — a dead socket never polls.
+  }
+
+  /** Keeps the wake probe armed while a resize is owed — withheld by a
+   *  parked/hidden page. Self-limiting: the check re-reads the divergence,
+   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  the channel whose delivery can change the outcome; arming the timer
+   *  would just fit-and-withhold again on every tick. */
+  private retryOwedResize(rows: number, cols: number): void {
+    if (rows !== this.lastRows || cols !== this.lastCols) {
+      this.armWakeProbe();
+    }
   }
 
   /** Applies the server's authoritative size to xterm without echoing it back out
