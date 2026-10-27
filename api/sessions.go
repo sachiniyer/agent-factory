@@ -173,11 +173,11 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 				// reads the repoID-keyed storage map and so recovers what the
 				// snapshot dropped. The error message keeps the
 				// human-readable repo Paths the user passes to --repo.
-				repoIDs, repoPaths, gaps, err := diskRepoPathsForTitle(title, paths)
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
 				if err == nil && len(repoIDs) > 1 {
 					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
-				notice = warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
 			return &matches[0], notice, nil
 		}
