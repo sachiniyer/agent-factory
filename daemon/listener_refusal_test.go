@@ -268,7 +268,7 @@ func TestRefusalSeversHijackedWebSocketStreams(t *testing.T) {
 	// reading forever — the server stopped counting it at the upgrade.
 	revoked := *m.Config()
 	revoked.AllowUnauthenticatedNetwork = false
-	m.live.Store(&revoked)
+	m.storeLivePosture(&revoked)
 	failed, err := wl.reconcile(&revoked)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -302,7 +302,7 @@ func TestRefusalSeversWebSocketStreamsAcrossGenerations(t *testing.T) {
 	// per-generation tracker would lose.
 	moved := *m.Config()
 	moved.ListenAddr = "127.0.0.1:0"
-	m.live.Store(&moved)
+	m.storeLivePosture(&moved)
 	failed, err := wl.reconcile(&moved)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -313,7 +313,7 @@ func TestRefusalSeversWebSocketStreamsAcrossGenerations(t *testing.T) {
 	revoked := *m.Config()
 	revoked.ListenAddr = "0.0.0.0:0"
 	revoked.AllowUnauthenticatedNetwork = false
-	m.live.Store(&revoked)
+	m.storeLivePosture(&revoked)
 	failed, err = wl.reconcile(&revoked)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -346,7 +346,7 @@ func TestRefusalSeversStreamsLeftOpenByOptOut(t *testing.T) {
 	// the hijacked stream stays open in the tracker.
 	disabled := *m.Config()
 	disabled.ListenAddr = ""
-	m.live.Store(&disabled)
+	m.storeLivePosture(&disabled)
 	failed, err := wl.reconcile(&disabled)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -357,7 +357,7 @@ func TestRefusalSeversStreamsLeftOpenByOptOut(t *testing.T) {
 	refused := *m.Config()
 	refused.ListenAddr = "0.0.0.0:0"
 	refused.AllowUnauthenticatedNetwork = false
-	m.live.Store(&refused)
+	m.storeLivePosture(&refused)
 	failed, err = wl.reconcile(&refused)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -458,7 +458,7 @@ func TestRefusalFreezesRetiredListenerOnServedPosture(t *testing.T) {
 	next := *cfg
 	next.RequireToken = false
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	require.False(t, m.Config().RequireToken, "the refused tokenless config is now live")
 	wl.webFreeze.mu.Lock()
@@ -498,7 +498,7 @@ func TestRefusalFreezesEveryDrainingGeneration(t *testing.T) {
 	next.ListenAddr = "0.0.0.0:0"
 	next.RequireToken = false
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	wl.webFreeze.mu.Lock()
 	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
@@ -634,7 +634,7 @@ func TestAuthRelaxationFreezesDrainingGenerations(t *testing.T) {
 	require.Empty(t, config.ListenerBindRefusal(&next),
 		"tokenless loopback is an allowed posture — no refusal fires")
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	wl.webFreeze.mu.Lock()
 	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
@@ -679,7 +679,7 @@ func TestRelaxationRebindFreezesBoundGeneration(t *testing.T) {
 	next.RequireLoopbackToken = false
 	require.Empty(t, config.ListenerBindRefusal(&next))
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	wl.webFreeze.mu.Lock()
 	pins := append([]frozenRange(nil), wl.webFreeze.pins...)
@@ -753,7 +753,7 @@ func TestFailedRebindUnfreezesRetainedGeneration(t *testing.T) {
 	next.ListenAddr = hold.Addr().String()
 	next.RequireLoopbackToken = false
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	wl.webFreeze.mu.Lock()
 	pinned := len(wl.webFreeze.pins)
@@ -793,7 +793,7 @@ func TestOptInRevocationRejectsLateDrainHandlers(t *testing.T) {
 	next.AllowUnauthenticatedNetwork = false
 	require.NotEmpty(t, config.ListenerBindRefusal(&next))
 	wl.retireWebBeforePostureSwap(&next)
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 
 	wl.webFreeze.mu.Lock()
 	pins := append([]frozenRange(nil), wl.webFreeze.pins...)

@@ -580,6 +580,9 @@ type PingRequest struct{}
 // reports through Ping. It is deliberately narrower than config.Config: status
 // only needs the listener/auth values that can differ after a supported
 // hand-edit, and Ping must never become a general config or secret export.
+// One overlay is not boot state: RequireToken also reads true while the #5183
+// upgrade-probation token floor is armed, because that is what the control
+// listener enforces.
 type DaemonBootConfig struct {
 	ListenAddr           string `json:"listen_addr"`
 	RequireToken         bool   `json:"require_token"`

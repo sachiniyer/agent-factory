@@ -131,6 +131,10 @@ type webListeners struct {
 	// the pin falls back to the live read, which in that context IS the
 	// still-unswapped config.
 	postureBeforeSwap *config.Config
+
+	// applyCarryRefusedSocket is the apply's #5183 carry decision, handed from
+	// pre-swap to reconcile (listener_probation.go). nil = startup reconcile.
+	applyCarryRefusedSocket *bool
 }
 
 // newWebListeners builds the manager (never binds — startHTTPServer's initial
@@ -177,7 +181,9 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	// apply-time warning instead. It runs on EVERY reconcile (not only when the
 	// address changed): an auth-posture edit can withdraw the opt-in under a
 	// serving listener, and that listener must retire here.
-	refusal := config.ListenerBindRefusal(newCfg)
+	// ONE deferral (#5183): an upgrade candidate keeps a journaled socket bound
+	// under the token floor instead (listener_probation.go).
+	refusal, floor := wl.probationReconcileLocked(newCfg, config.ListenerBindRefusal(newCfg))
 	if refusal != "" {
 		if wl.webRefusal != refusal || wl.webHandle != nil {
 			wl.refuseWebLocked(newCfg.ListenAddr, refusal)
@@ -235,6 +241,12 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	if wl.webHandle != nil && wl.boundSeq > 0 {
 		wl.webFreeze.unfreezeFrom(wl.boundSeq)
 	}
+	// The #5183 floor disarms only once the socket state settled above: an
+	// earlier clear would leave a still-bound socket serving the swapped
+	// tokenless config unfloored until its retire.
+	if !floor && wl.manager.tokenFloorArmed() {
+		wl.manager.setTokenFloor(false)
+	}
 	var errs []error
 	if webErr != nil {
 		errs = append(errs, webErr)
@@ -258,13 +270,15 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 // retained socket whose failed rebind left it answering on an address the file
 // no longer names. Retiring here — before the publish — closes that window.
 //
-// Three judgments:
+// Four judgments:
 //
 //   - The apply RELAXES auth (require_token or the loopback switch dropping):
 //     pin the kind's shared freeze onto the serving config before anything
 //     publishes, covering every generation already issued — including ones an
 //     earlier rebind or opt-out retired that are still draining off the
 //     handle's view entirely (#5137 review).
+//   - Under an active upgrade transaction nothing retires (#5183): the
+//     journaled socket stays bound under the token floor (probationPreSwapLocked).
 //   - The CONFIGURED posture refused (non-loopback network.listen_addr, token
 //     off, no opt-in): refuseWebLocked retires the socket AND records the
 //     refusal — the same work reconcile does post-swap, run early under the
@@ -317,6 +331,9 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 			through = wl.boundSeq - 1
 		}
 		wl.webFreeze.pin(wl.postureBeforeSwap, through)
+	}
+	if wl.probationPreSwapLocked(newCfg) {
+		return wl.sandboxRevokedPreSwap
 	}
 	if refusal := config.ListenerBindRefusal(newCfg); refusal != "" {
 		if wl.webRefusal != refusal || wl.webHandle != nil {
@@ -509,6 +526,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// network.require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
+	policy, notice = wl.probationBannerLocked(policy, notice)
 	handle, info, err := wl.webBind(addr)
 	if err != nil {
 		// The #5140 shape: the new bind failed EADDRINUSE on an address the
@@ -549,16 +567,17 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 // out of bindWebLocked so the swap path's rollback can re-bind a released
 // listener without re-running the whole gate. Caller holds wl.mu.
 //
-// The cross-generation hijack tracker rides here rather than in the callers
-// because EVERY path that creates a control listener must get it: the
-// ordinary bind, the #5140 release-then-bind retry, the swap, and the
-// rollback re-bind alike.
+// The probation token floor (posturePair) and the cross-generation hijack
+// tracker ride here rather than in the callers because EVERY path that
+// creates a control listener must get both: the ordinary bind, the #5140
+// release-then-bind retry, the swap, and the rollback re-bind alike.
 func (wl *webListeners) webBind(bindAddr string) (*tcpListenerHandle, tcpListenerInfo, error) {
 	cfg := wl.manager.Config()
 	wl.postureSeq++
 	return startTCPListenerWithListen(wl.webMux, bindAddr, cfg, webListenerPolicy(cfg), withWebShell, nil,
 		&livePosture{
 			snapshot:         wl.manager.Config,
+			posturePair:      wl.manager.authPosturePair,
 			policyFromConfig: true,
 			sandboxTokens:    &wl.manager.sandboxTokens,
 			freeze:           &wl.webFreeze,

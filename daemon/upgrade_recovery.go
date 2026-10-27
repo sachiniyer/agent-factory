@@ -359,6 +359,17 @@ func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	// fail identity here and roll back to the old exposed daemon. Only
 	// refusal-aware daemons report the reason, so an older responder that
 	// genuinely failed to bind still misses both fields and still fails.
+	//
+	// This clause only helps when the SUPERVISOR is itself a #5137 build: the
+	// recovery actor execs the immutable previous binary
+	// (internal/upgradetxn/recovery_actor.go), so a pre-#5137 old daemon
+	// validates candidates with a predicate that knows no refusal reason. That
+	// direction is covered candidate-side instead (#5183) — a probation
+	// candidate whose journal expected the socket bound keeps it bound under
+	// the token floor (webListeners.upgradeCandidateCarriesRefusedListener; the
+	// journal records no auth posture, so the floor is the strongest safe
+	// answer), and the fresh ordinary daemon that replaces it after adoption
+	// refuses at its own startup reconcile.
 	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound &&
 		h.Listeners.TCPRefusalReason == "" {
 		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)

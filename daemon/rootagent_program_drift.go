@@ -353,7 +353,7 @@ func (m *Manager) applyLiveConfigAndInvalidateRootProgramDrift(newCfg *config.Co
 	// The live snapshot and its drift-cache epoch are one publication. A warning
 	// commit holding m.mu therefore observes either the complete old generation
 	// or the complete new one, never new config with an old cache epoch.
-	m.live.Store(newCfg)
+	m.storeLivePosture(newCfg)
 	m.rootProgramDriftConfigEpoch++
 	for _, st := range m.rootEnsureStates {
 		// The epoch invalidates what an in-flight resolver may return, but it must
