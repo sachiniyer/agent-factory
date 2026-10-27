@@ -261,7 +261,7 @@ test("pr.yml calls the web selftest workflow, and it is scoped rather than uncon
     "pr.yml must call web-selftest.yml as a reusable workflow — that is the only way Build can `needs` it",
   );
   assert.deepEqual(jobNeeds(yaml, "web-selftest"), ["web-selftest-scope"]);
-  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.run == 'true'$/m);
+  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.selftest == 'true'$/m);
 });
 
 test("web-selftest.yml is callable AND runs on master", () => {
@@ -325,12 +325,10 @@ test("shared scope exposes both decisions and performance skips only on a known 
   const yaml = readWorkflow("pr.yml");
   assert.deepEqual(jobNeeds(yaml, "perf"), ["web-selftest-scope"]);
   const perf = yaml.slice(yaml.indexOf("\n  perf:\n"), yaml.indexOf("\n  test-macos:\n"));
-  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf_run == 'true'$/m);
-  assert.match(yaml, /perf_run: \$\{\{ steps\.scope\.outputs\.perf_run \}\}/);
-  assert.match(yaml, /node \.github\/scripts\/web-selftest-scope\.js changed-paths\.txt perf >> "\$GITHUB_OUTPUT"/);
-  assert.match(yaml, /git diff --no-renames --name-only/);
-  assert.equal((yaml.match(/echo "perf_run=true" >> "\$GITHUB_OUTPUT"/g) ?? []).length, 2,
-    "unknown events and missing base parents both run performance");
+  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf == 'true'$/m);
+  assert.match(yaml, /perf: \$\{\{ steps\.scope\.outputs\.perf \}\}/);
+  // Heavy jobs are off pull_request and on for every other event.
+  assert.match(yaml, /if \[ "\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]; then\n\s+heavy=false selftest=false perf=false/);
 });
 
 test("performance scope CLI fails open for an unreadable diff and emits its own output key", () => {
