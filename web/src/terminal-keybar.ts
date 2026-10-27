@@ -25,7 +25,18 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
   return (alt ? "\x1b" : "") + text;
 }
 
-export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
+// The font-size pair (#5500) rides on the arrows page rather than earning a
+// third row: it is an occasional display control, not a PTY key, so it never
+// reaches sendUserInput — act() special-cases it before the byte path. Seven
+// keys keeps the row at the primary page's count, so the 44px/348px narrow
+// math already proven for that row holds here unchanged.
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]] as const;
+
+/** The font-size keys' accessible names — the glyph alone reads as letters. */
+const FONT_ZOOM_LABELS: Record<string, { delta: number; name: string }> = {
+  "A−": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" },
+};
 
 export interface DecodedKeyBytes {
   key: string;
@@ -275,9 +286,40 @@ export class StickyModifiers {
   }
 }
 
-export function keybarPointerDown(event: Pick<Event, "preventDefault">, act: () => void): void {
+export function keybarPointerDown(event: Pick<Event, "preventDefault">, act?: () => void): void {
   event.preventDefault(); // Cancel the browser's button-focus default before acting.
-  act();
+  act?.();
+}
+
+/**
+ * True only for a click no pointer produced — assistive-tech activation,
+ * keyboard Enter, a programmatic `.click()`. A real tap's click can also
+ * arrive at detail:0 once the press's pointerdown was canceled (Chromium
+ * zeroes the click count along with the compatibility mouse events it
+ * suppresses), so detail alone misreads it as assistive — pointerType is the
+ * honest discriminator (#5426).
+ */
+export function keybarClickIsPointerless(event: { detail: number; pointerType?: string }): boolean {
+  return event.detail === 0 && !event.pointerType;
+}
+
+/**
+ * True while the sheet's opening-gesture marker is armed — whatever the
+ * backdrop click's own metadata reports (#5428). The marker arms only when a
+ * pointer gesture opened the sheet, and the click ending that gesture is the
+ * first click the fresh full-screen backdrop can receive; any genuinely new
+ * gesture disarms the marker at pointerdown before its click can arrive, so
+ * still-armed means this click IS the opening one. The event is deliberately
+ * not consulted: iOS Safari dispatches the trailing click as a plain
+ * MouseEvent with no pointer fields, or labels a touch click pointerType
+ * "mouse" (WebKit bug 282988) — either would fail an identity match and
+ * self-dismiss the sheet. Pointerless opens arm nothing, so every click
+ * still dismisses.
+ */
+export function keybarSheetClickIsOpeningGesture(
+  event: { pointerId?: number; pointerType?: string; detail?: number },
+  opening: { pointerId: number; pointerType: string } | undefined): boolean {
+  return opening !== undefined;
 }
 
 export class TerminalKeybar {
@@ -309,11 +351,16 @@ export class TerminalKeybar {
   private readonly suppressedKeydowns = new WeakSet<Event>();
   private pasteSheet: HTMLElement | undefined;
   private pasteSheetArea: HTMLTextAreaElement | undefined;
+  private pasteSheetGesture: { pointerId: number; pointerType: string } | undefined;
+  // A pointerdown anywhere starts a NEW gesture — by definition later than the
+  // one whose trailing click the armed swallow exists for (#5428).
+  private readonly disarmPasteSheetGesture = (): void => { this.pasteSheetGesture = undefined; };
   private disposed = false;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly paste: (data: string) => void,
-    private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
+    private readonly refit: () => void, private readonly applicationCursor: () => boolean,
+    private readonly fontSizeStep: (delta: number) => void) {
     this.originalMaxHeight = host.style.maxHeight;
     this.textarea = host.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
@@ -327,21 +374,66 @@ export class TerminalKeybar {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = key;
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
-        const act = () => {
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
+        const act = (event?: PointerEvent) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          // The A−/A+ keys step the shared terminal font size (#5500) — display
+          // state, not input — so they bypass the modifiers and the byte path
+          // entirely and leave an armed modifier armed for the next real key.
+          else if (zoom) this.fontSizeStep(zoom.delta);
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else if (key === "Paste") void this.requestPaste();
+          // The pointer that released on Paste is remembered through the read:
+          // if it falls back to the sheet, the tap's own trailing click must not
+          // dismiss it (#5428). A pointerless invocation arms nothing.
+          else if (key === "Paste") void this.requestPaste(
+            event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : undefined);
           // Resolve and consume at source. The marker preserves these bytes
           // without sending a keybar emission through the user decoder again.
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
-        button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
-        // Assistive activation has no pointerdown. Compatibility clicks must not
-        // send twice (or turn a one-shot tap into a locked modifier).
-        button.addEventListener("click", event => { if (event.detail === 0) act(); });
+        // #5426: pointerdown is activation-triggering only for a mouse; on the
+        // touch and pen input this bar exists for, transient activation arrives
+        // at the release — pointerup. navigator.clipboard.readText is
+        // activation-gated on exactly those engines, so Paste acts on the
+        // release instead of the press, while every other key still acts at
+        // pointerdown. Its preventDefault still runs either way — without it
+        // the tap would steal xterm's focus before the release ever arrives.
+        const onRelease = key === "Paste";
+        // The release must complete a press that started on THIS key — plain
+        // click semantics. pointerup is paired to its pointerdown by pointerId
+        // (a finger landing elsewhere and lifting on the key never pastes;
+        // touch and pen already route their pointerup to the down-target via
+        // implicit pointer capture, so the pairing binds the mouse case), the
+        // release must land inside the key's box (capture still delivers a
+        // slid-off release to it), and pointercancel — the browser taking the
+        // gesture for a scroll — withdraws the press.
+        let pressedId: number | undefined;
+        button.addEventListener("pointerdown", event => {
+          if (onRelease) pressedId = event.pointerId;
+          keybarPointerDown(event, onRelease ? undefined : act);
+        });
+        if (onRelease) {
+          button.addEventListener("pointerup", event => {
+            if (event.pointerId !== pressedId) return;
+            pressedId = undefined;
+            const rect = button.getBoundingClientRect();
+            if (event.clientX >= rect.left && event.clientX < rect.right &&
+              event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
+          });
+          button.addEventListener("pointercancel", event => {
+            if (event.pointerId === pressedId) pressedId = undefined;
+          });
+          // A mouse press dragged off the key releases elsewhere — its stale
+          // id must not pair with a later release that lands on the key.
+          button.addEventListener("pointerleave", () => { pressedId = undefined; });
+        }
+        // Assistive activation has no pointer at all, so its click gets the
+        // act() the pointer events already gave a real tap — and the tap's
+        // own click, pointer-derived, must not fire a second one.
+        button.addEventListener("click", event => { if (keybarClickIsPointerless(event)) act(); });
         if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
         row.append(button);
       }
@@ -450,19 +542,21 @@ export class TerminalKeybar {
   }
   /**
    * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
-   * tap's synchronous stack so the request lands inside the browser's
-   * user-activation window — iOS Safari answers with its own paste bubble and
-   * Android Chrome may ask for clipboard permission once; both are fine.
+   * synchronous stack of the tap's activation-bearing event — pointerup, not
+   * pointerdown, which carries transient user activation for a mouse alone
+   * (#5426) — so the request lands inside the browser's user-activation window.
+   * iOS Safari answers with its own paste bubble and Android Chrome may ask
+   * for clipboard permission once; both are fine.
    *
    * Three failure shapes collapse into the one never-silent fallback: no
    * readText at all (Firefox, an insecure context), a rejection (permission
    * denied), and an empty read each open the paste sheet — the textarea route
    * is how paste works on browsers that block readText.
    */
-  async requestPaste(): Promise<void> {
+  async requestPaste(gesture?: { pointerId: number; pointerType: string }): Promise<void> {
     const clipboard = navigator.clipboard;
     if (!clipboard?.readText) {
-      this.openPasteSheet();
+      this.openPasteSheet(gesture);
       return;
     }
     try {
@@ -476,7 +570,7 @@ export class TerminalKeybar {
         return;
       }
     } catch { /* readText also rejects on denied permission. */ }
-    if (!this.disposed && this.focused) this.openPasteSheet();
+    if (!this.disposed && this.focused) this.openPasteSheet(gesture);
   }
   /**
    * Sends text through xterm's paste path: term.paste wraps the block in
@@ -503,8 +597,13 @@ export class TerminalKeybar {
    * and Send routes the text through the same sendPaste path a direct
    * clipboard read would. The card reuses the app's modal chrome classes;
    * Escape, Cancel, and a backdrop tap all dismiss.
+   *
+   * `gesture` is the pointer that invoked Paste, when there was one: the sheet
+   * is appended while that gesture is still in flight, and the tap's own
+   * trailing click would otherwise hit-test the fresh backdrop and dismiss it
+   * inside the same gesture (#5428).
    */
-  private openPasteSheet(): void {
+  private openPasteSheet(gesture?: { pointerId: number; pointerType: string }): void {
     if (this.pasteSheet) {
       this.pasteSheetArea?.focus();
       return;
@@ -515,7 +614,7 @@ export class TerminalKeybar {
     // drops a just-committed IME composition before its zero-delay finalizer
     // reads it. Open behind that commit instead, the same deferral sendPaste
     // takes, so the text the user finished lands before the sheet takes focus.
-    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet())) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet(gesture))) return;
     const title = document.createElement("h2");
     title.className = "af-modal-title";
     title.textContent = "Paste";
@@ -571,11 +670,24 @@ export class TerminalKeybar {
     const backdrop = document.createElement("div");
     backdrop.className = "af-modal-backdrop";
     backdrop.append(card);
-    backdrop.addEventListener("click", () => this.closePasteSheet(false));
+    backdrop.addEventListener("click", event => {
+      // The click that ends the opening gesture hit-tests a backdrop that did
+      // not exist when its pointerdown ran — swallowing it keeps the sheet
+      // open past its own tap (#5428). Consumed either way; a later, separate
+      // interaction always dismisses.
+      const opening = this.pasteSheetGesture;
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+        this.pasteSheetGesture = undefined;
+        return;
+      }
+      this.closePasteSheet(false);
+    });
     cancel.addEventListener("click", () => this.closePasteSheet(false));
     send.addEventListener("click", () => this.closePasteSheet(true));
     this.pasteSheet = backdrop;
     this.pasteSheetArea = area;
+    this.pasteSheetGesture = gesture;
+    document.addEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     document.body.append(backdrop);
     area.focus();
   }
@@ -584,6 +696,8 @@ export class TerminalKeybar {
     this.pasteSheet?.remove();
     this.pasteSheet = undefined;
     this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     if (send && area?.value) this.sendPaste(area.value);
     // Focusing the sheet blurred the terminal's textarea; hand the focus back
     // so the keybar returns to the session the text was sent to.
@@ -626,6 +740,8 @@ export class TerminalKeybar {
     this.pasteSheet?.remove();
     this.pasteSheet = undefined;
     this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
     this.softInput.dispose();

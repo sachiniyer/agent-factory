@@ -34,7 +34,7 @@ func TabGlyph(kind session.TabKind) string {
 		return AgentTabGlyph
 	case session.TabKindShell:
 		return ShellTabGlyph
-	case session.TabKindWeb, session.TabKindVSCode:
+	case session.TabKindWeb, session.TabKindVSCode, session.TabKindDocs:
 		return WebTabGlyph
 	default:
 		return ProcessTabGlyph
