@@ -8,6 +8,7 @@
 // gate, so do not add per-PR reads here.
 
 const BASE = "master";
+const FIX_LABEL = "fix-master";
 const HOLD_LABELS = ["hold", "no-auto-merge"];
 const REQUIRED_CHECKS = ["Build", "Lint"];
 const CODEX_LOGIN = "chatgpt-codex-connector";
@@ -96,6 +97,33 @@ function filesQuery(numbers) {
 function touchesWorkflows(files) {
   if (!files || (files.pageInfo && files.pageInfo.hasNextPage)) return true;
   return (files.nodes || []).some((f) => f.path.startsWith(".github/workflows/"));
+}
+
+// Master's own Build/Lint workflows. Their newest COMPLETED run (cancelled and
+// skipped runs say nothing about the tree) decides: a failure halts merging
+// until a later run passes. Catches composed breaks the Go-only composition
+// check cannot see (e.g. test expectations that a sibling PR invalidated).
+const MASTER_HEALTH_WORKFLOWS = [
+  ".github/workflows/build.yml",
+  ".github/workflows/lint.yml",
+];
+const INCONCLUSIVE = new Set(["cancelled", "skipped", "neutral", "stale"]);
+
+// `runs` is the newest-first list from one actions/runs call. Returns the failing
+// run that causes the halt, or null.
+function findRedMasterRun(runs) {
+  for (const path of MASTER_HEALTH_WORKFLOWS) {
+    const latest = runs.find((r) => r.path === path && !INCONCLUSIVE.has(r.conclusion));
+    if (latest && latest.conclusion === "failure") return latest;
+  }
+  return null;
+}
+
+async function masterRedRun(github, owner, repo) {
+  const res = await github.rest.actions.listWorkflowRunsForRepo({
+    owner, repo, branch: BASE, status: "completed", per_page: 30,
+  });
+  return findRedMasterRun(res.data.workflow_runs);
 }
 
 function isCodex(login) {
@@ -223,12 +251,34 @@ async function settleBroken({ github, core, context, passed, number }) {
 // Step 3: merge everything selectable, then re-raise master verification once.
 async function mergeAll({ github, core, context }) {
   const { owner, repo } = context.repo;
+  // Refuse to merge onto a red master. A failed read throws: no merge this run.
+  const red = await masterRedRun(github, owner, repo);
+  if (red) {
+    // Not a deadlock: a fix-forward PR labelled `fix-master` (Build + Lint still
+    // required on its head) may land, since nothing else could turn master green.
+    core.warning(`Master ${red.name} run ${red.id} concluded failure; only ${FIX_LABEL} PRs may merge.`);
+    await core.summary
+      .addHeading("Merging halted: master is red", 3)
+      .addRaw(
+        `Latest completed master **${red.name}** run [${red.id}](${red.html_url}) ` +
+          `on ${(red.head_sha || "").slice(0, 10)} concluded \`failure\`. ` +
+          `Only PRs labelled \`${FIX_LABEL}\` merge until a later master run passes.\n`,
+      )
+      .write();
+  }
   const prs = await fetchOpenPrs(github, core, owner, repo);
   const phase1 = selectCandidates(prs);
   await attachThreads(github, core, owner, repo, phase1.filter((e) => !e.reason).map((e) => e.pr));
   let selected = phase1.map((e) =>
     e.reason === null && hasUnansweredP1(e.pr) ? { pr: e.pr, reason: "unanswered P1 Codex finding" } : e,
   );
+  if (red) {
+    selected = selected.map((e) =>
+      e.reason === null && !e.pr.labels.nodes.some((l) => l.name === FIX_LABEL)
+        ? { pr: e.pr, reason: "master is red" }
+        : e,
+    );
+  }
   // AUTO_MERGE_TOKEN (a PAT with the workflows permission) can merge workflow
   // PRs; GITHUB_TOKEN cannot, and GitHub refuses the merge. Detect them up front.
   const usingPat = process.env.USING_PAT === "true";
@@ -318,6 +368,6 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
-  touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  findRedMasterRun, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
 };

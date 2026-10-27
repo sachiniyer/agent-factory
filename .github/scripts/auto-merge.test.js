@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
+const { selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, findRedMasterRun, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
 
 const run = (name, conclusion = 'SUCCESS', status = 'COMPLETED') => ({ __typename: 'CheckRun', name, status, conclusion });
 const green = [run('Build'), run('Lint'), run('Test', 'FAILURE')];
@@ -70,7 +70,9 @@ function fakeCore() {
     addList(l) { c.listed.push(...l); return this; }, async write() {} };
   return c;
 }
+const github_runs = { runs: [] };
 function fakeGithub(files) {
+  github_runs.runs = [];
   const merged = [];
   return { merged, graphql: async (q) => {
     const rateLimit = { cost: 1, remaining: 1, resetAt: 'x' };
@@ -80,8 +82,8 @@ function fakeGithub(files) {
       ? { files: { pageInfo: { hasNextPage: false }, nodes: files[n].map((path) => ({ path })) } }
       : { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
     return { rateLimit, repository };
-  }, rest: { pulls: { merge: async ({ pull_number }) => { merged.push(pull_number); return { data: { sha: 'f'.repeat(40) } }; } },
-    actions: { createWorkflowDispatch: async () => {} } } };
+  }, rest: { actions: { listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: github_runs.runs } }), createWorkflowDispatch: async () => {} }, pulls: { merge: async ({ pull_number }) => { merged.push(pull_number); return { data: { sha: 'f'.repeat(40) } }; } },
+  } };
 }
 
 test('on GITHUB_TOKEN a workflow-touching PR is skipped (not merged, run does not fail)', async () => {
@@ -98,5 +100,41 @@ test('with AUTO_MERGE_TOKEN workflow PRs are merged and the files query is skipp
   const core = fakeCore(); const github = fakeGithub({ 1: ['a.go'], 2: ['.github/workflows/x.yml'] });
   await mergeAll({ github, core, context: { repo: { owner: 'o', repo: 'r' } } });
   delete process.env.USING_PAT;
+  assert.deepEqual(github.merged, [1, 2]);
+});
+
+const mr = (path, conclusion, id = 1) => ({ id, path: `.github/workflows/${path}`, name: path, conclusion, head_sha: 'b'.repeat(40), html_url: 'u' });
+test('findRedMasterRun: newest completed Build/Lint decides; later pass resumes', () => {
+  assert.equal(findRedMasterRun([]), null);
+  assert.equal(findRedMasterRun([mr('build.yml', 'success', 3), mr('lint.yml', 'success', 2)]), null);
+  assert.equal(findRedMasterRun([mr('build.yml', 'failure', 3), mr('build.yml', 'success', 1)]).id, 3);
+  assert.equal(findRedMasterRun([mr('build.yml', 'success', 4), mr('build.yml', 'failure', 3)]), null);
+  assert.equal(findRedMasterRun([mr('lint.yml', 'failure', 5), mr('build.yml', 'success', 4)]).id, 5);
+  // cancelled runs are ignored; other workflows do not count
+  assert.equal(findRedMasterRun([mr('build.yml', 'cancelled', 6), mr('build.yml', 'success', 5)]), null);
+  assert.equal(findRedMasterRun([mr('docs.yml', 'failure', 7)]), null);
+});
+
+test('mergeAll merges nothing while master Build/Lint is red, and says which run', async () => {
+  delete process.env.USING_PAT;
+  const core = fakeCore(); const github = fakeGithub({ 1: ['a.go'], 2: ['a.go'] });
+  github_runs.runs = [mr('build.yml', 'failure', 99)];
+  let raw = '';
+  core.summary.addRaw = function (t) { raw += t; return this; };
+  await mergeAll({ github, core, context: { repo: { owner: 'o', repo: 'r' } } });
+  assert.deepEqual(github.merged, []);
+  assert.equal(core.outputs.merged, 'false');
+  assert.match(raw, /\b99\b/);
+  // a fix-master PR may still land so master can turn green
+  const g2 = fakeGithub({ 1: ['a.go'], 2: ['a.go'] }); github_runs.runs = [mr('build.yml', 'failure', 99)];
+  const orig = g2.graphql;
+  g2.graphql = async (q) => { const r = await orig(q); const pr1 = r.repository.pullRequests && r.repository.pullRequests.nodes[0];
+    if (pr1) pr1.labels = { nodes: [{ name: 'fix-master' }] }; return r; };
+  await mergeAll({ github: g2, core: fakeCore(), context: { repo: { owner: 'o', repo: 'r' } } });
+  assert.deepEqual(g2.merged, [1]);
+  github_runs.runs = [mr('build.yml', 'failure', 99)];
+  // a later passing run resumes merging
+  github_runs.runs = [mr('build.yml', 'success', 100), mr('build.yml', 'failure', 99)];
+  await mergeAll({ github, core, context: { repo: { owner: 'o', repo: 'r' } } });
   assert.deepEqual(github.merged, [1, 2]);
 });

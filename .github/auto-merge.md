@@ -13,6 +13,13 @@ API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the 
 
 `GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
 
+## Halt conditions
+
+Merging is refused (and resumes automatically) when:
+
+- an open `master broken by merge batch <sha>` issue exists and master still fails the composition check; or
+- master's most recent **completed** `Build` or `Lint` workflow run (`build.yml` / `lint.yml`; cancelled and skipped runs are ignored) concluded `failure`. One `actions/runs?branch=master&status=completed` call per run; the job summary names the run that caused the halt. This catches composed breaks the Go-only composition check cannot (e.g. test expectations a sibling PR invalidated). It clears once a later master run passes — re-dispatch the workflow on master to speed that up. A fix-forward PR labelled `fix-master` (Build + Lint still required on its head) is exempt from this halt, so a red master can always be repaired through the merger.
+
 ## Workflow-touching PRs and `AUTO_MERGE_TOKEN`
 
 `GITHUB_TOKEN` cannot merge a PR whose diff touches `.github/workflows/` (GitHub refuses: "refusing to allow a GitHub App to create or update workflow … without workflows permission"). On `GITHUB_TOKEN` the merger runs one cheap files query for the merge candidates only, skips such PRs with the reason *workflow files — needs AUTO_MERGE_TOKEN or a maintainer merge*, and lists them in the job summary instead of failing the run.
