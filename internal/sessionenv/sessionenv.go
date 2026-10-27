@@ -12,6 +12,71 @@ import (
 // filtered session process. It is intentionally not a user-facing subcommand.
 const ExecMarker = "__af-session-env-exec"
 
+// PanePidUserOption is the pane-scoped tmux user option the exec shim stamps
+// the pane's identity bundle into at launch: "<pane_pid>:<deaths>:<pane_tty>"
+// (PanePidStampFormat). tmux >=3.8 stops reporting pane_pid once a pane's
+// root exits (#5319), but user options live on the pane struct, which
+// remain-on-exit preserves — so a held dead pane keeps answering
+// #{@af_pane_pid} with the pid it had while alive. session/tmux reads it back
+// as the fallback authority for a dead pane's empty pane_pid.
+//
+// The bundle is incarnation-bound because the option outlives the incarnation
+// that wrote it: respawn-pane keeps the pane struct (its options, its %N id)
+// while replacing the root, so a bare pid could name a previous run. tmux
+// offers no respawn hook and empties pane_pid before pane-died formats run
+// (measured on 3.8: after-respawn-pane does not exist, and
+// pane-died/pane-exited/after-kill-pane are all silent through
+// `respawn-pane -k`), and the only per-allocation value tmux reports —
+// pane_tty — survives death as a NAME, whose devpts index respawns recycle.
+// So freshness is proven two ways at once: the deaths counter the pane-died
+// hook bumps on every natural exit, the recorded start command the stamp
+// pins, and the tty name as corroborating evidence at the row; and at the
+// shim a respawn must restamp before its command runs, unless the option
+// provably still names an earlier run — the dangerous state is a LIVE pane
+// running under the previous run's stamp, and the shim refuses to create it
+// when it can prove that is what it is (see stampPaneRootPid; a shim that
+// can neither write nor read the option launches anyway, the accepted
+// residual of never refusing a first launch over bookkeeping).
+const PanePidUserOption = "@af_pane_pid"
+
+// PaneDeathsUserOption counts the pane's natural root exits: the pane-died
+// hook (PaneDeathsHookCommand) increments it server-side each time the root
+// dies. A stamp records the count at stamp time; at teardown the counter has
+// moved exactly once, so a stamp carried into a later incarnation shows a gap
+// the reader refuses. The counter cannot see a `respawn-pane -k` kill — tmux
+// fires no hook for it — which is why the stamp also pins the pane's pty
+// name and recorded command, and why the shim refuses to launch a respawn
+// whose record it can prove still names an earlier run (see stampPaneRootPid).
+const PaneDeathsUserOption = "@af_pane_deaths"
+
+// PaneCommandUserOption pins the pane's recorded start command at stamp time.
+// #{pane_start_command} survives respawn, so the reader compares it byte-for-
+// byte: a replacement command — including one that merely contains a launch
+// marker — fails the equality, while an identical re-run re-executed this shim
+// and was freshly restamped anyway.
+const PaneCommandUserOption = "@af_pane_cmd"
+
+// PaneDeathsHookName installs the counter under a dedicated pane-died array
+// key. tmux hooks are arrays: an unindexed `set-hook pane-died` clears the
+// array and writes member 0, so a user hook installed before a commandless
+// respawn would silently stop running when the shim sets the counter again
+// (#5328 review). Key 99 is far enough out not to collide with an
+// operator's own members, and re-setting the same key is an idempotent
+// replace rather than an append — verified on tmux 3.2a and 3.8.
+const PaneDeathsHookName = "pane-died[99]"
+
+// PaneDeathsHookCommand is the pane-died hook body: increment
+// PaneDeathsUserOption. It runs in the dying pane's own context, so it needs
+// no target; the -F expansion keeps the arithmetic server-side.
+const PaneDeathsHookCommand = `set-option -F -p ` + PaneDeathsUserOption +
+	` "#{e|+:#{` + PaneDeathsUserOption + `},1}"`
+
+// PanePidStampFormat is the single -F expansion recorded into
+// PanePidUserOption: the pane's live root pid, the deaths counter as it
+// stands at stamp time, and the pane's pty name — all resolved against the
+// pane the option is set on, so the three stay consistent within one write.
+const PanePidStampFormat = "#{pane_pid}:#{" + PaneDeathsUserOption + "}:#{pane_tty}"
+
 // AgentServerExecMarker is the effect-bound variant used by af's Docker and SSH
 // launchers. It accepts only agent-server arguments, derives the credential
 // policy from the program those arguments will actually launch, and then execs
@@ -136,15 +201,17 @@ var agentNames = map[string]map[string]struct{}{
 	// so its per-agent allowlist is empty.
 	//
 	// The key MUST exist even though the set is empty. The docker provisioner
-	// derives the session's agent from AgentForCommand
-	// (dockerProvisioner.agentName), and resolveAgentCredentialMounts keys
-	// credential mounting off that result. devin is in agentCredentialFiles,
-	// but without this entry AgentForCommand("devin") returned "" — the
-	// empty-program fallback in agentName() does not cover a non-empty program
-	// — so a devin session resolved to "" and the devin credential mount was
-	// unreachable in production even after an image shipped the CLI. An empty
-	// set keeps the environment boundary at commonNames only while letting the
-	// credential mount fire.
+	// derives the session's agent through the shared grant predicate
+	// (GrantAgentForCommand, via dockerProvisioner.agentName), which classifies
+	// through the same supported-agent table — and
+	// resolveAgentCredentialMounts keys credential mounting off that result.
+	// devin is in agentCredentialFiles, but without this entry
+	// GrantAgentForCommand("devin") returned "" — the empty-program fallback in
+	// agentName() does not cover a non-empty program — so a devin session
+	// resolved to "" and the devin credential mount was unreachable in
+	// production even after an image shipped the CLI. An empty set keeps the
+	// environment boundary at commonNames only while letting the credential
+	// mount fire.
 	"devin": nameSet(),
 }
 
@@ -431,7 +498,7 @@ func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 //
 // The agent is derived from the command rather than taken from the caller,
 // because that is exactly what the launch paths do (TmuxSession.launchEnvironment
-// and hookProvisioner.environmentAgent both call AgentForCommand). A check that
+// and hookProvisioner.environmentAgent both classify the command itself). A check that
 // re-derived it differently could disagree with the resolution it is guarding —
 // the key a repo files an override under does not have to name the agent the
 // value actually runs.

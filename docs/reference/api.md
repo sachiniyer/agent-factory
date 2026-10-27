@@ -27,6 +27,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
+| `POST` | `/v1/PruneSessions` | `repo_id`, `all`, `older_than` | Dry-run listing for `af sessions prune`: reports which old archived sessions a reclaim would remove and the allocated bytes each would free. Strictly read-only. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id`, `expected_daemon_boot_id`, `force_reap` | Restore an archived, Lost, or Dead session; an optional expected daemon boot ID refuses before admission if the process changed. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
 | `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous. |
@@ -47,7 +48,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/AccountLogin` | `agent`, `name` | Open an agent's OWN login flow (claude auth login / codex login / gemini) in a bare tmux session scoped to one registered account: the account's credential directory injected, every ambient identity variable removed. Registers the account if it does not exist. Returns the tmux session and socket to attach to, and the account's logged-in state read from the agent's own credential file. af never reads, stores, or forwards the credential. |
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
-| `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically). |
+| `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically). |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |

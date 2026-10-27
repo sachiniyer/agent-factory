@@ -146,6 +146,42 @@ export function closeLeaf(root: LayoutNode, leafId: string): LayoutNode | null {
   return remove(root);
 }
 
+/** The sibling subtree of the leaf `leafId` — the OTHER child of the leaf's parent
+ *  split — or null when the leaf IS the whole tree (a single-leaf layout, which
+ *  closeLeaf already rejects as the un-closable last pane).
+ *
+ *  This is the subtree closeLeaf() substitutes in place of the collapsed parent to
+ *  absorb the closed pane's screen region, so it is the natural focus successor when
+ *  the closed pane held the keyboard: the pane that grew into the freed space is
+ *  where an operator's eye and hand already are, and focusing a leaf in a DIFFERENT
+ *  root branch (the previous leaves(root)[0] formula) sends keystrokes to an
+ *  unrelated session. Reference-stable: the returned node survives closeLeaf()
+ *  unchanged (remove() hands the sibling back as-is), so it can be read on the tree
+ *  BEFORE the close and still name the same subtree after.
+ *
+ *  Returns the sibling subtree itself (which may be a single leaf OR a split whose
+ *  own first leaf leaves() selects); which leaf of a multi-leaf sibling subtree gets
+ *  focus is a separate, deliberately narrower policy the caller applies. */
+export function siblingSubtreeOf(root: LayoutNode, leafId: string): LayoutNode | null {
+  if (root.kind === "leaf") {
+    return null; // a single-leaf tree has no sibling
+  }
+  // The leaf is a DIRECT child of this split: the sibling is the other child.
+  if (root.a.kind === "leaf" && root.a.id === leafId) {
+    return root.b;
+  }
+  if (root.b.kind === "leaf" && root.b.id === leafId) {
+    return root.a;
+  }
+  // Otherwise the leaf lives inside one child; descend into the side that contains
+  // it. The sibling (the other child of the leaf's parent) sits inside that same
+  // child, not in this split's other half.
+  if (findLeaf(root.a, leafId)) {
+    return siblingSubtreeOf(root.a, leafId);
+  }
+  return siblingSubtreeOf(root.b, leafId);
+}
+
 /** Drops every leaf bound to `tab` except the one with id `keepId`, collapsing each
  *  removal. Enforces the one-tab-one-pane invariant after a split/replace. */
 function dedupeExcept(root: LayoutNode, tab: number, keepId: string): LayoutNode {

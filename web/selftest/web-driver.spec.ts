@@ -2835,9 +2835,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const mouseHint = host.locator(".af-mouse-capture-hint");
-    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    // Seed off the live grid, not a constant: #5492 halves the phone font, so a
+    // count sized for the 13px grid underflows the doubled row count. Five lines
+    // per visible row also keeps the scrollback deeper in PIXELS than the flick
+    // plus its coast can cross — the margin 200 lines bought on ~15px cells.
+    const hostRows = host.locator(".xterm-rows > div");
+    await expect.poll(() => hostRows.count()).toBeGreaterThan(0);
+    const lineCount = (await hostRows.count()) * 5;
+    const lastLine = `touch-scroll-${lineCount}`;
+    await p.keyboard.type(`for i in $(seq 1 ${lineCount}); do printf 'touch-scroll-%s\\n' "$i"; done`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+    await expect(host).toContainText(lastLine, { timeout: 20_000 });
 
     // Aim at the screen — the element a finger actually lands on. The scrollable
     // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
@@ -2862,7 +2870,7 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       /enable-mouse-events/,
     );
     const bottom = await viewport.evaluate((el) => el.scrollTop);
-    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    expect(bottom, `${lineCount} lines of fresh output must leave real scrollback above the view`).toBeGreaterThan(0);
     await dragIntoHistory();
     await expect
       .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
@@ -3038,10 +3046,14 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
         message: "a tap must still report a button press to the mouse-aware application",
       })
       .toBe(true);
-    expect(
-      sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release),
-      "a tap must report the button's release as well",
-    ).toBe(true);
+    // The release is a second report of its own — a mousedown frame can land here
+    // while the mouseup frame is still in flight (the #4217 sighting), so it is
+    // polled the same way rather than read off the array the press filled.
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release), {
+        message: "a tap must report the button's release as well",
+      })
+      .toBe(true);
 
     // A finger travelling DOWN the screen pulls older content into view — what a
     // desktop wheel-up does here. One report per line of travel, button 64.
@@ -3223,6 +3235,23 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const scrollTop = (): Promise<number> => viewport.evaluate((el) => el.scrollTop);
+    // The coast's own ledger, mirrored onto the pane host by terminal.ts:
+    // `applied` counts every coast tick that emitted scroll px, and `stopped`
+    // freezes that count at the moment the coast last stopped. Proving a press
+    // stopped the coast needs THIS, not scrollTop — xterm flushes scrollLines to
+    // the DOM a painted frame after the buffer moved, so a press-time scrollTop
+    // read can sit a whole coast tick stale (the master sighting at run
+    // 36816835160 measured 68px — exactly one tick — with nothing applied after
+    // the stop).
+    const coastCounters = (): Promise<{ applied: number; stopped: number; liveStops: number }> =>
+      host
+        .locator(".af-pane-host")
+        .first()
+        .evaluate((el) => ({
+          applied: Number(el.getAttribute("data-af-coast-applied") ?? 0),
+          stopped: Number(el.getAttribute("data-af-coast-stop-count") ?? 0),
+          liveStops: Number(el.getAttribute("data-af-coast-live-stops") ?? 0),
+        }));
     // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
     // short by the top of history would read as less momentum than there is.
     await p.keyboard.type("for i in $(seq 1 1200); do printf 'fast-scroll-%s\\n' \"$i\"; done");
@@ -3389,16 +3418,45 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       await p.keyboard.press("Enter");
       await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
       await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atLift = (await coastCounters()).applied;
       // On a hybrid device a mouse or pen press while the flick still coasts is
       // fresh scroll intent — the coast must die at pointerdown, not fight it.
+      // Asserted on the coast's own ledger, not on scrollTop drift: the DOM's
+      // scrollTop trails the buffer by a painted frame, so a DOM read at the
+      // press can sit a whole tick stale — comparing counts is immune to when
+      // either sample lands relative to the in-flight flush.
       await new Promise((resolve) => setTimeout(resolve, 120));
       await p.mouse.move(column, y + height * 0.55);
+      // Sampled immediately before the press: a stop that lands while momentum
+      // is live bumps data-af-coast-live-stops, which is the proof this press
+      // interrupted a running coast rather than arriving after natural decay —
+      // ticks accumulated earlier could pass the count check either way.
+      const prePress = await coastCounters();
       await p.mouse.down();
-      const atPress = await scrollTop();
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      metrics.normalPointerStopDriftPx = Math.abs((await scrollTop()) - atPress);
+      // Two painted frames give every rAF queued at the press — the stopped
+      // coast's last-scheduled tick and xterm's pending scrollTop flush alike —
+      // their one legal run before the counts are read.
+      await p.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const afterPress = await coastCounters();
       await p.mouse.up();
-      expect(metrics.normalPointerStopDriftPx, "a mouse press mid-coast must stop momentum").toBe(0);
+      metrics.normalPointerStopMidCoastTicks = afterPress.stopped - atLift;
+      metrics.normalPointerStopPostStopApplied = afterPress.applied - afterPress.stopped;
+      metrics.normalPointerStopLiveStops = afterPress.liveStops - prePress.liveStops;
+      expect(
+        metrics.normalPointerStopMidCoastTicks,
+        "the press must land while the coast is still applying ticks",
+      ).toBeGreaterThan(0);
+      expect(
+        metrics.normalPointerStopLiveStops,
+        "the press must be the stop that landed while momentum was still live",
+      ).toBe(1);
+      expect(
+        metrics.normalPointerStopPostStopApplied,
+        "a mouse press mid-coast must stop momentum — no coast tick applies after it",
+      ).toBe(0);
     });
 
     // PART B — the alternate screen under an application that owns the wheel
@@ -4333,6 +4391,154 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   }
 });
 
+test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The checkbox sibling of the same-key Enter-save test above. A bool row commits
+  // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole
+  // pane, so the focused checkbox is destroyed and replaced. The restoration
+  // ladder only knew about `editingInput` (text rows), `advancedToggle`, and the
+  // account fields, so a checkbox save dropped focus to <body>: the app's
+  // document-level keydown gate then ran, and in config view the user's next
+  // `[`/`]` cycled the top-level view (other keystrokes were silently swallowed) —
+  // the exact body-focus hazard rerenderKeepingUserState's own comments describe.
+  // The fix captures the focused checkbox's `aria-label` (the config key) before
+  // the rebuild and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // auto_update is a core-tier bool row, visible without expanding advanced.
+    // Clicking it focuses it and fires `change` → save.
+    const box = pane.locator('.af-config-row[data-key="auto_update"] input');
+    await box.click();
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt checkbox replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(box).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The select sibling of the checkbox test above. An enumerated row commits on
+  // `change` and the save round-trip rebuilds the pane, so the focused select is
+  // destroyed and replaced. The restoration ladder had a branch for the
+  // account-agent select but none for a per-key config select, so a select save
+  // dropped focus to <body> and the user's next `[`/`]` cycled the view. The fix
+  // captures the focused select's `aria-label` (the config key) before the rebuild
+  // and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // update_channel is a core-tier enum row (stable | preview). Pick the option
+    // the select does not already hold so `change` actually fires.
+    const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+    const current = await channel.evaluate((sel: HTMLSelectElement) => sel.value);
+    const target = current === "stable" ? "preview" : "stable";
+    // Focus the select first, mirroring the real gesture the bug report
+    // reproduced ("clicking a config-row <select>, changing the option"): a mouse
+    // click on the select focuses it and opens the dropdown, and Tabbing to it
+    // focuses it the same way. Playwright's `selectOption` from a NON-focused
+    // state dispatches the change event without transferring focus to the
+    // select, so the element never holds DOM focus and the bug's "rebuild
+    // destroys the focused select" scenario never materializes. Focus() first
+    // makes the select genuinely hold focus at change time, exactly as a user's
+    // own click-to-open or Tab would — so the assertion below proves the fix
+    // catches the same focus loss the bug report observed.
+    await channel.focus();
+    await channel.selectOption(target);
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran).
+    await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt select replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(channel).toBeFocused();
+
+    // Downstream contract: with focus on a native SELECT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
   // The third case in this family, and the only one that moves focus to the WRONG
   // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
@@ -4785,6 +4991,115 @@ test.describe("split panes (SESSION_A roster)", () => {
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
     await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): a create pinned while an earlier close is still settling still rebinds the pane (#5061)", REAL_FIXTURE, async () => {
+    // The intermittent failure this blocks: an earlier tab mutation's post-await
+    // apply used to bump layoutGeneration like a USER intent write, so a
+    // createSessionTab pinned while it was still in flight read the landing as
+    // "the layout moved" and refused its own rebind — the bar grew past
+    // toHaveCount while the pane kept the old data-tab-id for the full 15s
+    // ("the pane must be bound to the new tab before anyone types into it"; the
+    // failing trace even rendered "Tab created · the layout changed meanwhile").
+    // Sightings: PR #4466 job 105416978093 and PR #5045 job 110276144061 — both
+    // Go-only changes that could not have moved this code.
+    //
+    // Here the losing order is scripted rather than raced: __afTabRebindHold
+    // (index.ts's test seam) parks each gesture's post-await step until released,
+    // so the earlier gesture's apply lands inside the later one's window on EVERY
+    // run. Before the fix this test times out on the final data-tab-id assertion.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+
+    const tabbar = page.locator(".af-tabbar");
+    const pane = page.locator(".af-term-host .af-pane").first();
+    // The agent tab's stable id, read while the pane is bound to it — the value the
+    // create's apply must move the pane OFF of.
+    const agentTabId = await pane.getAttribute("data-tab-id");
+
+    // Give A a closable tab to close slowly (below), bound to the pane.
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Arm the seam: every guarded tab mutation's post-await step now parks until
+    // its verb is released, so the apply order is scripted.
+    await page.evaluate(() => {
+      const parked = new Map<string, () => void>();
+      const w = window as unknown as {
+        __afTabRebindHold?: (verb: string) => Promise<void>;
+        __afTabRebindParked?: (verb: string) => boolean;
+        __afTabRebindRelease?: (verb: string) => void;
+      };
+      w.__afTabRebindHold = (verb) => new Promise<void>((resolve) => parked.set(verb, resolve));
+      w.__afTabRebindParked = (verb) => parked.has(verb);
+      w.__afTabRebindRelease = (verb) => parked.get(verb)?.();
+    });
+    const parked = (verb: string) =>
+      page.waitForFunction(
+        (v) => (window as unknown as { __afTabRebindParked?: (x: string) => boolean }).__afTabRebindParked?.(v),
+        verb,
+      );
+    const release = (verb: string) =>
+      page.evaluate(
+        (v) => (window as unknown as { __afTabRebindRelease?: (x: string) => void }).__afTabRebindRelease?.(v),
+        verb,
+      );
+    // A released hold's post-await step is synchronous once resumed, so one task
+    // turn guarantees it has run to completion before the next scripted step.
+    const flush = () => page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+
+    try {
+      // Close the shell tab and park its post-await apply. Its seq pin precedes the
+      // create's — that is what makes it the EARLIER gesture.
+      await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+      await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+      await parked("close");
+
+      // Issue the create while the close is parked — its pin is taken now, inside
+      // the earlier gesture's window: the ordering the flake hit.
+      await openSessionActions(page);
+      const newTab = tabbar.locator("..").locator(".af-tab-new");
+      if (await newTab.isVisible()) await newTab.click();
+      const menu = tabbar.locator("..").locator(".af-tab-menu");
+      await expect(menu).toBeVisible();
+      await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
+      await parked("create");
+
+      // Land the close first — exactly what used to veto the create's rebind.
+      await release("close");
+      await flush();
+      await expect(pane).toHaveAttribute("data-tab-id", agentTabId ?? "");
+
+      // Then let the create land: its pin was never newer-intent'd — the only write
+      // in its window was the earlier gesture's own landing, which is not intent.
+      await release("create");
+      await flush();
+
+      await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+      await expect(
+        pane,
+        "the pane must be bound to the new tab once its own gesture lands, regardless of an earlier gesture settling meanwhile",
+      ).not.toHaveAttribute("data-tab-id", agentTabId ?? "");
+      await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+    } finally {
+      // Never leave the seam or a parked gesture behind for the next test: the
+      // suite shares one page and one roster, and a hold left armed would park the
+      // afterEach's own close gestures mid-flight.
+      await page.evaluate(() => {
+        const w = window as unknown as {
+          __afTabRebindHold?: unknown;
+          __afTabRebindParked?: unknown;
+          __afTabRebindRelease?: (verb: string) => void;
+        };
+        delete w.__afTabRebindHold;
+        w.__afTabRebindRelease?.("close");
+        w.__afTabRebindRelease?.("create");
+        delete w.__afTabRebindParked;
+        delete w.__afTabRebindRelease;
+      });
+      await flush();
+    }
   });
 
   test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
@@ -8125,8 +8440,6 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
   };
   const sessionName = "peer-agent-2347";
-  const lineCount = 40;
-  const lastLine = `peer-agent-line-${lineCount}`;
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -8141,6 +8454,23 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
+    // lineCount has to sit between the two grids this test drives: above the live
+    // local rows so the seeded output overflows them, yet under HALF the tall
+    // peer's — every typed line emits two rows (the PTY echo plus cat's copy),
+    // and the peer check only proves its point while the tall grid swallows all
+    // of them. Size it from the settled grid, not a constant: #5492's font
+    // halving roughly doubled the phone row count a fixed count was sized for.
+    let localRows = 0;
+    await expect
+      .poll(async () => {
+        const next = await firstRows();
+        const settled = next > 0 && next === localRows;
+        localRows = next;
+        return settled;
+      }, { message: "the phone grid must finish its attach fit before it is measured" })
+      .toBe(true);
+    const lineCount = Math.floor((localRows * 3) / 2);
+    const lastLine = `peer-agent-line-${lineCount}`;
     await expect.poll(firstRows).toBeLessThan(lineCount);
 
     // The fixture's `claude` is the real agent-tab PTY path with a deterministic
