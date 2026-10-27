@@ -862,6 +862,262 @@ func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
 	}
 }
 
+// seedAdoptedRootDriftFixture builds a manager holding one adopted-looking
+// root whose runtime evidence reports running, plus an ensure-state whose
+// cached resolution says the frozen profile wants configured — the shape
+// TestAdoptedRootProgramDriftLatchRejectsReplacedRuntime seeds, so a direct
+// checkAdoptedRootProgramDrift pass reaches the latch without the ensure
+// loop's asynchronous config reader.
+func seedAdoptedRootDriftFixture(t *testing.T, configured, running string) (*Manager, *logCapture, *config.RepoContext, *rootEnsureState, config.RootAgent, *session.Instance) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: configured}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", running))
+	profile := config.RootAgent{Enabled: true, Program: configured}
+	st := &rootEnsureState{
+		programDriftResolved:          true,
+		programDriftResolvedRepoID:    repo.ID,
+		programDriftResolvedWorkspace: repo.WorkspacePath(),
+		programDriftResolvedProfile:   profile,
+		programDriftConfiguredProgram: configured,
+	}
+	return manager, warnings, repo, st, profile, root
+}
+
+// THE BUG (#5504): the drift latch compared configured and running commands
+// byte-for-byte, so an adopted root whose stored command only differs in
+// quoting warned "restart the daemon, then kill the root" over nothing. The
+// comparison must be on parsed argv; commands that are not plain literal word
+// lists keep the byte compare as their whole verdict.
+func TestAdoptedRootProgramDriftComparesArgvNotBytes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured string
+		running    string
+		wantDrift  bool
+		wantSignal string
+	}{
+		{"single-quoted configured command",
+			`'/opt/af-detected/claude' --dangerously-skip-permissions`,
+			"/opt/af-detected/claude --dangerously-skip-permissions", false, ""},
+		{"double-quoted configured command",
+			`"/opt/af-detected/claude" --dangerously-skip-permissions`,
+			"/opt/af-detected/claude --dangerously-skip-permissions", false, ""},
+		{"quoted flag word",
+			`/opt/af-detected/claude '--dangerously-skip-permissions'`,
+			"/opt/af-detected/claude --dangerously-skip-permissions", false, ""},
+		// Byte-identical commands are no drift even when the parse cannot
+		// vouch for them — the byte compare remains the fallback verdict.
+		{"byte-equal non-literal stays quiet",
+			`claude "$(cat creds)"`, `claude "$(cat creds)"`, false, ""},
+		{"quoted glob word stays quiet",
+			`claude '*'`, `claude "*"`, false, ""},
+		{"escaped-space spelling stays quiet",
+			`claude 'a b'`, `claude a\ b`, false, "",
+		},
+		{"apostrophe escape idiom stays quiet",
+			`'/o'\''b/claude' --x`, `"/o'b/claude" --x`, false, "",
+		},
+		{"an extra argument is real drift",
+			"/opt/af-detected/claude --dangerously-skip-permissions",
+			"/opt/af-detected/claude --dangerously-skip-permissions --verbose", true,
+			"word count differs (configured 2, running 3)"},
+		{"non-literal byte difference still warns",
+			`claude "$(cat creds)"`, `claude $(cat creds)`, true,
+			"command text differs"},
+		{"unquoted glob is real drift",
+			`claude '*'`, `claude *`, true,
+			"command text differs"},
+		{"unquoted tilde is real drift",
+			`claude '~'`, `claude ~`, true,
+			"command text differs"},
+		{"nested brace expansion is real drift",
+			`claude '{a{b},c}'`, `claude {a{b},c}`, true,
+			"command text differs"},
+		{"double-quoted escape differs from single-quoted",
+			`claude "a\$b"`, `claude 'a\$b'`, true,
+			"word 1 differs"},
+		{"separator past unmarked brace close is real drift",
+			`claude '{a},b}'`, `claude {a},b}`, true,
+			"command text differs"},
+		{"unquoted keyword is real drift",
+			"time claude", "'time' claude", true,
+			"command text differs"},
+		{"escaped keyword spelling stays quiet",
+			`ti\me claude`, "'time' claude", false, ""},
+		{"non-assignment colon-tilde stays quiet",
+			`'/tmp/a:~/claude' --x`, "/tmp/a:~/claude --x", false, ""},
+		{"argument colon-tilde stays quiet",
+			`claude 'x=a:~/x'`, "claude x=a:~/x", false, ""},
+		{"command-leading assignment word is real drift",
+			`'x=a:~/claude'`, "x=a:~/claude", true,
+			"command text differs"},
+		{"continuation-joined keyword is real drift",
+			"'time' claude", "ti\\\nme claude", true,
+			"command text differs"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, warnings, repo, st, profile, root :=
+				seedAdoptedRootDriftFixture(t, test.configured, test.running)
+			manager.checkAdoptedRootProgramDrift(repo,
+				daemonInstanceKey(repo.ID, session.RootSessionTitle),
+				repo.WorkspacePath(), st, profile, root, nil)
+
+			manager.mu.Lock()
+			latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
+			pending := st.programDriftLatchPending
+			manager.mu.Unlock()
+			got := warnings.String()
+			warned := strings.Contains(got, "root agent program drift")
+			if warned != test.wantDrift || latched != test.wantDrift || pending {
+				t.Fatalf("drift verdict = (warned %v, latched %v, pending %v), want drift %v:\n%s",
+					warned, latched, pending, test.wantDrift, got)
+			}
+			if test.wantSignal != "" && !strings.Contains(got, "("+test.wantSignal+")") {
+				t.Fatalf("warning missing distinguishing signal %q:\n%s", test.wantSignal, got)
+			}
+		})
+	}
+}
+
+// A latch conclusion that could not commit last sweep is carried as
+// programDriftLatchPending and retried on the next pass — the only drift
+// verdict that survives across ensure passes. If that carry was seeded while
+// the compare was byte-based, the retried pass under the argv compare must
+// find the quoting-only pair equal, consume the pending bit, and stay quiet
+// (approval note 2). A committed latch cannot reach this code from an old
+// binary at all: it lives only in Manager/rootEnsureState memory and dies
+// with the daemon process the upgrade replaces.
+func TestAdoptedRootProgramDriftPendingLatchGoesQuietWhenArgvEqual(t *testing.T) {
+	manager, warnings, repo, st, profile, root := seedAdoptedRootDriftFixture(t,
+		`'/opt/af-detected/claude' --dangerously-skip-permissions`,
+		"/opt/af-detected/claude --dangerously-skip-permissions")
+	st.programDriftLatchPending = true
+
+	manager.checkAdoptedRootProgramDrift(repo,
+		daemonInstanceKey(repo.ID, session.RootSessionTitle),
+		repo.WorkspacePath(), st, profile, root, nil)
+
+	manager.mu.Lock()
+	pending := st.programDriftLatchPending
+	latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
+	manager.mu.Unlock()
+	if pending || latched || strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("carried quoting-only latch did not go quiet: pending=%v latched=%v warnings=%s",
+			pending, latched, warnings.String())
+	}
+}
+
+// A seedable fully-committed latch can only model what an old binary produced
+// in memory — under this binary a latch is committed only after the argv
+// compare already found real drift. Whatever its provenance, a carried latch
+// must never emit a second warning for an argv-equal pair.
+func TestAdoptedRootProgramDriftLoggedLatchNeverWarnsAgain(t *testing.T) {
+	manager, warnings, repo, st, profile, root := seedAdoptedRootDriftFixture(t,
+		`'/opt/af-detected/claude' --dangerously-skip-permissions`,
+		"/opt/af-detected/claude --dangerously-skip-permissions")
+	st.programDriftLogged = true
+	st.programDriftLoggedRepoID = repo.ID
+	manager.mu.Lock()
+	manager.rootProgramDriftLogged[repo.ID] = true
+	manager.mu.Unlock()
+
+	manager.checkAdoptedRootProgramDrift(repo,
+		daemonInstanceKey(repo.ID, session.RootSessionTitle),
+		repo.WorkspacePath(), st, profile, root, nil)
+
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("a carried latch re-warned for an argv-equal pair:\n%s", warnings.String())
+	}
+}
+
+// The redaction oracle (#5504, approval note 3): when a real drift collapses
+// both commands to the same agent name, the warning must still distinguish
+// the two fragments — and must carry neither a raw path nor a flag value.
+func TestAdoptedRootProgramDriftWarningDistinguishesIdenticalRedactions(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		configured  string
+		running     string
+		wantSignal  string
+		secretParts []string
+	}{
+		{"executable differs",
+			"/home/dweller-alpha/bin/claude --settings ALPHA-SECRET",
+			"/home/dweller-beta/bin/claude --settings BETA-SECRET",
+			"executable differs",
+			[]string{"dweller-alpha", "dweller-beta", "ALPHA-SECRET", "BETA-SECRET"}},
+		{"same executable, argument differs",
+			"/opt/agents/claude --token ALPHA-SECRET",
+			"/opt/agents/claude --token BETA-SECRET",
+			"word 2 differs",
+			[]string{"ALPHA-SECRET", "BETA-SECRET", "--token"}},
+		{"word count differs",
+			"/opt/agents/claude",
+			"/opt/agents/claude --token BETA-SECRET",
+			"word count differs (configured 1, running 3)",
+			[]string{"BETA-SECRET", "--token"}},
+		{"non-literal byte drift",
+			`claude $(cat ALPHA-SECRET)`,
+			`claude "$(cat ALPHA-SECRET)"`,
+			"command text differs",
+			[]string{"ALPHA-SECRET", "$(cat", "cat "}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, warnings, repo, st, profile, root :=
+				seedAdoptedRootDriftFixture(t, test.configured, test.running)
+			manager.checkAdoptedRootProgramDrift(repo,
+				daemonInstanceKey(repo.ID, session.RootSessionTitle),
+				repo.WorkspacePath(), st, profile, root, nil)
+
+			got := warnings.String()
+			line := ""
+			for _, candidate := range strings.Split(got, "\n") {
+				if strings.Contains(candidate, "root agent program drift") {
+					line = candidate
+					break
+				}
+			}
+			if line == "" {
+				t.Fatalf("real drift produced no warning:\n%s", got)
+			}
+			for _, secret := range test.secretParts {
+				if strings.Contains(line, secret) {
+					t.Errorf("warning leaked %q:\n%s", secret, line)
+				}
+			}
+			if !strings.Contains(line, `configured command "claude"`) ||
+				!strings.Contains(line, `running command "claude"`) {
+				t.Errorf("warning must still show the redacted agent names:\n%s", line)
+			}
+			if !strings.Contains(line, "("+test.wantSignal+")") {
+				t.Errorf("warning missing distinguishing signal %q:\n%s", test.wantSignal, line)
+			}
+			configuredFrag := line[strings.Index(line, "configured command ")+len("configured command "):]
+			configuredFrag = configuredFrag[:strings.Index(configuredFrag, " · running command ")]
+			runningFrag := line[strings.Index(line, "running command ")+len("running command "):]
+			runningFrag = runningFrag[:strings.Index(runningFrag, " · the live root")]
+			if configuredFrag == runningFrag {
+				t.Errorf("configured and running fragments are identical strings %q:\n%s",
+					configuredFrag, line)
+			}
+		})
+	}
+}
+
 func waitForRootProgramResolutionIdle(t *testing.T, manager *Manager, st *rootEnsureState) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
