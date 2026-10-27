@@ -145,13 +145,18 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 
 			// Program flag overrides config. Both are restricted to bare
 			// agent names from tmux.SupportedPrograms; per-invocation path
-			// or flag overrides belong in program_overrides.
-			program := cfg.DefaultProgram
+			// or flag overrides belong in program_overrides. The TUI is handed
+			// the flag AND the just-resolved default_program: with no flag it
+			// re-reads default_program each time a session is created, so a
+			// live `af config set default_program` reaches it without a
+			// restart (#4889), while the resolved value seeds the fallback a
+			// failed re-read keeps — repo-scoped here, so a transient
+			// project-config failure cannot swap the bare global default in
+			// for the project's own.
 			if programFlag != "" {
 				if err := config.ValidateProgramEnum("--program flag", "--program flag", programFlag, ""); err != nil {
 					return err
 				}
-				program = programFlag
 			}
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
@@ -163,7 +168,7 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			config.SetInteractiveWarningWriter(nil)
 
 			app.Version = version
-			return runLaunchApp(ctx, program, repo)
+			return runLaunchApp(ctx, programFlag, cfg.DefaultProgram, repo)
 		},
 	}
 

@@ -969,6 +969,12 @@ button:disabled,
   min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   justify-content: center;
 }
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+}
 .af-term-menu .af-copy-link-phone {
   display: none;
 }
@@ -2088,6 +2094,9 @@ button:disabled,
 }
 @media (max-width: 768px) {
   .af-copy-link-desktop {
+    display: none;
+  }
+  .af-term-zoom {
     display: none;
   }
   .af-term-menu .af-copy-link-phone {

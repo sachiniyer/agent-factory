@@ -656,7 +656,10 @@ test("the paste sheet's backdrop dismiss ignores the opening gesture's click wha
 
 test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {
   const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
-  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→"]]);
+  // The A−/A+ zoom pair rides the arrows page's end (#5500) — display controls,
+  // not PTY keys — keeping both pages at the seven-target budget the geometry
+  // model below already closes on.
+  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]]);
   // ≥348px of room: 44px targets + 4px gaps + padding. Below that the keybar's
   // narrow rule lets keys shrink to a 40px floor (#5380), so at 320px the same
   // model must still close.

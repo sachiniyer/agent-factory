@@ -78,6 +78,12 @@ function stage(): Stage {
     storeToken() {},
     listTasks: async () => [],
     fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
+    getConfig: async () => null,
+    // The null config read schedules the bounded background reconcile; the
+    // sandbox exercises the commit path, so the reconcile itself is a no-op.
+    reconcileConfigRead() {},
+    setTerminalFontSizes() {},
+    terminalFontSizesFromConfig: () => ({ phone: 6.5, desktop: 13 }),
     connectionAttemptMayCommit: () => true,
     reconcileProject: () => null,
     loadProjectChoice: () => null,
