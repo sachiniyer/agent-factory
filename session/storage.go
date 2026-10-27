@@ -147,6 +147,11 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunFailurePending records that the run ended failed (initial prompt
+	// proven undelivered, #5278) and the task's errored status has not yet been
+	// acknowledged as written (#5646). omitempty + additive: an older record
+	// decodes to false, the pre-fix behaviour.
+	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.
