@@ -792,7 +792,7 @@ func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *t
 // This handler runs on the daemon's continuous poll against ARBITRARY agent
 // output, and Enter typed into a working composer cannot be taken back. Output
 // that quotes the legacy wording — including this repo's own source (where the
-// phrase appears verbatim in start.go and this file's docstrings), and issue
+// phrase appears verbatim in trust_prompt.go and this file's docstrings), and issue
 // text — must inject nothing, however long it stays on screen. The legacy
 // branch was the last trust predicate in this file that matched on a single
 // bare phrase; this test is the quote-negative test that was missing for it
