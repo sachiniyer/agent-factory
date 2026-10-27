@@ -93,7 +93,7 @@ func (i *Instance) restoreCarriedTabs() {
 			id = newTabID()
 		}
 		tab := &Tab{
-			ID: id, Name: name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal,
+			ID: id, Name: name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode,
 			// The recorded finish is part of the logical tab (#4506 review): the
 			// session it could be re-read from is the one the reap just killed.
 			Exit:                          tabExitFromData(td.Exit),
