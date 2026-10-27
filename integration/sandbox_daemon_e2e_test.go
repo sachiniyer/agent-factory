@@ -149,14 +149,20 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		t.Fatalf("tab count = %d after CreateTab, want %d", got, before+1)
 	}
 
+	// --- session work: a distinctive commit in the sandbox workspace ----------------
+	workspace := func() string {
+		return host.exec(t, "dirname $(find /root/.af-sessions -maxdepth 4 -name .git | head -1)")
+	}
+	host.exec(t, "cd "+workspace()+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work")
+
 	// --- archive: the host is reaped, the work survives on origin ---------------
 	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &daemon.ArchiveSessionResponse{})
 	if a := find(title); a == nil || a.Liveness != session.LiveArchived {
 		t.Fatalf("after ArchiveSession the session is %+v, want an archived row", a)
 	}
 	waitFor(t, "the archived session's agent-server to be reaped", 30*time.Second, func() bool { return agentServers() == 0 })
-	if branches := host.exec(t, "git -C /repo.git branch --list"); branches == "" {
-		t.Fatalf("origin has no branches after archive: %q", branches)
+	if log := host.exec(t, "git -C /repo.git log --all --format=%s"); !strings.Contains(log, "sbx-e2e-work") {
+		t.Fatalf("origin lacks the session's commit after archive; log:\n%s", log)
 	}
 
 	// --- restore: a fresh sandbox, drivable ------------------------------------
@@ -165,6 +171,9 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		r := find(title)
 		return r != nil && r.Liveness != session.LiveArchived && agentServers() > 0
 	})
+	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
+		t.Fatalf("restored workspace lost the session's file; e2e-work.txt = %q", got)
+	}
 	post("/v1/SendPrompt", daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: "after-restore-marker"}, &sent)
 	waitFor(t, "the restored agent to echo a prompt", 60*time.Second, func() bool {
 		return strings.Contains(preview(title, 0), "after-restore-marker")
