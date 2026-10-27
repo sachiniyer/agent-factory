@@ -844,3 +844,112 @@ func TestSandboxProvisionFailureMirrorsTheRawPIDForTheReap(t *testing.T) {
 	assert.Empty(t, reapTransportCalls,
 		"the refuse guard must short-circuit before the reap invokes the transport")
 }
+
+// A launch that suppressed `echo $!` (a wrapper swallowing stdout while the
+// nohup'd `af agent-server` did start) leaves RemotePID empty, but the nohup
+// still ran — so this is NOT the pre-launch empty-PID path that may `rm -rf`
+// the partial workspace. The refuse guard must fail closed: an empty PID after
+// a launch attempts the reap with launchAttempted set, so the reap refuses,
+// does not latch, does not remove the session dir, and never invokes the
+// transport — the record is the operator's only handle on the orphan.
+func TestSandboxReapRefusesAnEmptyRemotePIDAfterLaunch(t *testing.T) {
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+	sentinel := filepath.Join(marker, "still-here")
+	require.NoError(t, os.WriteFile(sentinel, []byte("present"), 0o644))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, launchAttempted: true}
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"an empty PID after a launch means the agent-server may still be running; the record must be retained as unknown-state")
+	assert.False(t, p.reaped,
+		"the reap must NOT latch — the next poll must retry, not return a cached verdict")
+	assert.Contains(t, err.Error(), "refusing to reap",
+		"the error must say it refused, not that the reap completed")
+	assert.Contains(t, err.Error(), "no remote PID",
+		"the error must name the empty PID so the operator can diagnose it")
+	assert.Contains(t, err.Error(), marker,
+		"the error must name the session dir so the operator can inspect it by hand")
+
+	_, statErr := os.Stat(sentinel)
+	assert.NoError(t, statErr,
+		"the session dir must NOT be removed while the agent-server may still be running")
+}
+
+// End-to-end through provision() + reapProvisionFailure: when the launch
+// transport exits cleanly but returns no PID (a wrapper that swallowed `echo
+// $!`), startAgentServer fails with "invalid background PID" and an empty
+// RemotePID. The launchAttempted flag is set before the call, so the failure
+// reap refuses rather than `rm -rf`-ing the session dir of a possibly-running
+// server. The surfaced error joins the provision error with the reap refusal
+// and wraps ErrWorkspaceStateUnknown so the daemon retains the record.
+func TestSandboxProvisionFailureRefusesAnEmptyRemotePIDAfterLaunch(t *testing.T) {
+	localBin := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(localBin, []byte("0123456789"), 0o755))
+
+	var reapTransportCalls []string
+	p := &sandboxProvisioner{
+		spec:    ProvisionSpec{Title: "test-session"},
+		afBin:   localBin,
+		program: "",
+	}
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		switch {
+		case strings.Contains(script, "mktemp -d"):
+			return []byte("/remote/af-sessions/test.XXXXXX\n"), nil
+		case strings.Contains(script, "git config --global"):
+			return nil, nil
+		case strings.Contains(script, "git clone"):
+			return nil, nil
+		case strings.Contains(script, "cat >") && strings.Contains(script, "chmod +x"):
+			return nil, nil
+		case strings.Contains(script, "wc -c"):
+			return []byte("10\n"), nil
+		case strings.Contains(script, "nohup"):
+			// The transport exits cleanly but suppresses `echo $!`: the nohup
+			// ran, the agent-server may be detached, and the captured PID is
+			// empty rather than the non-numeric noise the garbage-PID test uses.
+			return []byte("\n"), nil
+		case strings.Contains(script, "rm -rf") ||
+			strings.Contains(script, "af-sandbox-reaped-") ||
+			strings.Contains(script, "kill -0"):
+			reapTransportCalls = append(reapTransportCalls, script)
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	_, err := p.provision()
+	require.Error(t, err, "an empty captured PID must fail provisioning")
+	assert.Contains(t, err.Error(), "invalid background PID",
+		"the provision error must name what failed")
+	assert.Contains(t, err.Error(), `""`,
+		"the provision error must name the empty PID that failed the validity check")
+
+	assert.True(t, p.launchAttempted,
+		"the launch was attempted, so the reap must treat an empty PID as a possibly-running server")
+	assert.Equal(t, "", p.remotePID,
+		"the empty captured PID is mirrored onto the provisioner unchanged")
+	assert.Equal(t, "/remote/af-sessions/test.XXXXXX", p.sessionDir)
+
+	joinedErr := p.reapProvisionFailure(err)
+	require.Error(t, joinedErr)
+	assert.True(t, errors.Is(joinedErr, ErrWorkspaceStateUnknown),
+		"the joined error must preserve the reap refusal's unknown-state classification, so the daemon retains the record")
+	assert.False(t, p.reaped,
+		"the reap must not latch — the record must be retried, not retired")
+	assert.Contains(t, joinedErr.Error(), "provisioning failed and cleanup of its partial workspace",
+		"the surfaced error must say cleanup did not complete, so the operator inspects before retrying")
+	assert.Contains(t, joinedErr.Error(), "refusing to reap",
+		"the surfaced error must say the reap refused, so the operator knows the server may still be running")
+	assert.Contains(t, joinedErr.Error(), "no remote PID",
+		"the surfaced error must name the empty PID for diagnosis")
+
+	assert.Empty(t, reapTransportCalls,
+		"the refuse guard must short-circuit before the reap invokes the transport")
+}
