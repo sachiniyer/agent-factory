@@ -54,6 +54,10 @@ const (
 	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
 	// hand-edited.
 	cfgStringList
+	// cfgFloat is a fractional scalar — today the [web] terminal font sizes
+	// (#5500), whose 6.5 phone pitch no integer kind can carry. It is written as a
+	// real TOML float (8 → "8.0") so the file stays unambiguous about the type.
+	cfgFloat
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -210,6 +214,14 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
 		"enabled": {kind: cfgBool},
 		"program": {kind: cfgString},
+	}},
+	// The browser client's display preferences (#5500). The leaf form —
+	// `af config set web.terminal_font_size_phone 8` — is what the web terminal's
+	// +/- controls write through SetConfigValue, and the compact-JSON whole-table
+	// form is what the config panes post back.
+	"web": {structured: true, subkeys: map[string]settableLeafSpec{
+		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
+		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
 	"keys": {structured: true},
 }
@@ -805,6 +817,23 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
 	if err != nil {
 		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+	}
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
 	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's

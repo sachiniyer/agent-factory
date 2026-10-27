@@ -225,14 +225,13 @@ func TestPlaceOverlayRemeasuresWidthAfterDroppingRows(t *testing.T) {
 	if strings.Contains(out, "W") {
 		t.Fatal("precondition: the over-wide row must have been clipped away by height")
 	}
-	// The retained rows are 10 cells in a 40-cell frame, so the modal must still be
-	// centered with background on both sides — not stretched to the full width.
-	if !strings.HasPrefix(lines[0], "x") {
-		t.Fatalf("the retained rows are narrow, so the modal must stay centered with background "+
-			"to its left; got %q", lines[0])
-	}
-	if !strings.HasSuffix(lines[0], "x") {
-		t.Fatalf("and background to its right; got %q", lines[0])
+	// The retained rows are 10 cells in a 40-cell frame, so the modal must still
+	// be centered with blank margins on both sides (#5297: the cells beside a
+	// modal are blank backdrop, not background) — not stretched to the full
+	// width.
+	if want := strings.Repeat(" ", 15) + narrow + strings.Repeat(" ", 15); lines[0] != want {
+		t.Fatalf("the retained rows are narrow, so the modal must stay centered with blank "+
+			"margins on both sides; got %q, want %q", lines[0], want)
 	}
 }
 
