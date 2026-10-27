@@ -562,9 +562,14 @@ func sshLoginUser(cfg config.SSHConfig) string {
 // be killed by mistake. It moved here when the x/crypto reap was deleted (#3052);
 // it was always transport-agnostic, which is why one copy now serves every
 // backend that reaps a remote agent-server.
+//
+// It never reports success on a process it did not see die (#5571 W1.7): SIGTERM
+// gets a ~3s grace window (a 0.3s one SIGKILLed servers mid-shutdown), and after
+// SIGKILL it polls for the pid to vanish, exiting 78 if it did not — the caller
+// then retains the workspace instead of deleting the dir under a live process.
 func remotePIDIdentityKillScript(remotePID, afPath string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; gone() { if ! kill -0 "$pid" 2>/dev/null; then return 0; fi; matches_session; [ "$?" -eq 1 ]; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; i=0; while [ "$i" -lt 10 ]; do sleep 0.3; if gone; then exit 0; fi; i=$((i+1)); done; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null; i=0; while [ "$i" -lt 10 ]; do sleep 0.3; if gone; then exit 0; fi; i=$((i+1)); done; exit 78`,
 		shellQuote(remotePID), shellQuote(afPath))
 }
 

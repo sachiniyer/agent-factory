@@ -314,3 +314,26 @@ func TestSandboxReapScriptExpectedUsesResolvedSessionDir(t *testing.T) {
 	assert.NotContains(t, script, "/root/.af-sessions/",
 		"and must NOT carry the unresolved mktemp spelling, or the identity check mismatches")
 }
+
+// A server that ignores SIGTERM must still be reaped: the kill script waits out
+// the grace window, escalates to SIGKILL, and exits 0 only once it has SEEN the
+// process die (#5571 W1.7) — never on a process it merely stopped watching.
+func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T) {
+	afPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
+	require.NoError(t, os.MkdirAll(filepath.Dir(afPath), 0o755))
+	cmd := exec.Command("sh", "-c", `trap '' TERM; while :; do sleep 0.2; done`)
+	cmd.Args[0] = afPath
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	pid := cmd.Process.Pid
+	require.True(t, pidAlive(pid), "premise: the process must be alive")
+
+	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(pid), afPath)).CombinedOutput()
+	require.NoError(t, err, "a SIGTERM-ignoring server is killed and confirmed gone: %s", out)
+	require.Error(t, cmd.Wait(), "the process must have died by signal")
+}
