@@ -645,6 +645,35 @@ button:disabled,
 .af-rail-empty-new:hover {
   background: var(--af-surface-raised);
 }
+.af-rail-skipped {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--af-space-2);
+  margin: 0 0 var(--af-space-1) 0;
+  border-left: calc(var(--af-space-1) * 0.5) solid var(--af-dead);
+  background: var(--af-surface-raised);
+  color: var(--af-dead);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.af-rail-skipped-head {
+  font-weight: 600;
+  margin-bottom: var(--af-space-1);
+}
+.af-rail-skipped-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+}
+.af-rail-skipped-row {
+  margin: 0;
+}
+.af-rail-skipped-row strong {
+  color: var(--af-dead);
+  font-weight: 600;
+}
 .af-row {
   display: flex;
   align-items: flex-start;

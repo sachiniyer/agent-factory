@@ -76,6 +76,15 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 			RequireToken:         s.manager.cfg.RequireToken,
 			RequireLoopbackToken: s.manager.cfg.RequireLoopbackToken,
 		}
+		// The #5183 upgrade-probation floor is enforcement OUTSIDE the file:
+		// while it holds, the control listener's gate demands the bearer token
+		// even though the loaded config reads tokenless. Report what the socket
+		// enforces — otherwise status and doctor would call a floored socket
+		// unauthenticated. Read from the same paired publication the gate reads
+		// (authPosturePair), never a separate flag.
+		if s.manager.tokenFloorArmed() {
+			resp.BootConfig.RequireToken = true
+		}
 	}
 	return nil
 }

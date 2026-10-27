@@ -298,6 +298,36 @@ export interface SnapshotResponse {
 	operation_lock_timeout_ms?: number;
 	/** Process-local monotonic reading used to measure that admission bound. */
 	operation_clock_ms?: number;
+	/** Repos the daemon dropped at startup (corrupt/unreadable/newer-schema/unloadable
+	 *  instances.json), so this snapshot may be MISSING their sessions (#4742). The
+	 *  daemon reports the set explicitly so a client can tell "repo has no sessions"
+	 *  apart from "the daemon dropped this repo's sessions at startup" — the same
+	 *  contract the CLI's list/get/whoami reads honor by refusing or caveating. The
+	 *  web mirrors the field and surfaces it as a persistent incompleteness notice
+	 *  rather than rendering the truncated `instances` as a complete list. Omitted
+	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
+	 *  startup, so the rail renders nothing extra in the steady state. */
+	skipped_repos?: SkippedRepo[];
+}
+
+/** One repo the daemon could not load sessions for at startup
+ *  (daemon/snapshot.go SkippedRepo), reported on SnapshotResponse.skipped_repos so
+ *  the web can name the affected repo and reason instead of silently hiding its
+ *  sessions. Field names and JSON tags match the Go struct exactly. */
+export interface SkippedRepo {
+	/** The repo's stable id (config.RepoIDFromRoot — a short hex hash, not a path).
+	 *  The web maps it to a project root via registeredProjects when the repo is
+	 *  registered, falling back to the bare id. */
+	repo_id: string;
+	/** Stable machine-readable reason code (daemon/snapshot.go): one of
+	 *  "corrupted-instances-json", "unreadable-instances-json",
+	 *  "newer-schema-instances-json", "rows-failed-to-load". An empty or unknown
+	 *  value is treated as corrupted, which is all an older daemon ever sent. */
+	reason?: string;
+	/** Count of sessions that failed to load when reason is
+	 *  "rows-failed-to-load" (their worktree or tmux is gone); zero for the
+	 *  read/parse reasons, under which a row never reached the materializer. */
+	failed_rows?: number;
 }
 
 /** One lifecycle choice served by the daemon, including its consequence. */
