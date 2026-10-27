@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/proposal"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -55,6 +56,14 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	isShell := req.Shell || isExplicitShell
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
+	isDocs := explicitKind && kind == session.TabKindDocs
+	if isDocs {
+		if err := validateDocsTabRequest(req); err != nil {
+			return CreateTabResponse{}, err
+		}
+	} else if strings.TrimSpace(req.Proposal) != "" {
+		return CreateTabResponse{}, fmt.Errorf("--proposal is only valid for a docs tab (--kind docs)")
+	}
 	if !explicitKind && !isShell && strings.TrimSpace(req.Command) == "" {
 		return CreateTabResponse{}, fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
@@ -122,11 +131,18 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		effectiveKind = session.TabKindWeb
 	case isVSCode:
 		effectiveKind = session.TabKindVSCode
+	case isDocs:
+		effectiveKind = session.TabKindDocs
 	case isShell:
 		effectiveKind = session.TabKindShell
 	}
 	if err := instance.Capabilities().RefuseTabKind(effectiveKind, webURL); err != nil {
 		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: %w", title, err)
+	}
+	if isDocs {
+		if err := requireProposal(repoID, req.Proposal); err != nil {
+			return CreateTabResponse{}, err
+		}
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
@@ -155,6 +171,8 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		tab, err = instance.AddWebTab(webURL, req.Name)
 	case isVSCode:
 		tab, err = instance.AddVSCodeTab(req.Name)
+	case isDocs:
+		tab, err = instance.AddDocsTab(req.Proposal, req.Name)
 	case isShell:
 		tab, err = instance.AddShellTab()
 	default:
@@ -383,4 +401,30 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 		}
 	}
 	return false
+}
+
+// validateDocsTabRequest refuses the fields a docs tab cannot use, before any
+// session lookup.
+func validateDocsTabRequest(req CreateTabRequest) error {
+	if strings.TrimSpace(req.Proposal) == "" {
+		return fmt.Errorf("a docs tab requires a proposal (--proposal <slug>)")
+	}
+	if err := proposal.ValidateSlug(req.Proposal); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
+		return fmt.Errorf("--url/--port are not valid for a docs tab (--kind docs)")
+	}
+	if strings.TrimSpace(req.Command) != "" {
+		return fmt.Errorf("--command is not valid for a docs tab (--kind docs)")
+	}
+	return nil
+}
+
+func requireProposal(repoID, slug string) error {
+	store, err := proposal.Open(repoID)
+	if err != nil {
+		return err
+	}
+	return store.RequireSlug(slug)
 }
