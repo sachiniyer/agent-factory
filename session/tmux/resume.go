@@ -339,7 +339,7 @@ func ConversationSelectorArgs(program string) []string {
 // ConversationSelectorArgs truncates to two words for refusal text; this form
 // preserves the tail because receipt routing must honor --all (#5471 review).
 func CodexResumeSelection(command string) (selector []string, resume bool) {
-	tokens, _ := splitShellTokens(command)
+	tokens, _ := SplitShellTokens(command)
 	agentIdx, agent := findAgentToken(tokens)
 	if agent != ProgramCodex {
 		return nil, false
@@ -413,7 +413,7 @@ func CodexResumeTarget(selector []string) (id string, last, all, ok bool) {
 // selector — while consuming option values so `--remote` as a -c operand can
 // never be mistaken for the flag.
 func CodexResumeRunsRemote(command string) bool {
-	tokens, _ := splitShellTokens(command)
+	tokens, _ := SplitShellTokens(command)
 	agentIdx, agent := findAgentToken(tokens)
 	if agent != ProgramCodex {
 		return false

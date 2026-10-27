@@ -37,7 +37,7 @@ func AgentForCommand(command string) string {
 // wrapper the gate accepted onto a pre-#4356 session stays classifiable on
 // restore. This shares only the env-basename rule, not a parser:
 // DetectAgentExecutable and AgentNamespaceForCommand are otherwise independent
-// (the gate uses splitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
+// (the gate uses SplitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
 // filepath.Base) and agree on the env-wrapper spellings the #4356 fix targets,
 // not on every command.
 //
