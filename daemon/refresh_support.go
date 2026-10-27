@@ -59,10 +59,10 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // The handoff projection has the identical no-backend-gate shape. ForStorage runs
 // projectPendingHandoffForPreviousRelease right after the account-swap
 // projection, and it sets StartupStateUnknown=true on ANY row whose
-// PendingHandoffMission carries an ambiguous delivery verdict
-// (HandoffDeliveryUnresolved: PromptCouldNotConfirm, PromptSentUnverified, or the
-// missing evidence a legacy record carries, which restoreMissingHandoffMissionEvidence
-// normalizes to PromptCouldNotConfirm before the projection runs). The local
+// PendingHandoffMission carries an ambiguous delivery verdict (the
+// PromptCouldNotConfirm/PromptSentUnverified list, or the missing evidence a
+// legacy record carries, which restoreMissingHandoffMissionEvidence normalizes
+// to PromptCouldNotConfirm before the projection runs). The local
 // backend runs agent handoffs (Capabilities().Handoff is true), so the projection
 // reaches local rows mid-mission, and a local ghost persisted mid-mission is
 // released by the raw StartupStateUnknown guard for the same reason a mid-swap
@@ -121,8 +121,16 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	// Hold the same ambiguous-handoff shape the loader holds: the projection
 	// sets StartupStateUnknown=true with no backend gate, so the raw arm must
 	// not short-circuit on the projected value before the fence a current
-	// reader would restore. HandoffDeliveryUnresolved keeps the one verdict
-	// list (session/handoff_storage.go) rather than duplicating it here.
+	// reader would restore. The rollback marker
+	// (HandoffOriginalStartupStateUnknown proving the original state was false)
+	// is the gate, not the verdict list: the marker is set ONLY by
+	// projectPendingHandoffForPreviousRelease, which fires for an ambiguous
+	// delivery verdict, so its presence proves a compatible writer projected
+	// the handoff fence — including a newer release's future ambiguous verdict
+	// this binary has no constant for, which the marker still carries. The raw
+	// arm therefore honors the marker without requiring the current binary to
+	// recognize the verdict, matching the LoadedActivity re-raise for an
+	// unrecognized nonempty verdict.
 	//
 	// The marker gate (shape 1 above) bypasses the StartupStateUnknown guard
 	// only when the rollback marker proves the original state was false; a row
@@ -134,7 +142,6 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	// a LiveLost/LiveDead row the restore loop gave up on, mirroring the
 	// canAutoRestoreLostSession arm the loaded form uses for Lost.
 	handoffFence := item.PendingHandoffMission != "" &&
-		session.HandoffDeliveryUnresolved(item.HandoffDeliveryStatus) &&
 		item.HandoffOriginalStartupStateUnknown != nil &&
 		!*item.HandoffOriginalStartupStateUnknown &&
 		handoffFenceLoadedFormHolds(item)
@@ -164,6 +171,14 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // does) and the trailing guard releases the unrecoverable half. A LiveArchived row
 // is ActivityTerminal with no restore path, so LoadedActivity reports it terminal
 // and EffectiveLiveness is not LiveLost, and the fence does not re-raise it.
+//
+// The LiveLost fallback additionally gates on the loader's relocation
+// eligibility: a local LiveLost row whose relocation-recovery record still
+// represents a pending relocation loads inert (Started=false), so the restore
+// loop refuses it and the loaded form releases — the fence must not re-raise a
+// hold for it, or the ghost wedges the cap. A row whose restored record has no
+// relocation recovery is the one the loader starts, so it is the one shape the
+// fallback re-raises.
 func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
 	if activity, _ := session.LoadedActivity(item); activity == session.ActivityPending {
 		return true
@@ -171,7 +186,30 @@ func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
 	// canAutoRestoreLostSession's restore-eligibility term: a LiveLost/LiveDead
 	// row the loop is still reviving holds; the trailing IdleReasonRestoreGaveUp
 	// guard in rawTaskRunHoldsSlot releases the half the loop gave up on.
-	return session.EffectiveLiveness(item) == session.LiveLost
+	//
+	// Gate on the loader's relocation/started eligibility rather than effective
+	// liveness alone. A local LiveLost row whose relocation-recovery record
+	// decodes but still represents a pending relocation the worktree restore
+	// later rejects (or any row whose restored record still carries a
+	// relocation recovery) loads inert with Started=false, so
+	// ValidateRuntimeAction(RuntimeActionRecoverLost) refuses it and
+	// canAutoRestoreLostSession returns false — the loaded form releases.
+	// Equating every LiveLost row with the restore loop would hold such a ghost
+	// and, with no Instance to run the lifecycle edge that clears TaskRunActive,
+	// wedge max_concurrent_runs forever. RestoreRelocationRecoveryOriginals is
+	// the same boundary the loader uses; it clears the worktree-missing rollback
+	// fence (a stall projection, not a pending relocation) but leaves a real
+	// pending relocation in place, so a row whose restored record has no
+	// relocation recovery is the one the loader starts and the restore loop can
+	// still revive — the only shape the fence re-raises a hold for.
+	restored, err := item.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		// Undecodable: LoadedActivity above returned ActivityPending, so this
+		// branch is unreachable for a LiveLost row; fail closed rather than wedge.
+		return false
+	}
+	return session.EffectiveLiveness(item) == session.LiveLost &&
+		restored.Worktree.RelocationRecovery == nil
 }
 
 // releasesLostSandboxGhost reports whether a row that failed to materialize is a

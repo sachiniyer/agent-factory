@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The pending-handoff local ghost (#1892), the sibling the
@@ -14,8 +15,8 @@ import (
 // refreshDaemonInstances whether a row that failed to materialize (a "ghost")
 // still occupies a max_concurrent_runs slot for its task. ForStorage projects
 // StartupStateUnknown=true onto ANY row whose PendingHandoffMission carries an
-// ambiguous delivery verdict (HandoffDeliveryUnresolved: PromptCouldNotConfirm,
-// PromptSentUnverified, or the missing evidence a legacy record carries, which
+// ambiguous delivery verdict (PromptCouldNotConfirm, PromptSentUnverified, or
+// the missing evidence a legacy record carries, which
 // restoreMissingHandoffMissionEvidence normalizes to PromptCouldNotConfirm before
 // the projection runs) — no backend gate
 // (projectPendingHandoffForPreviousRelease) — so a local task session
@@ -347,5 +348,112 @@ func TestLocalPendingHandoffGhostReleasesOnIdleOrTerminalLiveness(t *testing.T) 
 				t.Fatalf("rawTaskRunHoldsSlot held a local %v row whose loaded form releases (%v) for %s; the handoffFence must mirror the loaded form's activity and not re-raise a hold a %v row releases, or a ghost that never materializes wedges the cap forever", tc.liveness, tc.activity, tc.name, tc.liveness)
 			}
 		})
+	}
+}
+
+// TestLocalPendingHandoffGhostHonorsFutureVerdictMarker is the version-skew gate.
+// A newer release may add another ambiguous delivery verdict this binary has no
+// constant for; its writer still projects the handoff fence (its
+// ambiguousHandoffDelivery list includes the new verdict), setting
+// StartupStateUnknown=true and capturing the original false in
+// HandoffOriginalStartupStateUnknown. This older reader does not recognize the
+// verdict, but the marker proves a compatible writer projected the fence, and
+// LoadedActivity re-raises the mission for an unrecognized nonempty verdict
+// (ClassifyActivity returns ActivityPending for any non-empty
+// PendingHandoffMission), so the loaded form HOLDS. The raw arm must honor the
+// marker without requiring the current binary to recognize the verdict, or a
+// local running ghost persisted with a future verdict is released from the cap
+// and admitTaskRunLocked admits a replacement beyond max_concurrent_runs after a
+// rollback to this older binary.
+//
+// The row is constructed directly in its on-disk shape (rather than through
+// ForStorage) because the projection this binary ships does not yet know the
+// future verdict; a future writer's projection is what the marker stands in for.
+func TestLocalPendingHandoffGhostHonorsFutureVerdictMarker(t *testing.T) {
+	originalFalse := false
+	row := session.InstanceData{
+		TaskID:                             "task1",
+		TaskRunActive:                      true,
+		Liveness:                           session.LiveRunning,
+		BackendType:                        "local",
+		PendingHandoffMission:              "continue the inherited work",
+		HandoffDeliveryStatus:              session.PromptDeliveryStatus("future-ambiguous"),
+		StartupStateUnknown:                true,
+		HandoffOriginalStartupStateUnknown: &originalFalse,
+	}
+	// The materialized oracle: the loader restores the fence (recovering the
+	// original false), does not recognize the verdict, and re-raises the
+	// mission for an unrecognized nonempty verdict, so ClassifyActivity returns
+	// ActivityPending — the held idle edge the loaded local row keeps.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityPending {
+		t.Fatalf("LoadedActivity reported %v for a local LiveRunning row with a future-ambiguous handoff verdict; an unrecognized nonempty verdict must re-raise the mission and keep the loaded form pending", activity)
+	}
+	if !rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot released a local row whose marker proves a compatible writer projected the handoff fence for a future verdict; the fence must honor the marker without requiring the current binary to recognize the verdict, or the cap undercounts a future-verdict ghost")
+	}
+}
+
+// TestLocalPendingHandoffGhostReleasesInertRelocationLiveLost is the second
+// shape the handoffFence must not re-raise: a local LiveLost row whose
+// relocation-recovery record decodes but still represents a pending relocation.
+// FromInstanceData keeps such a row inert (Started=false) — the persisted
+// worktree path is not authoritative while a relocation is pending — so
+// ValidateRuntimeAction(RuntimeActionRecoverLost) refuses it and
+// canAutoRestoreLostSession returns false: the loaded form RELEASES its slot.
+// LoadedActivity reports ActivityTerminal for LiveLost (the local backend does
+// not rewrite liveness), so the handoffFenceLoadedFormHolds LiveLost fallback
+// is the only thing that could re-raise the hold. Equating every LiveLost row
+// with the restore loop holds this inert row, and with no Instance to clear
+// TaskRunActive the capped task wedges forever. The fallback gates on the
+// loader's relocation eligibility (RestoreRelocationRecoveryOriginals leaves a
+// real pending relocation in place), so the raw arm releases the same row the
+// loaded form releases.
+//
+// The row carries a decodable relocation-recovery record (a real pending
+// relocation, not the worktree-missing rollback fence the restore clears), so
+// the restored record still has RelocationRecovery != nil — the one shape the
+// loader keeps inert.
+func TestLocalPendingHandoffGhostReleasesInertRelocationLiveLost(t *testing.T) {
+	originalFalse := false
+	branchTrue := true
+	externalFalse := false
+	row := session.InstanceData{
+		TaskID:                             "task1",
+		TaskRunActive:                      true,
+		Liveness:                           session.LiveLost,
+		BackendType:                        "local",
+		PendingHandoffMission:              "continue the inherited work",
+		HandoffDeliveryStatus:              session.PromptCouldNotConfirm,
+		StartupStateUnknown:                true,
+		HandoffOriginalStartupStateUnknown: &originalFalse,
+		Worktree: session.GitWorktreeData{
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State:                       sessiongit.RelocationRecoveryStalled,
+				OriginalExternalWorktree:    &externalFalse,
+				OriginalBranchCreatedByUs:   &branchTrue,
+				OriginalStartupStateUnknown: &originalFalse,
+			},
+		},
+	}
+	// Precondition: the relocation record decodes and remains a pending
+	// relocation (not the worktree-missing fence, which the restore clears),
+	// so the loader keeps this row inert (Started=false).
+	restored, err := row.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		t.Fatalf("precondition: the relocation record must decode for this to be the inert shape; got %v", err)
+	}
+	if restored.Worktree.RelocationRecovery == nil {
+		t.Fatalf("precondition: the restored record must still carry the pending relocation; a nil record is the worktree-missing fence shape the loader starts, not the inert relocation shape this test is for")
+	}
+	// The materialized oracle: the loaded form is terminal (LiveLost, no inert
+	// rewrite for the local backend) and the row loads inert (Started=false),
+	// so canAutoRestoreLostSession refuses it and holdsTaskRunSlot releases.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityTerminal {
+		t.Fatalf("LoadedActivity reported %v for a local LiveLost row; ClassifyActivity calls LiveLost terminal, and the local backend does not rewrite liveness, so the loaded form's Activity is terminal", activity)
+	}
+	if rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot held a local LiveLost row whose relocation-recovery record keeps the loader inert (Started=false); canAutoRestoreLostSession refuses it and the loaded form releases, so the raw arm must release too or the ghost wedges max_concurrent_runs forever")
 	}
 }
