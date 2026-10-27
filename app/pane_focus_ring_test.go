@@ -255,6 +255,39 @@ func TestSectionNav_ProjectsFocusHonorsReboundCursorKeys(t *testing.T) {
 		"a rebound previous-section key must take priority over the Projects cursor")
 }
 
+// TestSectionNav_AutomationsFocusHonorsReboundCursorKeys is the Automations peer
+// of TestSectionNav_ProjectsFocusHonorsReboundCursorKeys. The Automations rail
+// is a captive vim-style list whose HandleKey hardcodes j/k/up/down as cursor
+// moves; a configured section-navigation override (next_section = "j",
+// prev_section = "k") MUST take priority over those hardcoded aliases, the same
+// rule handleProjectsFocus already enforces. Before the fix the captive cursor
+// handler ate the rebound key as a row move and the focus ring silently stayed
+// on Automations instead of stepping to the next section.
+func TestSectionNav_AutomationsFocusHonorsReboundCursorKeys(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"next_section": {"j"},
+		"prev_section": {"k"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := paneTestHome(t)
+	h.focusRegion(layout.RegionAutomations)
+	require.Equal(t, layout.RegionAutomations, h.ring.Active())
+	// `j` (rebound next_section) from Automations steps the ring forward to
+	// Projects, not consumed as a cursor move.
+	preIdx := h.automations.SelectedTaskIndex()
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	require.Equal(t, layout.RegionProjects, h.ring.Active(),
+		"a rebound next-section key must take priority over the Automations cursor")
+	require.Equal(t, preIdx, h.automations.SelectedTaskIndex(),
+		"a rebound next-section key must NOT also move the Automations cursor")
+
+	h.focusRegion(layout.RegionAutomations)
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	require.Equal(t, layout.RegionTree, h.ring.Active(),
+		"a rebound previous-section key must take priority over the Automations cursor")
+}
+
 // TestSectionNav_SkipsWorkspacePanes proves `]` jumps SECTION to SECTION, not
 // through the open workspace panes (those are Tab's / 1-9's job): with a pane
 // open, `]` from the tree lands on Automations, skipping the pane region.
