@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -38,6 +39,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
+		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
@@ -45,6 +47,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Width:                    i.Width,
 		CreatedAt:                i.CreatedAt,
 		UpdatedAt:                i.UpdatedAt,
+		ArchivedAt:               i.archivedAt,
 		Program:                  i.Program,
 		RuntimeProgram:           i.runtimeProgram,
 		RuntimePID:               i.runtimePID,
@@ -85,6 +88,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
+		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
+		// session whose off-box runtime owes no teardown (runtimeTeardown == nil).
+		// ForStorage publishes it only for a UserKilled tombstone, where it records
+		// that the kill was committed against an inert rebuild and the tombstone
+		// therefore carries no RuntimeCleanup handle on purpose. The marker is the
+		// durable token FromInstanceData reads to admit that "nothing owed" shape —
+		// the sandbox analog of the local branch's worktreeReaped admission (#2691)
+		// — so a handle-less tombstone that survives a daemon restart can still
+		// complete its pending record delete instead of installing a permanent
+		// fail-closed teardown. A local backend never reaches here: it has no
+		// off-box runtime, and its reaped shape is read from its worktree paths.
+		if isSandboxBackendType(data.BackendType) && i.runtimeTeardown == nil {
+			marker := true
+			data.killedWithoutLiveRuntime = &marker
+		}
 	}
 
 	// Persist the usage-limit reset time only while the session is actually
@@ -103,6 +121,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
+	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
+	if i.taskRunActive {
+		// Same gating as the held flag: a finished run's last turn observation
+		// is not evidence for anything, and persisting it would let a later run
+		// on this row inherit a boundary it never crossed.
+		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
+		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
 	// discharge. Any other state may legitimately carry the obligation across a
@@ -125,7 +151,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// would land in that slot (#3062).
 	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
-		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
+		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
 		if tab.tmux != nil {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
@@ -205,6 +231,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// from a pre-#3650 record, which is what makes absence mean today's
 			// behaviour for both.
 			HookScopeUnitPrefix: i.gitWorktree.HookScopeUnitPrefix(),
+			// Durable record state, not a projection: the poll that maintains it
+			// runs only in the daemon, so a restart must come back still knowing
+			// the worktree was deleted outside af until a probe proves otherwise
+			// (#5102).
+			Missing:       i.worktreeMissing,
+			MissingReason: i.worktreeMissingReason,
 		}
 		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
@@ -237,6 +269,11 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recoveryClone := *recovery
 	data.Worktree.RelocationRecovery = &recoveryClone
 	recovery = &recoveryClone
+	// First, so the shape check below never mistakes a real stall projected
+	// through the worktree-missing fence for the bare fence itself.
+	if err := restoreMissingFencedState(recovery); err != nil {
+		return InstanceData{}, err
+	}
 	state, err := runtimeRelocationRecoveryState(recovery)
 	if err != nil {
 		return InstanceData{}, err
@@ -268,6 +305,17 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	recovery.CleanupOriginalExternalWorktree = nil
 	recovery.CleanupOriginalBranchCreatedByUs = nil
 	recovery.CleanupOriginalStartupStateUnknown = nil
+	// The worktree-missing rollback projection is not a relocation record; with
+	// the ownership values restored above, it reads back as the flag it stands
+	// for (#5102). An older binary that rewrote the row dropped the flag and its
+	// reason but kept this record, which is why the shape, not Missing, decides.
+	if isWorktreeMissingRollbackFence(recovery) {
+		data.Worktree.RelocationRecovery = nil
+		data.Worktree.Missing = true
+		if data.Worktree.MissingReason == "" {
+			data.Worktree.MissingReason = WorktreeMissingDeletedReason(data.Worktree.WorktreePath)
+		}
+	}
 	return data, nil
 }
 
@@ -340,6 +388,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if data.UpdatedAt.IsZero() {
 		data.UpdatedAt = data.CreatedAt
 	}
+	taskRunAttemptAt := taskRunPromptAttemptAtFromData(data)
 	instance := &Instance{
 		ID:         id,
 		TaskID:     data.TaskID,
@@ -352,8 +401,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:            data.TaskRunActive,
-		taskRunIdleEdgeHeld:      data.TaskRunActive && data.TaskRunIdleEdgeHeld,
+		taskRunActive:       data.TaskRunActive,
+		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
+		// Gate on the run still being in flight, mirroring the write side and
+		// the held flag: a finished run's stale observation cannot release the
+		// next run's delivery window.
+		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
+		taskRunPromptAttemptAt:   taskRunAttemptAt,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
@@ -361,6 +416,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
+		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,
@@ -368,6 +424,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Width:                    data.Width,
 		CreatedAt:                data.CreatedAt,
 		UpdatedAt:                data.UpdatedAt,
+		archivedAt:               data.ArchivedAt,
 		Program:                  data.Program,
 		runtimeProgram:           data.RuntimeProgram,
 		runtimePID:               data.RuntimePID,
@@ -429,11 +486,26 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		if (data.UserKilled || data.RuntimeCleanupStateUnknown) && liveness != LiveArchived {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
-				// Legacy/malformed retention records fail closed. Keeping the inert backend
-				// preserves classification while this closure makes Kill return the
-				// unknown-state sentinel, so finishUserKill retains the only record
-				// instead of laundering a missing handle into no-op success.
-				instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
+					// Inert-at-kill tombstone: the kill was committed against an inert
+					// rebuild whose off-box runtime owed no teardown (nil runtimeTeardown),
+					// so the tombstone carries no RuntimeCleanup handle on purpose. The
+					// marker written at commit time distinguishes this current-binary
+					// "nothing owed" shape from a legacy/malformed tombstone. Admit it the
+					// way the local branch's worktreeReaped does (#2691): leave the inert
+					// backend and a nil teardown, so finishUserKill's Kill runs the no-op
+					// success path (deadRemoteAgentServer.Kill returns nil for a nil
+					// teardown) and the pending record delete can proceed instead of
+					// installing a permanent fail-closed teardown no retry, re-kill, or
+					// restart can clear.
+					instance.runtimeTeardown = nil
+				} else {
+					// Legacy/malformed retention records fail closed. Keeping the inert backend
+					// preserves classification while this closure makes Kill return the
+					// unknown-state sentinel, so finishUserKill retains the only record
+					// instead of laundering a missing handle into no-op success.
+					instance.runtimeTeardown = unavailableRuntimeCleanup(data.Title, data.BackendType, cleanupErr)
+				}
 			} else {
 				instance.backend = backend
 				instance.runtimeTeardown = teardown
@@ -474,7 +546,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// populated worktree remains unknown/corrupt and must not be treated as
 		// proof that no worktree exists.
 		worktreeReaped = data.UserKilled && data.Worktree.RepoPath == "" && data.Worktree.WorktreePath == ""
-		if !worktreeReaped {
+		// A startup-state-unknown record may carry only title/branch/name
+		// evidence — a leftover whose worktree never registered. Its worktree
+		// path is then legitimately empty, and failing here would make the row
+		// unloadable: skipped with a warning on every refresh tick instead of
+		// resting inert for inspection. Other row shapes keep the strict check —
+		// a live or corrupt record's empty path must still fail loudly.
+		if !worktreeReaped && !(data.StartupStateUnknown && data.Worktree.WorktreePath == "") {
 			gw, err := git.NewGitWorktreeFromStorage(
 				data.Worktree.RepoPath,
 				data.Worktree.WorktreePath,
@@ -519,6 +597,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
+			instance.worktreeMissing = data.Worktree.Missing
+			instance.worktreeMissingReason = data.Worktree.MissingReason
 		}
 
 		// Rebuild the instance's tab list from disk so every tab (agent + shell)
@@ -533,12 +613,32 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
 
+	// Every return below hands back a row no automatic restore can reach —
+	// inert (started=false), Archived rather than Lost, or vetoed by
+	// ValidateRuntimeAction — so a persisted environmental wait could never be
+	// consumed by the Lost-restore loop and every client would keep reporting
+	// "waiting on the environment" while nothing retries (#5295 review). The
+	// wait means "an automatic retry is armed"; on an unreachable row that is
+	// a lie, and an explicit restore starts a fresh episode anyway, so each
+	// inert load drops it rather than mirror the stale record.
+	inertReturn := func() *Instance {
+		if instance.ClearLostRestoreWait() {
+			// The wait was persisted, so clearing it only in memory leaves
+			// the stale field in instances.json — a crash before the next
+			// write would let the disk-fallback API re-derive a wait no
+			// retry can consume. Enroll the load-runtime checkpoint so the
+			// clearance is durable before the row installs (#5295 review).
+			instance.markLoadRuntimeReplaced()
+		}
+		return instance
+	}
+
 	// The local runtime and worktree are already gone. Keep this terminal row
 	// inert until the daemon retries only the failed record deletion; starting it
 	// would synthesize a fresh conventional tmux name and make the retry target a
 	// session that never belonged to this tombstone.
 	if worktreeReaped {
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	// A relocation-recovery record says the persisted worktree path is not yet
@@ -547,7 +647,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// agent in a stale or replaced directory. An explicit bounded archive/restore
 	// retry owns resolving the record before any runtime may use the path again.
 	if restoredRelocationRecovery {
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	// An uncertain startup loads INERT. Re-running Start(false) would probe or
@@ -556,7 +656,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// worktree and exact tmux binding above remain available for inspection and an
 	// explicit user kill, while the daemon status loop leaves the record alone.
 	if data.StartupStateUnknown {
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	// An automatic account choice is durable before its replacement starts. Keep
@@ -565,7 +665,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// conversation resume before the pending notice and task are delivered.
 	if data.PendingAccountSwap != nil {
 		instance.started = true
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	// An archived session (#1028) loads INERT: its tmux was torn down and its
@@ -581,7 +681,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// tmux-less for the same reason (its TmuxName entries reference sessions
 	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
 	if liveness == LiveArchived {
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
@@ -598,7 +698,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.touchLocked()
 		}
 		instance.mu.Unlock()
-		return instance, nil
+		return inertReturn(), nil
 	}
 
 	if err := instance.Start(false); err != nil {
@@ -607,6 +707,21 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// establish a safe runtime boundary. Keep the row inert and explicitly
 			// killable so storage retains every exact tmux cleanup handle.
 			instance.MarkStartupStateUnknown()
+			return inertReturn(), nil
+		}
+		if errors.Is(err, tmux.ErrSpawnDirMissing) {
+			// The tmux session is gone and its persisted worktree is missing:
+			// the spawn-dir seam refused a respawn that tmux would have
+			// silently placed in the server's cwd (#5172). Load the row Lost
+			// (started, so SaveInstances keeps the record and
+			// lostSessionWantsRestore admits it) instead of dropping it — the
+			// daemon's lost-restore loop owns the rebuild-then-respawn path,
+			// and it can only reach a row that materialized.
+			instance.mu.Lock()
+			instance.liveness = LiveLost
+			instance.started = true
+			instance.touchLocked()
+			instance.mu.Unlock()
 			return instance, nil
 		}
 		return nil, err
@@ -667,6 +782,8 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Kind:                          kind,
 				Command:                       td.Command,
 				URL:                           td.URL,
+				Proposal:                      td.Proposal,
+				PushMode:                      td.PushMode,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),

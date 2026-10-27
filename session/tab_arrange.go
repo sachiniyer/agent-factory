@@ -26,7 +26,7 @@ import "fmt"
 // reason: it landed in #1817 rendering Name || "VS Code", so the rule that admits
 // web and process admits it too.
 func TabKindRenameable(kind TabKind) bool {
-	return kind == TabKindWeb || kind == TabKindProcess || kind == TabKindVSCode
+	return kind == TabKindWeb || kind == TabKindProcess || kind == TabKindVSCode || kind == TabKindDocs
 }
 
 // RenameTabByID selects and renames the stable target under one write lock, so

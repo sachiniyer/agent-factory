@@ -74,9 +74,9 @@ func malformedTitleWalkRecord(t *testing.T, repoID, repoPath, title string) {
 }
 
 // unreadableRepoInstances replaces the repo's instances.json with a DIRECTORY so
-// MigrateAllRepoInstancesForDaemonLoad — which os.ReadFile's it and refuses HARD on
-// a read failure (unlike the skip-and-warn for corrupt content) — fails, making
-// refreshLocked return an error. This isolates the second pre-flight return
+// the per-repo file cache — which os.ReadFile's it in loadRepoFile and refuses
+// HARD on a read failure (unlike the skip-and-warn for corrupt content) — fails,
+// making refreshLocked return an error. This isolates the second pre-flight return
 // (refreshLocked): the failure provably precedes loadRepoInstanceData.
 func unreadableRepoInstances(t *testing.T, repoID string) {
 	t.Helper()
