@@ -125,6 +125,17 @@ func assertTabRejection(t *testing.T, err error, want string) {
 	}
 }
 
+// existingWorktreeDir returns path after ensuring it exists. tmux.Start
+// refuses to spawn into a directory that is not there (#5172), so a fixture
+// worktree path meant to stand in for a real worktree must be real on disk.
+func existingWorktreeDir(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", path, err)
+	}
+	return path
+}
+
 // startedLocalTabInstance builds a started local instance whose agent tab is a
 // mock-backed tmux session, registers it in the manager, and seeds a matching
 // on-disk record so the manager's refresh keeps the live in-memory instance.
@@ -134,7 +145,7 @@ func startedLocalTabInstance(t *testing.T, m *Manager, repoID, repoPath, title, 
 	pty := tabPtyFactory{t: t, cmdExec: exec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), title,
+		repoPath, existingWorktreeDir(t, filepath.Join(t.TempDir(), "wt")), title,
 		title+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)

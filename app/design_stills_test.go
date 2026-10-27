@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +25,12 @@ import (
 const (
 	// Noon UTC on the day before the fixture's daily 09:00 schedule preserves the
 	// approved "next Sep 07" still while keeping it independent of capture time.
+	// The record arms the entry rather than deriving it from the expression: the
+	// 29-cell "from cron: next Sep 07 09:00" qualifier cannot fit the rail's
+	// 30-cell scene width under #5153's fixed-indent field budget (24 cells),
+	// while the armed observation "next Sep 07 09:00" (17 cells) can.
 	designStillsNowRFC3339    = "2026-09-06T12:00:00Z"
-	designStillsPinnedNextRun = "from cron: next Sep 07"
+	designStillsPinnedNextRun = "next Sep 07 09:00"
 )
 
 // Run exclusively in the playtest container. These supplement P4 recovery
@@ -35,7 +40,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "confirmation-scroll", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
@@ -186,6 +191,19 @@ func TestDesignDriverScenes(t *testing.T) {
 					pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 				case "confirmation":
 					h.confirmAction(killConfirmMessage(inst.Title, "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true}), nil)
+				case "confirmation-scroll":
+					// A destructive confirm whose risk text overflows the window:
+					// the body pages, the footer counts what is hidden in each
+					// direction, and the prompt stays pinned (#5171).
+					var warnings []string
+					warnings = append(warnings, "[!] Delete project 'atlas'?")
+					for i := 1; i <= 16; i++ {
+						warnings = append(warnings, fmt.Sprintf("Warning %02d — could not verify workspace state before deletion; data may be lost.", i))
+					}
+					h.confirmActionWithDetail(strings.Join(warnings, "\n"), "Restore an archived session to bring the project back.", nil)
+					for i := 0; i < 3; i++ {
+						h.confirmationOverlay.ScrollDown()
+					}
 				case "search-overflow", "selection-overflow", "project-picker-overflow":
 					var items []string
 					var instances []*session.Instance
@@ -323,7 +341,13 @@ func newDesignDriverSceneHome(t *testing.T, mode string, initialNow func() time.
 }
 
 func configureDesignDriverRailScene(h *home, scene string) {
-	h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true, CronExpr: "0 9 * * *"}})
+	// The armed entry agrees with what the pinned clock makes the expression
+	// compute (Sep 06 noon → next 09:00 is Sep 07), so carrying it live keeps
+	// the still deterministic AND fits the rail's field budget where the
+	// computed "from cron:" qualifier could not (#5153 review).
+	next := time.Date(2026, time.September, 7, 9, 0, 0, 0, time.UTC)
+	h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true,
+		CronExpr: "0 9 * * *", Arming: task.ArmingArmed, NextRunAt: &next}})
 	h.projects.SetProjects([]ui.SidebarProject{{Name: "Agent Factory", Root: h.repoRoot, Active: true}, {Name: "Second project", Root: "/second"}})
 	h.relayout()
 	if scene == "rail-task-selection" {
