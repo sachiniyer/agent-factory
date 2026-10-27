@@ -1,16 +1,19 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/require"
 )
 
 // repoRoot resolves the checkout this test file belongs to, so the drift test
@@ -244,6 +247,163 @@ func TestPreflightHookNeverInstalls(t *testing.T) {
 			continue
 		}
 		t.Errorf("the preflight hook must never execute the installer, found: %q", trimmed)
+	}
+}
+
+// runPreflightHook writes the generated preflight hook to a temp dir and runs it
+// under bash. When fakeAf is non-nil it is placed in the temp dir as `af`
+// (executable), so command -v af resolves. isolatePATH, when true, sets PATH to
+// the temp dir alone — used for the missing-af branch, which only runs shell
+// builtins, so no system-installed af can satisfy command -v. When false the
+// temp dir is prepended to the existing PATH so `timeout` (used by the
+// version-capture bound) stays reachable. It returns the combined
+// stdout/stderr and the hook's exit code.
+func runPreflightHook(t *testing.T, fakeAf []byte, isolatePATH bool) (string, int) {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	if fakeAf != nil {
+		fake := filepath.Join(dir, "af")
+		require.NoError(t, os.WriteFile(fake, fakeAf, 0o755))
+	}
+	hook := filepath.Join(dir, "hook.sh")
+	require.NoError(t, os.WriteFile(hook, []byte(afPreflightHook()), 0o644))
+
+	cmd := exec.Command("bash", hook)
+	if isolatePATH {
+		cmd.Env = append(os.Environ(), "PATH="+dir)
+	} else {
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("running preflight hook: %v", err)
+		}
+	}
+	return out.String(), code
+}
+
+// TestPreflightHookReportsForUnexecutableAf locks the bug fix: an `af` that is on
+// PATH but cannot exec (a wrong-architecture or corrupt binary, or a wrapper with
+// a missing interpreter) made the old hook abort under set -e before any echo,
+// while 2>/dev/null swallowed bash's own exec-failure diagnostic — so the user got
+// no stdout, no stderr, and only an opaque non-zero exit. The hook's job is to
+// report, so the present-but-broken state must still emit a report. The hook
+// exits 0 on every branch: this is an informational SessionStart hook, and Codex
+// surfaces a hook's stdout to the session only on a zero exit — a non-zero exit
+// makes Codex record "hook exited with code N" and discard the stdout, which
+// would hide the very reinstall guidance this branch exists to deliver.
+func TestPreflightHookReportsForUnexecutableAf(t *testing.T) {
+	// A chmod-+x file whose bytes are not a valid executable for this host:
+	// command -v af succeeds (it only checks the PATH entry exists) but invoking
+	// af fails to exec (exit 126, "Exec format error").
+	report, code := runPreflightHook(t, []byte("\x7fELF\x01\x01\x01\x00garbage"), false)
+	if strings.TrimSpace(report) == "" {
+		t.Fatalf("preflight hook produced no report (no stdout, no stderr) for an " +
+			"af that is on PATH but fails to exec; the hook's job is to report " +
+			"af's PATH-presence, and it should always emit a message")
+	}
+	if !strings.Contains(report, "af is on PATH but failed to execute") {
+		t.Errorf("preflight hook report for unexecutable af = %q, want it to name the broken state", report)
+	}
+	if !strings.Contains(report, session.AfInstallCommand) {
+		t.Errorf("preflight hook report for unexecutable af = %q, want it to print the reinstall command", report)
+	}
+	if code != 0 {
+		t.Errorf("preflight hook exited %d for an unexecutable af, want 0 so Codex surfaces the report (a non-zero exit would make Codex discard the stdout and record only \"hook exited with code N\")", code)
+	}
+}
+
+// TestPreflightHookReportsHealthyAf locks the happy path: a working `af version`
+// prints a version line first and a second releases-URL line, and the hook
+// surfaces only the first (the first-line contract, kept via a parameter
+// expansion rather than a head -n 1 pipe) and exits 0.
+func TestPreflightHookReportsHealthyAf(t *testing.T) {
+	// Mirrors commands/root.go versionCmd: a version line then a GitHub releases URL.
+	fake := []byte("#!/usr/bin/env bash\necho \"agent-factory version v1.2.3\"\n" +
+		"echo \"https://github.com/sachiniyer/agent-factory/releases/tag/v1.2.3\"\nexit 0\n")
+	report, code := runPreflightHook(t, fake, false)
+	if code != 0 {
+		t.Fatalf("preflight hook exited %d for a healthy af, want 0", code)
+	}
+	if !strings.Contains(report, "v1.2.3 is available.") {
+		t.Errorf("preflight hook report for healthy af = %q, want the first version line", report)
+	}
+	if strings.Contains(report, "https://github.com/sachiniyer/agent-factory/releases") {
+		t.Errorf("preflight hook report for healthy af leaked the second (releases URL) line: %q", report)
+	}
+}
+
+// TestPreflightHookReportsAfThatEmitsThenFails locks the present-but-broken branch
+// for the case a `|| true` would have masked: a wrapper or partially broken
+// `af version` that prints a version-looking first line and then exits non-zero.
+// The hook must not report that as healthy — the non-zero exit means the CLI is
+// unusable, so the hook reports the broken state. The whole `af version` output
+// is captured first (no `head` in the pipe), so its exit status rather than a
+// masked pipeline decides the branch. The branch exits 0: a non-zero exit would
+// make Codex discard the stdout and record only "hook exited with code N",
+// hiding the reinstall guidance this branch exists to deliver.
+func TestPreflightHookReportsAfThatEmitsThenFails(t *testing.T) {
+	// Emits a plausible version line, then exits non-zero (the failure the old
+	// `|| true` turned into a healthy report).
+	fake := []byte("#!/usr/bin/env bash\necho \"agent-factory version v9.9.9\"\nexit 1\n")
+	report, code := runPreflightHook(t, fake, false)
+	if code != 0 {
+		t.Fatalf("preflight hook exited %d for an af that emits then fails, want 0 so Codex surfaces the report (a non-zero exit would make Codex discard the stdout and record only \"hook exited with code N\")", code)
+	}
+	if !strings.Contains(report, "af is on PATH but failed to execute") {
+		t.Errorf("preflight hook report for an af that emits then fails = %q, want it to name the broken state, not the version line", report)
+	}
+	if strings.Contains(report, "v9.9.9 is available.") {
+		t.Errorf("preflight hook reported a failing af as healthy (version line in report): %q", report)
+	}
+	if !strings.Contains(report, session.AfInstallCommand) {
+		t.Errorf("preflight hook report for an af that emits then fails = %q, want it to print the reinstall command", report)
+	}
+}
+
+// TestPreflightHookReportsMissingAf locks the missing-af branch: when af is not on
+// PATH at all the hook prints the install command and exits 0. The path is
+// isolated to the (af-less) temp dir so a system-installed af cannot satisfy
+// command -v and flip the branch.
+func TestPreflightHookReportsMissingAf(t *testing.T) {
+	report, code := runPreflightHook(t, nil, true)
+	if code != 0 {
+		t.Fatalf("preflight hook exited %d for a missing af, want 0", code)
+	}
+	if !strings.Contains(report, "af is not installed. Install it with:") {
+		t.Errorf("preflight hook report for missing af = %q, want the install message", report)
+	}
+	if !strings.Contains(report, session.AfInstallCommand) {
+		t.Errorf("preflight hook report for missing af = %q, want the install command", report)
+	}
+}
+
+// TestPreflightHookBoundsVersionCapture locks the wall-clock bound on the
+// version capture: a wrapper that hangs or floods output cannot stall
+// SessionStart for the 600s Codex applies when a hook declares no timeout. The
+// bound is a `timeout 10s` wrapper with a fallback to the unbounded capture
+// where timeout(1) is missing (older macOS), so the hook never misreports a
+// healthy af as broken just because timeout is absent. This is a structural
+// guard on the generated source; a live hang would take the full 10s, so the
+// functional runPreflightHook cases above cover the exit-status routing and this
+// test covers the bound itself.
+func TestPreflightHookBoundsVersionCapture(t *testing.T) {
+	hook := afPreflightHook()
+	if !strings.Contains(hook, "timeout 10s af version") {
+		t.Errorf("preflight hook does not bound af version with a 10s timeout; a wrapper that hangs or floods output could stall SessionStart for Codex's 600s default:\n%s", hook)
+	}
+	if !strings.Contains(hook, "command -v timeout") {
+		t.Errorf("preflight hook bounds af version with timeout(1) unconditionally; on systems without timeout (older macOS) the hook would misreport a healthy af as broken. It must fall back to the unbounded capture when timeout is missing:\n%s", hook)
 	}
 }
 
