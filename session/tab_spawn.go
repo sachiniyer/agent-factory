@@ -79,7 +79,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // refusal) instead of executing a duplicate command whose side effects a
 // roster dedupe could never undo. adoptOnSpawnFailure is the roster recheck
 // applied when OUR spawn is the one that failed.
-func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
+func (i *Instance) AddShellTabWithID(id string) (resultTab *Tab, resultErr error) {
 	// One write-lock section covers the id check, the in-flight id claim, the
 	// roster reads, AND the tmux-name claim: a concurrent create derives its
 	// tmux name off the same roster, so claiming while we derive is what keeps
@@ -107,22 +107,33 @@ func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
 			break
 		}
 		// A same-shape create under this id is in flight: join it — wait for
-		// it to resolve WITHOUT spawning, then the loop's roster recheck
-		// answers adopt-or-collide.
+		// it to resolve WITHOUT spawning, then answer the outcome recorded on
+		// the claim. Re-checking the roster is not enough: an owner that failed
+		// post-spawn left no row to adopt, and falling through to a fresh
+		// create would run a shell spawn again under an id whose retry contract
+		// says "the answer the first call got".
 		i.mu.Unlock()
 		<-wait
+		if c.tab != nil || c.err != nil {
+			return c.tab, c.err
+		}
 		i.mu.Lock()
 	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
-	displayName := uniqueShellName(i.Tabs)
-	// Resolve the tmux session name under the SAME lock as the display name:
-	// the two are independent namespaces (see tab_names.go) and both are read off
-	// i.Tabs, so deriving the tmux name after the unlock would read the roster
-	// unsynchronized. Guarded on agentTmux because a not-started instance has no
-	// session to spawn a sibling of — the precondition check below rejects it.
+	displayName := uniqueTabNameReserving(i.Tabs, i.tabDisplayClaims, shellTabName)
+	// The DISPLAY name is claimed too (#5571 W4.3, Codex): two different-id
+	// creates sharing a command basename would otherwise derive the same
+	// roster name off the same roster view, and the roster's unique-name
+	// invariant is what name-addressed verbs resolve against. Claimed
+	// unconditionally — the refuse paths below release it on return, so a
+	// rejected create only reserves it for the span it ran.
+	if i.tabDisplayClaims == nil {
+		i.tabDisplayClaims = map[string]bool{}
+	}
+	i.tabDisplayClaims[displayName] = true
 	tmuxName := ""
 	if agentTmux != nil {
 		tmuxName = uniqueTabTmuxNameReserving(i.Tabs, i.pendingTabCleanup, i.tabSpawnClaims, agentTmux.SanitizedName(), displayName)
@@ -135,21 +146,27 @@ func (i *Instance) AddShellTabWithID(id string) (*Tab, error) {
 	if claim != nil {
 		// The id claim outlives every return below: a joiner must not see the
 		// id free until this create's outcome is final — appended, refused, or
-		// failed — or it could spawn a second command in the gap.
+		// failed — or it could spawn a second command in the gap. The outcome
+		// is stamped on the claim BEFORE done closes so a waiter's read of it
+		// is ordered by the channel close.
 		defer func() {
 			i.mu.Lock()
 			delete(i.tabCreateInFlight, id)
+			claim.tab, claim.err = resultTab, resultErr
 			close(claim.done)
 			i.mu.Unlock()
 		}()
 	}
-	if tmuxName != "" {
-		defer func() {
-			i.mu.Lock()
+	// The name claims release on every return: a landed tab keeps them covered
+	// by its roster row; a refused/failed create leaves the names free again.
+	defer func() {
+		i.mu.Lock()
+		delete(i.tabDisplayClaims, displayName)
+		if tmuxName != "" {
 			delete(i.tabSpawnClaims, tmuxName)
-			i.mu.Unlock()
-		}()
-	}
+		}
+		i.mu.Unlock()
+	}()
 
 	if spawnErr != nil {
 		return nil, spawnErr
@@ -250,7 +267,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 // The same-id shape match extends to Command: a process tab's command is part of
 // what the id names, so an id retry with a different command is a collision, not
 // a replay.
-func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab, error) {
+func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (resultTab *Tab, resultErr error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("a process tab requires a non-empty command")
 	}
@@ -278,13 +295,20 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab,
 		}
 		i.mu.Unlock()
 		<-wait
+		if c.tab != nil || c.err != nil {
+			return c.tab, c.err
+		}
 		i.mu.Lock()
 	}
 	started := i.started
 	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
-	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
+	displayName := uniqueTabNameReserving(i.Tabs, i.tabDisplayClaims, processTabBaseName(requestedName, command))
+	if i.tabDisplayClaims == nil {
+		i.tabDisplayClaims = map[string]bool{}
+	}
+	i.tabDisplayClaims[displayName] = true
 	// Both namespaces resolved under the one lock; see AddShellTabWithID.
 	tmuxName := ""
 	if agentTmux != nil {
@@ -300,17 +324,19 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (*Tab,
 		defer func() {
 			i.mu.Lock()
 			delete(i.tabCreateInFlight, id)
+			claim.tab, claim.err = resultTab, resultErr
 			close(claim.done)
 			i.mu.Unlock()
 		}()
 	}
-	if tmuxName != "" {
-		defer func() {
-			i.mu.Lock()
+	defer func() {
+		i.mu.Lock()
+		delete(i.tabDisplayClaims, displayName)
+		if tmuxName != "" {
 			delete(i.tabSpawnClaims, tmuxName)
-			i.mu.Unlock()
-		}()
-	}
+		}
+		i.mu.Unlock()
+	}()
 
 	if spawnErr != nil {
 		return nil, spawnErr
@@ -423,8 +449,17 @@ type tabCreateClaim struct {
 	kind    TabKind
 	command string
 	// done closes when the owning create returns — appended, refused, or
-	// failed — so a joiner always re-checks the roster against a final state.
+	// failed — so a joiner always resolves against a final state.
 	done chan struct{}
+	// tab/err are the owning create's outcome, written under i.mu before done
+	// closes, so a joiner's read after <-done is race-free. They matter on the
+	// FAILURE path: a create that fails post-spawn (the command ran and exited
+	// nonzero — failedProcessTabError) leaves no roster row for a roster
+	// recheck to find, and re-running the create would execute the command a
+	// second time. The claim answer is the join contract: same id + same shape
+	// means the joiner asked for exactly the outcome the owner produced.
+	tab *Tab
+	err error
 }
 
 // tabCreateClaimOrJoinLocked arbitrates a supplied-id create on i.mu (held in
@@ -451,7 +486,7 @@ func (i *Instance) tabCreateClaimOrJoinLocked(id string, kind TabKind, command s
 	if c.kind != kind || (kind == TabKindProcess && c.command != command) {
 		return nil, nil, fmt.Errorf("tab id %q already names an in-flight %s create", id, TabKindName(c.kind))
 	}
-	return nil, c.done, nil
+	return c, c.done, nil
 }
 
 // tabIDCollisionLocked answers a supplied-id create against whoever already owns

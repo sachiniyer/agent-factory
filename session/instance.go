@@ -505,6 +505,10 @@ type Instance struct {
 	// instance that never spawns a sibling never needs it.
 	tabSpawnClaims map[string]bool
 
+	// tabDisplayClaims is tabSpawnClaims for the roster DISPLAY name: names
+	// derived by in-flight creates but not yet on i.Tabs. Guarded by i.mu.
+	tabDisplayClaims map[string]bool
+
 	// tabCreateInFlight reserves the stable ids of supplied-id creates still
 	// in flight — claimed under i.mu at the early check, released when the
 	// owning create returns (#5571 W4.3). The roster dedupes same-id creates

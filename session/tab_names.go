@@ -69,6 +69,21 @@ func uniqueTabNameExcluding(tabs []*Tab, base string, exclude *Tab) string {
 	return firstFreeName(used, base)
 }
 
+// uniqueTabNameReserving is uniqueTabName with one more reservation source:
+// claimed holds display names of sibling creates still in flight
+// (Instance.tabDisplayClaims, #5571 W4.3), so two concurrent creates never
+// derive the same roster name off the same roster view.
+func uniqueTabNameReserving(tabs []*Tab, claimed map[string]bool, base string) string {
+	used := make(map[string]bool, len(tabs)+len(claimed))
+	for _, t := range tabs {
+		used[t.Name] = true
+	}
+	for n := range claimed {
+		used[n] = true
+	}
+	return firstFreeName(used, base)
+}
+
 // uniqueTabTmuxName returns the tmux session name to spawn a new sibling tab
 // under: the agent session's sanitized name, the "__" separator, and a token
 // starting at base that collides with no live tmux session on the roster.
