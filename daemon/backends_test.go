@@ -85,7 +85,7 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 	// the builder passes any list through, this one proves the list it is given is
 	// the canonical one. Together they say a new backend reaches every client.
 	cfg, cfgErr := config.ResolveConfig(repo)
-	assert.Equal(t, backendCatalog(config.SupportedBackends, cfg, cfgErr, repo), resp.Backends,
+	assert.Equal(t, backendCatalog(config.SupportedBackends, cfg, cfgErr, repo, ""), resp.Backends,
 		"ListBackends must hand the canonical enum to backendCatalog untouched")
 
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status, "local needs no repo config")
@@ -360,7 +360,7 @@ func TestListBackends_NewBackendReachesClientsWithNoClientChange(t *testing.T) {
 	// consults no registry, so an unrecognized backend correctly reports no config
 	// requirement — that is the property under test.
 	cfg, cfgErr := config.ResolveConfig(repo)
-	catalog := backendCatalog([]string{config.BackendLocal, "fargate"}, cfg, cfgErr, repo)
+	catalog := backendCatalog([]string{config.BackendLocal, "fargate"}, cfg, cfgErr, repo, "")
 
 	names := make([]string, 0, len(catalog))
 	for _, opt := range catalog {
@@ -433,4 +433,38 @@ func TestListBackends_AnswersOverTheControlSocket(t *testing.T) {
 	assert.NotEmpty(t, hook.Reason, "the actionable reason is what the CLI prints; gob must carry it")
 	assert.Equal(t, config.BackendLocal, resp.Default)
 	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
+}
+
+// TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds pins the W3.1 picker
+// contract (#5571): the callback advisory lands ONLY on kinds whose provisioner
+// actually delivers a credential (ssh/sandbox), it is advisory rather than a
+// status change — an "available" backend stays available — and it repeats the
+// same refusal the mint degrades with, so choose-time and create-time cannot
+// disagree.
+func TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds(t *testing.T) {
+	repo := setupControlRepo(t)
+	addOrigin(t, repo)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"docker": map[string]any{"image": "img:latest"},
+		"ssh":    map[string]any{"host": "sandbox.invalid"},
+	})
+	cfg, cfgErr := config.ResolveConfig(repo)
+	require.NoError(t, cfgErr)
+
+	const refusal = "refusing to give this sandbox a callback credential: require_token is false"
+	catalog := backendCatalog(config.SupportedBackends, cfg, cfgErr, repo, refusal)
+
+	for _, opt := range catalog {
+		injects := session.BackendKind(opt.Name).InjectsSandboxCallback()
+		if injects {
+			// The advisory is orthogonal to Status: it rides an injecting
+			// backend whether the backend is available, unavailable for an
+			// unrelated reason (no sandbox.ssh here), or unknown.
+			assert.Equal(t, refusal, opt.CallbackUnavailableReason,
+				"backend %s injects a callback, so the advisory must ride it", opt.Name)
+		} else {
+			assert.Empty(t, opt.CallbackUnavailableReason,
+				"backend %s never injects a callback, so it has nothing to lose", opt.Name)
+		}
+	}
 }

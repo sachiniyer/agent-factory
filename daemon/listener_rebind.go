@@ -209,7 +209,8 @@ func (wl *webListeners) swapWebPreviewLocked(newCfg *config.Config) (webErr, pre
 	// restored side never left home.
 	if webErr == nil && webInfo.Addr != oldWebBoundAddr {
 		cfg := wl.manager.Config()
-		wl.announceWebListenerLocked(newCfg.ListenAddr, webInfo, webListenerPolicy(cfg), config.ListenerExposureNotice(cfg))
+		policy, notice := wl.probationBannerLocked(webListenerPolicy(cfg), config.ListenerExposureNotice(cfg))
+		wl.announceWebListenerLocked(newCfg.ListenAddr, webInfo, policy, notice)
 	}
 	if previewErr == nil && previewInfo.Addr != oldPreviewBoundAddr {
 		announcePreviewListenerLocked(previewInfo.Addr, config.PreviewListenerExposureNotice(wl.manager.Config()))
