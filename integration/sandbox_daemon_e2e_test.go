@@ -2,8 +2,6 @@ package integration_test
 
 import (
 	"encoding/json"
-	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,14 +47,8 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	host := startSandboxHost(t, repo)
 	writeFile(t, filepath.Join(repo, ".agent-factory", "config.json"), `{"backend":"sandbox"}`, 0644)
 
-	writeConfig := func(extra map[string]any) {
-		cfg := map[string]any{"auto_update": false, "sandbox_ssh": host.sshCommand()}
-		for k, v := range extra {
-			cfg[k] = v
-		}
-		writeFile(t, filepath.Join(home, config.ConfigFileName), mustJSON(t, cfg), 0644)
-	}
-	writeConfig(nil)
+	writeFile(t, filepath.Join(home, config.ConfigFileName),
+		mustJSON(t, map[string]any{"auto_update": false, "sandbox_ssh": host.sshCommand()}), 0644)
 
 	h := &harness{t: t, bin: afBin, home: home, repo: repo}
 	t.Cleanup(func() { stopDaemons(t, afBin, home) })
@@ -99,29 +91,10 @@ func TestSandboxDaemonE2E(t *testing.T) {
 
 	// --- create ---------------------------------------------------------------
 	//
-	// First on the DEFAULT config. Today that is refused: the daemon listens on
-	// loopback with no token, so it will not hand a sandbox a callback credential
-	// (AR-01; W3's -R tunnel removes the need). The refusal is pinned by name and
-	// logged, not skipped past — when W3 lands the default create succeeds, this
-	// branch stops running and the test proves the real default. Until then the
-	// rest of the lifecycle runs under the one workaround an operator has: a
-	// non-loopback network.listen_addr with network.require_token on.
+	// On the DEFAULT config: loopback listen_addr, no token. W3's -R tunnel means
+	// the sandbox needs no inbound route to the daemon, so create must succeed.
 	var created daemon.CreateSessionResponse
-	err := h.tryHTTPPost("/v1/CreateSession", daemon.CreateSessionRequest{Title: title, RepoPath: repo, Program: "claude"}, &created)
-	if err != nil {
-		if !strings.Contains(err.Error(), "refusing to give this sandbox a callback credential") {
-			t.Fatalf("default-config CreateSession failed for a reason other than the known callback refusal: %v", err)
-		}
-		t.Logf("KNOWN BLOCKER (AR-01, fixed by W3): default-config create is refused: %v", err)
-		ip := nonLoopbackIPv4(t)
-		stopDaemons(t, afBin, home)
-		// The first daemon start migrated config.json to config.toml, which then
-		// wins; drop it so the rewritten JSON is the one that loads.
-		_ = os.Remove(filepath.Join(home, "config.toml"))
-		writeConfig(map[string]any{"listen_addr": ip + ":" + freeTCPPort(t), "require_token": true})
-		h.startDaemon()
-		post("/v1/CreateSession", daemon.CreateSessionRequest{Title: title, RepoPath: repo, Program: "claude"}, &created)
-	}
+	post("/v1/CreateSession", daemon.CreateSessionRequest{Title: title, RepoPath: repo, Program: "claude"}, &created)
 	in := find(title)
 	if in == nil {
 		t.Fatalf("created session %q is not in the daemon snapshot", title)
@@ -231,29 +204,4 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(raw)
-}
-
-// nonLoopbackIPv4 finds an address of this host a sandbox could dial; the test
-// skips on a host with none.
-func nonLoopbackIPv4(t *testing.T) string {
-	t.Helper()
-	addrs, _ := net.InterfaceAddrs()
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && ipn.IP.To4() != nil {
-			return ipn.IP.String()
-		}
-	}
-	t.Skip("no non-loopback IPv4 address for the daemon's callback listener")
-	return ""
-}
-
-func freeTCPPort(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a free port: %v", err)
-	}
-	defer l.Close()
-	_, port, _ := net.SplitHostPort(l.Addr().String())
-	return port
 }
