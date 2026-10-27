@@ -150,8 +150,11 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	}
 
 	// --- session work: a distinctive commit in the sandbox workspace ----------------
+	// The agent works in the clone's LINKED worktree (the main clone stays on the
+	// default branch); that worktree is where its work and the pushed branch live.
 	workspace := func() string {
-		return host.exec(t, "dirname $(find /root/.af-sessions -maxdepth 4 -name .git | head -1)")
+		return host.exec(t, "main=$(dirname $(find /root/.af-sessions -maxdepth 4 -name .git | head -1)); "+
+			"git -C $main worktree list --porcelain | awk '/^worktree /{p=$2} END{print p}'")
 	}
 	ws := workspace()
 	committed := host.exec(t, "cd "+ws+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work 2>&1; git log --oneline -3 2>&1; git branch --show-current")
