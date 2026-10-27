@@ -67,27 +67,3 @@ func CommandUsesExecSeparator(command string) bool {
 	_, separator := stripExecPrefix(call.Args)
 	return separator
 }
-
-// CommandIsSingleSimpleCall reports whether command parses — under the POSIX
-// shell grammar mvdan.cc/sh uses elsewhere in this package — as exactly one
-// simple call: one statement, no negation/background/coprocess/disown, no
-// redirections, and a non-empty CallExpr.
-//
-// Exported for the config loader's auto-detected claude override (DefaultConfig),
-// which persists a shell command string that af later executes verbatim through
-// /bin/sh -c in every claude session pane. Persisting a value that is not even
-// valid single-simple-call shell syntax — e.g. a probe result that corrupted
-// into an unbalanced quote — would make every session pane die on launch with
-// `Syntax error: Unterminated quoted string` and no fallback to the bare
-// program name, and account-scoped launch admission (which parses with this same
-// predicate) would fail closed. The loader therefore omits such an override
-// rather than persisting it, falling back to a $PATH lookup of "claude" at exec
-// time — the same posture as a probe that found nothing.
-//
-// Using the same predicate the account launch proof uses keeps the loader's
-// admission decision in lockstep with the boundary that governs the persisted
-// value at launch.
-func CommandIsSingleSimpleCall(command string) bool {
-	_, ok := singleSimpleCall(command)
-	return ok
-}

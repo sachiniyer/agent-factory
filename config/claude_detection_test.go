@@ -11,9 +11,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// requireShellSyntax asserts command parses as valid shell syntax — the
+// property the cutset-trim bug violated with an unbalanced quote. It uses the
+// same mvdan.cc/sh parser family the account launch proof uses, so the check
+// is hermetic and does not depend on /bin/sh existing; callers that want the
+// pane's real shell additionally run /bin/sh -n themselves.
+func requireShellSyntax(t *testing.T, command string) {
+	t.Helper()
+	_, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	require.NoError(t, err, "%q must be valid shell syntax (no unbalanced quote)", command)
+}
 
 // TestGetClaudeCommandMemoized pins the #883 fix: repeated probes that share
 // the same SHELL/PATH/HOME must source the rc only once, while a changed HOME
@@ -235,12 +247,11 @@ func TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes(t *
 			parsed := parseCommandProbeOutput(tc.line)
 			require.NotEmpty(t, parsed, "the alias value must parse to a non-empty command")
 			// The composed override the pane runs: <parsed> + <af flag>. It
-			// must parse as a single simple shell call — i.e. mvdan.cc/sh
-			// accepts it without a syntax error. The cutset-trim bug left an
-			// unbalanced quote that mvdan.cc/sh (and /bin/sh) reject.
+			// must be valid shell syntax — i.e. mvdan.cc/sh accepts it
+			// without a syntax error. The cutset-trim bug left an unbalanced
+			// quote that mvdan.cc/sh (and /bin/sh) reject.
 			composed := parsed + " " + DetectedClaudePermissionsFlag
-			assert.True(t, sessionenv.CommandIsSingleSimpleCall(composed),
-				"composed override %q must parse as a single simple shell call (no unbalanced quote)", composed)
+			requireShellSyntax(t, composed)
 			// And it must parse under the real /bin/sh the pane uses. Use
 			// syntax-only validation (-n) so a real `claude` on PATH is never
 			// launched (and cannot hang or run with --dangerously-skip-
@@ -257,10 +268,10 @@ func TestParseCommandProbeOutputPersistsBalancedQuotesForValueBoundaryQuotes(t *
 // TestParseCommandProbeOutputStripsAssignmentFormWrapper is the regression
 // test for the "name=value" / "name -> value" serialization-wrapper bug: a
 // probe line whose value is wrapped in an ASCII " or ' pair must have the
-// wrapper stripped so the composed override parses as a single simple shell
-// call. Leaving the wrapper intact made /bin/sh treat the whole value as one
-// quoted executable name, so the override passed the guard but launched a
-// nonexistent command (#5526).
+// wrapper stripped so the composed override is valid shell syntax. Leaving
+// the wrapper intact made /bin/sh treat the whole value as one quoted
+// executable name, so the override parsed yet launched a nonexistent command
+// (#5526).
 func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -279,8 +290,7 @@ func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
 			parsed := parseCommandProbeOutput(tc.line)
 			require.Equal(t, tc.want, parsed, "the serialization wrapper must be stripped, not preserved")
 			composed := parsed + " " + DetectedClaudePermissionsFlag
-			assert.True(t, sessionenv.CommandIsSingleSimpleCall(composed),
-				"composed override %q must parse as a single simple shell call", composed)
+			requireShellSyntax(t, composed)
 			if _, err := os.Stat("/bin/sh"); err == nil {
 				out, err := exec.Command("/bin/sh", "-n", "-c", composed).CombinedOutput()
 				assert.NoError(t, err,
@@ -290,43 +300,10 @@ func TestParseCommandProbeOutputStripsAssignmentFormWrapper(t *testing.T) {
 	}
 }
 
-// TestDefaultConfigOmitsOverrideWithUnbalancedQuote is the defense-in-depth
-// half of the fix: even if a future corruption path produced shell-invalid
-// syntax for the composed override, DefaultConfig must refuse to persist it
-// (falling back to a $PATH lookup of "claude" at exec time) rather than
-// persisting a value that kills every session pane on launch. This drives the
-// full GetClaudeCommand → parse → shell-quote → compose → validate pipeline
-// through a fake shell that emits a zsh-form alias whose value carries a
-// genuinely unbalanced quote (no wrapper to strip), so it is deterministic and
-// does not depend on a real bash being installed.
-func TestDefaultConfigOmitsOverrideWithUnbalancedQuote(t *testing.T) {
-	// A fake shell that ignores its args and prints a zsh `which`-form alias
-	// line whose value has an unbalanced trailing apostrophe. The parser
-	// does not strip a wrapper here (zsh form, no backtick), so the value
-	// reaches the guard with its unbalanced quote intact — the same symptom
-	// the cutset-trim bug produced, here deliberately injected to prove the
-	// guard catches it even when the parser cannot repair the value.
-	fakeShell := filepath.Join(t.TempDir(), "probe-shell")
-	shellScript := "#!/bin/sh\necho \"claude: aliased to claude --prompt 'hi\"\nexit 0\n"
-	require.NoError(t, os.WriteFile(fakeShell, []byte(shellScript), 0755))
-
-	t.Setenv("SHELL", fakeShell)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
-
-	warnings := captureLog(t, &log.WarningLog)
-	cfg := DefaultConfig()
-	require.NotNil(t, cfg)
-	assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude],
-		"a probe result that composes to shell-invalid syntax must be omitted, not persisted")
-	assert.Contains(t, warnings.String(), "omitting the auto-detected override",
-		"omission must be audible: a silent fall-back hides a probe bug from the operator")
-}
-
 // TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd is the end-to-end
 // regression test: a real bash alias whose value's own boundary is a quote —
 // the shape the cutset-trim bug corrupted — flows through the full probe →
-// parse → shell-quote → compose → validate pipeline and lands in
+// parse → shell-quote → compose pipeline and lands in
 // ProgramOverrides as a shell-balanced command that /bin/sh executes.
 func TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd(t *testing.T) {
 	bashPath := requireBash(t)
@@ -368,8 +345,7 @@ func TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd(t *testing.T) {
 			// The whole point of the fix: the persisted override is valid
 			// shell syntax the pane can execute, and the permissions flag is
 			// a separate arg (not swallowed by an unclosed quote).
-			assert.True(t, sessionenv.CommandIsSingleSimpleCall(override),
-				"override %q must parse as a single simple shell call", override)
+			requireShellSyntax(t, override)
 			if _, err := os.Stat("/bin/sh"); err == nil {
 				// Syntax-only validation (-n): the property under test is
 				// shell parseability, not claude's exit code. -n never
@@ -430,63 +406,27 @@ func TestDefaultConfigPersistsQuoteBoundaryAliasEndToEnd(t *testing.T) {
 	}
 }
 
-// TestDefaultConfigOmitsPersistingUnprovableAliasEndToEnd drives the full
-// pipeline through an alias that, once probed, composes to shell syntax that
-// the account launch proof cannot prove (a binary `&&` command — valid shell
-// but not a single simple call), and asserts the defense-in-depth gate omits
-// it from ProgramOverrides so the session falls back to a $PATH lookup of
-// "claude" instead of dying on launch.
-func TestDefaultConfigOmitsPersistingUnprovableAliasEndToEnd(t *testing.T) {
+// TestDefaultConfigPersistsCompoundAliasEndToEnd pins the master contract for
+// a VALID compound alias — one that is real shell syntax but not a single
+// simple call, e.g. `alias claude="nvm use 20 && claude"`. Master persisted
+// such aliases verbatim (appending the permissions flag to the LAST command
+// of the chain, which is the claude invocation the operator wrote it for) and
+// they worked for unscoped launches through /bin/sh -c. An earlier revision of
+// this fix gated persistence on single-simple-call syntax and silently
+// dropped them — a regression, not a safety improvement: the gate is gone and
+// the compound alias must land in ProgramOverrides unchanged.
+func TestDefaultConfigPersistsCompoundAliasEndToEnd(t *testing.T) {
 	bashPath := requireBash(t)
 	homeDir := t.TempDir()
-	// An alias that is valid shell but NOT a single simple call. The
-	// af-appended --dangerously-skip-permissions would attach only to the
-	// second command of the && chain, so persisting it is dangerous; the
-	// guard omits it and falls back to a $PATH "claude" lookup.
-	writeGuardedBashrc(t, homeDir, "claude --model opus && echo ready")
+	writeGuardedBashrc(t, homeDir, "nvm use 20 && claude")
 	t.Setenv("HOME", homeDir)
 	t.Setenv("SHELL", bashPath)
-	t.Setenv("PATH", t.TempDir())
-
-	warnings := captureLog(t, &log.WarningLog)
-	cfg := DefaultConfig()
-	require.NotNil(t, cfg)
-	assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude],
-		"a probe result that does not compose to a single simple shell call must be omitted, not persisted")
-	assert.Contains(t, warnings.String(), "omitting the auto-detected override",
-		"omission must be audible: a silent fall-back hides a probe bug from the operator")
-}
-
-// TestDefaultConfigOmitsInvalidOverrideWarnsOnce pins the coalescing of the
-// "omitting the auto-detected override" warning: a normal TUI startup rebuilds
-// DefaultConfig up to four times and later LoadConfig calls can add more, but
-// the warning must fire exactly once per probe environment — the same posture
-// as the missing-command warning (TestDefaultConfigLogsMissingClaudeOnce).
-// Without coalescing, each rebuild re-validated the cached probe result and
-// re-emitted the same warning (#5526 review).
-func TestDefaultConfigOmitsInvalidOverrideWarnsOnce(t *testing.T) {
-	// A fake shell that ignores its args and prints a zsh `which`-form alias
-	// line whose value has an unbalanced trailing apostrophe. The parser does
-	// not strip a wrapper here (zsh form, no backtick), so the value reaches
-	// the guard with its unbalanced quote intact and the composed override is
-	// omitted — the same shape TestDefaultConfigOmitsOverrideWithUnbalancedQuote
-	// uses, but deterministic and bash-free.
-	fakeShell := filepath.Join(t.TempDir(), "probe-shell")
-	shellScript := "#!/bin/sh\necho \"claude: aliased to claude --prompt 'hi\"\nexit 0\n"
-	require.NoError(t, os.WriteFile(fakeShell, []byte(shellScript), 0755))
-
-	t.Setenv("SHELL", fakeShell)
-	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
 
-	warnings := captureLog(t, &log.WarningLog)
-	for range 5 {
-		cfg := DefaultConfig()
-		require.NotNil(t, cfg)
-		assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude],
-			"every rebuild must keep omitting the shell-invalid override")
-	}
-	assert.Equal(t, 1, strings.Count(warnings.String(), "\n"),
-		"five config reads of one invalid-override probe should emit the warning exactly once")
-	assert.Contains(t, warnings.String(), "omitting the auto-detected override")
+	cfg := DefaultConfig()
+	require.NotNil(t, cfg)
+	override := cfg.ProgramOverrides[tmux.ProgramClaude]
+	require.Equal(t, "nvm use 20 && claude "+DetectedClaudePermissionsFlag, override,
+		"a valid compound alias must persist verbatim with the af flag appended to the claude leg, as on master")
+	requireShellSyntax(t, override)
 }

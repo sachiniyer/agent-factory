@@ -656,9 +656,14 @@ const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := staticDefaultConfig()
-	if override, set := defaultClaudeOverride(); set {
+	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
 		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: override,
+			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
 		}
 	}
 

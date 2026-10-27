@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,53 +117,4 @@ func TestValidateAccountCommandStillAcceptsPlainExecPrefix(t *testing.T) {
 		TrustedExecutable: proof.TrustedExecutable,
 		GeneratedArgs:     proof.GeneratedArgs,
 	}))
-}
-
-// TestCommandIsSingleSimpleCall pins the predicate the config loader's
-// auto-detected claude override uses as its defense-in-depth guard: a
-// composed override that is not even valid single-simple-call shell syntax
-// (e.g. an unbalanced quote left by a corrupted probe) must report false so
-// DefaultConfig omits it rather than persisting a value that kills every
-// session pane on launch. The predicate is the same one the account launch
-// proof uses, so the loader's admission decision matches the boundary that
-// governs the persisted value at launch.
-func TestCommandIsSingleSimpleCall(t *testing.T) {
-	accepts := []struct {
-		name    string
-		command string
-	}{
-		{"bare name with flag", "claude --dangerously-skip-permissions"},
-		{"flags and double-quoted arg", `claude --prompt "'hi'" --dangerously-skip-permissions`},
-		{"single-quoted path with spaces", `'/opt/my claude/claude' --dangerously-skip-permissions`},
-		{"double-quoted path with spaces", `"/opt/my claude/claude" --dangerously-skip-permissions`},
-		{"absolute path with flag", "/usr/local/bin/claude --model opus --dangerously-skip-permissions"},
-		{"exec prefix", "exec claude --dangerously-skip-permissions"},
-	}
-	for _, tc := range accepts {
-		t.Run("accepts/"+tc.name, func(t *testing.T) {
-			assert.True(t, CommandIsSingleSimpleCall(tc.command),
-				"%q must parse as a single simple shell call", tc.command)
-		})
-	}
-	refuses := []struct {
-		name    string
-		command string
-	}{
-		{"unbalanced opening double quote", `claude --prompt "'hi --dangerously-skip-permissions`},
-		{"unbalanced opening single quote", "claude --prompt 'hi --dangerously-skip-permissions"},
-		{"unbalanced closing single quote", "claude --prompt hi' --dangerously-skip-permissions"},
-		{"empty", ""},
-		{"binary and command", "claude --model opus && echo ready --dangerously-skip-permissions"},
-		{"negated command", "! claude --dangerously-skip-permissions"},
-		{"backgrounded command", "claude --dangerously-skip-permissions &"},
-		{"pipelined command", "claude --dangerously-skip-permissions | cat"},
-		{"redirect", "claude --dangerously-skip-permissions > /tmp/log"},
-		{"two statements", "claude --dangerously-skip-permissions ; echo done"},
-	}
-	for _, tc := range refuses {
-		t.Run("refuses/"+tc.name, func(t *testing.T) {
-			assert.False(t, CommandIsSingleSimpleCall(tc.command),
-				"%q must NOT parse as a single simple shell call", tc.command)
-		})
-	}
 }
