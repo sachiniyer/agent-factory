@@ -89,7 +89,7 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					inst.Path = h.repoRoot
 					h.store.AddInstance(inst)
 					h.sidebar.SelectInstance(inst)
-					req := sessionStartRequest{Title: inst.Title, RepoPath: h.repoRoot, Program: "claude", Prompt: "Keep my prompt", Backend: "local", Account: "work"}
+					req := sessionStartRequest{Title: inst.Title, RepoPath: h.repoRoot, Program: "claude", Prompt: "Keep my prompt", Backend: "local", Account: "work", ProgramChosen: true, AccountChosen: true}
 					_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, rawPrompt: " Keep my prompt\n", err: errors.New("The daemon refused this create.")})
 					require.Same(t, inst, h.namingInstance)
 					require.Equal(t, " Keep my prompt\n", h.pendingPrompt)

@@ -37,7 +37,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	repoPath := "/tmp/preview-tab-identity-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

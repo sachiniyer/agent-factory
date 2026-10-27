@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -179,4 +180,18 @@ func (target sessionActionTarget) renameTabRequest(tabID, tabName, newName strin
 		ID: target.id, Title: target.title, RepoID: target.repoID,
 		TabID: tabID, TabName: tabName, NewName: newName,
 	}
+}
+
+// streamAddress returns the WS stream address for inst. A session with a
+// recorded stable id is dialed by it, ID-only (apiclient.StreamSession sends
+// by=id): a killed-and-recreated row cannot inherit the pane's input the way a
+// reused title can, a deferred attach really does reach the captured session
+// (#716's intent, carried onto the wire), and a stale id is refused rather than
+// reinterpreted as some other session's title (#4760 review). A pre-ID record
+// keeps the repo-scoped title contract: an empty id must not occupy the id slot.
+func streamAddress(inst *session.Instance, repoID string) apiclient.StreamSession {
+	if inst.ID != "" {
+		return apiclient.StreamSession{ID: inst.ID}
+	}
+	return apiclient.StreamSession{Title: inst.Title, RepoID: repoID}
 }
