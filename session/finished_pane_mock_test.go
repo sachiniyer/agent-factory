@@ -39,6 +39,10 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 		"#{pane_dead_status}", p.status,
 		"#{pane_dead_signal}", p.signal,
 		"#{pane_dead_time}", p.at,
+		"#{@af_pane_pid}", strconv.Itoa(pid)+":0:/dev/pts/0",
+		"#{@af_pane_deaths}", "1",
+		"#{pane_tty}", "/dev/pts/0",
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1",
 	).Replace(c.Args[len(c.Args)-1]) + "\n", true
 }
 

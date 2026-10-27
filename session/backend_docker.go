@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -528,6 +530,13 @@ func (p *dockerProvisioner) runContainer() error {
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
 		}
+		// docker's combined output loses the daemon-side resource errno as
+		// text, which the lost-restore classifier refuses to read — re-derive
+		// it from the engine's data-root filesystem so an out-of-space engine
+		// carries typed ENOSPC evidence (#5295 review).
+		if evidence := p.dockerRootFSFullEvidence(); evidence != nil {
+			err = errors.Join(err, evidence)
+		}
 		return fmt.Errorf("backend=docker: `docker run` failed for image %q: %s: %w", p.image, strings.TrimSpace(string(out)), err)
 	}
 	id := strings.TrimSpace(string(out))
@@ -536,6 +545,46 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
+}
+
+// statfsFull is the test seam over the bounded filesystem fullness answer —
+// a statfs needs no write access, so it is the only probe that works on a
+// root-owned engine data root.
+var statfsFull = fsprobe.Full
+
+// dockerRootFSFullEvidence derives the resource verdict docker's combined
+// output cannot carry: `docker run`'s stderr loses the engine-side errno
+// into text, but the engine's data-root filesystem answers it from THIS
+// process — statfs needs no write access to the root-owned dir, and zero
+// free blocks is exactly the ENOSPC dockerd's own write hit. The joined
+// PathError carries the real errno for the lost-restore classifier's
+// errors.Is chain, with provenance text naming where it came from. Every
+// unresolved or non-local step returns nil instead: a remote engine's root
+// is not statfs-able from here, an engine that cannot answer `docker info`
+// has no resolved root, and a root with free blocks has no evidence to add
+// — the error path never gains noise it did not earn (#5295 review).
+func (p *dockerProvisioner) dockerRootFSFullEvidence() error {
+	_, local, err := resolveDockerEngineEndpoint(p.dockerEnvironment())
+	if err != nil || !local {
+		return nil
+	}
+	out, err := p.docker(dockerShortStepTimeout, "info", "--format", "{{.DockerRootDir}}")
+	if err != nil {
+		return nil
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return nil
+	}
+	full, err := statfsFull(root)
+	if err != nil {
+		return fmt.Errorf("could not statfs docker data root %s: %w", root, err)
+	}
+	if !full {
+		return nil
+	}
+	return fmt.Errorf("statfs on docker data root %s reports zero free blocks — engine writes there would fail ENOSPC: %w",
+		root, &os.PathError{Op: "statfs", Path: root, Err: syscall.ENOSPC})
 }
 
 func (p *dockerProvisioner) containerEnvironmentNames() []string {
@@ -720,7 +769,14 @@ func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byt
 }
 
 func (p *dockerProvisioner) agentName() string {
-	agent := sessionenv.AgentForCommand(p.program)
+	// The grant predicate, not the identity classifier: the credential mounts
+	// and run_args validation this feeds install operator material, so the
+	// agent name must be one af can attribute to the operator. The remote
+	// variant is the honest one here — the executable resolves on the image's
+	// filesystem, which the host cannot stat; the container's clone lives at
+	// dockerWorkspaceDir, so an absolute program path inside it resolves to
+	// repository content and earns no grant (#5265).
+	agent := sessionenv.GrantAgentForRemoteCommand(p.program, dockerWorkspaceDir)
 	if agent == "" && strings.TrimSpace(p.program) == "" {
 		return tmux.ProgramClaude
 	}

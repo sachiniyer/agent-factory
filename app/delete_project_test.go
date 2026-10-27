@@ -197,11 +197,10 @@ func TestDeleteProjectConfirmStatesRealSplit(t *testing.T) {
 
 // TestDeleteProjectConfirmRendersConsequencesWhenCompact is the #1973 P1: the
 // honest split is worth nothing if the terminal renders it below the fold. The
-// overlay clips from the BOTTOM (windowOverlayBody keeps lines[:limit-1]), so a
-// dialog that led with the reassuring "N archived (restorable)" pushed the
-// non-restorable count off-screen — the user reads the safe half, presses y, and
-// loses sessions that were never restorable. That is the very bug this fix
-// exists to prevent, reintroduced by the layout.
+// body pages through a scroll window when it overflows (#5171) — the
+// consequences lead it, so the non-restorable count is what the reader sees
+// first and every other line stays a keystroke away, rather than the old clip
+// that pushed the tail off-screen behind "resize to read".
 //
 // Both sizes are real: 40x10 is the floor this app DECLARES it supports
 // (ui/layout/grid.go HardMinWidth/HardMinHeight — below it ui/fallback.go takes
@@ -214,7 +213,7 @@ func TestDeleteProjectConfirmStatesRealSplit(t *testing.T) {
 // pressed at 40x10 in the first place. An open dialog, however, re-fits on every
 // relayout (relayout -> layoutModalOverlays -> SetMaxSize), so shrinking the
 // terminal — or a tmux pane resize — re-renders it at the smaller size with the
-// consequences clipped. The dialog outlives the size it was opened at.
+// consequences paged. The dialog outlives the size it was opened at.
 func TestDeleteProjectConfirmRendersConsequencesWhenCompact(t *testing.T) {
 	mixed := []session.InstanceData{
 		deleteProjectSession("alpha", false),
@@ -236,7 +235,7 @@ func TestDeleteProjectConfirmRendersConsequencesWhenCompact(t *testing.T) {
 			require.NotNil(t, h.confirmationOverlay, "the dialog must survive the resize")
 			dialog := dialogText(h.confirmationOverlay.Render())
 
-			// The destructive fact must survive the clip.
+			// The destructive fact must be the first thing in the window.
 			assert.Contains(t, dialog, "1 in-place session torn down — not restorable",
 				"the non-restorable count must render at %dx%d — clipping it is the bug", tc.w, tc.h)
 			// And the user must still be able to see what key commits them.
@@ -248,11 +247,14 @@ func TestDeleteProjectConfirmRendersConsequencesWhenCompact(t *testing.T) {
 				assert.Less(t, strings.Index(dialog, "not restorable"), strings.Index(dialog, "archived — restorable"),
 					"the non-restorable count must lead the restorable one")
 			}
-			// Nothing may be swallowed in silence: if the elaboration was clipped,
-			// the dialog says so rather than looking complete.
+			// Nothing may be swallowed in silence: if the elaboration sits below
+			// the window, the dialog announces the lines and names the keys
+			// that reach them rather than looking complete.
 			if !strings.Contains(dialog, "Your real git repository is untouched") {
-				assert.Contains(t, dialog, "resize to read",
-					"clipped detail must be announced, not silently dropped")
+				assert.Contains(t, dialog, "more lines",
+					"hidden detail must be announced, not silently dropped")
+				assert.Contains(t, dialog, "↑/↓",
+					"the notice must name the scroll keys")
 			}
 			// The dialog must genuinely be confirmable at a supported size.
 			require.NotNil(t, h.confirmationOverlay)

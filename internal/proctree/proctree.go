@@ -234,10 +234,14 @@ func sameIdentity(p Process, read func(int) (Process, error)) (bool, error) {
 // snapshotted process instance (it exited, or the PID was recycled).
 var ErrIdentityChanged = errors.New("process exited or pid was recycled")
 
-// kill is the syscall used to deliver signals. It is a package variable only
-// so tests can simulate the TOCTOU window (a process reaped between the
-// identity check and the signal, making the kernel return ESRCH).
-var kill = syscall.Kill
+// Kill is the syscall used to deliver signals. It is an exported package
+// variable so tests OUTSIDE this package (notably the daemon package's
+// SIGTERM-fallback tests) can simulate a non-ESRCH signal failure such as
+// EPERM from a MAC policy, directly surfacing the error-text-broadness
+// invariant sigtermFallback must uphold. In-package tests use it to
+// simulate the TOCTOU window (a process reaped between the identity check
+// and the signal, making the kernel return ESRCH).
+var Kill = syscall.Kill
 
 // Signal delivers sig to p only if the PID still names the same process
 // instance. The verify-then-kill pair has an unavoidable microsecond TOCTOU
@@ -253,7 +257,7 @@ func Signal(p Process, sig syscall.Signal) error {
 	if !AliveSame(p) {
 		return ErrIdentityChanged
 	}
-	if err := kill(p.PID, sig); err != nil {
+	if err := Kill(p.PID, sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return ErrIdentityChanged
 		}
