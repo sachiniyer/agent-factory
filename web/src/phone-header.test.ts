@@ -171,3 +171,23 @@ test("phone panel actions can dismiss carried session state", () => {
   outer.dispose();
   session.dispose();
 });
+
+test("hiding the last phone control moves focus out before the menu hides", () => {
+  const callbacks: (() => void)[] = [];
+  const saved = (globalThis as { MutationObserver?: unknown }).MutationObserver;
+  Object.assign(globalThis, { MutationObserver: class { constructor(cb: () => void) { callbacks.push(cb); } observe() {} disconnect() {} } });
+  try {
+    const install = new Element("button");
+    const switcher = new Element("button");
+    const menu = components.appbarControls([install] as unknown as HTMLElement[], media(360), () => {}, () => {}, () => switcher as unknown as HTMLElement);
+    menu.open();
+    install.focus();
+    install.hidden = true;
+    for (const cb of callbacks) cb();
+    assert.equal(menu.trigger.hidden, true);
+    assert.equal(doc.activeElement, switcher, "focus must land on a visible app-bar control");
+    menu.dispose();
+  } finally {
+    Object.assign(globalThis, { MutationObserver: saved });
+  }
+});

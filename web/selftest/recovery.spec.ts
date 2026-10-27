@@ -103,7 +103,8 @@ for (const theme of ["light", "dark"] as const) {
     test("Tokenless column", async ({ page }, info) => {
       await page.goto("/");
       await expect(page.locator(".af-app")).toBeVisible();
-      await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+      await page.locator('.af-viewtab[data-view="config"]').click();
+      await page.getByRole("button", { name: "Log out", exact: true }).click();
       await expect(page.locator(".af-login-form button")).toBeVisible();
       await centeredColumn(page, ".af-login-form button");
       await still(page, info, "tokenless");
@@ -114,8 +115,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.locator(".af-app")).toBeVisible();
       await page.getByRole("tab", { name: "Tasks", exact: true }).click();
       const task = page.locator(".af-task-row").first();
-      await task.locator(".af-term-more").click();
-      await task.getByRole("button", { name: "Disable", exact: true }).click();
+      await task.getByRole("switch").click();
       await expect(page.locator(".af-toast-show")).toBeVisible();
       await still(page, info, "notice");
       await page.getByRole("button", { name: "Dismiss", exact: true }).click();
