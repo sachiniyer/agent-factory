@@ -540,7 +540,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user.
-		m.clearAttentionRequest(instance, answered.SetAt)
+		m.queueAttentionClear(instance, answered.SetAt)
 	}
 	return status, nil
 }
