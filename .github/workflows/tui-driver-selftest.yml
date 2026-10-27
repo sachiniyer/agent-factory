@@ -33,6 +33,12 @@ on:
   # Manual timing and recovery runs always execute, regardless of changed paths.
   workflow_dispatch:
 
+concurrency:
+  # A newer master push supersedes a stale run: the tip is the question. Keyed on
+  # workflow + ref, so PRs, merge_group entries and master never share a group.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Read-only: the runner checks out source and runs the same container harness as
 # developers. The daemon and tmux server exist only inside the ephemeral testbox.
 permissions:
