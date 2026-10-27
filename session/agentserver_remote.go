@@ -72,6 +72,12 @@ type remoteAgentServer struct {
 	// — each fans a single remote WS to N local subscribers. The channel behind
 	// each is a remoteClientlessChannel (the remote WS) rather than a tmux one.
 	brokers map[int]*ptyBroker
+	// idBrokers is brokers keyed by stable tab id, for the id-addressed plane
+	// (#5571 W4.4); see agentserver_remote_tabid.go. idPlaneKnown/idPlane cache
+	// the sandbox's tab-id-addressing advertisement.
+	idBrokers    map[string]*ptyBroker
+	idPlaneKnown bool
+	idPlane      bool
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
 	// cannot lazily resurrect a broker (and dial a fresh WS to a torn-down sandbox
 	// that never gets closed) — the local runtime's #1632 guard, same reasoning.
@@ -177,6 +183,9 @@ func (s *remoteAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error)
 }
 
 func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
+	if s.idNative() {
+		return s.rc.previewByID(tabID, full)
+	}
 	if s.inst == nil {
 		return PreviewSnapshot{}, fmt.Errorf("remote session %q cannot resolve stable tab id %q without its owning instance", s.rc.title, tabID)
 	}
@@ -287,8 +296,13 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	s.closed = true
 	brokers := s.brokers
 	s.brokers = nil
+	idBrokers := s.idBrokers
+	s.idBrokers = nil
 	s.mu.Unlock()
 	for _, br := range brokers {
+		br.close()
+	}
+	for _, br := range idBrokers {
 		br.close()
 	}
 	// Kill the in-sandbox workspace over REST, THEN reap the sandbox itself. Both
@@ -392,178 +406,6 @@ func (s *deadRemoteAgentServer) Kill(_ bool) error {
 }
 
 func (s *deadRemoteAgentServer) Archive() (string, error) { return "", s.err() }
-
-// --- remote WS clientlessChannel: the sandbox stream as a broker channel ---
-
-// remoteClientlessChannel is the remote runtime's clientlessChannel: it binds ONE
-// tab's ptyBroker to the sandbox's WS PTY stream. Where tmuxClientlessChannel
-// drives pipe-pane/send-keys/resize-window on a local tmux pane, this drives the
-// same three verbs over a single bidirectional WebSocket to the `af agent-server`:
-//
-//   - StartCapture dials the tab's WS and returns a reader that yields the
-//     sandbox's PTY_OUT bytes (dropping the remote's own repaint/resize-echo control
-//     frames — the daemon-side broker re-derives those locally, so feeding them into
-//     the ring would double-count them in the seq).
-//   - SendRaw/Resize write INPUT/RESIZE frames back over that same socket (the
-//     agent-server accepts input from any subscriber — the multi-writer model).
-//   - Snapshot fetches the current screen over REST Preview so the broker can paint
-//     a fresh local subscriber, exactly as the tmux channel's capture-pane does.
-//
-// This is what lets remoteAgentServer reuse ptyBroker unchanged: the broker never
-// knows whether its bytes come from a local pipe or a remote socket.
-type remoteClientlessChannel struct {
-	rc  *remoteAgentClient
-	tab int
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	ctx    context.Context
-	cancel context.CancelFunc
-	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
-	// concurrent reader + one writer, but two goroutines writing (an input and a
-	// resize) would race the frame boundary.
-	writeMu sync.Mutex
-}
-
-var _ clientlessChannel = (*remoteClientlessChannel)(nil)
-
-// PaneDead is always false here: a dead REMOTE pane is the remote daemon's
-// business — its own broker serves the repaint-only stream, which reaches this
-// channel as ordinary upstream bytes (#5330). Nothing local ever needs the
-// verdict this method answers for.
-func (c *remoteClientlessChannel) PaneDead() bool {
-	return false
-}
-
-func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
-	return &remoteClientlessChannel{rc: rc, tab: tab}
-}
-
-// StartCapture dials the tab's WS stream (from the live tail) and returns a reader
-// over the sandbox's PTY_OUT bytes. The reader goroutine also drains the socket's
-// control/repaint frames (dropping them) so the connection stays healthy — coder/
-// websocket auto-responds to the server's keepalive pings only while a read is in
-// flight, so this loop IS the keepalive. It is the broker's first-Subscribe entry
-// point, so the returned reader is consumed immediately and never blocks the socket.
-func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		return nil, fmt.Errorf("remote clientless capture already started")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab, "")
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	c.conn, c.ctx, c.cancel = conn, ctx, cancel
-	pr, pw := io.Pipe()
-	go c.readLoop(ctx, conn, pw)
-	return pr, nil
-}
-
-// readLoop copies the sandbox's PTY_OUT bytes into the broker's pipe until the
-// socket errors or capture is stopped. It DROPS the remote's OpRepaint and every
-// control frame (MsgResize echo, MsgExit): the daemon-side broker paints its own
-// per-subscriber repaint via Snapshot and manages its own resize echo, so passing
-// the remote's through would double-count repaint bytes in the ring seq and echo
-// resizes twice. This makes the remote socket behave to the broker exactly like
-// tmux pipe-pane: a future-only stream of raw output.
-func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.Conn, pw *io.PipeWriter) {
-	defer func() { _ = pw.Close() }()
-	for {
-		msg, err := agentproto.ReadMessage(ctx, conn)
-		if err != nil {
-			return
-		}
-		if msg.Binary && msg.Frame.Op == agentproto.OpPTYOut {
-			if _, werr := pw.Write(msg.Frame.Data); werr != nil {
-				return
-			}
-		}
-	}
-}
-
-// StopCapture cancels the read loop and closes the WS, so the broker's read side
-// (the pipe) returns EOF. Idempotent.
-func (c *remoteClientlessChannel) StopCapture() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return nil
-	}
-	c.cancel()
-	err := c.conn.Close(websocket.StatusNormalClosure, "")
-	c.conn, c.ctx, c.cancel = nil, nil, nil
-	return err
-}
-
-// SendRaw writes verbatim input bytes to the sandbox PTY as an INPUT frame over
-// the capture socket (multi-writer: the agent-server accepts input from any
-// subscriber). It requires the capture socket, which the broker always opens on
-// the first Subscribe before any input can be routed here.
-func (c *remoteClientlessChannel) SendRaw(b []byte) error {
-	conn, ctx, err := c.activeConn()
-	if err != nil {
-		return err
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, remoteWSWriteTimeout)
-	defer cancel()
-	return agentproto.WriteFrame(wctx, conn, agentproto.InputFrame(b))
-}
-
-// Resize sends the winning size to the sandbox PTY as a RESIZE frame. The broker
-// tracks last-resize-wins + echoes the authoritative size to local subscribers;
-// this just forwards the size to the remote (whose own echo is dropped by readLoop).
-func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
-	conn, ctx, err := c.activeConn()
-	if err != nil {
-		return err
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, remoteWSWriteTimeout)
-	defer cancel()
-	return agentproto.WriteFrame(wctx, conn, agentproto.ResizeFrame(rows, cols))
-}
-
-// Snapshot returns the sandbox's current visible screen over REST Preview — the
-// repaint the broker injects so a fresh local subscriber sees the screen before
-// the first live byte, mirroring tmux capture-pane. The WS stream carries only
-// future output, so without this a just-opened remote pane would render blank.
-func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	snapshot, err := c.rc.preview(c.tab, false)
-	if err != nil {
-		return PaneSnapshot{}, err
-	}
-	// REST Preview carries only the screen, not the cursor position, so the repaint
-	// omits cursor restore for remote panes (HasCursor stays false). It is also
-	// -J-joined (the agent-server's Preview uses CapturePaneContent), NOT the grid form
-	// buildRepaint's per-row positioning wants (#1688) — so a wrapped logical line
-	// re-wraps by the client width here. This is a known screen-only best-effort
-	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
-	// HasCursor is false); productizing it needs the agent-server to expose a grid
-	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
-	return PaneSnapshot{
-		Screen:   []byte(snapshot.Content),
-		Modes:    snapshot.Modes,
-		HasModes: snapshot.HasModes,
-	}, nil
-}
-
-// activeConn returns the live capture socket and its context, or an error if
-// capture is not running (no subscriber has opened the stream yet).
-func (c *remoteClientlessChannel) activeConn() (*websocket.Conn, context.Context, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return nil, nil, fmt.Errorf("remote pty stream for tab %d is not open", c.tab)
-	}
-	return c.conn, c.ctx, nil
-}
 
 // --- remoteAgentClient: the thin REST + WS transport to one agent-server ---
 
@@ -855,8 +697,13 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID strin
 	// independent budget while still bounding a peer that stops reading.
 	dialCtx, cancel := context.WithTimeout(ctx, remoteAgentDialTimeout+remoteAgentWSHandshakeTimeout)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, u, opts)
+	conn, resp, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
+		// A stale stable id is a 404 on the handshake (the sandbox's tab_gone
+		// refusal); surface it as ErrTabGone so the caller stops addressing it.
+		if tabID != "" && resp != nil && resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("remote agent-server: tab id %q: %w", tabID, ErrTabGone)
+		}
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))
 	}

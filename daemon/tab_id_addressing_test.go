@@ -278,30 +278,11 @@ func TestBindTab_IDAddressedNeverPinsAnOrdinal(t *testing.T) {
 		t.Fatal("an id-addressed connection must never pin a fixed ordinal")
 	}
 
-	// A runtime with NO id-native plane must re-resolve, not pin.
-	binding, err = bindTab(ordinalOnlyServer{}, inst, b.ID, 0)
-	if err != nil {
-		t.Fatalf("bindTab (ordinal-only runtime): %v", err)
-	}
-	if _, pinned := binding.(ordinalTabBinding); pinned {
-		t.Fatal("an id-addressed connection to an ordinal-shaped runtime must re-resolve per op, not pin the bind-time ordinal")
-	}
-	rb, ok := binding.(resolvingTabBinding)
-	if !ok {
-		t.Fatalf("expected a re-resolving binding for an ordinal-only runtime, got %T", binding)
-	}
-	if rb.tabID != b.ID {
-		t.Fatalf("the re-resolving binding must carry the stable id %q, got %q", b.ID, rb.tabID)
-	}
-
-	// It resolves the id to the tab's CURRENT ordinal on every op — so a shift is
-	// followed, not misrouted — and refuses an id that names no live tab.
-	if idx, rerr := rb.resolve(); rerr != nil || idx != 1 {
-		t.Fatalf("re-resolve = (%d, %v), want (1, nil)", idx, rerr)
-	}
-	gone := resolvingTabBinding{as: ordinalOnlyServer{}, instance: inst, tabID: "never-minted"}
-	if _, rerr := gone.resolve(); !errors.Is(rerr, session.ErrTabGone) {
-		t.Fatalf("an unknown id must re-resolve to ErrTabGone, got %v", rerr)
+	// A runtime with NO id-native plane cannot be addressed by id at all (#5571
+	// W4.4): every real runtime implements TabAddressableServer — the remote one
+	// carries its own legacy bridge — so the daemon no longer re-resolves.
+	if _, err = bindTab(ordinalOnlyServer{}, inst, b.ID, 0); err == nil {
+		t.Fatal("an id-addressed connection to a runtime without an id-native plane must refuse, not pin an ordinal")
 	}
 }
 
