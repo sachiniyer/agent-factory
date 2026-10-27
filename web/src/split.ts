@@ -1859,12 +1859,14 @@ export class SplitView {
     if (pane) {
       pane.status = status;
     }
+    // A status flip moves a tab in or out of openTabs; report() dedups when it
+    // does not. It must run before onStatus: that callback updates the store
+    // synchronously, and a reader looking at openTabs on a session switch has
+    // to see THIS session's layout, not the previous one's.
+    this.report();
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
-    // A status flip moves a tab in or out of openTabs; report() dedups when it
-    // does not.
-    this.report();
   }
 
   private onPaneFocus(leafId: string, focused: boolean): void {
