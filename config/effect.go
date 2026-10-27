@@ -113,8 +113,12 @@ var keyEffectClasses = map[string]EffectClass{
 	// by the daemon from its live config on each activation — so a save is in
 	// force for the next upgrade either path tries, with nothing to restart.
 	"upgrade_clear_unverifiable_artifacts": EffectAppliedLive,
-	"keys":                                 EffectNextAfLaunch,
-	"detach_keys":                          EffectNextAfLaunch,
+	// The daemon serves GetConfig from a fresh config.toml read on every RPC, so
+	// a saved [web] value is what the running daemon answers the very next read —
+	// and the writing browser has already applied it locally (#5500).
+	"web":         EffectAppliedLive,
+	"keys":        EffectNextAfLaunch,
+	"detach_keys": EffectNextAfLaunch,
 }
 
 // AllEffectClassifiedKeys returns the canonical name of every key in

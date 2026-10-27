@@ -29,6 +29,46 @@ func TestIdleReasonForUsesOnlyMechanicalFacts(t *testing.T) {
 			want: IdleReasonProcessExited,
 		},
 		{
+			name: "restore waits on the environment",
+			data: InstanceData{
+				Liveness:        LiveLost,
+				LostRestoreWait: &LostRestoreWait{Attempts: 3, Error: "no space left on device"},
+			},
+			want: IdleReasonRestoreWaitingOnEnvironment,
+		},
+		{
+			name: "dead restore waits on the environment",
+			data: InstanceData{
+				Liveness:        LiveDead,
+				LostRestoreWait: &LostRestoreWait{Attempts: 3, Error: "no space left on device"},
+			},
+			want: IdleReasonRestoreWaitingOnEnvironment,
+		},
+		{
+			name: "terminal give-up wins over a stale wait record",
+			data: InstanceData{
+				Liveness:           LiveLost,
+				LostRestoreFailure: &LostRestoreFailure{Attempts: 6, Error: "agent exited"},
+				LostRestoreWait:    &LostRestoreWait{Attempts: 3, Error: "enospc"},
+			},
+			want: IdleReasonRestoreGaveUp,
+		},
+		{
+			name: "empty wait record is not a reason",
+			data: InstanceData{
+				Liveness:        LiveLost,
+				LostRestoreWait: &LostRestoreWait{},
+			},
+			want: IdleReasonProcessExited,
+		},
+		{
+			name: "running ignores a stale wait record",
+			data: InstanceData{
+				Liveness:        LiveRunning,
+				LostRestoreWait: &LostRestoreWait{Attempts: 3, Error: "enospc"},
+			},
+		},
+		{
 			name: "legacy process death",
 			data: InstanceData{Liveness: LiveDead},
 			want: IdleReasonProcessExited,

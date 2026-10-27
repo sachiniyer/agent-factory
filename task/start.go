@@ -231,15 +231,26 @@ func WaitForReadyAndSubmitPrompt(
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
-		// A sent-unverified verdict means every capture succeeded but none
-		// rendered prompt-specific proof. One signal can still settle it (#4429):
-		// the agent's own mid-turn chrome. Readiness proved the composer idle
-		// before the send, so in-turn chrome appearing inside the window is this
-		// submission's work starting — positive delivery evidence, not a
-		// readability guess. A miss claims nothing; the ambiguous verdict stands.
-		if status == session.PromptSentUnverified &&
+		// The agent's own mid-turn chrome serves two verdicts here (#4429,
+		// #5219): for sent-unverified it is the one positive delivery proof
+		// left, and for delivered on a TASK RUN it is the run's turn boundary
+		// when the scoped indicator can appear before the daemon's first poll
+		// — a daemon watcher's first sight of it already present can never be
+		// attributed, so the turn would wait for the quiet fallback. An
+		// ordinary prompted create has no run boundary to record, so a
+		// delivered send there skips the watch rather than burn its budget
+		// (#5221 review). Readiness proved the composer idle before the send,
+		// so chrome in this window is this submission's work starting. A miss
+		// claims nothing; signatureless agents have no chrome to find, so
+		// they skip the watch as well.
+		if turnSignaturedAgent(instance.ResolvedAgent()) &&
+			(status == session.PromptSentUnverified ||
+				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
-			return session.PromptDelivered, nil
+			instance.RecordTaskRunTurn(time.Now())
+			if status == session.PromptSentUnverified {
+				return session.PromptDelivered, nil
+			}
 		}
 		return status, nil
 	}

@@ -254,17 +254,21 @@ func TestMenuRestingRowShedsDeleteBeforeRestore(t *testing.T) {
 
 // TestMenuRestingRowDropsDeadLiveVerbs is the other half of the #4755 footer
 // lie at ANY width: a resting row has no live surface, so the verbs that name
-// one — attach/interact, tab create/close/rename/jump, pane open — must not be
-// offered. The resting menu is the lifecycle verbs the row can actually take
-// (delete, restore) plus the global keys.
+// one — attach/interact, tab create/close/rename/jump — must not be offered.
+// The resting menu is the lifecycle verbs the row can actually take (delete,
+// restore) plus the global keys — and, for Lost/Dead rows, `s open pane`
+// (#5260): an archived row can never show a pane (pruneDeadPanes closes it on
+// sight), but a lost/dead row's pane still renders its fallback content in
+// ui/tab_pane.go, so the key works and the footer must say so.
 func TestMenuRestingRowDropsDeadLiveVerbs(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status session.Status
+		name         string
+		status       session.Status
+		wantOpenPane bool
 	}{
-		{name: "archived", status: session.Archived},
-		{name: "lost", status: session.Lost},
-		{name: "dead", status: session.Dead},
+		{name: "archived", status: session.Archived, wantOpenPane: false},
+		{name: "lost", status: session.Lost, wantOpenPane: true},
+		{name: "dead", status: session.Dead, wantOpenPane: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &session.Instance{ID: "resting-id"}
@@ -276,16 +280,65 @@ func TestMenuRestingRowDropsDeadLiveVerbs(t *testing.T) {
 			out := xansi.Strip(m.String())
 			for _, dead := range []string{
 				"interact", "attach", "new tab", "del tab", "rename tab",
-				"1-9/g go", "open pane", "archive",
+				"1-9/g go", "archive",
 			} {
 				if strings.Contains(out, dead) {
-					t.Fatalf("%s row must not advertise %q — no pane of it can ever be shown:\n%s", tc.name, dead, out)
+					t.Fatalf("%s row must not advertise %q — no live surface exists:\n%s", tc.name, dead, out)
 				}
+			}
+			if gotOpenPane := strings.Contains(out, "open pane"); gotOpenPane != tc.wantOpenPane {
+				t.Fatalf("%s row open-pane advertisement = %v, want %v:\n%s", tc.name, gotOpenPane, tc.wantOpenPane, out)
 			}
 			for _, want := range []string{"new", "delete session", "restore", "help", "quit"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("%s row footer must keep %q:\n%s", tc.name, want, out)
 				}
+			}
+		})
+	}
+}
+
+// TestMenuRestingLostDeadRowShedsOpenPaneBeforeRestore pins the #5260 shed
+// order on the rows that own a pane surface: `s open pane` is a Lost/Dead
+// row's second verb — the diagnostic the row exists to offer after restore —
+// so it outlives delete and the conditional retry but still sheds before
+// `r restore` when the bar runs out of room.
+func TestMenuRestingLostDeadRowShedsOpenPaneBeforeRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{name: "lost", status: session.Lost},
+		{name: "dead", status: session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+
+			// 60 cells sheds only `D` from the Lost/Dead compact menu — both
+			// surviving verbs must still be named.
+			m.SetSize(60, 1)
+			out := xansi.Strip(m.String())
+			if !strings.Contains(out, "open pane") {
+				t.Fatalf("%s row at 60 cells must still advertise open pane:\n%s", tc.name, out)
+			}
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 60 cells must still advertise restore:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "delete session") {
+				t.Fatalf("%s row at 60 cells must shed delete first:\n%s", tc.name, out)
+			}
+
+			// 44 cells forces the next shed: open pane goes, restore stays.
+			m.SetSize(44, 1)
+			out = xansi.Strip(m.String())
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 44 cells must keep restore — it is the row's verb:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "open pane") {
+				t.Fatalf("%s row at 44 cells must shed open pane before restore:\n%s", tc.name, out)
 			}
 		})
 	}

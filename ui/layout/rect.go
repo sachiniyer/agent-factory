@@ -34,15 +34,6 @@ func (r Rect) Contains(p Point) bool {
 // Local translates a screen point into rect-local coordinates.
 func (r Rect) Local(p Point) Point { return Point{X: p.X - r.X, Y: p.Y - r.Y} }
 
-// Intersects reports whether two rects share at least one cell. Empty rects
-// intersect nothing.
-func (r Rect) Intersects(o Rect) bool {
-	if r.Empty() || o.Empty() {
-		return false
-	}
-	return r.X < o.Right() && o.X < r.Right() && r.Y < o.Bottom() && o.Y < r.Bottom()
-}
-
 // CutLeft splits the rect into a left band of w columns and the remainder.
 // w is clamped to [0, r.W], so the two parts always tile r exactly.
 func (r Rect) CutLeft(w int) (left, rem Rect) {

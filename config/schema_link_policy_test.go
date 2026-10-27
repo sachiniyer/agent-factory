@@ -78,9 +78,10 @@ func TestInstancesMigrationStillReplacesASymlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, legacy, 0644))
 	require.NoError(t, os.Symlink(target, link))
 
-	assert.Equal(t, SchemaWriteReplaceLink, NewInstancesSchemaMigrationPlan(link).LinkPolicy)
+	plan := NewInstancesSchemaMigrationPlan(link)
+	assert.Equal(t, SchemaWriteReplaceLink, plan.LinkPolicy)
 
-	result, err := MigrateRepoInstancesForDaemonLoad(repoID)
+	_, result, err := LoadAndMigrateSchemaFile(plan)
 	require.NoError(t, err)
 	require.True(t, result.Migrated)
 
