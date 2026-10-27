@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -37,18 +38,21 @@ func forceTunnelLifelineExe(t *testing.T, exe string) {
 // startTunnel does — register, then spawn+publish through
 // provisionTunnelChild — and registers the failure-free cleanup. The caller
 // drives whatever assertion it is testing, including none.
-func spawnTestTunnel(t *testing.T, p *sandboxProvisioner) (*exec.Cmd, *tunnelLifeline) {
+func spawnTestTunnel(t *testing.T, p *sandboxProvisioner) *tunnelChild {
 	t.Helper()
 	registerSandboxTunnel(p)
-	cmd, ll, err := p.provisionTunnelChild("127.0.0.1:40000:127.0.0.1:40001")
+	if p.forward == "" {
+		p.forward = "127.0.0.1:40000:127.0.0.1:40001"
+	}
+	child, err := p.provisionTunnelChild()
 	require.NoError(t, err)
-	require.NotNil(t, cmd)
+	require.NotNil(t, child)
 	t.Cleanup(func() {
 		p.reapMu.Lock()
 		p.stopTunnel()
 		p.reapMu.Unlock()
 	})
-	return cmd, ll
+	return child
 }
 
 // requireGroupGone polls until no member of the process group named by pgid
@@ -81,33 +85,34 @@ func TestSandboxTunnelLifelineKillsGroupWhenDaemonPipeCloses(t *testing.T) {
 	// it a real lifeline, so the lifeline path is exercised end to end.
 	forceTunnelLifelineExe(t, os.Args[0])
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	cmd, ll := spawnTestTunnel(t, p)
-	require.NotNil(t, ll, "the tunnel must run under the lifeline when the binary speaks it")
+	child := spawnTestTunnel(t, p)
+	require.NotNil(t, child.ll, "the tunnel must run under the lifeline when the binary speaks it")
 
 	// The inner tunnel command reaches the lifeline verbatim: sh -c '<sshCmd>
-	// -o ExitOnForwardFailure=yes -N -L "$1"' af-sandbox <forward> — argv[6:]
-	// after '<exe> __watch-lifeline v1 <ms> --'. The flag is the
-	// failed-bind-does-not-look-healthy pin of
-	// TestSandboxTunnelRefusesToOutliveAFailedForward.
-	require.Len(t, cmd.Args, 10, "lifeline argv: exe __watch-lifeline v1 <ms> -- sh -c <script> af-sandbox <forward>: %v", cmd.Args)
-	assert.Equal(t, watchlifeline.Arg, cmd.Args[1])
-	assert.Equal(t, watchlifeline.Protocol, cmd.Args[2])
-	assert.Equal(t, "sh", cmd.Args[5])
-	assert.Equal(t, "-c", cmd.Args[6])
-	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -N -L "$1"`, cmd.Args[7])
-	assert.Equal(t, "af-sandbox", cmd.Args[8])
-	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", cmd.Args[9])
+	// -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"'
+	// af-sandbox <forward> — argv[6:] after '<exe> __watch-lifeline v1 <ms> --'.
+	// ExitOnForwardFailure is the failed-bind pin of
+	// TestSandboxTunnelRefusesToOutliveAFailedForward; the ServerAlive pair is
+	// the #5571 keepalive that bounds how long a dead peer goes undetected.
+	require.Len(t, child.cmd.Args, 10, "lifeline argv: exe __watch-lifeline v1 <ms> -- sh -c <script> af-sandbox <forward>: %v", child.cmd.Args)
+	assert.Equal(t, watchlifeline.Arg, child.cmd.Args[1])
+	assert.Equal(t, watchlifeline.Protocol, child.cmd.Args[2])
+	assert.Equal(t, "sh", child.cmd.Args[5])
+	assert.Equal(t, "-c", child.cmd.Args[6])
+	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`, child.cmd.Args[7])
+	assert.Equal(t, "af-sandbox", child.cmd.Args[8])
+	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[9])
 
-	pgid := cmd.Process.Pid
+	pgid := child.cmd.Process.Pid
 	// The daemon's half of the death pact is closing this write end — exactly
 	// what the kernel does for a dead daemon's descriptors.
-	require.NoError(t, ll.keepW.Close())
+	require.NoError(t, child.ll.keepW.Close())
 
-	// The lifeline ends by its own group SIGKILL — Wait both proves that and
-	// reaps it, and only a reaped leader stops counting for kill(-pgid, 0): a
-	// zombie still answers a group probe on this kernel.
-	waitErr := cmd.Wait()
-	require.Error(t, waitErr, "the lifeline ends by its own group SIGKILL")
+	// The lifeline ends by its own group SIGKILL — the reaper's Wait both proves
+	// that and reaps it, and only a reaped leader stops counting for
+	// kill(-pgid, 0): a zombie still answers a group probe on this kernel.
+	<-child.done
+	require.Error(t, child.err, "the lifeline ends by its own group SIGKILL")
 	requireGroupGone(t, pgid, 10*time.Second)
 }
 
@@ -121,19 +126,19 @@ func TestSandboxTunnelFallsBackOncePerDaemon(t *testing.T) {
 	forceTunnelLifelineExe(t, "/bin/false")
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
 
-	cmd, ll := spawnTestTunnel(t, p)
-	require.Nil(t, ll, "a non-acking lifeline must fall back to the direct spawn")
-	require.Equal(t, "sh", cmd.Args[0], "the fallback is the direct sh -c spawn: %v", cmd.Args)
-	require.Equal(t, "-c", cmd.Args[1])
-	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -N -L "$1"`, cmd.Args[2])
+	child := spawnTestTunnel(t, p)
+	require.Nil(t, child.ll, "a non-acking lifeline must fall back to the direct spawn")
+	require.Equal(t, "sh", child.cmd.Args[0], "the fallback is the direct sh -c spawn: %v", child.cmd.Args)
+	require.Equal(t, "-c", child.cmd.Args[1])
+	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`, child.cmd.Args[2])
 	assert.True(t, sandboxTunnelLifelineUnavailable.Load(), "the failed probe must latch the fallback")
 
 	// A second provision goes straight to the direct spawn and does NOT warn
 	// again — the warning is once per daemon.
 	warnings.Reset()
-	cmd2, ll2 := spawnTestTunnel(t, &sandboxProvisioner{sshCmd: tunnelTestSleep})
-	require.Nil(t, ll2)
-	require.Equal(t, "sh", cmd2.Args[0])
+	child2 := spawnTestTunnel(t, &sandboxProvisioner{sshCmd: tunnelTestSleep})
+	require.Nil(t, child2.ll)
+	require.Equal(t, "sh", child2.cmd.Args[0])
 	assert.NotContains(t, warnings.String(), "does not run the watch lifeline",
 		"the degradation warning must be logged once per daemon, not once per provision")
 }
@@ -150,16 +155,16 @@ func TestSandboxTunnelStampsHomeMarker(t *testing.T) {
 	// whole group.
 	forceTunnelLifelineExe(t, os.Args[0])
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	cmd, ll := spawnTestTunnel(t, p)
-	require.NotNil(t, ll)
-	assert.Contains(t, cmd.Env, want, "the lifeline child must carry the home marker")
+	child := spawnTestTunnel(t, p)
+	require.NotNil(t, child.ll)
+	assert.Contains(t, child.cmd.Env, want, "the lifeline child must carry the home marker")
 
 	// Direct path: same stamp.
 	forceTunnelLifelineExe(t, "")
 	p2 := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	cmd2, ll2 := spawnTestTunnel(t, p2)
-	require.Nil(t, ll2)
-	assert.Contains(t, cmd2.Env, want, "the direct child must carry the home marker")
+	child2 := spawnTestTunnel(t, p2)
+	require.Nil(t, child2.ll)
+	assert.Contains(t, child2.cmd.Env, want, "the direct child must carry the home marker")
 }
 
 // TestStopAllSandboxTunnelsStopsRegistered is the graceful-exit layer: every
@@ -168,10 +173,10 @@ func TestSandboxTunnelStampsHomeMarker(t *testing.T) {
 func TestStopAllSandboxTunnelsStopsRegistered(t *testing.T) {
 	forceTunnelLifelineExe(t, "")
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	cmd, _ := spawnTestTunnel(t, p)
+	child := spawnTestTunnel(t, p)
 
 	StopAllSandboxTunnels()
-	requireGroupGone(t, cmd.Process.Pid, 5*time.Second)
+	requireGroupGone(t, child.cmd.Process.Pid, 5*time.Second)
 	_, registered := liveSandboxTunnels.Load(p)
 	assert.False(t, registered, "stopTunnel must unregister the provisioner")
 	assert.Nil(t, p.tunnel)
@@ -180,9 +185,9 @@ func TestStopAllSandboxTunnelsStopsRegistered(t *testing.T) {
 	// than park behind the remote teardown.
 	reaping := &sandboxProvisioner{sshCmd: tunnelTestSleep}
 	reaping.reaping.Store(true)
-	cmd2, _ := spawnTestTunnel(t, reaping)
+	child2 := spawnTestTunnel(t, reaping)
 	StopAllSandboxTunnels()
-	assert.True(t, alive(t, cmd2.Process.Pid),
+	assert.True(t, alive(t, child2.cmd.Process.Pid),
 		"a mid-reap provisioner must be skipped, not double-stopped")
 }
 
@@ -202,12 +207,10 @@ func TestTunnelSpawnAfterStopKillsItself(t *testing.T) {
 	p.stopTunnel()
 	p.reapMu.Unlock()
 
-	forward := "127.0.0.1:45555:127.0.0.1:45556"
-	cmd, ll, err := p.provisionTunnelChild(forward)
-	require.Error(t, err, "a spent provisioner must refuse the spawn")
-	assert.Contains(t, err.Error(), "already stopping")
-	assert.Nil(t, cmd)
-	assert.Nil(t, ll)
+	p.forward = "127.0.0.1:45555:127.0.0.1:45556"
+	child, err := p.provisionTunnelChild()
+	require.ErrorIs(t, err, errTunnelOwnerStopped, "a spent provisioner must refuse the spawn")
+	assert.Nil(t, child)
 
 	// The newborn it briefly started is already dead and reaped — not even a
 	// zombie of this test's children may carry the forward.
@@ -216,7 +219,7 @@ func TestTunnelSpawnAfterStopKillsItself(t *testing.T) {
 			continue
 		}
 		for _, arg := range childArgv(pid) {
-			assert.NotContains(t, arg, forward, "the refused tunnel's child must not survive: %v", arg)
+			assert.NotContains(t, arg, p.forward, "the refused tunnel's child must not survive: %v", arg)
 		}
 	}
 }
@@ -238,10 +241,10 @@ func childArgv(pid int) []string { return proctree.Argv(pid) }
 func TestReapStopsTunnel(t *testing.T) {
 	forceTunnelLifelineExe(t, "")
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	cmd, _ := spawnTestTunnel(t, p)
+	child := spawnTestTunnel(t, p)
 
 	require.NoError(t, p.reap())
-	requireGroupGone(t, cmd.Process.Pid, 5*time.Second)
+	requireGroupGone(t, child.cmd.Process.Pid, 5*time.Second)
 	_, registered := liveSandboxTunnels.Load(p)
 	assert.False(t, registered)
 }
@@ -353,4 +356,230 @@ func TestSweepOrphanSandboxTunnelsForeignOnly(t *testing.T) {
 	SweepOrphanSandboxTunnels(home)
 	assert.NotContains(t, warnings.String(), "ownership stamp",
 		"a foreign-marked process must not even be reported — it is not ours to classify")
+}
+
+// --- supervised connection (#5571 W1.2) ---
+
+// startSupervisedTestTunnel spawns a tunnel AND its supervisor for the
+// supervision tests below: the shared backoff ladder is shrunk so a re-dial
+// lands inside a poll window (the same vars the ptybroker recovery tests
+// shrink), the readiness probe is replaced by probeFn so the fake tunnel never
+// needs a real listener, and cleanup stops everything via spawnTestTunnel's.
+func startSupervisedTestTunnel(t *testing.T, p *sandboxProvisioner, probeFn func(label, localAddr string, timeout, poll time.Duration) error) (*tunnelChild, <-chan struct{}) {
+	t.Helper()
+	forceTunnelLifelineExe(t, "")
+	prevInitial, prevMax, prevHealthy := redialInitialBackoff, redialMaxBackoff, redialHealthySpan
+	redialInitialBackoff, redialMaxBackoff, redialHealthySpan = 20*time.Millisecond, 80*time.Millisecond, 120*time.Millisecond
+	t.Cleanup(func() { redialInitialBackoff, redialMaxBackoff, redialHealthySpan = prevInitial, prevMax, prevHealthy })
+	prevProbe := waitForSandboxTunnelFn
+	waitForSandboxTunnelFn = probeFn
+	t.Cleanup(func() { waitForSandboxTunnelFn = prevProbe })
+	if p.localAddr == "" {
+		p.localAddr = "127.0.0.1:40000"
+	}
+	child := spawnTestTunnel(t, p)
+	done := make(chan struct{})
+	go func() { p.superviseTunnel(); close(done) }()
+	return child, done
+}
+
+// killTunnelGeneration fakes an unexpected transport death: the child's whole
+// process group dies and its reaper reaps it. It waits on the kernel fact — a
+// reaped leader stops answering kill(-pgid, 0) — rather than child.done or
+// cmd.ProcessState, both of which the reaper owns (done is safe to read but
+// proves nothing the group-gone probe doesn't; ProcessState is a data race
+// under -race). The generation poll that follows is what proves the
+// supervisor noticed.
+func killTunnelGeneration(t *testing.T, child *tunnelChild) {
+	t.Helper()
+	require.NoError(t, syscall.Kill(-child.cmd.Process.Pid, syscall.SIGKILL))
+	requireGroupGone(t, child.cmd.Process.Pid, 10*time.Second)
+}
+
+// requireTunnelGeneration polls until the provisioner publishes a generation
+// other than prev (or the first one at all when prev is nil) — a re-dial, not
+// just the death being noticed.
+func requireTunnelGeneration(t *testing.T, p *sandboxProvisioner, prev *tunnelChild, timeout time.Duration) *tunnelChild {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		p.reapMu.Lock()
+		got := p.tunnel
+		p.reapMu.Unlock()
+		if got != nil && got != prev {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no new tunnel generation after %s", timeout)
+	return nil
+}
+
+// requireSupervisorExit polls for the monitor goroutine's return.
+func requireSupervisorExit(t *testing.T, done <-chan struct{}, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("the transport supervisor did not exit within " + timeout.String())
+	}
+}
+
+// TestSuperviseTunnelRedialsAfterDeath is the W1.2 core: a tunnel child that
+// dies for any reason other than teardown is re-established — a NEW generation
+// under the same provisioner, re-bound to the same localAddr spec.
+func TestSuperviseTunnelRedialsAfterDeath(t *testing.T) {
+	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	// LIFO: this cleanup runs before spawnTestTunnel's, so it must stop the
+	// provisioner itself before expecting the supervisor to exit (stopTunnel
+	// is idempotent — spawnTestTunnel's teardown will harmlessly re-run it).
+	t.Cleanup(func() {
+		p.reapMu.Lock()
+		p.stopTunnel()
+		p.reapMu.Unlock()
+		requireSupervisorExit(t, done, 5*time.Second)
+	})
+
+	killTunnelGeneration(t, child)
+	next := requireTunnelGeneration(t, p, child, 10*time.Second)
+	require.NotSame(t, child, next)
+	require.True(t, alive(t, next.cmd.Process.Pid), "the re-dialed generation must be running")
+	// The respawn re-reads the pinned spec: same script, same forward arg.
+	assert.Equal(t, child.cmd.Args, next.cmd.Args)
+}
+
+// TestSuperviseTunnelStopsWithOwner covers both teardown signals: a parked-in-
+// backoff supervisor and a parked-on-exit supervisor both return once stopped,
+// and the daemon-exit path reaps the live generation.
+func TestSuperviseTunnelStopsWithOwner(t *testing.T) {
+	// Parked on a live generation's exit chan.
+	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	p.reapMu.Lock()
+	p.stopTunnel()
+	p.reapMu.Unlock()
+	requireSupervisorExit(t, done, 5*time.Second)
+	requireGroupGone(t, child.cmd.Process.Pid, 5*time.Second)
+
+	// Parked in a re-dial backoff: the child died, the dial is delayed, and
+	// stoppedCh must wake the sleep rather than let it finish.
+	p2 := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	child2, done2 := startSupervisedTestTunnel(t, p2, func(string, string, time.Duration, time.Duration) error {
+		return errors.New("the forward never answers")
+	})
+	killTunnelGeneration(t, child2)
+	// The probe fails every time, so the supervisor is inside the
+	// fail→backoff→spawn cycle continuously.
+	p2.reapMu.Lock()
+	p2.stopTunnel()
+	p2.reapMu.Unlock()
+	requireSupervisorExit(t, done2, 5*time.Second)
+}
+
+// TestSuperviseTunnelNoRedialOnTeardown pins the other half of "any exit other
+// than teardown": a child killed BY the stop path is never re-established —
+// the supervisor sees the latch, not an outage.
+func TestSuperviseTunnelNoRedialOnTeardown(t *testing.T) {
+	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	t.Cleanup(func() { requireSupervisorExit(t, done, 5*time.Second) })
+
+	p.reapMu.Lock()
+	p.stopTunnel()
+	p.reapMu.Unlock()
+
+	// Give the supervisor every chance to mis-fire: several shrunken backoff
+	// intervals plus the probe's own poll would have produced a new generation
+	// if teardown were read as an outage.
+	time.Sleep(400 * time.Millisecond)
+	p.reapMu.Lock()
+	assert.Nil(t, p.tunnel, "teardown must never be re-dialed")
+	p.reapMu.Unlock()
+	requireGroupGone(t, child.cmd.Process.Pid, 5*time.Second)
+}
+
+// TestSuperviseTunnelDialFailureKeepsRetrying: a re-dial whose spawn never
+// answers the readiness probe is killed and retried — the backoff ladder
+// keeps climbing instead of giving up or spinning.
+func TestSuperviseTunnelDialFailureKeepsRetrying(t *testing.T) {
+	var probes atomic.Int32
+	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error {
+		probes.Add(1)
+		return errors.New("the forward never answers")
+	})
+	t.Cleanup(func() {
+		p.reapMu.Lock()
+		p.stopTunnel()
+		p.reapMu.Unlock()
+		requireSupervisorExit(t, done, 5*time.Second)
+	})
+
+	killTunnelGeneration(t, child)
+	// Each failed re-dial costs one probe; several probes mean the loop is
+	// retrying, not parked.
+	deadline := time.Now().Add(10 * time.Second)
+	for probes.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d re-dial probes after a dead tunnel — the supervisor stopped retrying", probes.Load())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSuperviseTunnelBackoffBounds pins the jittered ladder: doubling, capped,
+// and smeared ±25% around redialDelay — the "capped, jittered backoff" half of
+// the property.
+func TestSuperviseTunnelBackoffBounds(t *testing.T) {
+	prevInitial, prevMax := redialInitialBackoff, redialMaxBackoff
+	redialInitialBackoff, redialMaxBackoff = 100*time.Millisecond, 800*time.Millisecond
+	t.Cleanup(func() { redialInitialBackoff, redialMaxBackoff = prevInitial, prevMax })
+	// Deterministic jitter: rand=0.5 gives the neutral factor.
+	prevRand := tunnelRedialRand
+	tunnelRedialRand = func() float64 { return 0.5 }
+	t.Cleanup(func() { tunnelRedialRand = prevRand })
+
+	for attempt, want := range []time.Duration{100, 200, 400, 800, 800, 800} {
+		if got := tunnelRedialDelay(attempt); got != want*time.Millisecond {
+			t.Errorf("tunnelRedialDelay(%d) = %s, want %s", attempt, got, want*time.Millisecond)
+		}
+	}
+	// The smear: extreme jitter stays inside ±25% of the ladder — including
+	// slightly over the nominal cap at the top, which is the point of jitter.
+	for _, r := range []float64{0, 1} {
+		tunnelRedialRand = func() float64 { return r }
+		for attempt := 0; attempt < 8; attempt++ {
+			base := float64(redialDelay(attempt))
+			got := float64(tunnelRedialDelay(attempt))
+			if got < base*0.75-1 || got > base*1.25+1 {
+				t.Fatalf("tunnelRedialDelay(%d) with rand=%v = %v, outside ±25%% of %v", attempt, r, got, base)
+			}
+		}
+	}
+}
+
+// TestTunnelSpawnsReverseForwardSlot is W3.4's slot: reverse forward specs set
+// on the provisioner are composed into the spawn as `-R "$N"` after the -L —
+// the same ExitOnForwardFailure fatality and the same supervision, today with
+// the slot empty.
+func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
+	forceTunnelLifelineExe(t, "")
+	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
+	p.forward = "127.0.0.1:40000:127.0.0.1:40001"
+	p.reverseFwds = []string{"127.0.0.1:9000:127.0.0.1:7070", "0:127.0.0.1:8080"}
+	registerSandboxTunnel(p)
+	child, err := p.provisionTunnelChild()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		p.reapMu.Lock()
+		p.stopTunnel()
+		p.reapMu.Unlock()
+	})
+
+	want := tunnelTestSleep + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1" -R "$2" -R "$3"`
+	assert.Equal(t, want, child.cmd.Args[2], "the spawn script composes each -R as a positional arg: %v", child.cmd.Args)
+	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[4])
+	assert.Equal(t, "127.0.0.1:9000:127.0.0.1:7070", child.cmd.Args[5])
+	assert.Equal(t, "0:127.0.0.1:8080", child.cmd.Args[6])
 }

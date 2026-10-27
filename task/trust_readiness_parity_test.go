@@ -9,7 +9,7 @@ import (
 
 // docTrustDialogFixture is the generic documentation-trust dialog, at the full
 // length DocTrustPromptPresent requires (it deliberately refuses to match a
-// shortened prefix — see its doc in session/tmux/start.go).
+// shortened prefix — see its doc in session/tmux/trust_prompt.go).
 //
 // It must read as ready ONLY because it is a trust dialog: several arms are a
 // disjunction of a trust predicate and some other ready signal, so a second

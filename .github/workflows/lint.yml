@@ -15,6 +15,12 @@ on:
   # that suppression. No `paths:` filter applies to a dispatch, so it always runs.
   workflow_dispatch:
 
+concurrency:
+  # A newer master push supersedes a stale run: the tip is the question. Keyed on
+  # workflow + ref, so PRs, merge_group entries and master never share a group.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Read-only: workflow only checks out source and runs golangci-lint + gofmt.
 permissions:
   contents: read
