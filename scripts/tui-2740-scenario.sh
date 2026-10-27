@@ -25,7 +25,7 @@ af_boot
 af_new_instance worker
 
 bin="$(_af_resolve_bin)"
-worktree="$("$bin" sessions get worker | jq -er '.worktree.worktree_path')"
+worktree="$("$bin" sessions get worker --repo "$AF_DRIVER_REPO" | jq -er '.worktree.worktree_path')"
 mkdir -p "$worktree/node_modules/pkg"
 printf bulk >"$worktree/node_modules/pkg/bulk.js"
 
@@ -40,7 +40,7 @@ af_send y
 af_wait_for 'on-archive hook' "$AF_DRIVER_TIMEOUT" 'failed hook warning surfaces'
 af_wait_for 'Archived \(1\)' "$AF_DRIVER_TIMEOUT" 'warning archive settles in Archived'
 
-archived_path="$("$bin" sessions get worker | jq -er '.worktree.worktree_path')"
+archived_path="$("$bin" sessions get worker --repo "$AF_DRIVER_REPO" | jq -er '.worktree.worktree_path')"
 if [ "$archived_path" = "$worktree" ] || [ ! -d "$archived_path" ]; then
     _af_fail "#2740: session did not relocate despite the committed hook warning: $archived_path"
     exit 1

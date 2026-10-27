@@ -28,20 +28,20 @@ af_send End
 af_wait_for 'Other:' 5 'End jumps to the bottom of help'
 
 screen="$(af_capture)"
-quit_line="$(printf '%s\n' "$screen" | grep -m1 'Quit the' || true)"
-continuation_line="$(printf '%s\n' "$screen" | grep -m1 'application' || true)"
-if [ -z "$quit_line" ] || [ -z "$continuation_line" ]; then
+wrap_line="$(printf '%s\n' "$screen" | grep -m1 'Delete tab' || true)"
+continuation_line="$(printf '%s\n' "$screen" | grep -m1 'agent stays' || true)"
+if [ -z "$wrap_line" ] || [ -z "$continuation_line" ]; then
     printf '%s\n' "$screen" >&2
-    _af_fail '#2577: the quit description did not wrap in the real 80-column TUI'
+    _af_fail '#2577: the wrapped 'Delete tab' description did not wrap in the real 80-column TUI'
     exit 1
 fi
-quit_payload="${quit_line#*│}"
+wrap_payload="${wrap_line#*│}"
 continuation_payload="${continuation_line#*│}"
-quit_prefix="${quit_payload%%Quit*}"
+wrap_prefix="${wrap_payload%%Delete tab*}"
 continuation_prefix="${continuation_payload%%[! ]*}"
-if [ "${#quit_prefix}" -ne "${#continuation_prefix}" ]; then
-    printf '%s\n%s\n' "$quit_line" "$continuation_line" >&2
-    _af_fail "#2577: wrapped description starts in the key column (description col ${#quit_prefix}, continuation col ${#continuation_prefix})"
+if [ "${#wrap_prefix}" -ne "${#continuation_prefix}" ]; then
+    printf '%s\n%s\n' "$wrap_line" "$continuation_line" >&2
+    _af_fail "#2577: wrapped description starts in the key column (description col ${#wrap_prefix}, continuation col ${#continuation_prefix})"
     exit 1
 fi
 _af_log 'assert OK: wrapped help description uses the description column'
