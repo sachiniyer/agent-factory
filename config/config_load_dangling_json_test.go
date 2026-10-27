@@ -10,7 +10,7 @@ import (
 )
 
 // This file pins the legacy config.json half of the broken-symlink contract
-// (#3660 review). refuseDanglingConfigLink was retrofitted only against the
+// (#3660 review). RefuseDanglingConfigLink was retrofitted only against the
 // config.toml reads: a dangling ~/.agent-factory/config.json symlink reads as
 // ENOENT, which the JSON branches treated as "no config yet" — so af started on
 // defaults (LoadConfig) and `af config validate` / `af doctor` reported Missing
@@ -106,7 +106,7 @@ func TestLoadConfigReadOnly_RefusesDanglingLegacyJSONSymlink(t *testing.T) {
 // --- Non-regressions: the guard must not turn ordinary paths into errors. ---
 
 // TestLoadConfig_RegularMissingJSONStillMaterializesDefaults is the key
-// non-regression. refuseDanglingConfigLink returns nil for a simply-absent
+// non-regression. RefuseDanglingConfigLink returns nil for a simply-absent
 // file (an ordinary first run), so the guard added before os.ReadFile(configPath)
 // must NOT turn "no config yet" into an error. Both files absent → first run →
 // materialize config.toml of defaults, no error, exactly as before.
@@ -141,7 +141,7 @@ func TestLoadConfigReadOnly_RegularMissingJSONStillReportsMissing(t *testing.T) 
 
 // TestLoadConfig_ResolvingLegacyJSONSymlinkStillConverts pins that a
 // resolving config.json symlink (a real dotfiles target) is NOT refused —
-// refuseDanglingConfigLink returns nil for a link that resolves. The legacy
+// RefuseDanglingConfigLink returns nil for a link that resolves. The legacy
 // config.json must still load and convert to config.toml as before.
 func TestLoadConfig_ResolvingLegacyJSONSymlinkStillConverts(t *testing.T) {
 	home := t.TempDir()

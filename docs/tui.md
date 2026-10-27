@@ -20,11 +20,11 @@ Run outside a git repository and `af` still opens — on the project registry, s
 you can select a known project or add one.
 
 <video controls muted loop playsinline preload="metadata"
-       poster="assets/tui/demo-poster.png"
+       poster="https://sachiniyer.github.io/agent-factory/assets/tui/demo-poster.png"
        aria-label="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
-  <source src="assets/tui/demo.webm" type="video/webm">
-  <source src="assets/tui/demo.mp4" type="video/mp4">
-  <img src="assets/tui/demo.gif" alt="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
+  <source src="https://sachiniyer.github.io/agent-factory/assets/tui/demo.webm" type="video/webm">
+  <source src="https://sachiniyer.github.io/agent-factory/assets/tui/demo.mp4" type="video/mp4">
+  <img src="https://sachiniyer.github.io/agent-factory/assets/tui/demo.gif" alt="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
 </video>
 
 Demo: [MP4](assets/tui/demo.mp4) · [WebM](assets/tui/demo.webm) ·
