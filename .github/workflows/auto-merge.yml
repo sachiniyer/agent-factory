@@ -98,7 +98,10 @@ jobs:
         id: merge
         if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true')
         uses: actions/github-script@v8
+        env:
+          USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
         with:
+          github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
           script: |
             await require('./.github/scripts/auto-merge.js').mergeAll({ github, core, context });
 

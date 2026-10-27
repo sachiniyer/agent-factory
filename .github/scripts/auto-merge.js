@@ -71,6 +71,33 @@ function threadsQuery(numbers) {
 }`;
 }
 
+const WORKFLOW_SKIP_REASON =
+  "workflow files — needs AUTO_MERGE_TOKEN or a maintainer merge";
+
+// One aliased query, only for the PRs that survived phase 1 (and only when
+// merging with GITHUB_TOKEN, which cannot touch .github/workflows/).
+function filesQuery(numbers) {
+  const fields = numbers
+    .map(
+      (n) => `
+    p${n}: pullRequest(number: ${Number(n)}) {
+      files(first: 100) { pageInfo { hasNextPage } nodes { path } }
+    }`,
+    )
+    .join("");
+  return `query($owner: String!, $repo: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $repo) {${fields}
+  }
+}`;
+}
+
+// A truncated or missing file list fails closed (treated as touching workflows).
+function touchesWorkflows(files) {
+  if (!files || (files.pageInfo && files.pageInfo.hasNextPage)) return true;
+  return (files.nodes || []).some((f) => f.path.startsWith(".github/workflows/"));
+}
+
 function isCodex(login) {
   return (login || "").replace(/\[bot\]$/, "") === CODEX_LOGIN;
 }
@@ -199,11 +226,37 @@ async function mergeAll({ github, core, context }) {
   const prs = await fetchOpenPrs(github, core, owner, repo);
   const phase1 = selectCandidates(prs);
   await attachThreads(github, core, owner, repo, phase1.filter((e) => !e.reason).map((e) => e.pr));
+  let selected = phase1.map((e) =>
+    e.reason === null && hasUnansweredP1(e.pr) ? { pr: e.pr, reason: "unanswered P1 Codex finding" } : e,
+  );
+  // AUTO_MERGE_TOKEN (a PAT with the workflows permission) can merge workflow
+  // PRs; GITHUB_TOKEN cannot, and GitHub refuses the merge. Detect them up front.
+  const usingPat = process.env.USING_PAT === "true";
+  const workflowSkipped = [];
+  if (!usingPat) {
+    const cands = selected.filter((e) => !e.reason).map((e) => e.pr);
+    if (cands.length) {
+      const data = await github.graphql(filesQuery(cands.map((c) => c.number)), { owner, repo });
+      noteRateLimit(core, "files", data.rateLimit);
+      selected = selected.map((e) => {
+        if (e.reason) return e;
+        const node = data.repository[`p${e.pr.number}`];
+        if (!touchesWorkflows(node && node.files)) return e;
+        workflowSkipped.push(e.pr.number);
+        return { pr: e.pr, reason: WORKFLOW_SKIP_REASON };
+      });
+    }
+  }
+  if (workflowSkipped.length) {
+    await core.summary
+      .addHeading("Skipped: workflow-touching PRs", 3)
+      .addRaw(`${WORKFLOW_SKIP_REASON}\n\n`)
+      .addList(workflowSkipped.map((n) => `#${n}`))
+      .write();
+  }
   const merged = [];
   let lastSha = "";
-  for (const { pr, reason } of phase1.map((e) =>
-    e.reason === null && hasUnansweredP1(e.pr) ? { pr: e.pr, reason: "unanswered P1 Codex finding" } : e,
-  )) {
+  for (const { pr, reason } of selected) {
     if (reason) {
       core.info(`#${pr.number}: skip (${reason})`);
       continue;
@@ -228,6 +281,8 @@ async function mergeAll({ github, core, context }) {
   if (!merged.length) return;
 
   // GITHUB_TOKEN merges fire no push workflows: dispatch once for the new head.
+  // A PAT merge fires them itself, so dispatching would duplicate every run.
+  if (usingPat) return;
   for (const workflow_id of MASTER_WORKFLOWS) {
     try {
       await github.rest.actions.createWorkflowDispatch({
@@ -263,6 +318,6 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
-  selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
 };
