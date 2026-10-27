@@ -241,6 +241,7 @@ func (i *Instance) reprovisionRemote() error {
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
+	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
 	}

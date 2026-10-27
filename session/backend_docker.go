@@ -422,10 +422,10 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.prepareAccountUser(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
-	if err := p.configureGit(); err != nil {
+	if err := p.cloneWorkspace(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
-	if err := p.cloneWorkspace(); err != nil {
+	if err := p.configureGit(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.copyAfBinary(); err != nil {
@@ -573,14 +573,11 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
-// configureGit sets a git identity and marks every directory safe inside the
-// container so the clone + worktree creation (which run as root over a possibly
-// foreign-owned bind mount) don't trip on "dubious ownership" or a missing
-// committer identity.
+// configureGit writes the committer identity into the clone's repo-local git
+// config inside the container. It runs after the clone and never writes a
+// global config or safe.directory (#5571 W2.7).
 func (p *dockerProvisioner) configureGit() error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
+	script := gitIdentityCommand(dockerWorkspaceDir, p.spec.GitUserName, p.spec.GitUserEmail)
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)

@@ -156,10 +156,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
+	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+	if err := w.configureGit(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	binary, err := os.Open(p.afBin)

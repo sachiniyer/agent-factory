@@ -166,6 +166,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
+		spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(absPath)
 	}
 	// Mint through the SHARED helper, which the replacement path uses too, so the
 	// two cannot diverge on which kinds get a credential or on what a refusal
