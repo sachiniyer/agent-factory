@@ -345,6 +345,31 @@ func startDaemonHint() string {
 	return "Running af starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
 }
 
+// shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
+// the upgrade report and the withheld-respawn error. Its steps are ordered by
+// safety: wait for the old daemon to exit before running af again, since a
+// draining daemon normally exits on its own; escalate to `kill -9` only if it is
+// still there after several minutes, and say that the kill loses in-flight
+// shutdown work. The wait comes first because running af early is not
+// harmless: the old daemon closes its control socket before its final save, so
+// an af run in that window finds no socket and reclaims the home through
+// StopDaemon — SIGTERM, then SIGKILL — destroying the very work the withheld
+// respawn exists to protect. The verb is `kill -9` because a draining daemon
+// absorbs SIGTERM by design.
+//
+// The check is `af daemon status`, not `ps`: the user acts minutes after this
+// prints, by which time the pid may name a different process. Each status run
+// re-verifies that this home's recorded pid is a live `af --daemon` ("verified"),
+// and it never starts a daemon, so it is safe to run during the drain. A bare
+// `ps -p` would pass for whatever reused the pid, and "any leftover
+// `af --daemon`" may serve another home.
+func shutdownIncompleteHint(pid int) string {
+	if pid > 0 {
+		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait until `af daemon status` no longer shows pid %d as verified, then run af again (running af sooner can kill it mid-shutdown). If it still does after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
+	}
+	return "still finishing its shutdown — it normally exits on its own: wait until `af daemon status` no longer shows a verified pid, then run af again (running af sooner can kill it mid-shutdown). If it still does after several minutes, it may be wedged: kill -9 that pid (in-flight shutdown work may be lost)."
+}
+
 // reportUpgradeRestart tells the user what the restart actually did.
 //
 // The rule (#1947): never claim the daemon is on the new binary unless it is.
@@ -383,15 +408,35 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// false — while the daemon is demonstrably alive, so checking the pid alone
 		// would report "unknown" about a daemon that just talked to us.
 		h := daemonHealthFn()
-		if h.PingErr == nil || h.PIDVerified {
+		switch {
+		case h.PingErr == nil || h.PIDVerified:
 			fmt.Fprintf(errOut, "The running daemon could not be stopped: %v\n", restartErr)
 			fmt.Fprintln(errOut, "Its process is still verifiably alive, so it is still running the old binary.")
 			fmt.Fprintln(errOut, stopDaemonHint(h))
+			return
+		case h.PIDUnverifiable:
+			// PIDUnverifiable counts as evidence a daemon may still be
+			// up: the pid file names a live af daemon whose home just
+			// could not be bound, so "could not determine" is still the
+			// truthful line — but claimed alongside a pid worth checking,
+			// not bare ignorance, and NOT alongside a stop instruction:
+			// the state proves neither ownership nor which binary, and af
+			// itself refuses to signal a pid it cannot bind to this home.
+			fmt.Fprintf(errOut, "Could not determine whether the daemon was stopped: %v\n", restartErr)
+			fmt.Fprintf(errOut, "pid %d is a live af daemon, but its home could not be verified — it may serve another home, or be this home's daemon still running the old binary.\n", h.PIDFilePID)
+			fmt.Fprintln(errOut, "Check `af daemon status` — it re-verifies the pid's home on every run.")
 			return
 		}
 		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
 		fmt.Fprintln(errOut, "No daemon was found and its process could not be verified either, so this upgrade may or may not have reached one.")
 		fmt.Fprintln(errOut, "Check with `af daemon status` before assuming either way.")
+		return
+	case restartPhaseShutdownIncomplete:
+		// The old daemon agreed to stop but is still alive at the bound, so the
+		// respawn was withheld rather than raced against it (#5007). It is not
+		// "nothing is running" and not "it refused": it is still draining.
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID))
 		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.
@@ -412,6 +457,17 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 			fmt.Fprintf(errOut, "No daemon answered the control socket, but pid %d is a running af daemon, so it was not restarted.\n", h.PIDFilePID)
 			fmt.Fprintln(errOut, "It is still running the old binary.")
 			fmt.Fprintln(errOut, stopDaemonHint(h))
+			return
+		} else if h.PIDUnverifiable {
+			// A live af daemon exists under the pid file but its home is
+			// unproven: it may be this home's daemon the socket could not
+			// reach, or another home's daemon the upgrade never touched.
+			// Neither the quiet all-clear nor "still running the old
+			// binary, stop it" is honest — report the inconclusive state
+			// and print no stop instruction for a pid af cannot bind.
+			fmt.Fprintln(out, "Upgraded successfully!")
+			fmt.Fprintf(errOut, "No daemon answered the control socket, and pid %d is a live af daemon whose home could not be verified — it may serve another home.\n", h.PIDFilePID)
+			fmt.Fprintln(errOut, "Cannot determine whether this home's daemon was restarted — check `af daemon status`.")
 			return
 		}
 		fmt.Fprintln(out, "Upgraded successfully!")

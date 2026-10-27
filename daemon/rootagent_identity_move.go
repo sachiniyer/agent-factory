@@ -8,8 +8,8 @@ import (
 )
 
 // Moving a project between identities, and finishing the durable write that
-// records the one it has (#3530). The heal pass in rootagent_heal.go decides
-// WHEN a transition is warranted; this file is what a transition does — which
+// records the one it has (#3530). The heal pass in rootagent_reattribution_pass.go
+// decides WHEN a transition is warranted; this file is what a transition does — which
 // state travels with it, which fences defer it, and what a retry may skip.
 
 // retryReconcileOwed re-attempts the durable identity writes a snapshot build

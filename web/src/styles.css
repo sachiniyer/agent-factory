@@ -1213,6 +1213,15 @@ button:disabled,
   min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   justify-content: center;
 }
+/* The A−/A+ text-size pair (#5500): same hit area as the copy-link icon button.
+ * These are never toggled by `hidden` — visibility is the phone media rule's
+ * display:none below — so the inline-flex here cannot re-expose a hidden one. */
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+}
 .af-term-menu .af-copy-link-phone { display: none; }
 
 .af-term-action {
@@ -2708,6 +2717,9 @@ button:disabled,
  * terminal's own ResizeObserver never sees a width change when it toggles. */
 @media (max-width: 768px) {
   .af-copy-link-desktop { display: none; }
+  /* The head's zoom pair gives way to the keybar's own A−/A+ keys at phone
+   * width — one control set per device class, not two stacked (#5500). */
+  .af-term-zoom { display: none; }
   .af-term-menu .af-copy-link-phone { display: inline-flex; }
 
   /* The decorative brand yields entirely. The remaining controls keep DOM/focus
@@ -3508,6 +3520,24 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
     outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
     outline-offset: calc(0 - var(--af-space-1) / 2);
   }
+}
+
+/* Seven primary keys need 348px (7×44px targets + 4px gaps + padding). Below
+   that — the 320px phones the keybar still serves — the keys narrow to a 40px
+   floor so the whole row stays inside the viewport; the 44px height never
+   changes (#5380). layout() sets af-keybar-narrow from visualViewport.width —
+   a media query would read the layout viewport and miss a pinch zoom. The
+   bar's auto grid column would size the row to its max-content, so the track
+   is pinned too, letting flex-shrink actually engage. The floor is capped at
+   the row's fair share — (row width − six 4px gaps) ÷ 7 — so a viewport
+   narrower than 320px keeps fitting instead of clipping Arrows; at 320px and
+   up the share is ≥40px and the 40px floor governs. Without the class both
+   rules are inert. */
+.af-terminal-keybar.af-keybar-narrow { grid-template-columns: minmax(0, 1fr); }
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
+  min-width: min(
+    calc(var(--af-space-4) + var(--af-space-3)),
+    calc((100% - 6 * var(--af-space-1)) / 7));
 }
 
 /* Focused phone sessions reserve one 48px chrome row and one 44px key row. */

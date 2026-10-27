@@ -867,28 +867,40 @@ func TestRedactAccessTokenErrorRedactsOverlapHost(t *testing.T) {
 // the remainder of the bracketed host exactly as the userinfo branch redacts
 // through a structural end.
 //
-// url.Parse rejects a bracketed host containing access_token= outright on
-// net/url's IP-literal validation (the bracket is parsed as an address, which
-// admits no '='), so the public-API row pins the existing fail-closed path,
-// and the direct row pins that ']' — the terminator the host branch selects for
-// a bracketed authority — redacts the whole in-bracket value, IPv6 colons
-// included (a ':' terminator would truncate at the first one and leave the
-// suffix).
+// Whether url.Parse rejects the bracketed access_token= authority outright is
+// toolchain-patch-dependent: net/url's strict IP-literal host validation (the
+// bracket is parsed as an address, which admits no '=') landed in go1.25.2, so
+// there the parse fails and the public API fails closed to "[url redacted]";
+// on the go.mod floor (go1.25.0/1.25.1) the parse succeeds and the host branch
+// itself redacts the in-bracket value through its ']' terminator. The
+// public-API row therefore pins the toolchain-independent property — no part
+// of the token value survives, and the output is either the fail-closed marker
+// or a URL whose in-bracket access_token value is REDACTED — rather than one
+// exact string (#5103). The direct row pins that ']' — the terminator the host
+// branch selects for a bracketed authority — redacts the whole in-bracket
+// value, IPv6 colons included (a ':' terminator would truncate at the first one
+// and leave the suffix).
 func TestRedactAccessTokenURLRedactsBracketedHostOverlap(t *testing.T) {
 	const secret = "af-sentinel-bracket-host-overlap"
 
-	t.Run("public API parse-rejects fail closed", func(t *testing.T) {
+	t.Run("public API keeps the secret out on every supported toolchain", func(t *testing.T) {
 		raw := "http://[%access_token=" + secret + ":SECRET::1]/p"
 		got := RedactAccessTokenURL(raw)
-		// url.Parse rejects the bracketed IP-literal carrying access_token=;
-		// the URL is fail-closed to "[url redacted]" rather than emitting a
-		// host-branch redaction that could split the value at an IPv6 colon.
-		if got != "[url redacted]" {
-			t.Errorf("RedactAccessTokenURL(%q) = %q; want %q (parse rejects, fail closed)",
-				raw, got, "[url redacted]")
+		if strings.Contains(got, secret) || strings.Contains(got, "SECRET") {
+			t.Errorf("RedactAccessTokenURL(%q) = %q; token material survived", raw, got)
 		}
-		if strings.Contains(got, secret) {
-			t.Errorf("secret %q survived into %q", secret, got)
+		// The two accepted forms of a redacted result: go1.25.2+ rejects the
+		// bracketed authority at url.Parse and fails closed; go1.25.0/1.25.1
+		// (the go.mod floor) accept it and the host branch redacts the whole
+		// in-bracket value through the ']' terminator. Either satisfies the
+		// contract — pin the property, not a toolchain-specific string.
+		switch got {
+		case "[url redacted]":
+		case "http://[%ACcess_token=REDACTED]/p":
+		default:
+			t.Errorf("RedactAccessTokenURL(%q) = %q; want %q (fail closed) or %q "+
+				"(in-bracket access_token value redacted)",
+				raw, got, "[url redacted]", "http://[%ACcess_token=REDACTED]/p")
 		}
 	})
 

@@ -211,6 +211,47 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 	}
 }
 
+type uncapturedProbeBackend struct {
+	*FakeBackend
+}
+
+func (b *uncapturedProbeBackend) HasUpdatedObserved(*Instance) (bool, bool, string, bool, bool) {
+	return false, false, "", false, false
+}
+
+// The capture bit rides the observation, not the error (#5221 review): a
+// backend that can prove its probe returned no frame reports captured=false —
+// the same answered-with-nothing shape a swallowed local capture-pane
+// failure produces — while every narrower contract asserts its observation
+// ran and defaults to true.
+func TestSnapshotReportsCaptureSuccess(t *testing.T) {
+	uncaptured, err := NewInstance(InstanceOptions{Title: "uncaptured", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uncaptured.SetBackend(&uncapturedProbeBackend{FakeBackend: NewFakeBackend()})
+	obs, _, _, _, _, err := uncaptured.SnapshotAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Captured {
+		t.Fatal("a capture-aware backend's failed probe must report captured=false")
+	}
+
+	captured, err := NewInstance(InstanceOptions{Title: "captured", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured.SetBackend(NewFakeBackend())
+	obs, _, _, _, _, err = captured.SnapshotAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Captured {
+		t.Fatal("a backend without the distinction asserts its observation ran — captured=true")
+	}
+}
+
 // A completed transport call is not necessarily an observation of the current
 // runtime. Runtime replacement rotates the observation generation without
 // waiting for predecessor I/O, so SnapshotAgent must revalidate after Snapshot

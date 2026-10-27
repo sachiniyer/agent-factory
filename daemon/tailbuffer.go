@@ -50,25 +50,28 @@ func (b *tailBuffer) logSuffix() string {
 	return "; last output:\n  " + strings.Join(b.lines, "\n  ")
 }
 
-// firstLine returns the oldest buffered line — usually the script's initial
-// complaint — for the persisted status summary.
-func (b *tailBuffer) firstLine() string {
+// lastLine returns the newest buffered line — for a multi-line diagnostic the
+// one that names the failure — for the persisted status summary.
+func (b *tailBuffer) lastLine() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.lines) == 0 {
 		return ""
 	}
-	return b.lines[0]
+	return b.lines[len(b.lines)-1]
 }
 
 // failureSummary builds the status the crash-loop breaker persists:
-// "errored: <exit error>: <first buffered line>", capped at
+// "errored: <exit error>: <newest buffered line>", capped at
 // watcherStatusSummaryMax. The "errored" prefix is what the TUI keys the
-// supervision state off (ui.watchTaskStatus), so it must come first.
+// supervision state off (ui.watchTaskStatus), so it must come first. The
+// newest tail line carries the diagnostic: a Python traceback's oldest line is
+// always "Traceback (most recent call last):" and a Node stack's is the
+// "Error:" header, while the actual failure is the last (#5441).
 func failureSummary(runErr error, tail *tailBuffer) string {
 	summary := "errored: " + runErr.Error()
-	if first := tail.firstLine(); first != "" {
-		summary += ": " + first
+	if last := tail.lastLine(); last != "" {
+		summary += ": " + last
 	}
 	if len(summary) > watcherStatusSummaryMax {
 		summary = truncateRunes(summary, watcherStatusSummaryMax) + "…"
