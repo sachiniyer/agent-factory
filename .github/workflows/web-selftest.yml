@@ -82,16 +82,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: web-selftest-${{ github.event.pull_request.number || github.ref }}
-  # Superseding a PR run is free — a newer head replaces the question being asked.
-  # NOTHING else is superseded, and the condition names the one event that may be
-  # rather than excluding the one that may not: a master run is its own verdict for
-  # its own commit, and cancelling it is how the per-commit attribution that is the
-  # entire reason for the push trigger gets lost. A `workflow_dispatch` shares this
-  # group with the master run (both key off github.ref), so an exclusionary
-  # condition would also let a manual "did master recover?" kill the push run it was
-  # asked about. Volume is bounded by the `paths:` filter above.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Keyed on the ref, with the nightly schedule in its own group so a landing
+  # master push cannot cancel the nightly run that Build is waiting on.
+  # A newer master push supersedes a stale push run (the tip is the question; a
+  # burst of merges verifies the last one). merge_group refs are unique per queue
+  # entry, so nothing there is cancelled by another entry.
+  group: web-selftest-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
+  cancel-in-progress: true
 
 # Read-only: checks out source and runs the harness in a container. It never
 # comments on or modifies the PR. pr.yml grants the same, which is what lets it
