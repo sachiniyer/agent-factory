@@ -209,6 +209,18 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
+	// The named host list (#5571 W6.1): a whole compact-JSON table of
+	// name → {host,user,port,identity_file,workspace_root}, and the default's name.
+	// A default is only meaningful against the list, so the cross-check (a default
+	// naming a listed host) runs where both are known — the loader and the whole-
+	// table writer; the leaf writer checks the name's shape.
+	"hosts": {structured: true},
+	"default_host": {kind: cfgString, validate: func(_, v string) error {
+		if v == "" {
+			return nil
+		}
+		return ValidateHostName(v)
+	}},
 	"session_env_passthrough": {structured: true},
 	"root_agents":             {structured: true},
 	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
