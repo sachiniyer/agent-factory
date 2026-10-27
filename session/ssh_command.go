@@ -136,10 +136,16 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
 		// best-effort list. See sshNoConfigFile.
 		"-F", sshNoConfigFile,
-		"-o", "User=" + shellQuote(sshLoginUser(cfg)),
+		// Two-layer quoting for User and UserKnownHostsFile: sshConfigQuote groups
+		// the value for ssh's own config parser (a multi-value keyword re-splits a
+		// bare value on whitespace, and User's strdelim takes only the first token),
+		// and shellQuote keeps the whole `keyword=<value>` token one argv element
+		// across the outer `sh -c '<sshCmd> "$@"'`. An AF home or ssh.known_hosts
+		// containing a space would otherwise never be the file af prepared.
+		"-o", shellQuote("User=" + sshConfigQuote(sshLoginUser(cfg))),
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
-		"-o", "UserKnownHostsFile=" + shellQuote(knownHosts),
+		"-o", shellQuote("UserKnownHostsFile=" + sshConfigQuote(knownHosts)),
 		// The x/crypto client consulted ONE file, so this preserves today's
 		// semantics rather than tightening them.
 		//
@@ -405,6 +411,34 @@ func sshPinnedProxyCommand(dialAddr string, port int) (string, error) {
 // string back. See sshPinnedProxyCommand for the measurement.
 func escapeSSHPercent(s string) string {
 	return strings.ReplaceAll(s, "%", "%%")
+}
+
+// sshConfigQuote wraps value as a single ssh_config(5) token for an `-o` option,
+// so an option VALUE containing whitespace (or a double quote, or a backslash)
+// reaches ssh's own config parser as ONE path rather than being re-split into
+// many. It is the INNER layer of the two-stage quoting discipline
+// sshPinnedProxyCommand applies to its path; UserKnownHostsFile is a MULTI-VALUE
+// ssh_config keyword, so without this layer ssh tokenizes the value on
+// whitespace after the outer `sh -c '<sshCmd> "$@"'` consumes shellQuote's single
+// quotes — turning `/dir with space/kh` into the three files `/dir`, `with`,
+// `space/kh`, none of which is the store af prepared.
+//
+// The OUTER layer is still shellQuote: sshConfigQuote returns a double-quoted
+// token, which the caller embeds in `keyword=<token>` and shellQuote()s for the
+// `sh -c` wrapper. A double quote is literal inside the single-quoted region the
+// outer shell sees, so it survives unchanged into ssh's argv; ssh's own config
+// parser then groups everything between the surviving double quotes as one
+// value. ssh_config honours `\"` and `\\` inside a double-quoted value (measured
+// against OpenSSH 10.0p2, Debian 13, via `ssh -G`), so a path that contains
+// either character round-trips exactly — a property the single-layer form never
+// had, and the reason both are escaped here rather than only the space.
+//
+// This is the form the bug report verified end-to-end (#3061's transport
+// convergence quoted UserKnownHostsFile only for the outer shell; the fix
+// restores the inner layer the ProxyCommand already had).
+func sshConfigQuote(value string) string {
+	r := strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+	return "\"" + r.Replace(value) + "\""
 }
 
 // sshHostKeyOptions maps ssh_host_key_verification onto the ssh binary's own
