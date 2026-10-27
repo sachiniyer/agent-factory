@@ -446,6 +446,27 @@ if command -v go >/dev/null 2>&1; then
     fi
 fi
 
+# AF_TESTBOX_TMPFS=<dest>[:<opts>] adds a size-limited --tmpfs mount under a
+# chosen path — the only moment a mount can be added is docker-run time, and
+# the playtest container is unprivileged so an in-container `mount` cannot
+# substitute. A scenario uses it to put a REAL ENOSPC under a write target:
+# mount a scratch path and symlink the real target into it, e.g.
+# AF_TESTBOX_TMPFS=/home/dev/wt-tmpfs:mode=1777,size=16m with
+# $AGENT_FACTORY_HOME/worktrees -> /home/dev/wt-tmpfs created by the scenario,
+# so a restore's rebuild genuinely fails on a full filesystem.
+#
+# Two traps the option text above encodes:
+#   * Mountpoint PARENTS the image lacks are created by dockerd as root:root —
+#     --tmpfs /home/dev/sandbox/home/worktrees leaves sandbox/home unwritable
+#     by the dev user and the playtest entry dies on its first write. Pick a
+#     dest whose parent already exists in the image (/home/dev does).
+#   * A tmpfs root is root-owned 0755 unless mode= is given — the scenario's
+#     filler and the session worktree are written by `dev`, so mode=1777 (or
+#     uid=1000 where supported) is required for the fill to work.
+if [ -n "${AF_TESTBOX_TMPFS:-}" ]; then
+    RUN_FLAGS+=(--tmpfs "$AF_TESTBOX_TMPFS")
+fi
+
 # Cache volumes created by older harness versions (or manual root runs)
 # can be root-owned, which the non-root test user can't write to. A
 # one-shot root chown makes the harness self-healing.

@@ -137,7 +137,19 @@ func TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping(t *testing.T
 	done := RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
 
 	pid := waitForPidFile(t, pidFile, 30*time.Second)
-	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	// The surviving hook is the entire point of this test, so it is still
+	// running — and the runner is still owed journal writes under logs/hooks —
+	// when teardown begins. Cleanups run LIFO, so registering this after every
+	// t.TempDir above makes it run before any RemoveAll: kill the survivor's
+	// process group, then hold teardown until the runner has reaped it and
+	// finished writing. done closes only after cmd.Wait and the last journal
+	// write land, so it is the deterministic "nothing can still write into the
+	// temp dir" signal — not a sleep (#5377).
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		waitForClosed(t, done, 30*time.Second,
+			"post-worktree hook runner did not finish after the surviving hook's process group was killed")
+	})
 
 	stopStandInDaemonUnit(t)
 	// The runner's own channel is the oracle, not kill(pid, 0): a hook systemd

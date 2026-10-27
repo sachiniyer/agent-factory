@@ -87,6 +87,18 @@ const tmuxWaitDelay = 2 * time.Second
 // tear down a session that is merely slow or stored under another spelling).
 var ErrTmuxTimeout = errors.New("tmux command timed out")
 
+// ErrTmuxServerNoAnswer marks exactly one non-answer: Start's PRE-spawn
+// has-session gate could not get the tmux server to answer inside the bound
+// — the (possibly shared) server is wedged or its filesystem is stuck, an
+// environmental stall external to this session. It is always paired with
+// context.DeadlineExceeded so the lost-restore classifier's
+// deadline+sentinel arm reads the same non-answer shape af's other bounded
+// probes produce. It deliberately excludes Start's post-spawn readiness
+// timeout — that one can also mean the pane command exited instantly, a
+// session defect, not a server outage — and every other tmux deadline
+// (#5295 review).
+var ErrTmuxServerNoAnswer = errors.New("tmux server did not answer the pre-spawn has-session probe")
+
 // boundedTmuxCommand builds a tmux command bound to ctx. It runs in its own
 // process group so the deadline tears down the whole tree — tmux plus any child
 // that inherited the capture pipe — rather than SIGKILLing only the tmux client
