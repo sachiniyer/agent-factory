@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/stretchr/testify/require"
 )
 
 // watchRecorder collects deliveries and lifecycle statuses from a supervisor
@@ -67,6 +69,9 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	s.loadTasks = tasks
 	s.deliver = adaptWatchDelivery(rec.deliver)
 	s.setStatus = rec.setStatus
+	// Never let the crashWindow recovery timer reach the real task store from
+	// a test that shrinks the window but keeps the recorder seams.
+	s.recoverStatus = func(string, task.Task, string) (bool, error) { return false, nil }
 	s.recordDrops = func(string, int, time.Time) error { return nil }
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -210,8 +215,9 @@ func TestWatcherBackoffAndCrashLoopBreaker(t *testing.T) {
 	// empty: the persisted summary is just the errored prefix and exit status
 	// (#797), with no stray separator.
 	statuses := rec.statusesSnapshot()
-	if got := statuses[len(statuses)-1]; got != "bbbb0001:errored: exit status 3" {
-		t.Fatalf("breaker status = %q, want %q", got, "bbbb0001:errored: exit status 3")
+	want := "bbbb0001:errored: gave up after 5 failures in 10m0s (last: exit status 3)"
+	if got := statuses[len(statuses)-1]; got != want {
+		t.Fatalf("breaker status = %q, want %q", got, want)
 	}
 
 	events := rec.eventsSnapshot()
@@ -685,7 +691,8 @@ func TestWatcherFailureLogsIncludeOutputTail(t *testing.T) {
 		t.Fatalf("breaker message missing the output tail, got:\n%s", got)
 	}
 	statuses := rec.statusesSnapshot()
-	if got, want := statuses[len(statuses)-1], "ab970001:errored: exit status 1: "+wantLine; got != want {
+	want := "ab970001:errored: gave up after 5 failures in 10m0s (last: exit status 1): " + wantLine
+	if got := statuses[len(statuses)-1]; got != want {
 		t.Fatalf("persisted status = %q, want %q", got, want)
 	}
 }
@@ -716,7 +723,8 @@ func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
 		t.Fatalf("breaker message missing the stdout tail, got:\n%s", got)
 	}
 	statuses := rec.statusesSnapshot()
-	if got, want := statuses[len(statuses)-1], "ab970002:errored: exit status 1: death rattle"; got != want {
+	want := "ab970002:errored: gave up after 5 failures in 10m0s (last: exit status 1): death rattle"
+	if got := statuses[len(statuses)-1]; got != want {
 		t.Fatalf("persisted status = %q, want %q", got, want)
 	}
 }
@@ -748,8 +756,8 @@ func TestTailBufferCaps(t *testing.T) {
 		t.Fatalf("overlong line not truncated to the byte cap: len=%d", len(last))
 	}
 
-	summary := failureSummary(errors.New("exit status 1"), b)
-	if !strings.HasPrefix(summary, "errored: exit status 1: xxx") {
+	summary := giveUpSummary(errors.New("exit status 1"), b, watcherCrashMaxExits, watcherCrashWindow)
+	if !strings.HasPrefix(summary, "errored: gave up after 5 failures in 10m0s: xxx") {
 		t.Fatalf("summary = %.60q..., want errored prefix + newest line", summary)
 	}
 	if len(summary) > watcherStatusSummaryMax+len("…") {
@@ -803,17 +811,18 @@ func TestTruncateRunesBoundary(t *testing.T) {
 	}
 }
 
-// TestFailureSummaryUTF8 guards the persisted crash-loop status (#863): a
+// TestGiveUpSummaryUTF8 guards the persisted crash-loop status (#863): a
 // multi-byte error message that overflows watcherStatusSummaryMax is cut on a
 // rune boundary, so tasks.json stores valid UTF-8 (no "�") and the cap still
 // holds once the ellipsis is appended.
-func TestFailureSummaryUTF8(t *testing.T) {
+func TestGiveUpSummaryUTF8(t *testing.T) {
 	b := &tailBuffer{}
-	// A first line of emoji that, combined with the "errored: ..." prefix,
+	// A tail line of emoji that, combined with the "errored: ..." prefix,
 	// pushes the summary well past the 256-byte cap with the boundary landing
-	// inside a 4-byte rune.
+	// inside a 4-byte rune — and leaves no room for the "(last: …)" segment,
+	// which must drop entirely rather than show an empty shell.
 	b.add(strings.Repeat("🚀", 200))
-	summary := failureSummary(errors.New("exit status 1"), b)
+	summary := giveUpSummary(errors.New("exit status 1"), b, watcherCrashMaxExits, watcherCrashWindow)
 
 	if !utf8.ValidString(summary) {
 		t.Fatalf("summary is not valid UTF-8: %q", summary)
@@ -821,8 +830,11 @@ func TestFailureSummaryUTF8(t *testing.T) {
 	if strings.ContainsRune(strings.TrimSuffix(summary, "…"), utf8.RuneError) {
 		t.Fatalf("summary contains U+FFFD: %q", summary)
 	}
-	if !strings.HasPrefix(summary, "errored: exit status 1: 🚀") {
+	if !strings.HasPrefix(summary, "errored: gave up after 5 failures in 10m0s: 🚀") {
 		t.Fatalf("summary lost its prefix: %.40q", summary)
+	}
+	if strings.Contains(summary, "(last:") {
+		t.Fatalf("dropped (last: …) segment still present under cap pressure: %.60q", summary)
 	}
 	if !strings.HasSuffix(summary, "…") {
 		t.Fatalf("truncated summary missing ellipsis: %.40q...", summary)
@@ -834,8 +846,9 @@ func TestFailureSummaryUTF8(t *testing.T) {
 	// A short multi-byte message fits and is persisted unchanged.
 	short := &tailBuffer{}
 	short.add("デプロイ失敗")
-	if got := failureSummary(errors.New("exit status 2"), short); got != "errored: exit status 2: デプロイ失敗" {
-		t.Fatalf("short multi-byte summary altered: %q", got)
+	want := "errored: gave up after 5 failures in 10m0s (last: exit status 2): デプロイ失敗"
+	if got := giveUpSummary(errors.New("exit status 2"), short, watcherCrashMaxExits, watcherCrashWindow); got != want {
+		t.Fatalf("short multi-byte summary altered: %q, want %q", got, want)
 	}
 
 	// A multi-byte tail line longer than watcherTailMaxBytes is itself cut on a
@@ -848,13 +861,14 @@ func TestFailureSummaryUTF8(t *testing.T) {
 	}
 }
 
-// TestFailureSummaryUsesNewestTailLine pins #5441: the persisted
+// TestGiveUpSummaryUsesNewestTailLine pins #5441: the persisted
 // last_run_status must carry the tail's NEWEST line — the one that names the
 // failure — not the oldest. A Python traceback's first line is always the
 // constant "Traceback (most recent call last):"; the diagnostic
-// ("BlockingIOError: ...") is the last. This fails on master, where
-// failureSummary persisted tail.firstLine().
-func TestFailureSummaryUsesNewestTailLine(t *testing.T) {
+// ("BlockingIOError: ...") is the last. It also pins the #5329 give-up
+// phrasing: the status must say the breaker gave up, not merely that a run
+// errored.
+func TestGiveUpSummaryUsesNewestTailLine(t *testing.T) {
 	b := &tailBuffer{}
 	for _, line := range []string{
 		"Traceback (most recent call last):",
@@ -864,10 +878,166 @@ func TestFailureSummaryUsesNewestTailLine(t *testing.T) {
 	} {
 		b.add(line)
 	}
-	summary := failureSummary(errors.New("exit status 1"), b)
-	want := "errored: exit status 1: BlockingIOError: [Errno 11] Resource temporarily unavailable"
+	summary := giveUpSummary(errors.New("exit status 1"), b, watcherCrashMaxExits, watcherCrashWindow)
+	want := "errored: gave up after 5 failures in 10m0s (last: exit status 1): BlockingIOError: [Errno 11] Resource temporarily unavailable"
 	if summary != want {
 		t.Fatalf("summary = %q, want %q (newest tail line, not the oldest)", summary, want)
+	}
+}
+
+// TestGiveUpSummaryEmptyTail covers a run that died with nothing to say: no
+// output, so the summary ends at the "(last: …)" segment with no trailing
+// colon.
+func TestGiveUpSummaryEmptyTail(t *testing.T) {
+	summary := giveUpSummary(errors.New("exit status 1"), &tailBuffer{}, watcherCrashMaxExits, watcherCrashWindow)
+	want := "errored: gave up after 5 failures in 10m0s (last: exit status 1)"
+	if summary != want {
+		t.Fatalf("summary = %q, want %q", summary, want)
+	}
+}
+
+// TestGiveUpSummaryLongRunErr pins the cap-priority rule: when the summary
+// would overflow watcherStatusSummaryMax, the "(last: …)" exit text gives
+// ground first — truncated with a marker — never the diagnostic line that
+// names the failure (#5329).
+func TestGiveUpSummaryLongRunErr(t *testing.T) {
+	b := &tailBuffer{}
+	diag := "BlockingIOError: [Errno 11] Resource temporarily unavailable"
+	b.add(diag)
+	longErr := errors.New("exit status 1: " + strings.Repeat("r", 400))
+	summary := giveUpSummary(longErr, b, watcherCrashMaxExits, watcherCrashWindow)
+
+	if !strings.HasSuffix(summary, ": "+diag) {
+		t.Fatalf("diagnostic line was cut; it must be the last thing to give: %q", summary)
+	}
+	if !strings.Contains(summary, "(last: exit status 1: rrr") || !strings.Contains(summary, "r…): "+diag) {
+		t.Fatalf("exit text not truncated-with-marker inside (last: …): %q", summary)
+	}
+	if len(summary) > watcherStatusSummaryMax {
+		t.Fatalf("summary length %d exceeds cap %d", len(summary), watcherStatusSummaryMax)
+	}
+}
+
+// TestWatcherRecoveryRetiresStaleTerminalStatus drives the real run loop for
+// the #5441 stale-status fix: a watch that stays alive one full crash window
+// earns "started" back over a stale terminal last_run_status — and only over
+// a terminal one. crashWindow is shrunk so the window elapses in test time.
+func TestWatcherRecoveryRetiresStaleTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("ec770001", `sleep 5`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	_, err := task.UpdateTaskStatus(tsk.ID, nil,
+		"errored: gave up after 5 failures in 10m0s (last: exit status 1): BlockingIOError: [Errno 11]")
+	require.NoError(t, err)
+
+	s, _ := newTestSupervisor(t, task.LoadTasks)
+	s.crashWindow = 60 * time.Millisecond
+	s.recoverStatus = task.RecoverStaleWatcherStatus
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 5*time.Second, "stale terminal status to recover", func() bool {
+		stored, err := task.GetTask(tsk.ID)
+		return err == nil && stored.LastRunStatus == "started"
+	})
+}
+
+// TestWatcherRecoveryLeavesNonTerminalStatus is the guard half of the same
+// rule: the recovery timer DOES fire on a healthy run, but the store-side
+// write is conditional — a delivered "sent" (or any non-terminal outcome) is
+// newer evidence and is never rewritten to "started".
+func TestWatcherRecoveryLeavesNonTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("ec770002", `sleep 5`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	deliveredAt := time.Now()
+	_, err := task.UpdateTaskStatus(tsk.ID, &deliveredAt, "sent")
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	s, _ := newTestSupervisor(t, task.LoadTasks)
+	s.crashWindow = 60 * time.Millisecond
+	s.recoverStatus = func(taskID string, armed task.Task, status string) (bool, error) {
+		calls.Add(1)
+		return task.RecoverStaleWatcherStatus(taskID, armed, status)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 5*time.Second, "recovery timer to fire", func() bool {
+		return calls.Load() > 0
+	})
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	if stored.LastRunStatus != "sent" {
+		t.Fatalf("non-terminal status was clobbered: %q, want %q", stored.LastRunStatus, "sent")
+	}
+	if stored.LastRunAt == nil || !stored.LastRunAt.Equal(deliveredAt) {
+		t.Fatalf("recovery touched LastRunAt: %v", stored.LastRunAt)
+	}
+}
+
+// TestWatcherRecoveryLeavesFreshTerminalStatus pins the compare-and-swap
+// half of the rule: the recovery retires ONLY the terminal value the watcher
+// was armed over. An arming refusal committed during the window is newer
+// evidence — it must survive even though it is itself a terminal status.
+func TestWatcherRecoveryLeavesFreshTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("ec770004", `sleep 5`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	const armedOver = "errored: gave up after 5 failures in 10m0s (last: exit status 1): boom"
+	_, err := task.UpdateTaskStatus(tsk.ID, nil, armedOver)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	s, _ := newTestSupervisor(t, task.LoadTasks)
+	s.crashWindow = 60 * time.Millisecond
+	s.recoverStatus = func(taskID string, armed task.Task, status string) (bool, error) {
+		calls.Add(1)
+		require.Equal(t, armedOver, armed.LastRunStatus, "recovery must compare against the arm-time row")
+		return task.RecoverStaleWatcherStatus(taskID, armed, status)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// A fresh refusal lands inside the window, after the watcher armed.
+	const refusal = "errored: not armed — target session is archived"
+	_, err = task.UpdateTaskStatus(tsk.ID, nil, refusal)
+	require.NoError(t, err)
+
+	waitUntil(t, 5*time.Second, "recovery timer to fire", func() bool {
+		return calls.Load() > 0
+	})
+	time.Sleep(3 * s.crashWindow) // let any late second write land
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	if stored.LastRunStatus != refusal {
+		t.Fatalf("fresh terminal status was clobbered: %q, want %q", stored.LastRunStatus, refusal)
+	}
+}
+
+// TestWatcherRecoveryNeverFiresWhileCrashLooping pins the other side of the
+// crashWindow gate: a still-crash-looping watch never has a run alive a full
+// window, so the recovery write can never fire and a stale terminal status
+// keeps telling the truth.
+func TestWatcherRecoveryNeverFiresWhileCrashLooping(t *testing.T) {
+	var calls atomic.Int32
+	dir := t.TempDir()
+	s, _ := newTestSupervisor(t, staticTasks(watchTask("ec770003", `exit 1`, dir)))
+	s.crashWindow = 200 * time.Millisecond
+	s.recoverStatus = func(string, task.Task, string) (bool, error) {
+		calls.Add(1)
+		return false, nil
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("recovery fired %d times on a crash-looping watch, want 0", n)
 	}
 }
 
