@@ -9,7 +9,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -67,22 +69,55 @@ func noteOnce(msg string) {
 // command's `data` payload instead, which is additive to one command's JSON
 // shape and needs no contract sign-off. That leaves #3511's broader question —
 // other commands, and the envelope itself — open for Sachin.
-func warnIncompleteTitleWidening(title string, gaps []config.RepoInstancesSkip, err error) string {
+func warnIncompleteTitleWidening(title string, unreadable, corrupted []config.RepoInstancesSkip, err error) string {
 	var msg string
 	switch {
 	case err != nil:
 		msg = fmt.Sprintf(
 			"warning: could not check any project for another session titled %q, so this result may name the wrong project: %v; pass --repo <path> to scope the lookup\n",
 			title, err)
-	case len(gaps) > 0:
+	case len(unreadable) > 0 || len(corrupted) > 0:
+		// Merge the two gap classes in repoID order so a message built from
+		// them stays stable across runs: `unreadable` already arrives sorted
+		// (os.ReadDir), but `corrupted` is collected in map-iteration order.
+		gaps := append(append([]config.RepoInstancesSkip{}, unreadable...), corrupted...)
+		sort.Slice(gaps, func(i, j int) bool { return gaps[i].RepoID < gaps[j].RepoID })
 		msg = fmt.Sprintf(
 			"warning: could not check every project for another session titled %q, so this result may name the wrong project: %s; pass --repo <path> to scope the lookup, or %s\n",
-			title, config.DescribeRepoInstancesSkips(gaps), config.RepoInstancesSkipRemedy(gaps))
+			title, config.DescribeRepoInstancesSkips(gaps), widenRepoInstancesRemedy(unreadable, corrupted))
 	default:
 		return ""
 	}
 	noteOnce(msg)
 	return strings.TrimRight(msg, "\n")
+}
+
+// widenRepoInstancesRemedy is the remedy warnIncompleteTitleWidening appends to
+// its caveat. It keeps parse-corruption remediation distinct from unreadable-file
+// remediation (#5530 review): RepoInstancesSkipRemedy's "repair or remove the
+// file(s)" fits a file that could not be READ, but removing a parse-corrupted
+// instances.json discards the hidden sessions — af keeps no backup — so a
+// corrupted skip gets corruptedRepoRepairHint (copy aside, fix the JSON or
+// restore from a backup) instead. A newer-schema skip already suppresses removal
+// via RepoInstancesSkipRemedy and takes precedence over the corruption hint:
+// its "upgrade, do not delete" advice is already non-destructive and is the only
+// useful step for a file this binary cannot parse, so a mixed newer-schema +
+// corrupted set still points at the upgrade rather than a half-right remedy.
+func widenRepoInstancesRemedy(unreadable, corrupted []config.RepoInstancesSkip) string {
+	remedy := config.RepoInstancesSkipRemedy(unreadable)
+	if len(corrupted) == 0 {
+		return remedy
+	}
+	// RepoInstancesSkipRemedy already returned the upgrade advice when a
+	// newer-schema skip is present in `unreadable`; don't clobber it with the
+	// corruption hint, which would point an operator at the wrong file.
+	var newer *config.UnsupportedSchemaVersionError
+	for _, skip := range unreadable {
+		if errors.As(skip.Err, &newer) {
+			return remedy
+		}
+	}
+	return corruptedRepoRepairHint
 }
 
 // sessionGetResult is `sessions get`'s --json payload shape when the

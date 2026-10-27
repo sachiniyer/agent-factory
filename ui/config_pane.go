@@ -77,6 +77,22 @@ type ConfigPane struct {
 	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
+	// explain is the provenance read path (#4803), injected on the same terms:
+	// NewConfigPane wires ExplainConfigForEditor, which resolves in-process
+	// locally and through the targeted daemon's ExplainConfig under a remote
+	// target. The rows say WHAT a value is; this answers WHERE it came from.
+	explain func(key string) (*config.ResolvedValue, error)
+
+	// The explain sub-view (config_pane_explain.go): 'e' on a key row swaps the
+	// list for the key's full candidate trace — which layer won, which were
+	// shadowed, absent, or disallowed. savedScrollTop holds the list's scroll
+	// offset so esc returns the reader to the row they explained.
+	explaining     bool
+	explainKey     string
+	explainLines   []string
+	explainValue   *config.ResolvedValue
+	savedScrollTop int
+
 	// accounts is the Accounts section (#3385): agent identities, rendered below
 	// the config tiers and visibly not config rows. It is a separate struct rather
 	// than more fields here because it is a separate domain — nothing in it goes
@@ -143,8 +159,9 @@ func NewConfigPane() *ConfigPane {
 	// with displayValue, which never feeds the writer.
 	in.Blur()
 	return &ConfigPane{
-		input: in,
-		save:  applyingConfigSet,
+		input:   in,
+		save:    applyingConfigSet,
+		explain: ExplainConfigForEditor,
 	}
 }
 
@@ -160,9 +177,19 @@ func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
 }
 
 func (c *ConfigPane) SetSize(width, height int) {
+	resized := width != c.width
 	c.width = width
 	c.height = height
 	c.sizeEditField()
+	// An open trace was wrapped for the old width: lines emitted wider than
+	// the pane wrap or clamp in the dialog while the scroll window still
+	// budgets against the old count, leaving parts of it unreachable. Keep
+	// the resolved value and rewrap it so the line math stays exact (#4803
+	// review).
+	if resized && c.explaining && c.explainValue != nil {
+		c.explainLines = c.wrappedExplainLines(*c.explainValue)
+		c.scrollTop = min(max(0, len(c.explainLines)-1), c.scrollTop)
+	}
 }
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
@@ -188,6 +215,9 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		c.cancelRegister()
 		c.accounts.status = ""
 		c.accounts.statusIsError = false
+		c.explaining = false
+		c.explainLines = nil
+		c.explainValue = nil
 		c.clearStatus()
 		// A pending request is consumed the moment the app opens the assistant, so
 		// one that survives to a close was never taken (the pane was dismissed
@@ -313,6 +343,11 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if c.accounts.registering {
 		return c.handleRegisterKey(msg)
 	}
+	// The explain view is a reader, not a form: scroll and leave. It sits above
+	// the account-row routing because 'e' is its own way out, not an account verb.
+	if c.explaining {
+		return c.handleExplainKey(msg)
+	}
 	// An account row answers enter itself — with a login or a register field —
 	// rather than falling through to beginEdit, which would open a config value
 	// editor over a row that has no config key.
@@ -353,6 +388,9 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		// intent that is closing it.
 		c.SetFocus(false)
 		c.assistantRequested = true
+		return true
+	case "e":
+		c.beginExplain()
 		return true
 	case "enter":
 		c.beginEdit()
@@ -483,16 +521,25 @@ func (c *ConfigPane) commitEdit() {
 // bottom and the user is editing a row they cannot see — and a selection you
 // cannot see is one you will change by accident.
 func (c *ConfigPane) String() string {
+	if c.explaining {
+		return c.renderExplainView()
+	}
 	header := c.renderHeader()
 	footer := c.renderStatus() + c.renderHints()
-
 	rowLines, selStart, selEnd := c.renderRowLines()
+	return c.renderWindowed(header, footer, rowLines, selStart, selEnd)
+}
 
-	// Reserve the two cue rows unconditionally. Making the budget depend on
-	// whether the cues happen to show is circular — and it would make the list
-	// grow and shrink by a line as the user scrolls past either end.
+// renderWindowed renders a header, a scrollable window of lines with overflow
+// cues, and a footer — the one layout String() and the explain view share, so
+// both scroll and budget identically.
+//
+// The two cue rows are reserved unconditionally. Making the budget depend on
+// whether the cues happen to show is circular — and it would make the list
+// grow and shrink by a line as the user scrolls past either end.
+func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selStart, selEnd int) string {
 	budget := c.height - countLines(header) - countLines(footer) - cueRows
-	visible, above, below := c.window(rowLines, selStart, selEnd, budget)
+	visible, above, below := c.window(lines, selStart, selEnd, budget)
 
 	var b strings.Builder
 	b.WriteString(header)
@@ -775,8 +822,9 @@ func (c *ConfigPane) renderHints() string {
 	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 		{text: "↑/↓ move", drop: 2},
 		{text: "↵ edit", drop: 3},
+		{text: "e explain", drop: 4},
 		{text: advanced, drop: 1},
-		{text: "C assistant", drop: 4},
+		{text: "C assistant", drop: 5},
 		{text: "esc close"},
 	})) + "\n"
 }

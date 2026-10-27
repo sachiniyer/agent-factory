@@ -315,6 +315,7 @@ func retainedArchiveLocation(warning string) string {
 // title stays aligned with its siblings.
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	archiveWarning := i.ArchiveWarning()
+	callbackWarning := i.CallbackUnavailable()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -581,7 +582,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && !restoreFailed && !restoreWaiting {
+	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && !restoreFailed && !restoreWaiting {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)
@@ -601,7 +602,23 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	branchLine := fmt.Sprintf("%s %s%s%s", strings.Repeat(" ", prefixWidth), branchMarker, description, spaces)
 
 	lines := []string{title}
-	if archiveWarning == "" {
+	var warningTexts []string
+	if archiveWarning != "" {
+		if location := retainedArchiveLocation(archiveWarning); location != "" {
+			// Put the recovery location before the prose-heavy warning. A typical
+			// sidebar cannot fit the full bounded report on one line, but it must
+			// still show where the complete bytes remain.
+			warningTexts = append(warningTexts, location)
+		}
+		warningTexts = append(warningTexts, archiveWarning)
+	}
+	if callbackWarning != "" {
+		// The cross-surface phrase, verbatim — the picker's JSON, the web banner
+		// and this row all name it identically so the user greps one string and
+		// finds every place af said it (#5571 W3.1).
+		warningTexts = append(warningTexts, session.CallbackUnavailablePrefix+callbackWarning)
+	}
+	if len(warningTexts) == 0 {
 		if description != "" {
 			lines = append(lines, descS.Render(branchLine))
 		}
@@ -610,13 +627,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// notice is part of the same row block rather than separated by whitespace.
 		if description != "" {
 			lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
-		}
-		warningTexts := []string{archiveWarning}
-		if location := retainedArchiveLocation(archiveWarning); location != "" {
-			// Put the recovery location before the prose-heavy warning. A typical
-			// sidebar cannot fit the full bounded report on one line, but it must
-			// still show where the complete bytes remain.
-			warningTexts = append([]string{location}, warningTexts...)
 		}
 		for index, warningText := range warningTexts {
 			glyph := "  "

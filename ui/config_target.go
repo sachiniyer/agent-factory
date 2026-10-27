@@ -102,6 +102,46 @@ func localConfigForEditor() ([]config.ConfigEntry, string, error) {
 	return config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName), nil
 }
 
+// ExplainConfigForEditor resolves one key's provenance on whichever daemon this
+// af session is attached to — the explain half of the editor's read surface
+// (#4803). The pane's rows say WHAT a value is; this says WHERE it came from,
+// through the same config.ExplainGlobalValue `af config get --explain` resolves.
+//
+// The split is the editor's own, for the editor's reason: a remote target never
+// falls back to the local file, so the local branch resolves in-process (the
+// same way localConfigForEditor reads its rows) while the remote branch asks the
+// targeted daemon — explaining machine B from machine A's file would answer
+// about a config the user is not looking at, the exact failure the read and the
+// write already route together to prevent.
+func ExplainConfigForEditor(key string) (*config.ResolvedValue, error) {
+	if !apiclient.IsRemoteTarget() {
+		value, err := config.ExplainGlobalValue(key)
+		if err != nil {
+			return nil, err
+		}
+		return &value, nil
+	}
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.ExplainConfig(daemon.ExplainConfigRequest{Key: key})
+	if err != nil {
+		return nil, remoteConfigRefusal(client, "explain config on", "ExplainConfig", "Nothing was read", err)
+	}
+	// A real daemon answers with the key's trace or an error. A remote target is
+	// whatever answers the URL, though, and an empty explanation would render a
+	// view claiming every layer was absent — the fabricated-blank failure shape
+	// this surface exists to avoid. Refuse it like the empty GetConfig list.
+	if resp.Explanation.Key == "" {
+		return nil, fmt.Errorf("the daemon at %s returned an empty config explanation; "+
+			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
+	}
+	return &resp.Explanation, nil
+}
+
 // applyingConfigSet writes one global config key on whichever daemon this
 // session is attached to, and returns the per-key effect notice so the pane
 // shows the honest outcome — live now, deferred rebind, next daemon start, or
