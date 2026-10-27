@@ -31,8 +31,8 @@ type home struct {
 
 	// -- Storage and Configuration --
 
-	program string
-	repoID  string
+	programChoice
+	repoID string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
@@ -334,6 +334,7 @@ type home struct {
 	// Each new error/success notice increments it; a stale hideErrMsg from an
 	// older timer must not clear a newer notice.
 	transientNoticeID uint64
+	namingNotice      namingFormNotice // a notice the open naming form raised (#4123)
 	// alarmBanner is the top-of-screen delivery-failure alarm (#1238): a
 	// persistent red bar raised while the daemon snapshot reports a watch task
 	// whose events are failing to reach their target session. Fed each poll by
@@ -388,6 +389,8 @@ type home struct {
 	handoffChoices  []string
 	handoffAccounts []string
 	handoffWarnings []string
+	// handoffResolvedAgents is the picker load's resolved_agents, kept for the confirm step's carry-intended judgment (#4367/#4504); nil -> enum like resolvedFor.
+	handoffResolvedAgents map[string]string
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that
@@ -434,6 +437,15 @@ type home struct {
 	// would silently replace it — putting the session on an identity the user had
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
+	// pendingProgramChosen records that the USER confirmed this form's program
+	// through the picker (#4889 review) — including deliberately re-picking the
+	// value already shown. A confirmed choice submits the concrete program on
+	// the wire; an untouched config-derived seed submits "" so the daemon
+	// resolves default_program at create time. String equality cannot see the
+	// re-picked-same-value case — this flag is what can. Reset by
+	// startNewInstance; set by a program-picker submit and by a failed
+	// create's draft restore.
+	pendingProgramChosen bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the
@@ -444,7 +456,27 @@ type home struct {
 	// rows are built from the daemon's registry (plus a leading "ambient identity"
 	// row), so the overlay's index cannot be mapped back through any local list.
 	accountPickerChoices []accountChoice
-
+	// accountDefaultSeq is the issuance counter fetchAccountDefault stamps on
+	// each accountDefaultMsg it launches. Two preselect fetches can be in flight
+	// at once — a submit-then-fail restore re-fires one while the form-open fetch
+	// still pends — and the older reply landing last must not overwrite the
+	// newer answer (#4889 review).
+	accountDefaultSeq int64
+	// remoteDefaultPending marks the window between a remote-target form open
+	// (or implicit restore) and the ListPrograms reply: submitting "" before the
+	// daemon's resolved default corrects the field would create a program the
+	// user never saw (#4889 review).
+	remoteDefaultPending bool
+	// remoteProgramCatalog is the program list the remote daemon reported,
+	// which the program picker offers instead of the local
+	// tmux.SupportedPrograms — a newer daemon can support agents this client
+	// lacks (#4889 review).
+	remoteProgramCatalog []string
+	// programPickerChoices is the option list the open program picker is
+	// showing, held alongside the overlay for the same reason
+	// accountPickerChoices is: a remote catalog cannot be mapped back through
+	// the local enum.
+	programPickerChoices []string
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
 	// (capture-pane via runMetadataTick, refreshPanesCmd) is
@@ -459,7 +491,7 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
+func newHome(ctx context.Context, program, configuredDefault string, repo *config.RepoContext) *home {
 	// repo is nil when af was launched outside a git repository (#2477): the TUI
 	// opens in registry mode with no active project, and the user selects one
 	// from the Projects section. An empty repoID makes the cold-start snapshot an
@@ -526,7 +558,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
 		appConfig:                   appConfig,
-		program:                     program,
+		programChoice:               newProgramChoice(program, configuredDefault, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),
@@ -618,246 +650,6 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	}
 
 	return h
-}
-
-// updateHandleWindowSizeEvent records the terminal size and re-solves the
-// layout.
-func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) tea.Cmd {
-	m.termWidth = msg.Width
-	m.termHeight = msg.Height
-	m.relayout()
-	return m.consumePaneAutoHideStatus()
-}
-
-// relayout is the single sizing path (#1024 PR 4): layout.Grid turns the
-// terminal size into the region rects — applying the §2.6 degradation ladder
-// and the #1088 pane-count fitting — and every pane is re-rected. Called on
-// every WindowSizeMsg and whenever a grid input changes without a resize (a
-// pane opening or closing).
-func (m *home) relayout() {
-	previousVisible := append([]*store.OpenPane(nil), m.visiblePanes...)
-	// The grid is asked for every open pane; it honors at most MaxPanes of
-	// them (§2.6). The store then picks WHICH panes stay visible — the
-	// most-recently-focused ones, in workspace order — while the hidden
-	// panes' bindings persist and restore on grow, which is exactly the
-	// retain-and-restore contract the A/B split had.
-	m.grid.Panes = m.store.NumOpenPanes()
-	// Size the automations section to its content: the grid grows it to show
-	// every automation when the rail has the room, collapsing only when the
-	// tree + automations can't both fit (#1126).
-	m.grid.Automations = m.store.NumTasks()
-	// Size the Projects section to its content the same way (#1588 follow-up):
-	// the grid grows it to show every project the rail has room for.
-	m.grid.Projects = len(m.projects.Projects())
-	// Reserve the alarm banner row exactly when a delivery-failure alarm is
-	// raised (#1238), so the row appears/disappears with the alarm and never
-	// steals space in the healthy steady state.
-	m.grid.Banner = m.alarmBanner.Active()
-	lay := m.grid.Solve(m.termWidth, m.termHeight)
-	m.lastLayout = lay
-	if lay.Fallback {
-		// No rects to hand out, but keep the focus flags + hints coherent so
-		// key routing stays correct while the terminal is too small.
-		m.visiblePanes = nil
-		m.syncFocus()
-		return
-	}
-
-	// First real relayout after a restore: the restore-time relayout ran at
-	// (0,0) and fell through to fallback with visiblePanes=nil, so the restored
-	// panes are the visibility baseline this pass uses to detect a pane the
-	// terminal can't fit (#1535). Clear it ONLY when it is actually consumed
-	// (previousVisible empty): an intermediate relayout that reaches here with a
-	// real previousVisible already established leaves nothing to consume, and one
-	// that falls through to fallback returned above — so the baseline survives
-	// every relayout until the first sized one uses it, instead of being cleared
-	// out from under that resize (#1551 review). Since visiblePanes is nil until
-	// the first non-fallback relayout, that first sized relayout is exactly the
-	// one that consumes it.
-	if len(previousVisible) == 0 && len(m.restoredPaneBaseline) > 0 {
-		previousVisible = m.restoredPaneBaseline
-		m.restoredPaneBaseline = nil
-	}
-
-	nextVisible := m.store.VisibleOpenPanes(lay.PaneCount())
-	if hidden := newlyAutoHiddenPane(previousVisible, nextVisible, m.store.OpenPanes()); hidden != nil {
-		m.setPaneAutoHideStatus(hidden, m.store.NumOpenPanes())
-	}
-	m.visiblePanes = nextVisible
-	m.clearStaleAutoHideStatus()
-
-	// Rebuild the ring's pane entries to the visible set (auto-hidden panes
-	// leave the ring; the focused pane is most-recently-focused, so it is
-	// never the one auto-hidden). SetIDs keeps the active id when it
-	// survives; a vanished active falls back to the tree.
-	ids := make([]string, 0, len(m.visiblePanes)+3)
-	ids = append(ids, layout.RegionTree)
-	for _, p := range m.visiblePanes {
-		ids = append(ids, layout.PaneRegion(p.ID()))
-	}
-	// Projects follows automations so forward Tab is tree → panes → automations
-	// → projects → (wrap) tree (#1588 follow-up).
-	ids = append(ids, layout.RegionAutomations, layout.RegionProjects)
-	m.ring.SetIDs(ids...)
-	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
-	m.ring.SetHidden(layout.RegionProjects, !lay.ProjectsVisible)
-	m.applyPendingTUIViewFocus()
-	m.syncFocus()
-
-	m.sidebar.SetRect(lay.Tree)
-	visible := make(map[int]bool, len(m.visiblePanes))
-	for i, p := range m.visiblePanes {
-		visible[p.ID()] = true
-		if w := m.paneWindows[p.ID()]; w != nil {
-			w.SetRect(lay.Panes[i])
-		}
-	}
-	// Auto-hidden panes render nothing while retaining their window state.
-	for id, w := range m.paneWindows {
-		if !visible[id] {
-			w.SetRect(layout.Rect{})
-		}
-	}
-	m.automations.SetRect(lay.Automations)
-	m.automations.SetCompact(lay.AutomationsCompact)
-	m.projects.SetRect(lay.Projects)
-	m.projects.SetCompact(lay.ProjectsCompact)
-	m.statusBar.SetRect(lay.StatusBar)
-	m.alarmBanner.SetRect(lay.Banner)
-
-	m.layoutModalOverlays()
-
-	// Live panes report their view geometry through SetRect → w.live.Resize —
-	// which is render-only unless the attachment currently OWNS the pane's size
-	// (the focused interactive pane, #4480): only an owner's Resize reaches the
-	// WS stream's last-resize-wins resize-window. The TUI no longer resizes
-	// local tmux sessions from the relayout, and a passive viewer's layout churn
-	// never does either.
-}
-
-// The pane auto-hide helpers live in pane_autohide.go, split out when this
-// file crossed the file-length limit (#1145).
-
-// syncFocus applies the focus ring's active region to the panes and the
-// status-bar hints, and stamps a focused pane most recently focused so the
-// §2.6 auto-hide order tracks real attention.
-func (m *home) syncFocus() {
-	active := m.ring.Active()
-	panes := map[string]layout.Pane{
-		layout.RegionTree:        m.sidebar,
-		layout.RegionAutomations: m.automations,
-		layout.RegionProjects:    m.projects,
-	}
-	for _, p := range m.visiblePanes {
-		if w := m.paneWindows[p.ID()]; w != nil {
-			panes[layout.PaneRegion(p.ID())] = w
-		}
-	}
-	for id, pane := range panes {
-		if id == active {
-			pane.Focus()
-		} else {
-			pane.Blur()
-		}
-	}
-	if p := m.focusedOpenPane(); p != nil {
-		m.store.TouchOpenPane(p)
-		m.lastFocusedPaneID = p.ID()
-	}
-	m.menu.SetFocusRegion(active)
-	m.syncSplitPaneHint()
-	m.syncScrollHint()
-	// ←/→ move focus between VISIBLE panes, and focusAdjacentPane returns early
-	// below two of them, so the pair is inert with one pane open. Advertising it
-	// there is the same dead-affordance class as #2830/#2864.
-	m.menu.SetPaneCycleAvailable(len(m.visiblePanes) > 1)
-	m.syncProjectsHint()
-}
-
-// syncProjectsHint keeps the Projects footer's row-scoped verbs (Enter switch,
-// D delete) in step with whether the section HAS a row. Both act on the cursor,
-// and handleProjectsFocus consumes each as a no-op when SelectedProject reports
-// false, so an empty section must advertise neither.
-//
-// Called from syncFocus AND from both project refreshes: rows change on a
-// background poll, which is not guaranteed to reach a relayout, and a stale
-// gate here would re-advertise a verb that had just gone inert.
-func (m *home) syncProjectsHint() {
-	m.menu.SetProjectRowsAvailable(m.projects.HasProjects())
-}
-
-// focusRegion moves focus directly to the given region and re-solves the
-// layout so ring visibility and pane rects stay coherent.
-func (m *home) focusRegion(region string) {
-	m.ring.Focus(region)
-	m.relayout()
-}
-
-// cycleFocus advances the focus ring (Tab / Shift-Tab). Task edits are made
-// only inside the tasks overlay, which saves on close (handleStateTasks) —
-// the in-rail automations section is read-only, so no save is needed here.
-func (m *home) cycleFocus(back bool) tea.Cmd {
-	// A live pane preview is transient chrome, not a focus stop. Tab / Shift-Tab
-	// must DISMISS it and still advance the ring one step — never swallow the
-	// keystroke (#1705). Earlier this early-returned after cancelling the
-	// preview, so with a preview live (which the idle tick creates whenever the
-	// tree cursor names a tab the owner pane isn't bound to) reverse traversal
-	// out of a pane was impossible: the ring never moved.
-	//
-	// The step anchors on ring.Active() — cancelPanePreview(false), NOT
-	// cancelPanePreview(true) — so a Tab pressed from the tree while a
-	// background preview happens to be owned by some pane still steps from the
-	// tree, not from that pane.
-	var refresh tea.Cmd
-	if m.panePreviewTxn != nil {
-		m.suppressActivePanePreview()
-		m.cancelPanePreview(false)
-		refresh = m.panesRefresh(m.attached.Load())
-	}
-	if back {
-		m.ring.Prev()
-	} else {
-		m.ring.Next()
-	}
-	m.relayout()
-	return refresh
-}
-
-// focusAdjacentSection moves focus to the next / previous SECTION region — the
-// non-pane focus-ring stops: the instances tree, the automations rail, and the
-// projects rail. Workspace panes are skipped (Tab steps through those, 1-9 jump
-// to tabs). This is what the `]` / `[` "next / prev section" bindings drive
-// (#1706): automations and projects became their own Tab-focusable rail
-// sections (#1470 / #1588 / #1590) rather than sidebar section headers, so the
-// old header-walking JumpNextSection could never reach them — from an instance
-// row `]` was a silent no-op. Stepping the real focus ring makes `]` land on
-// Automations (dropping the instance-only `D kill` from the footer) exactly as
-// the binding advertises, and `[` walks back.
-func (m *home) focusAdjacentSection(back bool) tea.Cmd {
-	// Mirror cycleFocus: a live preview is transient chrome and must be
-	// dismissed without swallowing the keystroke (#1705 class).
-	var refresh tea.Cmd
-	if m.panePreviewTxn != nil {
-		m.suppressActivePanePreview()
-		m.cancelPanePreview(false)
-		refresh = m.panesRefresh(m.attached.Load())
-	}
-	// Step the ring, skipping workspace panes, until it rests on a section
-	// region. The tree is always a visible non-pane stop, so this always
-	// terminates; bound the loop by the ring size as a backstop.
-	for i := 0; i < len(m.visiblePanes)+3; i++ {
-		var id string
-		if back {
-			id = m.ring.Prev()
-		} else {
-			id = m.ring.Next()
-		}
-		if id == "" || !layout.IsPaneRegion(id) {
-			break
-		}
-	}
-	m.relayout()
-	return refresh
 }
 
 func (m *home) Init() tea.Cmd {

@@ -27,6 +27,15 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
 			}
 
+			// Run the deferred startup orphan sweep if this refresh repaired every
+			// skipped repo (drained skippedRepos to empty). A no-op unless the
+			// startup sweep was deferred for a known-incomplete session view; once
+			// the view is complete the destructive pass runs with no restart. The
+			// sweep runs on a separately tracked worker (not inline here) so its
+			// external Docker list/reap cannot suspend the maintenance passes
+			// below on an unavailable engine or a large orphan set.
+			launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
+
 			// Compute and persist each session's status (Ready/Dead/Running). The
 			// daemon is the sole
 			// owner of status now (#935/#960 PR 5): it computes the liveness here
@@ -98,6 +107,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			manager.FlushOwedSettlements()
 
 			manager.ResumeLimitedSessions()
+
+			// Report proposal docs that changed on disk to open Docs tabs. A stat
+			// of each watched doc; it commits nothing.
+			manager.ScanProposals()
 
 			// Handle stop before ticker.
 			select {

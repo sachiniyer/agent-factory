@@ -111,10 +111,17 @@ type SkippedRepo struct {
 	RepoID string `json:"repo_id"`
 	// Reason is a stable machine-readable code for why the repo was skipped:
 	// SkippedRepoReasonCorruptedInstancesJSON,
-	// SkippedRepoReasonUnreadableInstancesJSON or
-	// SkippedRepoReasonNewerSchemaInstancesJSON. A client treats an empty or
-	// unknown value as corrupted, which is all an older daemon ever sent.
+	// SkippedRepoReasonUnreadableInstancesJSON,
+	// SkippedRepoReasonNewerSchemaInstancesJSON or
+	// SkippedRepoReasonRowsFailedToLoad. A client treats an empty or unknown
+	// value as corrupted, which is all an older daemon ever sent.
 	Reason string `json:"reason,omitempty"`
+	// FailedRows is the number of sessions in the repo whose row the daemon
+	// could not load (worktree or tmux gone) when Reason is
+	// SkippedRepoReasonRowsFailedToLoad, so the refusal can name how many are
+	// hidden and the remedy can target them. Zero for the read/parse reasons,
+	// under which a row never reached the materializer (#4876).
+	FailedRows int `json:"failed_rows,omitempty"`
 }
 
 // SkippedRepoReasonCorruptedInstancesJSON is the reason carried for a repo whose
@@ -133,6 +140,16 @@ const SkippedRepoReasonUnreadableInstancesJSON = "unreadable-instances-json"
 // not understand (#4783). Its remedy is to upgrade, and the file must not be
 // touched: deleting or "repairing" it discards sessions this binary cannot see.
 const SkippedRepoReasonNewerSchemaInstancesJSON = "newer-schema-instances-json"
+
+// SkippedRepoReasonRowsFailedToLoad is the reason carried for a repo whose
+// instances.json parsed but some of its rows failed to load — the worktree or
+// tmux session a Live row points at is gone, not the file (#4876). It is kept
+// apart from the corrupted/unreadable reasons because the file is fine: the
+// remedy is to restore or delete the unloadable sessions, not to repair a JSON
+// error that is not there. Carried on the polling path only (a previously-
+// skipped repo whose stale reason it rewrites); a fresh repo with unloadable
+// rows at startup is out of this fix's scope.
+const SkippedRepoReasonRowsFailedToLoad = "rows-failed-to-load"
 
 // skippedRepoReasonForReadError names the reason for a repo the loader could
 // not read, so the client can give the remedy that fits the failure.
@@ -274,12 +291,18 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 // startup.
 //
 // Leaving the set takes positive evidence: the repo is in reread, meaning this
-// refresh read AND parsed its instances.json. Absence from fresh is not enough
-// (#4783). A repo can be missing from fresh because the loader could not read
-// it, or because its directory is gone, and neither is a repair; treating the
-// omission as one served a truncated snapshot as complete again. A repo fresh
-// still reports is kept with fresh's entry, so the reason tracks the file's
-// current state (a startup-corrupt file that is now unreadable says so).
+// refresh read AND parsed its instances.json INTO a fully loadable row set —
+// refreshDaemonInstances retracts a repo from reread when its file parses but
+// ANY row fails fromInstanceDataForRefresh, so a parses-but-some-row-unloadable
+// file stays a non-repair too (a partial loss is the same lie as a zero-rows
+// one, #4812, #4876). Absence from fresh is not enough (#4783). A repo can be
+// missing from fresh because the loader could not read it, or because its
+// directory is gone, and neither is a repair; treating the omission as one
+// served a truncated snapshot as complete again. A repo fresh still reports
+// is kept with fresh's entry, so the reason tracks the file's current state:
+// a previously-skipped repo whose file now parses but loses rows is rewritten
+// to rows-failed-to-load here (#4876), since the stale corrupted/unreadable
+// wording would send the operator to repair a file that is fine.
 func retainStillSkipped(prev, fresh []SkippedRepo, reread map[string]bool) []SkippedRepo {
 	if len(prev) == 0 {
 		return nil

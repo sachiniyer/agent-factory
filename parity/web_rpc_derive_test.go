@@ -16,14 +16,17 @@ type webRPCCall struct {
 
 // webCallRe accepts a literal method or a plain identifier. Identifiers are
 // resolved only from module-level const declarations below; a dynamic method
-// cannot be inventoried honestly and is reported rather than dropped.
-var webCallRe = regexp.MustCompile(`(?s)\baf(?:<[^>]*>)?\(\s*(?:"([A-Za-z0-9_]+)"|'([A-Za-z0-9_]+)'|([A-Za-z_$][A-Za-z0-9_$]*))\s*,`)
+// cannot be inventoried honestly and is reported rather than dropped. The
+// literal class includes '-': routes registered on the mux outside HTTPRoutes()
+// take kebab-case names (the web's one such call is "config-assistant"), and a
+// class that cannot spell them drops the call silently rather than reporting it.
+var webCallRe = regexp.MustCompile(`(?s)\baf(?:<[^>]*>)?\(\s*(?:"([A-Za-z0-9_-]+)"|'([A-Za-z0-9_-]+)'|([A-Za-z_$][A-Za-z0-9_$]*))\s*,`)
 
 // Module constants are unindented in the TypeScript sources. Anchoring at the
 // start of a line deliberately excludes function-local const declarations: a
 // method shared as module protocol metadata is stable, while a local/dynamic
 // alias should make the audit fail closed.
-var webModuleStringConstRe = regexp.MustCompile(`(?m)^(?:export[ \t]+)?const[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*(?::[^=\n]+)?=[ \t]*(?:"([A-Za-z0-9_]+)"|'([A-Za-z0-9_]+)')[ \t]*;`)
+var webModuleStringConstRe = regexp.MustCompile(`(?m)^(?:export[ \t]+)?const[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*(?::[^=\n]+)?=[ \t]*(?:"([A-Za-z0-9_-]+)"|'([A-Za-z0-9_-]+)')[ \t]*;`)
 
 func webModuleStringConsts(src string) map[string]string {
 	out := map[string]string{}

@@ -136,7 +136,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: origExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "restart",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "restart",
 		"restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -181,8 +181,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 
 	loadStore, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
-	loaded, err := loadStore.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, loadStore)
 	require.Len(t, loaded, 1, "the persisted instance must reload")
 
 	restored := loaded[0]
@@ -220,7 +219,7 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-restart",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-restart",
 		"account-restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -314,7 +313,7 @@ func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-respawn",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-respawn",
 		"account-respawn-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -365,7 +364,7 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-refusal",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-refusal",
 		"account-refusal-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -424,7 +423,7 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 		TmuxName: legacyName, // legacy single-session field; NO Tabs
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"),
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")),
 			SessionName:  "legacy",
 			BranchName:   "legacy-branch",
 		},

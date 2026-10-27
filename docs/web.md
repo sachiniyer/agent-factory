@@ -82,13 +82,23 @@ backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
-Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and More keys. Tap Ctrl or Alt to modify the next key, including the bar’s own
+Tab, **^C**, **Paste** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
+keys, **A−**/**A+** and More keys. The A−/A+ pair steps the terminal's text
+size by half a pixel per press and is display state, not input — it sends no
+keys to the session. Tap Ctrl or Alt to modify the next key, including the bar’s own
 keys; double tap to lock (shown
 by ▸ and an outline), then tap again to release. IME composition is sent unchanged
 and leaves armed modifiers for the next key. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.
+
+**Terminal text size.** At desktop width the terminal header carries the same
+**A−**/**A+** pair (one-pixel steps); on a phone it lives in the keybar's arrow
+row. Each device class keeps its own size — stepping one never touches the
+other — and both persist in the daemon's `[web]` config table
+(`web.terminal_font_size_phone`, `web.terminal_font_size_desktop`, each a
+number in [4, 32]) so the size survives a reload and follows every browser
+attached to this daemon.
 
 ![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
@@ -155,10 +165,11 @@ for tab and view navigation.
 The pane header's **Retry limit** appears for a session waiting on a usage limit
 and requests another attempt. If an agent or account handoff could not confirm
 mission delivery, inspect the pane first; the same place shows **Retry handoff**
-as the explicit override while automatic redelivery stays suppressed. If that retry
-delivers the mission while its final disk settlement remains pending, the web
-keeps a confirmed-mutation warning on screen because the mission has already
-landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
+as the explicit override while automatic redelivery stays suppressed, and
+**Mark delivered** to retire it without resending when the pane shows the mission
+already landed. If that retry delivers the mission while its final disk
+settlement remains pending, the web keeps a confirmed-mutation warning on screen
+because the mission has already landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
@@ -307,7 +318,9 @@ described in [Project accounts](usage-limits.md#scoping-an-account-to-a-project)
 The default `network.listen_addr` is `127.0.0.1:8443`: the browser client and JSON
 API share a plain-HTTP listener. An absent key inherits that default; explicitly
 setting `network.listen_addr = ""` disables the listener. Listener settings are
-global-only. Apply changes with `af daemon restart`.
+global-only. `af config set` — or a save in either config pane — applies them to
+the running daemon in place, no restart; a raw hand-edit still needs
+`af daemon restart`.
 
 For remote use, keep loopback and forward the port over SSH, or configure a
 network bind with authentication and transport protection. Follow

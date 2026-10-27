@@ -369,7 +369,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · s open · enter attach"},
+			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · " + helpKey(keys.KeyOpenPane) + " open · enter attach"},
 			// The unbounded jump-to-tab prompt comes from #3021; keep the issue
 			// reference in source rather than exposing it in the help overlay.
 			{helpKey(keys.KeyJumpTabPrompt), "Jump to any tab by number or name"},
@@ -661,11 +661,17 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
 		m.textOverlayDismissPolicy = nil
-		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
-		m.menu.SetState(ui.StateDefault)
+		if m.returnToNamingFormAfterDetails() {
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			dismissCmd = tea.Batch(dismissCmd, m.replayDeferredNamingReplies())
+		} else {
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+		}
 		if replayDismissKey {
 			dismissCmd = replayKeyAfterInteractiveHelpDismiss(dismissCmd, msg)
 		}

@@ -4,6 +4,9 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // #4506 review: tmux leaves pane_dead_status EMPTY for a command killed by a
@@ -46,7 +51,7 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := NewTmuxSessionWithDeps("pane-exit", "true", nil,
-				heldPaneExec(tc.pid, tc.status, tc.signal, tc.deadTime, nil))
+				heldPaneExec(t, tc.pid, tc.status, tc.signal, tc.deadTime, nil))
 			dead, status, statusKnown, at, known := ts.ProbePaneExit()
 			assert.True(t, known)
 			assert.Equal(t, tc.wantDead, dead)
@@ -64,8 +69,8 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
-	after := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
+	after := heldPaneExec(t, uncollected, "7", "", "1726000000", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-pending", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -85,13 +90,101 @@ func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	require.Equal(t, 3, reads)
 }
 
+// #4682: tmux 3.4 built with utempter can lose the root's SIGCHLD, and then it
+// collects the root only on its next SIGCHLD. The fixture's server behaves that
+// way: it reports the status only once something runs a job through it. The
+// probe must make that happen rather than wait out paneStatusWait.
+func TestProbePaneExitNudgesTheServerToCollectAStrandedRoot(t *testing.T) {
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(t, uncollected, "", "", "", nil)
+	collected := heldPaneExec(t, uncollected, "7", "", "1726000000", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-stranded", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if nudges == 0 {
+				return stranded.OutputFunc(c)
+			}
+			return collected.OutputFunc(c)
+		},
+	})
+	dead, status, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.True(t, statusKnown, "the probe never got the server to collect the root")
+	require.Equal(t, 7, status)
+	require.Equal(t, 1, nudges, "one nudge collects the root; more are noise")
+}
+
+// A server that never collects the root, however often it is nudged, gets a
+// fixed number of nudges, and the probe still answers within paneStatusWait.
+func TestProbePaneExitCapsItsNudges(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(t, uncollected, "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-never-collected", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: stranded.OutputFunc,
+	})
+	dead, _, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.False(t, statusKnown)
+	require.Equal(t, maxReapNudges, nudges)
+}
+
+// #4906 review: the nudge's log line names the version of the SERVER that lost
+// the SIGCHLD, read in the probe's own display-message. It never runs the tmux
+// client: `tmux -V` reports the installed binary, which after an upgrade is not
+// the running server, and it would start a fresh command timeout after the
+// probe's wait had already run out.
+func TestProbePaneExitLogsTheServersVersionWithoutRunningTheClient(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	dir := t.TempDir()
+	ranClient := filepath.Join(dir, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte(
+		"#!/bin/sh\ntouch "+ranClient+"\necho 'tmux 3.6'\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var info logtest.Buffer
+	previous := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&info)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(previous) })
+
+	stranded := heldPaneExec(t, uncollectedProcess(t), "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-version", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: stranded.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			last := len(c.Args) - 1
+			c.Args[last] = strings.ReplaceAll(c.Args[last], "#{version}", "3.4")
+			return stranded.OutputFunc(c)
+		},
+	})
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.NoFileExists(t, ranClient, "the probe ran the tmux client for its log line")
+	require.Contains(t, info.String(), "tmux 3.4", "the log line must name the server's version")
+	require.NotContains(t, info.String(), "3.6")
+}
+
 // Once a read has established that the root exited, a re-read that cannot
 // answer (tmux failed, the session went away) must not turn the finished command
 // back into an unknown one: tab creation and restore would leave it unstamped.
 func TestProbePaneExitKeepsTheExitWhenARereadFails(t *testing.T) {
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-reread-fails", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -119,7 +212,7 @@ func TestProbePaneExitBoundsAStalledRereadByTheWait(t *testing.T) {
 	require.NoError(t, err)
 	uncollected := uncollectedProcess(t)
 	reads := 0
-	before := heldPaneExec(uncollected, "", "", "", nil)
+	before := heldPaneExec(t, uncollected, "", "", "", nil)
 	ts := NewTmuxSessionWithDeps("pane-exit-reread-stalls", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: before.RunFunc,
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
@@ -143,6 +236,51 @@ func TestProbePaneExitBoundsAStalledRereadByTheWait(t *testing.T) {
 	case <-time.After(tmuxCommandTimeout):
 		t.Fatalf("a stalled re-read held the probe for a whole %s command timeout", tmuxCommandTimeout)
 	}
+}
+
+// #5335: a stamped dead pane whose deaths counter still reads 0 is pending,
+// not uncollectible — the queued pane-died hook has not run yet. While it is
+// pending the pid checks that prove the root is gone cannot run, so the probe
+// must not answer a conclusive dead: when the hook lands the stamp validates
+// and the probe completes; when it never lands the answer stays unknown and no
+// durable TabExit is stamped for a root that may still be running.
+func TestProbePaneExitWaitsOutAPendingStamp(t *testing.T) {
+	gone := exitedProcess(t).PID
+	fresh := paneState{deaths: "1", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/0"
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-stamp", "true", nil,
+		laggingDeathsExec(t, "", stamp, fresh, "", "", "", nil))
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+}
+
+// A pending stamp that resolves to a root still running — pane_dead fired on
+// the terminal closing, not on the process ending — must replace the
+// provisional dead answer with a live one: known=true, dead=false, and
+// promptly rather than after paneStatusWait. An older draft of the pending
+// fold kept the provisional reading because the re-read loop only discarded
+// live answers while guarding an ESTABLISHED exit; a provisional one is not.
+func TestProbePaneExitPendingStampAcceptsALiveRoot(t *testing.T) {
+	fresh := paneState{deaths: "1", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	stamp := strconv.Itoa(os.Getpid()) + ":0:/dev/pts/0"
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-live", "true", nil,
+		laggingDeathsExec(t, "", stamp, fresh, "", "", "", nil))
+	start := time.Now()
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "the stamped pid is alive — pane_dead marked the closed terminal, not the root")
+	require.Less(t, time.Since(start), paneStatusWait,
+		"a resolving live answer must not burn the whole uncollected wait")
+}
+
+func TestProbePaneExitPendingStampStaysUnknown(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	pending := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-forever", "true", nil,
+		deadPaneExec(t, "", "456:0:/dev/pts/0", pending, "", "", "", nil))
+	_, _, _, _, known := ts.ProbePaneExit()
+	require.False(t, known, "a stamp that never becomes provable must not stamp a durable exit")
 }
 
 // shrinkPaneStatusWait bounds ProbePaneExit's wait for an uncollected root, so a
