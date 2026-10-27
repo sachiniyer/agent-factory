@@ -123,6 +123,7 @@ import {
   AppShell,
   isActionableSession,
   orderedSessions,
+  clearLoginDraft,
   renderLogin,
   sessionTabs,
   canManageTabs,
@@ -532,6 +533,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: Registe
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
@@ -887,6 +889,13 @@ function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInv
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    // Reinstall this handle's Tab trap. A fresh modal already installed it in
+    // modalChrome, so this reaps and re-adds the same listener (a no-op); a
+    // retained handle remounted after a refused RPC — openModal re-inserts the
+    // existing el without rebuilding it — had its trap reaped by any modalChrome
+    // that ran in between (an intervening modal opened and closed), so the
+    // reopened error dialog would otherwise have no Tab containment.
+    m.reactivate?.();
     if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
   });
 }

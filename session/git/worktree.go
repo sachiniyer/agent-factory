@@ -68,6 +68,17 @@ type GitWorktree struct {
 	// ownership until use completes; only absence from both means no unresolved
 	// operation is known.
 	relocationRecovery *RelocationRecovery
+	// relocationRecoveryOrigin snapshots the durable recovery record a claim
+	// consumed, so a failed settle can restore the pre-claim fence rather than
+	// inferring it from the claim's freshly observed identity. A claim over an
+	// identity-unknown stalled record may resolve a fresh identity from the
+	// recorded path; the claim_stale fence a failed settle then leaves carries
+	// that identity, and restoring it would diverge from the durable record and
+	// close the identity-unknown ENOENT discharge the next same-process retry
+	// needs when the archived path disappeared between claim and settle (#5555).
+	// Process-local: only a same-process failed settle reads it; a restart
+	// reloads the durable record directly. Guarded by relocationMu.
+	relocationRecoveryOrigin *RelocationRecovery
 	// activeRelocationClaim keeps ownership visible after a durable record is
 	// resolved and consumed. It is not itself serialized; RelocationSnapshot
 	// projects it as a stale-claim record so a concurrent checkpoint can never

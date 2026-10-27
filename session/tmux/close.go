@@ -571,14 +571,7 @@ func capturePaneProcess(pid int) (proctree.Process, bool, error) {
 	return proctree.Process{}, false, fmt.Errorf("pane process %d still exists but was absent from the process-table snapshot", pid)
 }
 
-// waitForProcessExit waits on the pre-teardown process identity, not merely its
-// PID. proctree treats zombies as exited and PID reuse as a different identity,
-// so neither can masquerade as a pane that is still writing (#2103).
-func waitForProcessExit(process proctree.Process, timeout time.Duration) bool {
-	return len(proctree.WaitForExits([]proctree.Process{process}, timeout)) == 0
-}
-
-// waitForPaneExitOrRequester is waitForProcessExit with the late-registration
+// waitForPaneExitOrRequester waits on the pre-teardown process identity with the late-registration
 // window closed (#5182): the requester registry is consulted on every poll, so
 // a pane root that becomes a tracked requester mid-wait — now blocked on THIS
 // teardown's reply — stops counting as a survivor at once rather than burning

@@ -146,3 +146,72 @@ func TestTabbedWindowScrollCueIsPaneChrome(t *testing.T) {
 	require.Contains(t, header, "Scroll")
 	require.Contains(t, header, "Esc exits")
 }
+
+// TestTabbedWindowHeaderKeyboardCueStaysInsideBoundIdentity pins the #2579
+// clause separator convention once interactive mode coexists with a divergent
+// tree selection. The `· keyboard` cue is an identity fragment (joined with
+// ` · `), so it must land INSIDE the bound identity — before the `— cursor:`
+// clause — not at the end of the header where the append used to drop it inside
+// the cursor's clause.
+func TestTabbedWindowHeaderKeyboardCueStaysInsideBoundIdentity(t *testing.T) {
+	alpha := startedWindowInstance(t, "alpha")
+	beta := startedWindowInstance(t, "beta")
+	const width = 120
+
+	t.Run("selection clause still set off with a dash when not interactive", func(t *testing.T) {
+		w := newTestTabbedWindow()
+		setWindowInstance(w, alpha)
+		w.SetSelectionHint("beta · Agent")
+		header := w.renderHeader(width)
+		assert.Contains(t, header, "alpha · Agent — cursor: beta · Agent")
+		assert.NotContains(t, header, "· cursor:",
+			"the cursor clause must not read as another identity fragment")
+		assert.NotContains(t, header, "keyboard")
+	})
+
+	t.Run("keyboard cue is a fragment of the bound identity without selection", func(t *testing.T) {
+		w := newTestTabbedWindow()
+		setWindowInstance(w, alpha)
+		w.SetInteractive(true)
+		header := w.renderHeader(width)
+		assert.Contains(t, header, "alpha · Agent · keyboard")
+		assert.NotContains(t, header, "— cursor:")
+	})
+
+	t.Run("keyboard cue precedes the cursor clause, not inside it", func(t *testing.T) {
+		w := newTestTabbedWindow()
+		setWindowInstance(w, alpha)
+		w.SetSelectionHint("beta · Agent")
+		w.SetInteractive(true)
+		header := w.renderHeader(width)
+		assert.Contains(t, header, "alpha · Agent · keyboard — cursor: beta · Agent",
+			"the keyboard cue is a bound-identity fragment and must precede the cursor clause")
+		assert.NotContains(t, header, "alpha · Agent — cursor: beta · Agent · keyboard",
+			"the cue must not drop inside the cursor's clause")
+	})
+
+	t.Run("scroll clause follows the cursor clause which follows the keyboard cue", func(t *testing.T) {
+		w := newTestTabbedWindow()
+		setWindowInstance(w, alpha)
+		w.SetSelectionHint("beta · Agent")
+		w.SetInteractive(true)
+		w.ScrollUp()
+		require.True(t, w.IsInScrollMode())
+		header := w.renderHeader(width)
+		assert.Contains(t, header, "alpha · Agent · keyboard — cursor: beta · Agent — Scroll · Esc exits",
+			"identity fragments join with '·', clauses set off with '—' in order: bound identity, cursor, scroll")
+	})
+
+	t.Run("preview arm keeps keyboard as an identity fragment and ignores the selection hint", func(t *testing.T) {
+		w := newTestTabbedWindow()
+		setWindowInstance(w, alpha)
+		w.SetPreview(beta, 0, "alpha · Agent")
+		w.SetSelectionHint("beta · Agent")
+		w.SetInteractive(true)
+		header := w.renderHeader(width)
+		assert.Contains(t, header, "beta · Agent · preview · keyboard",
+			"the preview arm joins both fragments inside its identity")
+		assert.NotContains(t, header, "— cursor:",
+			"a previewing pane shows the cursor as the preview, so no cursor clause is appended")
+	})
+}
