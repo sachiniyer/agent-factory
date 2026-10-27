@@ -822,7 +822,10 @@ func parseContainerOwner(out string) (string, error) {
 // session, and after this fix it is in scope for a non-account session too
 // (previously the non-account path forced HOME=/root while running every exec
 // as a non-root default user, so provisioning failed at the first
-// `git config --global`).
+// `git config --global`). The exception is a non-account session on a
+// root-DEFAULT image: the probe reports 0:0, no preparation is needed, and the
+// step returns early with containerUser unset so the session runs exactly as it
+// did before this step existed.
 func (p *dockerProvisioner) prepareContainerUser() error {
 	if p.spec.Account.Dir != "" {
 		return p.prepareAccountUser()
@@ -846,10 +849,18 @@ func (p *dockerProvisioner) prepareContainerUser() error {
 // numeric uid:gid this way). It then chowns HOME and creates+chowns /workspace
 // as root (0:0) to that uid. Subsequent provisioning execs (configureGit,
 // cloneWorkspace) and the agent-server itself run as that user via
-// sessionExecOptions, with a HOME it can now write to. For a root-default image
-// the probe reports 0:0 and the chowns are no-ops, so the root-default path is
-// byte-for-byte unchanged (HOME stays /root, the agent-server runs as 0:0, and
-// the credential-mount targets under /root remain where agents expect them).
+// sessionExecOptions, with a HOME it can now write to.
+//
+// A root-default image (probe reports 0:0) is the exception: it returns early
+// with containerUser unset, because preparation would REGRESS it twice over.
+// The chown is not a no-op when docker.run_args bind-mounts a host directory at
+// /root or /workspace — it would re-own the operator's host files. And a set
+// containerUser makes sessionExecOptions force `-e HOME=/root` on every exec,
+// overriding a HOME the operator set via run_args (docker exec -e wins over the
+// container's configured env). With containerUser left unset every exec runs as
+// the image's default user with the container's inherited env — the exact
+// behavior non-account sessions had before this step existed — and the clone
+// creates /workspace itself, as it always has.
 func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if p.spec.Account.Dir != "" {
 		return nil
@@ -862,6 +873,9 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	owner, err := parseContainerOwner(string(out))
 	if err != nil {
 		return fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err)
+	}
+	if owner == "0:0" {
+		return nil
 	}
 	script := fmt.Sprintf("mkdir -p %s && chown %s %s %s",
 		shellQuote(dockerWorkspaceDir), owner,

@@ -107,8 +107,8 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 			if strings.Contains(joined, "sh -c") && strings.Contains(joined, "id -u") {
 				// prepareNonAccountUser probes the image's default USER. This
 				// fake image defaults to root, so the probe reports 0:0 and the
-				// subsequent chown is a no-op — mirroring a root-default BYO
-				// image, the path every shipped/tested image takes.
+				// step returns early with no chown — mirroring a root-default
+				// BYO image, the path every shipped/tested image takes.
 				return []byte("0:0\n"), nil
 			}
 			// readBanner polls via `sh -c 'cat <banner>; kill -0 <pid> && …'` —

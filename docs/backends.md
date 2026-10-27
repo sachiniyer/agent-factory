@@ -237,12 +237,16 @@ only needs the workspace tooling:
   BYO image that sets a non-root `USER` directive (a common hardening practice)
   provisions the same way a root-default image does. An account-scoped session
   probes the **mounted account**'s owner; a session with no `--account` probes
-  the **image**'s default `USER` (`id -u`/`id -g`), and in both cases af chowns
-  HOME and `/workspace` to that uid as root before provisioning as that user.
-  `stat` is account-only (it reads the mounted directory's owner); `id`,
-  `mkdir` and `chown` run on every docker session. These entries and `cat` were
-  already required and simply missing from this list (#3602 review); busybox
-  and coreutils each provide all of them.
+  the **image**'s default `USER` (`id -u`/`id -g`), and af chowns HOME and
+  `/workspace` to that uid as root before provisioning as that user. `stat` is
+  account-only (it reads the mounted directory's owner); `id` runs on every
+  non-account session, and `mkdir`/`chown` run on an account session or when
+  the probe finds a non-root default user — a root-default image on a
+  non-account session skips the chown entirely, so a host directory
+  bind-mounted at `/root` or `/workspace` is never re-owned and a HOME set via
+  `run_args` stays in effect. These entries and `cat` were already required
+  and simply missing from this list (#3602 review); busybox and coreutils each
+  provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts

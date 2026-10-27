@@ -188,10 +188,23 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 
 // TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged pins the no-
 // regression half: a root-default BYO image (the path every shipped/tested
-// image and the round-trip integration test take) provisions exactly as
-// before. The probe reports 0:0, the chown is a no-op, every provisioning exec
-// runs as 0:0 with HOME=/root, and the agent-server runs as 0:0 with HOME=/root,
-// so the credential-mount anchors under /root stay where agents expect them.
+// image and the round-trip integration test take) provisions exactly as it did
+// before prepareNonAccountUser existed. The probe reports 0:0 and the step
+// returns early — no chown runs and containerUser stays unset — so:
+//
+//   - Nothing chowns /root or /workspace. A docker.run_args bind mount there
+//     attaches a HOST directory to the container, and a chown would re-own the
+//     operator's host files (they persist after the container is reaped).
+//   - Every provisioning exec (configureGit, cloneWorkspace, agent-server,
+//     readBanner) runs as the image's default user with the container's own
+//     env: no --user and no -e. A forced `-e HOME=/root` would override a HOME
+//     the operator set via run_args (docker exec -e wins over the container's
+//     configured env) — the second regression this early return prevents.
+//
+// The one exec that still carries --user is execSh's `chmod +x` of the copied
+// `af` binary: docker cp lands it root-owned so only root can chmod it, which
+// non-root images require — and on a root-default image running as 0:0 is the
+// same user the image default resolves to anyway.
 func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	repo := dockerNonAccountProvisionFixture(t, "rootdefault/image:latest")
 	var calls [][]string
@@ -204,25 +217,58 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	})
 	require.NoError(t, err, "a non-account session on a root-default image must provision; calls=%v", calls)
 
-	// The probe reports 0:0 and every subsequent exec runs as 0:0 with HOME=/root.
+	var sawChmod bool
 	for _, call := range calls {
 		if len(call) == 0 || call[0] != "exec" {
 			continue
 		}
 		joined := strings.Join(call, " ")
-		if strings.Contains(joined, "id -u") {
-			continue // the probe itself carries no --user by design
+		require.NotContainsf(t, joined, "chown",
+			"a root-default image must not be chown-prepared — a run_args bind mount at /root or /workspace would re-own host files; call=%v", call)
+		require.NotContainsf(t, joined, "mkdir",
+			"a root-default image must not be chown-prepared — the clone creates /workspace itself, as before; call=%v", call)
+		if strings.Contains(joined, "chmod +x") {
+			sawChmod = true
+			require.Containsf(t, joined, "--user 0:0",
+				"execSh's chmod must run as root — docker cp lands the binary root-owned; call=%v", call)
+			continue
 		}
-		require.Containsf(t, joined, "--user 0:0",
-			"a root-default image must run every exec as 0:0 (same as the image default); call=%v", call)
-		require.NotContainsf(t, joined, "HOME=/af-home",
-			"a root-default non-account session keeps HOME=/root (no /af-home leak from the account path); call=%v", call)
+		for _, arg := range call {
+			require.NotEqualf(t, "--user", arg,
+				"a root-default image must exec as the image's default user, not a forced uid (master behavior); call=%v", call)
+			require.NotEqualf(t, "-e", arg,
+				"a root-default image must not force -e HOME — a HOME the operator set via run_args must survive (docker exec -e would override it); call=%v", call)
+			require.Falsef(t, strings.HasPrefix(arg, "HOME="),
+				"a root-default image must not force HOME — a run_args HOME must survive; call=%v", call)
+		}
 	}
-	// HOME stays /root: the credential-mount anchors and the doc's
-	// "Container-native HOME and PATH remain owned by the image" claim hold.
-	bannerRead := findExecCall(calls, "cat "+dockerBannerPath)
-	require.NotNil(t, bannerRead)
-	require.Contains(t, strings.Join(bannerRead, " "), "HOME="+dockerContainerHome)
+	require.True(t, sawChmod, "copyAfBinary's chmod must still run; calls=%v", calls)
+}
+
+// TestPrepareNonAccountUser_RootDefaultSkipsPreparation pins the unit contract
+// behind the no-regression test above: when the id probe reports 0:0 the step
+// performs no second exec (no mkdir/chown that could re-own a host directory
+// bind-mounted at /root or /workspace) and leaves containerUser unset, so
+// sessionExecOptions() returns nil and every later exec inherits the
+// container's configured env — including a HOME the operator set via
+// docker.run_args.
+func TestPrepareNonAccountUser_RootDefaultSkipsPreparation(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return []byte("0:0\n"), nil
+	}))
+	p := &dockerProvisioner{containerID: "cid"}
+
+	require.NoError(t, p.prepareNonAccountUser())
+	require.Len(t, calls, 1,
+		"a 0:0 probe must be the only docker call — no chown/mkdir may run against a root-default image; calls=%v", calls)
+	require.Contains(t, strings.Join(calls[0], " "), "id -u",
+		"the single call must be the id probe; calls=%v", calls)
+	require.Equal(t, "", p.containerUser,
+		"containerUser must stay unset on a root-default image so sessionExecOptions adds no --user/-e HOME")
+	require.Empty(t, p.sessionExecOptions(),
+		"an unset containerUser must yield no exec overrides — execs inherit the container env, run_args HOME included")
 }
 
 // TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate pins the fail-
