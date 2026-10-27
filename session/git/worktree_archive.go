@@ -39,6 +39,47 @@ func RestoreWorktreePath(repoPath, title, branchName string) (string, error) {
 	return resolveWorktreePlacement(cfg, repoRoot, worktreeDir, title, branchName)
 }
 
+// RestoreWorktreeBasePath is RestoreWorktreePath without the collision suffix:
+// the preferred placement a restore of this session lands on whenever that path
+// is free. Unlike RestoreWorktreePath it does not change when something already
+// occupies the path, which is what lets a restore retry recognize a checkout an
+// earlier restore of the same row placed there (#5102).
+func RestoreWorktreeBasePath(repoPath, title, branchName string) (string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
+	repoRoot, err := findGitRepoRoot(repoPath)
+	if err != nil {
+		return "", err
+	}
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return preferredWorktreePlacement(cfg, repoRoot, worktreeDir, title, branchName)
+}
+
+// SameWorktreePath reports whether a and b name the same location once
+// symlinks are resolved, with the same bounded, single-flight normalization
+// the worktree listing comparison uses (git reports the resolved path; a
+// recorded one may go through a symlink, as macOS's temp dir does). An error
+// means a path could not be normalized in time and nothing may be concluded.
+func SameWorktreePath(a, b string) (bool, error) {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true, nil
+	}
+	ra, err := boundedResolveForCompare(a)
+	if err != nil {
+		return false, err
+	}
+	rb, err := boundedResolveForCompare(b)
+	if err != nil {
+		return false, err
+	}
+	return ra == rb, nil
+}
+
 // ErrRepoGone is returned by RestoreWorktreeTo when the origin repository this
 // worktree is registered against no longer exists (deleted, unmounted, or no
 // longer a git repository). A worktree cannot be re-registered without its

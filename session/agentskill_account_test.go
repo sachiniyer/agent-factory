@@ -257,9 +257,14 @@ func TestInjectSystemPrompt_WritesTheGuidanceWhereAScopedSessionReads(t *testing
 		envVar   string
 		skillAt  func(root string) string
 		accounts string
+		program  string
 	}{
-		{"gemini", "GEMINI_CLI_HOME", geminiSkillPathUnder, "gemini"},
-		{"codex", "CODEX_HOME", codexSkillPathUnder, "codex"},
+		{"gemini", "GEMINI_CLI_HOME", geminiSkillPathUnder, "gemini", "gemini"},
+		// codex's skill is also a filesystem seam — the appended -c is the
+		// unrelated startup update check suppression every codex launch carries
+		// (#5238), not a skill rewrite.
+		{"codex", "CODEX_HOME", codexSkillPathUnder, "codex",
+			"codex -c check_for_update_on_startup=false"},
 	} {
 		t.Run(tc.agent, func(t *testing.T) {
 			agentHome(t)
@@ -270,8 +275,8 @@ func TestInjectSystemPrompt_WritesTheGuidanceWhereAScopedSessionReads(t *testing
 
 			program := injectSystemPrompt(tc.agent,
 				resolveSkillTarget(&Instance{Program: tc.agent, Account: "work"}, tc.agent))
-			require.Equal(t, tc.agent, program,
-				"the skill is placed through the filesystem; the command is not rewritten")
+			require.Equal(t, tc.program, program,
+				"the skill is placed through the filesystem; the command gains no skill rewrite")
 
 			require.FileExists(t, tc.skillAt(dir),
 				"the scoped session reads its account directory, so the guidance has to be there")

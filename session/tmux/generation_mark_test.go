@@ -344,7 +344,8 @@ func TestWedgedIdentityProbeSpendsOneBudget(t *testing.T) {
 	require.Zero(t, m.captureCalls.Load(),
 		"an identity probe that consumed the deadline must not be followed by a capture spending a second one")
 	require.False(t, session.monitor.dead, "an unanswered probe is unknown — never a latchable death")
-	require.Contains(t, errs.String(), "error capturing pane content")
+	require.Contains(t, errs.String(), "identity probe failed in status monitor",
+		"the poll ended on the probe's error, not a capture's — the log must say which")
 }
 
 // TestIdentityProbeRunsOnACadenceNotEveryPoll pins the gate from the #4473

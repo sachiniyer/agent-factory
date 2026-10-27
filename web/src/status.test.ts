@@ -60,6 +60,17 @@ test("idle detail renders only mechanical reason values and observed churn age",
     ),
     "restore gave up after 6 attempts: agent exited at startup",
   );
+  assert.equal(
+    idleReasonDetail(
+      sess({
+        liveness: Liveness.Lost,
+        idle_reason: "restore-waiting-on-environment",
+        lost_restore_wait: { attempts: 3, error: "no space left on device" },
+      }),
+      now,
+    ),
+    "restore is waiting on the environment (3 environmental failures): no space left on device",
+  );
 });
 
 test("operator status groups every mechanical idle reason by the action it needs", () => {

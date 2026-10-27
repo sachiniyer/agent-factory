@@ -342,7 +342,7 @@ that was quietly reachable (#2521).
 
 ### Making docker the default backend for a repo
 
-To run a repo's sessions in containers by default, set `backend = "docker"` in
+To run a repo's sessions in containers by default, set `"backend": "docker"` in
 its `.agent-factory/config.json`. This is an operator decision, not a default af
 ships — the steps below must be done in order, because the flip does **not**
 degrade gracefully on an unprepared box:
@@ -423,7 +423,7 @@ back (see [Archive & restore](#archive-restore)).
 | `ssh.host` | yes | The remote host (`host` or `host:port`) the session runs on. |
 | `ssh.user` | no | The SSH login user (default: the current OS user). |
 | `ssh.port` | no | The SSH port (default: 22). Give the port **either** here or as `host:port` in `ssh.host`, not both with different values — a conflict is rejected with an error naming both, rather than one silently winning. Identical values are fine. |
-| `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
+| `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. At session create af refuses a path it cannot hand to ssh — missing, unreadable, not a regular file, or containing `%` (ssh expands `%` tokens such as `%h`/`%d` when it loads the key, so af would verify one file while ssh reads another) — rather than silently authenticating with agent or default keys as the wrong identity. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 
 > **Your `~/.ssh/config` does not apply, and never has.** af runs `ssh` with
