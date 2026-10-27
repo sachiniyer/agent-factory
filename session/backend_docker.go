@@ -90,11 +90,6 @@ const (
 	// with no af.home label (a pre-upgrade one) is treated as not-ours and left
 	// alone. The value is the AF home path — human-legible in `docker inspect`.
 	dockerHomeLabel = "af.home"
-	// dockerEngineIDFormat selects the daemon's stable, non-secret identity from
-	// `docker info`. Cleanup tombstones persist this value so a daemon restart
-	// cannot redirect `docker rm -f` to whichever engine the client happens to
-	// target later (#2382).
-	dockerEngineIDFormat = "{{.ID}}"
 )
 
 // docker command timeouts. Provisioning steps (run/clone/cp/exec) get a generous
@@ -114,11 +109,6 @@ var (
 	dockerBannerPollTimeout  = 45 * time.Second
 	dockerBannerPollInterval = 400 * time.Millisecond
 )
-
-// dockerReapTimeout bounds the `docker rm -f` container reap. A var (not a const)
-// only so tests can shorten it to exercise the deadline path; production never
-// reassigns it. Mirrors networkGitTimeout / tmuxCommandTimeout.
-var dockerReapTimeout = 30 * time.Second
 
 // dockerWaitDelay bounds how long cmd.Wait blocks after the docker CLI (or the
 // origin-lookup git in originRemoteURL) exits or is killed on its deadline,
@@ -231,7 +221,7 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
 		}
 		proof := accountLaunchProof(resolvedProgram, resolvedProgram,
-			builtInProgramOverride(cfg, spec.Program, resolvedProgram))
+			builtInProgramOverride(cfg, spec.Program, resolvedProgram), nil, "")
 		// The built-in proof is established in the host namespace. Docker may not
 		// contain that path (or may contain a different file there), so never grant
 		// its executable identity across the container boundary. A bare agent name
@@ -320,21 +310,6 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	return res, nil
 }
 
-// reapProvisionFailure cleans up a container created by a failed provision. No
-// Instance record exists to carry a future retry, so a reap that does not succeed
-// must remain visible to the caller with both causes and the orphan risk (#2590).
-func (p *dockerProvisioner) reapProvisionFailure(provisionErr error) error {
-	if p.containerID == "" {
-		return provisionErr
-	}
-	reapErr := p.reap()
-	if reapErr == nil {
-		return provisionErr
-	}
-	return fmt.Errorf("backend=docker: provisioning failed and cleanup of container %s for session %q did not complete; a container may still be running; inspect it before retrying: %w",
-		p.shortID(), p.spec.Title, errors.Join(provisionErr, reapErr))
-}
-
 // dockerProvisioner holds the state of one container provisioning so its steps
 // (run/clone/cp/exec/port) and its reap closure share the container ID.
 type dockerProvisioner struct {
@@ -382,10 +357,39 @@ type dockerProvisioner struct {
 // provision runs the full container lifecycle and returns the wiring a docker
 // session needs. Each step wraps docker's combined output in the error so a
 // failure is self-diagnosing.
+//
+// EVERY step's failure — not only `docker run`'s — can be the data root
+// answering ENOSPC: the engine writes there when it creates the container's
+// layer, and the in-container steps write through docker exec into the
+// writable layer on the same filesystem. docker's combined output loses that
+// errno as text the lost-restore classifier refuses to read, so any failed
+// step re-derives the verdict from the data-root filesystem itself and joins
+// it BEFORE the error returns to Provision's reap — reaping the failed
+// container frees its partial layer data and could mask the fullness being
+// measured (#5382). The probe still yields nothing when the engine is remote,
+// foreign-namespaced, or reports free capacity — no invented errnos — and it
+// only runs for step failures that could have BEEN a data-root write: each
+// step's error carries its operation class (dockerStepError), so a local
+// parse or validation failure on a coincidentally-full root stays structural
+// instead of waiting on the environment's unbounded budget (#5382 review).
 func (p *dockerProvisioner) provision() (ProvisionResult, error) {
+	res, err := p.provisionSteps()
+	if err != nil {
+		var se *dockerStepError
+		if errors.As(err, &se) && se.op != dockerOpLocal {
+			if evidence := p.dockerRootFSFullEvidence(se.op); evidence != nil {
+				err = errors.Join(err, evidence)
+			}
+		}
+		return ProvisionResult{}, err
+	}
+	return res, nil
+}
+
+func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if p.spec.Account.Dir != "" {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	} else {
 		// A remote Docker engine publishes the agent-server port on the engine
@@ -395,16 +399,16 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 		// reason (bind-mount identity); refuse here too, before `docker run`, so a
 		// non-account session fails fast with the remote-engine cause instead.
 		if err := p.ensureDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err)
+		return ProvisionResult{}, dockerStepErr(fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err), dockerOpLocal)
 	}
 	p.engineID = engineID
 	if err := p.runContainer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
@@ -413,30 +417,30 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	// reapProvisionFailure tears the container down on the way out — a shadowed
 	// account never reaches the agent. No-op for a session with no account.
 	if err := p.verifyAccountRuntimeBoundary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 	if err := p.prepareAccountUser(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
 	if err := p.configureGit(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.cloneWorkspace(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	if err := p.startAgentServer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	banner, err := p.readBanner()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	hostPort, err := p.publishedPort()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 
 	endpoint := &AgentServerEndpoint{
@@ -447,8 +451,12 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
 	return ProvisionResult{
 		Backend: &dockerBackend{
-			containerID: p.containerID,
-			provisioner: p,
+			// The command the in-container agent-server was bound to launch
+			// (#5108) — recorded as runtime evidence when the launch RPC
+			// returns.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			containerID:        p.containerID,
+			provisioner:        p,
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,
@@ -549,6 +557,8 @@ func (p *dockerProvisioner) runContainer() error {
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
 		}
+		// The data-root capacity evidence joins at the provision() boundary,
+		// shared with every other provisioning step (#5382).
 		return fmt.Errorf("backend=docker: `docker run` failed for image %q: %s: %w", p.image, strings.TrimSpace(string(out)), err)
 	}
 	id := strings.TrimSpace(string(out))
@@ -632,7 +642,14 @@ func (p *dockerProvisioner) copyAfBinary() error {
 		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
-		return fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err)
+		// execSh pins --user 0:0 for account sessions; otherwise the exec
+		// inherits the image's USER. Mark it so the callsite's daemon-write
+		// default doesn't mislabel an exec that ran as a container user.
+		op := dockerOpSessionExec
+		if p.spec.Account.Dir != "" {
+			op = dockerOpRootExec
+		}
+		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), op)
 	}
 	return nil
 }
@@ -645,7 +662,9 @@ func (p *dockerProvisioner) copyAfBinary() error {
 func (p *dockerProvisioner) startAgentServer() error {
 	filteredInner, err := p.agentServerCommand()
 	if err != nil {
-		return err
+		// A local construction failure, not a docker round-trip — keep the
+		// callsite's session-exec default from lending it the fs verdict.
+		return dockerStepErr(err, dockerOpLocal)
 	}
 	filteredInner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
 
@@ -710,8 +729,17 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 			logArgs = append(logArgs, p.sessionExecOptions()...)
 			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
 			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
-			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
+			bannerErr := fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
+			// A banner that never appeared is always writer-side evidence:
+			// the reads may keep failing (daemon exec state is a data-root
+			// write), or the file exists empty because the startup shell's
+			// redirect created it while the agent-server's own write died
+			// ENOSPC — a successful `cat` only proves the file is
+			// readable, never that the writer could populate it (#5382
+			// review). Classify with the session writer's privilege so the
+			// Bavail window is seen either way.
+			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpSessionExec)
 		}
 		// The poll interval bounds how long we can outrun the deadline; use a
 		// non-wall-clock sleep so it is deterministic under test time control.
@@ -733,128 +761,6 @@ func (p *dockerProvisioner) publishedPort() (string, error) {
 	return port, nil
 }
 
-// reap removes the container. It runs on the session's Kill (after the in-container
-// workspace is torn down over REST), on a provisioning failure, and on a
-// bad-endpoint NewInstance failure — so a container is never leaked.
-//
-// It is memoized but only for a reap that COMPLETED: a success, or a failure docker
-// ANSWERED with, latches (reaped=true, outcome in reapErr) so the repeated Kill
-// retries and the Kill-vs-provision-failure race collapse to that one result.
-//
-// A TIMEOUT deliberately does NOT latch. The `docker rm -f` was SIGKILLed mid-reap,
-// so it did not complete and the container may STILL be running; the daemon's
-// kill-retry (finishUserKill, on every poll for the retained record) must therefore
-// be able to actually re-run `docker rm -f` rather than see a stale nil. This is the
-// #2063-review defect the naive sync.Once had: it latched on the timeout too, so the
-// second reap() skipped the closure and returned nil (reapErr was a per-call local),
-// the row was deleted, and the container was orphaned exactly one poll later —
-// retention that lasted a single tick. Not latching a timeout makes retention
-// durable AND the reap genuinely retry-able.
-//
-// While a reap keeps timing out it keeps returning the ErrWorkspaceStateUnknown
-// sentinel (row retained); once docker answers — a later `docker rm -f` succeeds or
-// reports (e.g. "No such container", already gone) — it latches and the row may go.
-// It never silently returns nil while the container may still be leaked.
-func (p *dockerProvisioner) reap() error {
-	// Held across the docker call so concurrent reaps serialize (no double
-	// `docker rm -f`) and the latch is read/written race-free — the same
-	// mutual-exclusion the sync.Once gave, minus its permanent latch.
-	p.reapMu.Lock()
-	defer p.reapMu.Unlock()
-	if p.reaped {
-		return p.reapErr
-	}
-	if p.containerID == "" {
-		p.reaped = true
-		return nil
-	}
-	// Own the context here (rather than via p.docker) so a tripped deadline is
-	// distinguishable from a reap that docker ANSWERED with an error — the two mean
-	// opposite things for the record (#2049).
-	ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
-	defer cancel()
-	if p.verifyEngineOnReap {
-		if strings.TrimSpace(p.engineID) == "" {
-			reapErr := fmt.Errorf("%w: backend=docker: refusing to reap container %s for session %q because its cleanup handle predates Docker engine identity tracking; inspect the original Docker engine and remove the container manually",
-				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title)
-			log.WarningLog.Printf("%v", reapErr)
-			return reapErr
-		}
-		currentEngineID, err := currentDockerEngineID(ctx, p.dockerEnvironment())
-		if err != nil {
-			reapErr := fmt.Errorf("%w: backend=docker: cannot verify the Docker engine before reaping container %s for session %q; restore Docker access and retry: %v",
-				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title, err)
-			log.WarningLog.Printf("%v", reapErr)
-			return reapErr
-		}
-		if currentEngineID != p.engineID {
-			reapErr := fmt.Errorf("%w: backend=docker: refusing to reap container %s for session %q because the current Docker engine is %q, but the cleanup handle belongs to %q; select the original Docker context or DOCKER_HOST and retry",
-				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title, currentEngineID, p.engineID)
-			log.WarningLog.Printf("%v", reapErr)
-			return reapErr
-		}
-	}
-	out, err := dockerExec(ctx, p.dockerEnvironment(), "rm", "-f", p.containerID)
-	if err == nil {
-		p.reaped = true
-		p.reapErr = nil
-		log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
-		return nil
-	}
-	reapErr := fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
-	// The #914 guard: classify a TIMEOUT only when err != nil AND the ctx deadline
-	// tripped, so a bare exec.ErrWaitDelay that dockerExec already normalized to
-	// success (err == nil) never reaches here.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// Unknown-state, and NOT latched: RETAIN the row now and re-run on the next
-		// reap. exec.CommandContext reports the killed process, not the context
-		// sentinel, so join ctx.Err explicitly and keep the deadline classifiable by
-		// callers (#2049 classification + #2063 review + #2590 review).
-		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, errors.Join(reapErr, ctx.Err()))
-		log.WarningLog.Printf("%v", reapErr)
-		return reapErr
-	}
-	// docker ANSWERED with an error: the reap completed and TOLD us something, so it
-	// latches as a KNOWN-state error and the row may be deleted, per the documented
-	// deleteSessionRecord contract. Latching also stops retries from re-running a
-	// command that will keep answering the same way.
-	p.reaped = true
-	p.reapErr = reapErr
-	log.WarningLog.Printf("%v", reapErr)
-	return reapErr
-}
-
-// currentEngineID returns the daemon identity that the provisioner's Docker
-// client currently targets. New containers record it before `docker run`, and
-// restored reapers prove the same identity again before issuing the destructive
-// command. It deliberately stores no endpoint, context path, or credential.
-func (p *dockerProvisioner) currentEngineID(timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return currentDockerEngineID(ctx, p.dockerEnvironment())
-}
-
-// currentDockerEngineID takes the environment explicitly for the same reason
-// every other docker invocation here does: the CLI is spawned with a filtered
-// environment, never the host's, so an unlisted credential cannot reach it.
-// `docker info` is no exception — it is a docker CLI call like any other, and
-// leaving it on the ambient environment would be a hole in the boundary that
-// happens to be on the reap path rather than the run path.
-func currentDockerEngineID(ctx context.Context, environ []string) (string, error) {
-	out, err := dockerExec(ctx, environ, "info", "--format", dockerEngineIDFormat)
-	if err != nil {
-		return "", fmt.Errorf("`docker info` could not report the engine identity: %w", err)
-	}
-	id := strings.TrimSpace(string(out))
-	if id == "" {
-		return "", errors.New("`docker info` returned an empty engine identity")
-	}
-	if len(id) > 256 || len(strings.Fields(id)) != 1 {
-		return "", errors.New("`docker info` returned a malformed engine identity")
-	}
-	return id, nil
-}
-
 // docker runs `docker <args...>` with a timeout and returns its combined output.
 func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -863,7 +769,14 @@ func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byt
 }
 
 func (p *dockerProvisioner) agentName() string {
-	agent := sessionenv.AgentForCommand(p.program)
+	// The grant predicate, not the identity classifier: the credential mounts
+	// and run_args validation this feeds install operator material, so the
+	// agent name must be one af can attribute to the operator. The remote
+	// variant is the honest one here — the executable resolves on the image's
+	// filesystem, which the host cannot stat; the container's clone lives at
+	// dockerWorkspaceDir, so an absolute program path inside it resolves to
+	// repository content and earns no grant (#5265).
+	agent := sessionenv.GrantAgentForRemoteCommand(p.program, dockerWorkspaceDir)
 	if agent == "" && strings.TrimSpace(p.program) == "" {
 		return tmux.ProgramClaude
 	}

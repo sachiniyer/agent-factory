@@ -155,7 +155,13 @@ func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string
 func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord) string {
 	parts := []string{
 		"ssh",
-		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHostsPath),
+		// Two-layer quoting, same discipline as ssh_command.go (see sshConfigQuote):
+		// this command runs through the shared `sh -c '<sshCmd> "$@"'` wrapper, so
+		// shellQuote alone is consumed by the outer shell before ssh sees the value,
+		// and ssh re-splits a bare UserKnownHostsFile value on whitespace. An AF
+		// home containing a space (the hook store lives under AF home) would
+		// otherwise never be the file hookProvisionKnownHosts just wrote.
+		"-o", shellQuote("UserKnownHostsFile=" + sshConfigQuote(knownHostsPath)),
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
 		// operator's matching Host block could hand OpenSSH a different key and
@@ -174,6 +180,29 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 		// hook provisioning that returns a host_key needs OpenSSH >= 8.5 on the daemon
 		// host. See docs/remote-hooks.md.
 		"-o", "KnownHostsCommand=none",
+		// The transport always supplies its own remote script — buildRunCommand runs
+		// `sh -c '<sshCmd> "$@"' af-sandbox <script>`, so every step (mktemp, git
+		// clone, cat > file, nohup af …) reaches ssh as a command-line remote command.
+		// ssh_config's RemoteCommand is the ONE directive that makes ssh refuse that
+		// combination outright: "Cannot execute command-line and remote command.", at
+		// option parsing, before any af command reaches the remote. That is total
+		// transport breakage — every provision step AND the live-teardown sandbox sub-
+		// reap fail — for a directive THIS command cannot exclude with `-F none`,
+		// because it deliberately reads the operator's ssh_config (for User resolution
+		// and key verification — see KnownHostsCommand above). ssh_command.go names
+		// RemoteCommand as the #1 directive `-F none` exists to exclude on backend=ssh:
+		// "af always supplies its own remote script, and ssh refuses the combination
+		// outright … Every provision AND every reap fails." This command is in exactly
+		// that situation, so the pin is the only thing between a matching `Host` block
+		// and the whole transport ceasing to run.
+		//
+		// All-upside, unlike the other config-injected directives this command leaves
+		// unpinned (SendEnv, ForwardAgent): RemoteCommand=none is the documented
+		// default (no command), the transport never wants a config-injected one, and
+		// no hook workflow depends on it — af's commands are one-shot scripts, not
+		// interactive sessions. It arrived in OpenSSH 7.6, beneath the 8.5 floor
+		// KnownHostsCommand=none above already requires, so it costs no version.
+		"-o", "RemoteCommand=none",
 		"-o", "StrictHostKeyChecking=yes",
 		// The script vouches for the key, so there is nobody to ask. Refuse
 		// rather than hang forever on a prompt no unattended provision can answer.
@@ -186,7 +215,7 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 	if user := strings.TrimSpace(record.User); user != "" {
 		target = user + "@" + target
 	}
-	parts = append(parts, shellQuoteSandbox(target))
+	parts = append(parts, shellQuote(target))
 	return strings.Join(parts, " ")
 }
 
@@ -198,7 +227,15 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 // provisionHost can stop doing it while the test stays green — which is exactly
 // the gap this closes. Production leaves it alone.
 var newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
-	return &sandboxProvisioner{spec: spec, sshCmd: sshCmd, afBin: afBin, program: program}
+	return &sandboxProvisioner{
+		spec:    spec,
+		sshCmd:  sshCmd,
+		afBin:   afBin,
+		program: program,
+		// Errors from the shared transport must name THIS backend. An operator whose
+		// provision_cmd clone failed should not be sent to look up sandbox_ssh.
+		backendLabel: string(BackendHook),
+	}
 }
 
 // hookProvisionPinnedRecord normalizes a record for pinning: the port is split
@@ -414,8 +451,12 @@ func (p *hookProvisioner) provisionedBackend() Backend {
 	// breaking the very teardown this field exists to complete.
 	cleanup.HasKnownHostsDir = true
 	return &HookBackend{
-		provisioner: p,
-		cleanup:     cleanup,
+		// The command the agent-server af started on the provisioned host was
+		// bound to launch (#5108) — recorded as runtime evidence when the
+		// launch RPC returns.
+		remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.environmentProgram()},
+		provisioner:        p,
+		cleanup:            cleanup,
 	}
 }
 
@@ -445,16 +486,34 @@ func (p *hookProvisioner) runProvisionCmd() (*hookProvisionRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("provision_cmd failed (%s): %w%s", p.hooks.ProvisionCmd, err, hookOutputSuffix(out.Combined()))
 	}
-	// provision_cmd has EXITED successfully. Everything after this — cloning,
-	// streaming the binary, starting the server — can take minutes, and a pgid the
-	// kernel has reclaimed may be reissued to an unrelated process in that window.
-	// So the group id is spent here: a later failure must never SIGKILL a group
-	// this script no longer owns. (A failure of provision_cmd ITSELF still
-	// quiesces, because the id is still live at that point.)
-	p.launchPgid = 0
-
+	// provision_cmd has EXITED 0. The stdout contract is parsed next, and the
+	// spend of the group id is deferred to the success branch below for a reason
+	// tied to the parse's own timing.
+	//
+	// Everything AFTER the parse — cloning, streaming the binary, starting the
+	// server — can take minutes, and a pgid the kernel has reclaimed may be
+	// reissued to an unrelated process in that window. So the group id is spent
+	// before that phase begins: a later transport failure must never SIGKILL a
+	// group this script no longer owns.
+	//
+	// But the PARSE ITSELF returns within milliseconds of the script exiting, so
+	// the pgid is maximally fresh on every stdout-contract-violation branch —
+	// exactly the freshness quiesceLaunchGroup requires ("only on the failure of
+	// a launch that has just returned"). A provision_cmd that exits 0 with
+	// unparseable stdout while a backgrounded child is still provisioning must
+	// let provisionHostOrReap quiesce that child before delete_cmd runs, or the
+	// orphan finishes creating the resource after a reap that reported success
+	// on a slug it could not find — the silent-orphan harm quiesceLaunchGroup's
+	// own comment says it exists to prevent (#2440/#1955). Spending the id before
+	// the parse would leave that quiesce a no-op on every parse-failure return.
+	//
+	// The launch path keeps the pgid set through its own stdout parse for the
+	// same reason (see launch in backend_hook_backend.go); this matches it.
 	record, sawJSON, violation := parseHookProvisionRecord(string(out.Stdout))
 	if record != nil {
+		// Success: spend the pgid before the minutes-long transport phase begins,
+		// so a later failure there can never signal a recycled group.
+		p.launchPgid = 0
 		return record, nil
 	}
 	if violation != nil {

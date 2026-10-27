@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -31,8 +30,8 @@ type home struct {
 
 	// -- Storage and Configuration --
 
-	program string
-	repoID  string
+	programChoice
+	repoID string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
@@ -386,6 +385,8 @@ type home struct {
 	handoffChoices  []string
 	handoffAccounts []string
 	handoffWarnings []string
+	// handoffResolvedAgents is the picker load's resolved_agents, kept for the confirm step's carry-intended judgment (#4367/#4504); nil -> enum like resolvedFor.
+	handoffResolvedAgents map[string]string
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that
@@ -432,6 +433,15 @@ type home struct {
 	// would silently replace it — putting the session on an identity the user had
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
+	// pendingProgramChosen records that the USER confirmed this form's program
+	// through the picker (#4889 review) — including deliberately re-picking the
+	// value already shown. A confirmed choice submits the concrete program on
+	// the wire; an untouched config-derived seed submits "" so the daemon
+	// resolves default_program at create time. String equality cannot see the
+	// re-picked-same-value case — this flag is what can. Reset by
+	// startNewInstance; set by a program-picker submit and by a failed
+	// create's draft restore.
+	pendingProgramChosen bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the
@@ -442,7 +452,27 @@ type home struct {
 	// rows are built from the daemon's registry (plus a leading "ambient identity"
 	// row), so the overlay's index cannot be mapped back through any local list.
 	accountPickerChoices []accountChoice
-
+	// accountDefaultSeq is the issuance counter fetchAccountDefault stamps on
+	// each accountDefaultMsg it launches. Two preselect fetches can be in flight
+	// at once — a submit-then-fail restore re-fires one while the form-open fetch
+	// still pends — and the older reply landing last must not overwrite the
+	// newer answer (#4889 review).
+	accountDefaultSeq int64
+	// remoteDefaultPending marks the window between a remote-target form open
+	// (or implicit restore) and the ListPrograms reply: submitting "" before the
+	// daemon's resolved default corrects the field would create a program the
+	// user never saw (#4889 review).
+	remoteDefaultPending bool
+	// remoteProgramCatalog is the program list the remote daemon reported,
+	// which the program picker offers instead of the local
+	// tmux.SupportedPrograms — a newer daemon can support agents this client
+	// lacks (#4889 review).
+	remoteProgramCatalog []string
+	// programPickerChoices is the option list the open program picker is
+	// showing, held alongside the overlay for the same reason
+	// accountPickerChoices is: a remote catalog cannot be mapped back through
+	// the local enum.
+	programPickerChoices []string
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
 	// (capture-pane via runMetadataTick, refreshPanesCmd) is
@@ -457,7 +487,7 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
+func newHome(ctx context.Context, program, configuredDefault string, repo *config.RepoContext) *home {
 	// repo is nil when af was launched outside a git repository (#2477): the TUI
 	// opens in registry mode with no active project, and the user selects one
 	// from the Projects section. An empty repoID makes the cold-start snapshot an
@@ -476,20 +506,14 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	ui.ApplyAppearance(appConfig.Appearance)
 	applyTheme()
 
-	// Apply configured detach key. The loader (sanitizeDetachKeys) already
-	// warns-and-defaults a bad hand-edited value, so this parse normally
-	// succeeds; if a value ever reaches here unparseable, fall back to the
-	// default rather than crashing the TUI on a config typo (#2556).
-	if appConfig.DetachKeys != "" {
-		detachKeys := appConfig.DetachKeys
-		b, err := config.ParseDetachKey(detachKeys)
-		if err != nil {
-			log.WarningLog.Printf("invalid detach_keys %q (%v); using default", detachKeys, err)
-			detachKeys = config.DefaultDetachKeys()
-			b, _ = config.ParseDetachKey(detachKeys)
-		}
-		tmux.SetDetachKey(b, detachKeys)
-	}
+	// Apply configured detach key. config.ApplyConfiguredDetachKey is the shared
+	// wiring site (also called by `af sessions attach`), so the matcher in
+	// apiclient reads the configured key on every fresh process. The loader
+	// (sanitizeDetachKeys) already warns-and-defaults a bad hand-edited
+	// value, so the parse inside it normally succeeds; if a value ever
+	// reaches it unparseable, it falls back to the default rather than
+	// crashing the TUI on a config typo (#2556).
+	config.ApplyConfiguredDetachKey(appConfig.DetachKeys)
 
 	// Load application state (seen-help-screens flags; #960 PR 6 the TUI no
 	// longer reads instances.json — the daemon owns it and answers Snapshot).
@@ -524,7 +548,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
 		appConfig:                   appConfig,
-		program:                     program,
+		programChoice:               newProgramChoice(program, configuredDefault, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),

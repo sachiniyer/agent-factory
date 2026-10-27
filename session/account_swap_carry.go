@@ -66,6 +66,36 @@ func carrySupportedAgent(agent string) bool {
 	return agent == tmux.ProgramClaude || agent == tmux.ProgramCodex
 }
 
+// AccountSwapCarryIntended reports whether a same-agent account swap would
+// ATTEMPT to carry its conversation, judging only the preconditions the
+// confirming user can know before the swap runs (#4367, #4504). It is a
+// NECESSARY, not sufficient, signal: the daemon re-checks filesystem state
+// (transcript presence, staleness, account homes, copy success) at admission,
+// after the user confirms — so a true return means "the carry is on", not "it
+// will succeed". A false return means no carry is even attempted, so the
+// replacement starts fresh.
+//
+// current and recorded describe the outgoing runtime (CurrentAgentName,
+// AgentProgram); target is the requested enum; targetResolved is the agent
+// that enum's resolved command launches (the daemon's resolved_agents answer,
+// falling back to the enum when the daemon did not classify one); outgoing is
+// the live tab's recorded conversation. The same-agent judgment goes through
+// HandoffTargetIsCurrent, not an enum compare, for the same reason the picker
+// uses it: program_overrides can make a resolved identity differ from the enum
+// (#4430 review), so a naive target == current misclassifies a redirected
+// self-handoff. An opaque target (targetResolved == "") is never
+// carry-intended: the daemon cannot prove it launches a carry-supporting
+// provider, so the replacement starts fresh.
+func AccountSwapCarryIntended(current, target, targetResolved, recorded string, outgoing AgentConversationData) bool {
+	if !HandoffTargetIsCurrent(current, target, targetResolved, recorded) {
+		return false
+	}
+	if !carrySupportedAgent(targetResolved) {
+		return false
+	}
+	return outgoing.HasID() && outgoing.Agent == targetResolved
+}
+
 type accountSwapCarryRequest struct {
 	// agent is the provider the resolved replacement program runs.
 	agent      string
@@ -307,8 +337,12 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
+	files, err := codexRolloutFiles(c.srcHome)
+	if err != nil {
+		return "af could not enumerate the previous account's rollout store"
+	}
 	var newer []string
-	for path := range codexRolloutFiles(c.srcHome) {
+	for path := range files {
 		if path == recordedPath {
 			continue
 		}
@@ -337,7 +371,14 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 // home, or "" when there is none.
 func codexRolloutRelPath(home, id string) (string, string) {
 	var matches []string
-	for path := range codexRolloutFiles(home) {
+	// A store that cannot be enumerated is not "no match": the walk stops at
+	// the first failure, so the map it leaves behind is partial and the one
+	// match it may hold proves nothing about uniqueness (#5471 review).
+	files, err := codexRolloutFiles(home)
+	if err != nil {
+		return "", "af could not enumerate the Codex rollout store"
+	}
+	for path := range files {
 		if strings.EqualFold(codexConversationIDFromPath(path), id) {
 			matches = append(matches, path)
 		}

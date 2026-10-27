@@ -440,11 +440,12 @@ func TestCloseTab_ClosingBelowTreeTabShiftsIt(t *testing.T) {
 		"the tree still shows the SAME tab it was on, at its new slot")
 }
 
-// TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor pins the original #930
-// behavior: when the tab that dies IS the tree's active tab, the tree lands on
-// the left neighbour.
-func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
-	h, _ := multiTabHome(t)
+// TestCloseTab_ClosingTheTreesOwnTabLandsOnNextSibling pins the #5298 landing
+// rule: when the tab that dies IS the tree's active tab, the tree lands on the
+// sibling that slid into the vacated slot — the same index — falling back to
+// the previous tab only when the deleted one was the last in the list.
+func TestCloseTab_ClosingTheTreesOwnTabLandsOnNextSibling(t *testing.T) {
+	h, alpha := multiTabHome(t)
 	h.focusRegion(layout.RegionTree)
 	h.store.SetActiveTab(2)
 
@@ -452,7 +453,9 @@ func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
 	_, _ = h.handleCloseTab()
 	confirmTabDeletionForTest(h)
 
-	assert.Equal(t, 1, h.store.ActiveTab(), "closing the tree's own tab lands on the left neighbour")
+	assert.Equal(t, 2, h.store.ActiveTab(),
+		"closing the tree's own tab lands on the tab that took its slot — shell-3 moved into index 2")
+	assert.Equal(t, "shell-3", alpha.GetTabs()[h.store.ActiveTab()].Name)
 }
 
 // TestPaneJump_PinSurvivesUnseededEpoch is codex finding 7: on a restored /
@@ -538,7 +541,7 @@ func TestSwapSameTitle_PreservesOpenPanes(t *testing.T) {
 		return recreated, nil
 	}))
 
-	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData()))
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale.Title))
 
 	require.Equal(t, 1, h.store.NumOpenPanes(),
 		"a same-title swap must PRESERVE the open pane — the replacement's ids differ by construction")
@@ -697,7 +700,7 @@ func TestSwapSameTitle_StalesPinnedPaneJump(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return recreated, nil
 	}))
-	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData()))
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale.Title))
 
 	// The swap is a logical selection change: the next selectionChanged must see it.
 	_ = h.selectionChanged()

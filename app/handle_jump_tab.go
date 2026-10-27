@@ -48,6 +48,10 @@ func (m *home) showJumpTabPrompt() (tea.Model, tea.Cmd) {
 	// enter submitted, and "tab done" while tab did nothing (#4172).
 	m.promptOverlay.SetPlaceholder("Tab number or name…")
 	m.promptOverlay.SetHints("enter jump · esc cancel", "enter jump · esc cancel")
+	// One line of input deserves a one-line dialog (#5587): without compact the
+	// textarea fills the frame the layout fit gives it and the box renders as a
+	// screen of blank lines around a single field.
+	m.promptOverlay.SetCompact()
 	m.layoutPromptOverlay()
 	m.state = stateJumpTab
 	return m, nil
@@ -74,6 +78,10 @@ func (m *home) handleStateJumpTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// fall through to resolve
 	default:
 		m.promptOverlay.HandleKeyPress(msg)
+		// Say where the current query would land while it is still editable
+		// (#5587): the prompt used to hold its answer until Enter, so a miss
+		// cost the whole jump — type, submit, get told no, retype blind.
+		m.promptOverlay.SetStatus(m.jumpTabStatus(m.promptOverlay.Value()))
 		return m, nil
 	}
 	query := m.promptOverlay.Value()
@@ -99,8 +107,10 @@ func (m *home) handleStateJumpTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Said out loud rather than swallowed. "No such tab" and "ambiguous" are both
 		// answers the user can act on; a prompt that closes with nothing happening is
 		// indistinguishable from a bug, which is the #3021 shape all over again.
-		m.errBox.SetNotice(jumpTabMiss(query, tabs))
-		return m, nil
+		// Through handleNotice, not errBox.SetNotice: it advances the notice
+		// generation and schedules the usual expiry, so the miss neither lingers
+		// forever nor gets erased early by an older notice's timer.
+		return m, m.handleNotice(jumpTabMiss(query, tabs))
 	}
 	return m.handleTabJump(idx)
 }
@@ -133,6 +143,36 @@ func resolveTabJump(query string, tabs []*session.Tab) int {
 		return 0
 	}
 	return ui.ResolveTabJump(query, labels)
+}
+
+// jumpTabStatus is the live answer the prompt shows while the query is being
+// typed (#5587): the tab Enter would land on, "more than one match" while the
+// query still names several, or "no match" once it names none. Empty stays
+// silent — the placeholder already says what to type. Resolved through the
+// same resolver Enter uses, so the line never promises a jump Enter refuses.
+func (m *home) jumpTabStatus(query string) string {
+	if strings.TrimSpace(query) == "" {
+		return ""
+	}
+	tabs := m.jumpTargetTabs()
+	if idx := resolveTabJump(query, tabs); idx != 0 {
+		if tab := tabs[idx-1]; tab != nil {
+			label := session.TabLabel(tab)
+			if tab.Name != "" && label != tab.Name {
+				return fmt.Sprintf("→ %s (%s)", label, tab.Name)
+			}
+			return "→ " + label
+		}
+	}
+	names, labels := tabJumpNamesAndLabels(tabs)
+	candidates := ui.ResolveTabJumpCandidates(query, names)
+	if candidates == 0 {
+		candidates = ui.ResolveTabJumpCandidates(query, labels)
+	}
+	if candidates > 1 {
+		return "more than one match"
+	}
+	return "no match"
 }
 
 // jumpTabMiss explains WHY nothing happened, distinguishing the two reasons so the

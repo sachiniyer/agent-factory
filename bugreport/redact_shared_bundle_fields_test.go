@@ -338,6 +338,13 @@ func TestRedactInstancesJSONScrubsLostRestoreFailureError(t *testing.T) {
 			Error: "start tmux session af_0f8fc14c_ProjectKingfisher for \"ProjectKingfisher\" " +
 				"in /srv/ConfidentialClient/repo/wt: exit status 1",
 		},
+		// The environmental-wait error is the same class of af-authored
+		// diagnostic quoting tmux/git — same secrets, same scrub (#5295).
+		LostRestoreWait: &session.LostRestoreWait{
+			Attempts: 2,
+			Error: "preserve push for \"ProjectKingfisher\" " +
+				"in /srv/ConfidentialClient/repo/wt: no space left on device",
+		},
 	})
 
 	for _, secret := range []string{"ProjectKingfisher", "ConfidentialClient"} {

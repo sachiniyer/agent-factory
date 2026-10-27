@@ -115,7 +115,23 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 		// owned it is gone" is already answered, and leaving it live means a copied
 		// token keeps authenticating until a recovery happens to replace it — or
 		// until the daemon restarts, if none ever does.
+		//
+		// The reap answered definitively on this branch (a known error is a
+		// definite answer, not an unknown one) and latched, so af's teardown
+		// obligation is discharged and the backend's immutable cleanup identity
+		// points at a runtime af already reaped. Clear it too, but leave the
+		// in-memory wiring (runtimeTeardown/remoteClient/agentSrv) for the
+		// abort-to-Lost retry: the in-process re-provision reaps through that
+		// closure (reapRemoteRuntimeForReplacement), not this field.
+		// resetRemoteRuntime clears the same identity on the success path where
+		// the wiring is also dropped; without it here, an ordinary sandbox row's
+		// ForStorage projection persists the discharged handle and a restart's
+		// FromInstanceData rebuilds a teardown for a runtime af already reaped
+		// (#5559 review). The unknown-outcome branch above returns before this
+		// point, so only a runtime whose reap answered definitively and latched
+		// reaches here.
 		i.revokeSandboxCredential()
+		i.clearDischargedRuntimeCleanup()
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 	}
 	// 4. Drop the dead remote wiring so the instance is an inert archived record
@@ -451,6 +467,18 @@ func (i *Instance) resetRemoteRuntime() {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
+	// A confirmed reap discharged the off-box runtime this backend's immutable
+	// cleanup identity points at. Clear it under the same lock so the next
+	// checkpoint stages no RuntimeCleanup for a runtime af already reaped:
+	// otherwise a restart's FromInstanceData would rebuild a teardown handle
+	// from it and a later kill/recovery would act on a resource it no longer
+	// owns (#5553 review). The unknown-outcome path returns before this point,
+	// so only a provably-gone runtime reaches here. The reaper itself is the
+	// provisioner's (bound to runtimeTeardown, already nilled above), not this
+	// field, so clearing it does not affect a teardown still in flight.
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		provider.clearRuntimeCleanupData()
+	}
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false
 		i.touchLocked()
@@ -489,6 +517,31 @@ func (i *Instance) revokeSandboxCredential() {
 	if creds != nil {
 		creds.Revoke()
 	}
+}
+
+// clearDischargedRuntimeCleanup drops the backend's immutable cleanup identity
+// after a reap that answered definitively and latched but left the in-memory
+// wiring in place for a retry. It is the ArchiveSandbox known-failure branch's
+// analogue of resetRemoteRuntime's cleanup clear: the reap returned a known
+// error (a definite answer, success or a definite failure) and latched, so
+// af's teardown obligation is discharged and the cleanup identity points at a
+// runtime af already reaped, but the row aborts to Lost and the in-process
+// retry (reapRemoteRuntimeForReplacement) still needs the in-memory
+// runtimeTeardown/remoteClient/agentSrv to re-enter the reap. Only the
+// persisted identity is cleared, so a restart's FromInstanceData cannot
+// rebuild a teardown for the reaped runtime and the next checkpoint stages no
+// RuntimeCleanup for it (#5559 review). The unknown-outcome branch returns
+// before this is reached, so only a runtime whose reap answered definitively
+// and latched discharges here.
+func (i *Instance) clearDischargedRuntimeCleanup() {
+	i.mu.Lock()
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		if provider.runtimeCleanupData() != nil {
+			provider.clearRuntimeCleanupData()
+			i.touchLocked()
+		}
+	}
+	i.mu.Unlock()
 }
 
 // markRuntimeCleanupStateUnknown makes an indeterminate reap durable without
@@ -559,7 +612,35 @@ func isSandboxBackendType(t string) bool {
 // a LOCAL session that is Lost loads started=true and already survives, and a
 // local row that never started is the junk the checkpoint's !Started() skip is for.
 func lostSandboxRecord(data InstanceData) bool {
-	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
+	// EffectiveLiveness, not data.Liveness directly, so a pre-#1195 sandbox row
+	// (LivenessUnset with a legacy Status: Lost/Dead) rolls forward to LiveLost
+	// exactly as FromInstanceData does on load. Reading data.Liveness here would
+	// miss that row while the loader treats it as a lost sandbox record, so the
+	// loaded form would release its slot and the raw ghost would still hold it —
+	// the cap wedges on the very legacy row the release exists for.
+	return isSandboxBackendType(data.BackendType) && EffectiveLiveness(data) == LiveLost
+}
+
+// LostSandboxRecord is the exported form of lostSandboxRecord for the raw-row
+// cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot), which
+// must mirror holdsTaskRunSlot for the row's known materialized form. A
+// sandbox-backed LiveLost row always loads inert (started=false, per
+// FromInstanceData's sandbox branch), so its live arm releases —
+// canAutoRestoreLostSession returns false because ValidateRuntimeAction refuses
+// a !Started session. LostSandboxRecord lets the raw arm reach the same verdict
+// when the row ghosts and no in-memory Instance exists to consult Started.
+func LostSandboxRecord(data InstanceData) bool {
+	return lostSandboxRecord(data)
+}
+
+// IsSandboxBackendType is the exported form of isSandboxBackendType for the
+// raw-row cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot).
+// A sandbox-backed row routes its hold/release verdict through the loader's inert
+// rewrite (see session.LoadedActivity), so the raw arm must recognize the same
+// backend set the loader's sandbox branch does rather than gating on the stored
+// liveness, which a row ghosted mid-run has not yet rolled forward to LiveLost.
+func IsSandboxBackendType(t string) bool {
+	return isSandboxBackendType(t)
 }
 
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,

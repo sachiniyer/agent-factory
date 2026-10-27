@@ -177,6 +177,38 @@ func TestSpawnSuppressesDevinWorkspaceTrust(t *testing.T) {
 	}
 }
 
+// TestSpawnSuppressesCodexUpdateCheck is the #5238 regression at the client
+// seam, the codex twin of the devin test above. A codex config agent launched
+// bare would render codex's startup update picker and hang on it for the full
+// readiness timeout — or die seconds after af navigated it. The config-agent
+// path deliberately does not run injectSystemPrompt, so the suppression has to
+// be applied on this path or nowhere, through the same shared helper.
+func TestSpawnSuppressesCodexUpdateCheck(t *testing.T) {
+	tempAFHome(t)
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex fixture: %v", err)
+	}
+	stubResolve(t, config.Config{
+		DefaultProgram:   "codex",
+		ProgramOverrides: map[string]string{"codex": codexPath},
+	})
+
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
+		got = req
+		return "af-config-1", "", nil
+	})
+
+	if _, _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	want := codexPath + " -c check_for_update_on_startup=false"
+	if got.Program != want {
+		t.Errorf("config agent must launch codex with its startup update picker suppressed (#5238);\n got Program = %q\nwant Program = %q", got.Program, want)
+	}
+}
+
 // TestSpawnDeliversBriefingAsThePrompt pins the delivery seam: the briefing rides
 // in as the request's Prompt, which the daemon delivers over a tmux paste buffer
 // (stdin-streamed, so unbounded) once the agent is ready. If it ever became a CLI

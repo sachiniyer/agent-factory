@@ -47,6 +47,27 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
   return { el, panel, trigger, open, close, dismiss, dispose: close };
 }
 
+/** Opens the panel above its trigger when the space below, inside the nearest
+ * clipping ancestor and the viewport, cannot hold it and the space above is larger. */
+export function placeMenu(trigger: HTMLElement, panel: HTMLElement): void {
+  panel.classList.remove("af-menu-up");
+  const anchor = trigger.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = trigger.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "") continue;
+    const clip = node.getBoundingClientRect();
+    top = Math.max(top, clip.top);
+    bottom = Math.min(bottom, clip.bottom);
+  }
+  const box = panel.getBoundingClientRect();
+  const needed = box.height + Math.max(0, box.top - anchor.bottom);
+  const below = bottom - anchor.bottom;
+  const above = anchor.top - top;
+  if (needed > below && above > below) panel.classList.add("af-menu-up");
+}
+
 /** The app's secondary controls use the same disclosure and Escape/focus model.
  * Desktop displays the same nodes inline; resizing closes any phone disclosure. */
 export function appbarControls(
@@ -54,6 +75,7 @@ export function appbarControls(
   phone = window.matchMedia("(max-width: 768px)"),
   beforeSync: () => void = () => {},
   onDismiss: () => void = () => {},
+  emptyFocus: () => HTMLElement | null = () => null,
 ) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
@@ -65,17 +87,33 @@ export function appbarControls(
   menu.panel.id = "af-appbar-tools";
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
+  const hasContent = () => Array.from(menu.panel.children).some((child) => !(child as HTMLElement).hidden);
+  const syncTrigger = () => {
+    const empty = !hasContent();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
+    menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
+  };
   const sync = () => {
     beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
-    menu.trigger.hidden = !phone.matches;
+    syncTrigger();
     menu.panel.hidden = phone.matches;
-    if (phone.matches && hadFocus) menu.trigger.focus();
+    if (phone.matches && hadFocus && !menu.trigger.hidden) menu.trigger.focus();
   };
+  // Children move in and out (session-first composition) and toggle `hidden`
+  // (install), so an empty More menu can appear at any time.
+  const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(syncTrigger);
+  observer?.observe(menu.panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   phone.addEventListener("change", sync);
   sync();
-  return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
+  return {
+    ...menu,
+    dispose: () => { observer?.disconnect(); phone.removeEventListener("change", sync); menu.dispose(); },
+  };
 }
 
 /** Session-first follows selected content, not drawer visibility or transient keyboard ownership. */
@@ -102,7 +140,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -134,11 +172,22 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  // The desktop font-size pair (#5500): terminal text only, beside the other
+  // pane-level controls and hidden at the phone breakpoint (where the keybar
+  // carries the same controls instead). Each press steps the shared device
+  // class's size — every pane in the page refits, which is correct because the
+  // value is per class, not per pane.
+  const fontDecrease = action("A−", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
   return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
@@ -184,13 +233,24 @@ export function viewNavigation(onSelect: (view: View) => void): {
 }
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
- *  around the async submit. close() removes it from the DOM. */
+ *  around the async submit. close() removes it from the DOM. reactivate() reinstalls
+ *  the document-level Tab trap after a retained handle is remounted by openModal
+ *  without rebuilding it — an intervening modalChrome reaped this handle's trap, so
+ *  the reopened error dialog would otherwise have no Tab containment. */
 export interface ModalHandle {
   el: HTMLElement;
   setBusy(busy: boolean): void;
   setError(msg: string | null): void;
   close(): void;
+  reactivate(): void;
 }
+
+// The single live document-level Tab trap. modalChrome reaps the previous trap
+// when a new modal opens (mountOverlay closes any current modal first, so at
+// most one is live). The trap is NOT removed in close() — a refused RPC remounts
+// the same handle, and a keydown during that detached window must not strand it —
+// so the previous modal's trap is reclaimed here, when the next modal takes over.
+let activeModalTrap: ((event: KeyboardEvent) => void) | null = null;
 
 /** Builds the shared modal chrome: a backdrop, a titled card, a body slot, an
  *  error line, and a footer with a cancel + a primary action button. Returns the
@@ -235,7 +295,31 @@ export function modalChrome(opts: {
   card.tabIndex = -1;
   // Keep native Tab navigation within the currently enabled, visible controls.
   // Re-query on each keypress: errors, disclosures and busy state can change them.
-  card.addEventListener("keydown", (event) => {
+  //
+  // The trap is attached at the document level (capture phase), not the card, so it
+  // still fires once focus has escaped to <body> — the state setBusy creates when it
+  // disables a footer button that had focus: the browser moves
+  // document.activeElement to <body>, and a Tab keydown there targets <body> and
+  // bubbles body → html → document, never through the card (a descendant of body).
+  // A card-level trap cannot observe that event, so its rescue branch
+  // (!card.contains(document.activeElement)) was dead exactly when it was needed.
+  // The document-level listener sees every keydown while the modal is open, gates
+  // itself on the backdrop still being connected, and is NOT removed in close(): a
+  // refused create/kill/archive RPC closes this modal (close() detaches the
+  // backdrop) and then remounts the same handle (index.ts openModal) once the RPC
+  // settles — the trap must survive that detached window so the reopened error
+  // dialog keeps its Tab containment. The guard below therefore stays registered
+  // and inert while the backdrop is detached; it does NOT self-remove on a
+  // keydown during that window, because that would strand the remount. Final
+  // disposal is the swap in modalChrome below: the next modal to open reaps the
+  // previous active trap, so at most one trap is live at a time and the last
+  // modal's trap lingers inert (its guard skips every event) after close if no
+  // other modal opens. Capture runs before the browser's default Tab focus shift,
+  // so the rescue can preventDefault and pull focus back inside before it leaves.
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event: KeyboardEvent) => {
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll<HTMLElement>(
       'button, input, select, textarea, a[href], summary, [tabindex]',
@@ -249,18 +333,33 @@ export function modalChrome(opts: {
       event.preventDefault();
       (event.shiftKey ? last! : first).focus();
     }
-  });
+  };
+  // Reap the previous modal's trap (if any) and install this one. A new modal
+  // always opens through mountOverlay, which closes the current modal first, so
+  // this swap is the disposal point: it bounds the live traps to one and reclaims
+  // a retained handle's trap once a different modal has taken over.
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
-
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
 
   cancelBtn.addEventListener("click", () => opts.onCancel());
 
   const handle: ModalHandle = {
     el: backdrop,
     setBusy(busy: boolean) {
+      // Move focus off a footer button BEFORE disabling it: a focused button that
+      // becomes disabled drops document.activeElement to <body>, escaping the
+      // dialog's Tab trap (see the document-level trap above). Only relocate when a
+      // footer button actually has focus, so a user typing into a field mid-RPC
+      // keeps the cursor while the in-flight RPC disables the submit/cancel pair.
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -269,13 +368,42 @@ export function modalChrome(opts: {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        // If focus escaped the dialog (a footer button was disabled while focused,
+        // or some other path left activeElement outside the card), pull it back
+        // inside so Tab stays contained while a refused attempt keeps the modal open
+        // with an error. Leaves in-dialog focus — a field the user is editing —
+        // alone, so a validation error does not yank the cursor out of its input.
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
       }
     },
     close() {
+      // The backdrop detaches here. The trap is NOT removed: a refused
+      // create/kill/archive RPC closes this modal and then remounts the same
+      // handle (index.ts openModal), and removing it here — or self-removing on
+      // a keydown during the detached RPC window — would leave the reopened
+      // error dialog with no Tab containment. The trap stays registered and is
+      // inert while the backdrop is detached (the guard above skips the event
+      // without removing itself); the next modalChrome reclaims it when a new
+      // modal opens.
       backdrop.remove();
+    },
+    reactivate() {
+      // Reinstall this handle's trap after a retained handle is remounted by
+      // openModal WITHOUT rebuilding it. modalChrome reaped this trap when an
+      // intervening modal opened (it swaps the single live trap to bound the
+      // count), so a refused RPC that closes modal A, lets the user open and
+      // close modal B in between, and then remounts A would otherwise leave A's
+      // reopened error dialog with no Tab containment: A's backdrop is
+      // reconnected but its trap was removed by modalChrome(B) and never
+      // reinstalled. openModal calls this on every (re)mount; for a fresh modal
+      // modalChrome already installed this trap, so this reaps and re-adds the
+      // same listener (a no-op), and for a remount it reclaims the live slot.
+      installTrap();
     },
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };

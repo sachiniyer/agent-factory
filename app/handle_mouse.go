@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -233,19 +234,33 @@ func (m *home) handleTabDragRelease(msg tea.MouseMsg) (bool, tea.Cmd) {
 	if drag == nil {
 		return false, nil
 	}
+	// A modal opened between the press and the release owns the screen —
+	// mirror handleTabDragPress's stateDefault guard. The modal's KeyMsg
+	// does not clear m.tabDrag (only release/wheel/second-button do), so a
+	// release arriving under the overlay would otherwise dispatch the click
+	// (SelectTabRow + focusRegionClick) or the active drop (openOrFocusPane)
+	// behind it. Drop the stale drag so the next gesture starts clean and
+	// swallow the release so nothing mutates behind a modal (#1774 class).
+	if m.state != stateDefault {
+		m.clearDragState()
+		return false, nil
+	}
 	if !drag.active {
 		now := m.mouseClock()
 		double := drag.zone == m.lastClickZone && now.Sub(m.lastClickAt) <= doubleClickInterval
 		m.clearDragState()
-		if !double {
-			m.lastClickZone = drag.zone
-			m.lastClickAt = now
-		}
 		// A click is a short drag, so it carries the same staleness — the press
 		// captured the target and this release acts on it. Same identity rule.
 		idx, ok := dragTabIndex(m.store.GetInstanceByTitle(drag.title), drag)
 		if !ok {
+			// Swallowed click (the grabbed tab was concurrently closed) — do not
+			// seed the double-click tracker, or a later click on the same row
+			// could be misread as a double (#1731/#1774 class).
 			return true, nil
+		}
+		if !double {
+			m.lastClickZone = drag.zone
+			m.lastClickAt = now
 		}
 		return true, m.handleTreeTabClick(drag.title, idx, double)
 	}
@@ -400,8 +415,21 @@ func isWheelButton(b tea.MouseButton) bool {
 // PR the wheel scrolled whatever the focus ring pointed at. Tree zones map
 // to cursor movement (the tree's only scroll primitive, same as j/k), pane
 // zones to that pane's capture scroll, the automations section to its task
-// cursor. Modal overlays own the screen, so the wheel is inert under them.
+// cursor. Modal overlays own the screen, so the wheel is inert under them —
+// with one exception: a scrollable confirmation pages its body on the wheel
+// (#5171), since "resize the terminal" was never an answer for unread risk
+// text.
 func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
+	if m.state == stateConfirm {
+		if m.confirmationOverlay != nil && m.confirmationOverlay.Scrollable() {
+			if msg.Button == tea.MouseButtonWheelUp {
+				m.confirmationOverlay.ScrollUp()
+			} else {
+				m.confirmationOverlay.ScrollDown()
+			}
+		}
+		return nil
+	}
 	if m.state != stateDefault {
 		return nil
 	}
@@ -673,6 +701,20 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.searchOverlay.SetSelectedIndex(idx)
 			return m.handleStateSearch(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// The project picker (ctrl+p, #1461) is a list that answered the keyboard
+	// and silently swallowed the mouse — the #1819 class — because, unlike every
+	// sibling picker, it is its own widget and was wired for the keyboard only.
+	// A click on a project row now selects and submits it like j/k + enter,
+	// dropping into add mode when the add row is the target, exactly as
+	// handleListKey does for the same row.
+	case stateSwitchProject:
+		if m.projectPickerOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.projectPickerOverlay.SetSelectedIndex(idx)
+			return m.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateNew:
 		// The naming form's status-bar hints (enter submit / tab change
 		// program) stay clickable; handleKeyPress routes them to the form.
@@ -755,7 +797,25 @@ func (m *home) paneByRegion(region string) (*store.OpenPane, *ui.TabbedWindow) {
 // keyMsgFromString synthesizes the tea.KeyMsg a click stands in for, from a
 // binding's primary key string (keys.GlobalKeyBindings[…].Keys()[0]). ok is
 // false for strings with no single-key equivalent.
+//
+// The lookup is override-aware. A status-bar hint registers a click zone with
+// the binding's EFFECTIVE primary key, so a [keys] rebind can point it at any
+// valid multi-character key the closed switch below never enumerates (ctrl+b,
+// f1, pgup, alt+x, …). Reverse-resolving through keys.GlobalKeyStringsMap —
+// the same map the keyboard path uses — and rebuilding the event with
+// keys.KeyMsgForString keeps the documented "clicking is equivalent to
+// pressing it" true after a rebind: the synthetic event's String() is the
+// rebound key, so handleKeyPress re-derives the same action from
+// GlobalKeyStringsMap the keyboard press would. The fallback switch still
+// covers the un-bound specials a hint can advertise WITHOUT being in
+// GlobalKeyStringsMap: ctrl+] the interactive-mode exit, the naming form's
+// ctrl+r/ctrl+o, and the diff-only shift+up/shift+down.
 func keyMsgFromString(s string) (tea.KeyMsg, bool) {
+	if _, ok := keys.GlobalKeyStringsMap[s]; ok {
+		if msg, ok := keys.KeyMsgForString(s); ok {
+			return msg, true
+		}
+	}
 	switch s {
 	case "enter":
 		return tea.KeyMsg{Type: tea.KeyEnter}, true

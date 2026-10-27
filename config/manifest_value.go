@@ -72,6 +72,38 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 		}
 		return editorValue(reflect.ValueOf(visible)), true
 	}
+	// root_agent is the only STRUCTURED global manifest key backed by a struct
+	// rather than a map or slice. editorValue's struct branch marshals the field
+	// value directly, and RootAgent.Enabled deliberately carries no omitempty
+	// (an explicit enabled = false must survive a full serialization), so an
+	// ABSENT [root_agent] table would render indistinguishably from an explicit
+	// {"enabled":false} — unlike every sibling structured key, whose map/slice
+	// branches honestly render {} / [] when empty.
+	//
+	// Render field-wise from the on-disk shape — the same form the writer's
+	// rootAgentConfigJSON uses (pointer fields with omitempty): an absent table
+	// renders {}, and only the fields actually present on disk appear, so an
+	// explicit enabled = false still renders {"enabled":false}. This needs a
+	// loaded source shape; a config with no source (DefaultConfig and in-memory
+	// stand-ins) has no on-disk presence to consult, so it falls through to the
+	// structural render below.
+	if key == "root_agent" && cfg.source.shape != nil {
+		shape, _ := cfg.source.topLevel("root_agent")
+		table, present := shape.(map[string]any)
+		if !present {
+			return "{}", true
+		}
+		var value rootAgentConfigJSON
+		if _, p := table["enabled"]; p {
+			enabled := field.FieldByName("Enabled").Bool()
+			value.Enabled = &enabled
+		}
+		if _, p := table["program"]; p {
+			program := field.FieldByName("Program").String()
+			value.Program = &program
+		}
+		return editorValue(reflect.ValueOf(value)), true
+	}
 	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
 	// the []string type: a future list whose elements can contain a comma keeps the
 	// unambiguous compact-JSON rendering rather than silently displaying one entry

@@ -126,7 +126,7 @@ func startedAccountTabInstance(t *testing.T, m *Manager, repoID, repoPath, accou
 	pty := tabPtyFactory{t: t, cmdExec: mockExec}
 
 	gw, err := sessiongit.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), accountVSCodeTitle,
+		repoPath, existingWorktreeDir(t, filepath.Join(t.TempDir(), "wt")), accountVSCodeTitle,
 		accountVSCodeTitle+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
@@ -281,6 +281,64 @@ func TestVSCodeEditor_IntegratedTerminalInheritsTheAccountEnvironment(t *testing
 	assertAccountScopedEnvironment(t,
 		editorEnvironment(t, manager, key, fakeVSCodeTerminalPath),
 		"a shell the editor spawned (an integrated terminal)", accountDir)
+}
+
+// TestVSCodeEditor_DropsCrossAgentAmbientCredentials is #4311's headline: the
+// scoped editor's environment is built from the pane's default-deny ALLOWLIST,
+// not from the daemon's environment with the selected agent's names subtracted.
+// The subtraction in ApplyAccountEnvironment covers only the SELECTED agent —
+// every other agent's identity-bearing names assume the base was already
+// filtered — so a daemon that inherited a codex or gemini identity handed it
+// straight to a claude-scoped editor, its extension host, and every integrated
+// terminal.
+//
+// This drives the real spawn seam with BOTH kinds of leak in the daemon's
+// environment: a second agent's ambient identity (the issue's example), and a
+// variable that is nobody's identity — because the boundary being pinned is the
+// allowlist itself, not a longer scrub list. On master all four survive into
+// the editor and its spawned shell; on this branch none do.
+func TestVSCodeEditor_DropsCrossAgentAmbientCredentials(t *testing.T) {
+	setAmbientClaudeIdentity(t)
+	// The state an ad-hoc daemon is actually in when several agents are
+	// installed: whatever autostarted it leaves every one of their ambient
+	// identities in its environ.
+	t.Setenv("OPENAI_API_KEY", "sk-codex-ambient")
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "ambient-codex"))
+	t.Setenv("GEMINI_API_KEY", "gemini-ambient")
+	t.Setenv("AF_TEST_UNRELATED_SECRET", "not-any-agents-identity")
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, inst, repoID, accountDir := newAccountVSCodeFixture(t, binary, "work")
+
+	if _, err := manager.ensureVSCodeServer(inst, repoID, accountVSCodeTitle); err != nil {
+		t.Fatalf("ensureVSCodeServer: %v", err)
+	}
+	key := daemonInstanceKey(repoID, accountVSCodeTitle)
+
+	leaks := map[string]string{
+		"OPENAI_API_KEY":           "codex's ambient credential",
+		"CODEX_HOME":               "codex's ambient credential root",
+		"GEMINI_API_KEY":           "gemini's ambient credential",
+		"AF_TEST_UNRELATED_SECRET": "a name no allowlist admits",
+	}
+	for _, route := range []struct {
+		subject, path string
+	}{
+		{"the editor process", fakeVSCodeEnvironPath},
+		{"a shell the editor spawned (an integrated terminal)", fakeVSCodeTerminalPath},
+	} {
+		env := editorEnvironment(t, manager, key, route.path)
+		for name, what := range leaks {
+			if v, ok := envValue(env, name); ok {
+				t.Errorf("%s carries %s %s=%q: a scoped editor must hold the pane's "+
+					"default-deny allowlist — the selected agent's subtraction alone never "+
+					"removed names outside its namespace (#4311)", route.subject, what, name, v)
+			}
+		}
+	}
+	// The boundary is still an account scope, not a wipe: the selected account's
+	// own root is injected through the same filtered base.
+	assertAccountScopedEnvironment(t,
+		editorEnvironment(t, manager, key, fakeVSCodeEnvironPath), "the editor process", accountDir)
 }
 
 // TestVSCodeEditor_RefusesWhenTheSelectedAccountCannotBeResolved is the

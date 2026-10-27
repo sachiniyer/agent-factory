@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +21,21 @@ type captureLaunchEnvPty struct {
 func (p *captureLaunchEnvPty) Start(command *exec.Cmd) (*os.File, error) {
 	p.cmd = command
 	return nil, errors.New("stop after capturing launch command")
+}
+
+// forceAgentOnSearchPath plants executable stubs for the named agents in a
+// private directory and makes it the whole PATH: the launcher's grant
+// predicate models execvp's walk, so a bare agent name earns its credential
+// grant only when a real executable file answers it (#5265).
+func forceAgentOnSearchPath(t *testing.T, names ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
 }
 
 func forceSessionEnvExecutable(t *testing.T, path string) {
@@ -119,7 +135,7 @@ func TestAgentNameUsedAsDataDoesNotSelectCredentialAllowlist(t *testing.T) {
 		"/srv/af agent-server --listen :43110 --repo /workspace --title codex",
 	} {
 		session := NewTmuxSession("agent-name-data", program)
-		_, environ, imports, err := session.launchEnvironment()
+		_, environ, imports, _, _, err := session.prepareLaunchEnvironment("")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -143,7 +159,7 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	session := NewTmuxSession("cross-agent-account", "codex")
 	session.SetAccountForAgent("claude", "work")
 
-	_, _, _, err := session.launchEnvironment()
+	_, _, _, _, _, err := session.prepareLaunchEnvironment("")
 	if err == nil {
 		t.Fatal("a Claude account was reinterpreted as a same-named Codex account after the program changed")
 	}
@@ -152,9 +168,37 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	}
 }
 
+// A scoped session's account material may only ride an executable af can
+// attribute to the operator — the same grant question the ambient filter
+// answers. A bare program that resolves through a repository-controlled PATH
+// entry must refuse the launch rather than inject the selected account's
+// environment into repository content (#5265 review).
+func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
+		t.Fatal(err)
+	}
+	// A PATH that resolves bare codex through the pane's working directory.
+	t.Setenv("PATH", ".")
+
+	session := NewTmuxSession("scoped-grant-fails", "codex")
+	session.SetAccountForAgent("codex", "work")
+	if _, _, _, _, _, err := session.prepareLaunchEnvironment(""); err == nil {
+		t.Fatal("account-scoped launch on a repository-controlled PATH hit was not refused")
+	} else if !strings.Contains(err.Error(), "cannot attribute") {
+		t.Fatalf("scoped grant refusal lost its reason: %v", err)
+	}
+}
+
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	// The scoped agent pane carries account material only on an executable af
+	// can attribute to the operator, so the bare codex name needs a PATH hit.
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")
@@ -171,7 +215,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 	t.Setenv("BASH_ENV", "/tmp/ambient-bashrc")
 	t.Setenv("PS1", "$((CODEX_HOME=42))")
-	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
+	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +235,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 
 	process := agent.NewSiblingSession("account-process", "make -j4")
-	wrapped, environ, imports, err := process.launchEnvironment()
+	wrapped, environ, imports, _, _, err := process.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +253,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
-	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment()
+	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +268,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped, environ, imports, err = shell.launchEnvironment()
+	wrapped, environ, imports, _, _, err = shell.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +289,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
 	}
-	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment()
+	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,12 +303,13 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
+	forceAgentOnSearchPath(t, "claude")
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
 
 	session := NewTmuxSession("inline-cloud-mode", "CLAUDE_CODE_USE_BEDROCK=1 claude")
-	_, environ, imports, err := session.launchEnvironment()
+	_, environ, imports, _, _, err := session.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +426,7 @@ func TestLegacyLaunchClearsInheritedSessionMarkers(t *testing.T) {
 	t.Setenv(EnvMarkerSession, "af_parent")
 	t.Setenv(EnvMarkerGeneration, "parent-generation")
 	child := NewTmuxSession("child", "claude")
-	_, environ, imports, err := child.launchEnvironment()
+	_, environ, imports, _, _, err := child.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,5 +437,97 @@ func TestLegacyLaunchClearsInheritedSessionMarkers(t *testing.T) {
 		if !slices.Contains(imports, name) {
 			t.Errorf("must unset stale server %s through update-environment", name)
 		}
+	}
+}
+
+// TestStartRestoresUpdateEnvironmentAfterFailedLaunch covers #5390's primary
+// property: once the expansion is queued, EVERY Start exit path re-applies the
+// baseline. The in-queue restore dies with the queue on a mid-queue failure —
+// tmux abandons a ;-chained queue at the first failed command — so the restore
+// must also run as its own bounded command after the launch attempt ends.
+func TestStartRestoresUpdateEnvironmentAfterFailedLaunch(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+
+	var restores []string
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for idx, arg := range c.Args {
+				if arg == "update-environment" && idx+1 < len(c.Args) {
+					restores = append(restores, c.Args[idx+1])
+				}
+			}
+			if len(c.Args) >= 2 && c.Args[1] == "set-option" {
+				return nil
+			}
+			return errors.New("session not found")
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
+				return []byte("DISPLAY SSH_AUTH_SOCK\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	session := NewTmuxSessionWithDeps("restore-on-failure", "codex", pty, execu)
+	if err := session.Start(t.TempDir()); err == nil {
+		t.Fatal("Start unexpectedly succeeded after the capture factory stopped it")
+	}
+	if !slices.Contains(restores, "DISPLAY SSH_AUTH_SOCK") {
+		t.Fatalf("failed launch never re-applied the prior update-environment outside the queue: %q", restores)
+	}
+}
+
+// TestStartHealsCredentialNamesLeftInUpdateEnvironment covers the other half
+// of #5390: a server an older build already left expanded cannot recover its
+// true pre-expansion value, but af never intends credential import names to
+// persist — the restore baseline drops them instead of re-persisting the leak.
+func TestStartHealsCredentialNamesLeftInUpdateEnvironment(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+
+	var restores []string
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for idx, arg := range c.Args {
+				if arg == "update-environment" && idx+1 < len(c.Args) {
+					restores = append(restores, c.Args[idx+1])
+				}
+			}
+			if len(c.Args) >= 2 && c.Args[1] == "set-option" {
+				return nil
+			}
+			return errors.New("session not found")
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
+				// An older build left the option expanded to a claude
+				// session's credential import list.
+				return []byte("ANTHROPIC_API_KEY DISPLAY OPENAI_API_KEY SSH_AUTH_SOCK\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	session := NewTmuxSessionWithDeps("heal-expanded", "codex", pty, execu)
+	_ = session.Start(t.TempDir())
+
+	const want = "DISPLAY SSH_AUTH_SOCK"
+	if len(restores) == 0 {
+		t.Fatal("failed launch never re-applied update-environment")
+	}
+	for _, got := range restores {
+		if got != want {
+			t.Fatalf("restored update-environment %q kept credential names; want %q", got, want)
+		}
+	}
+	// The queue's own trailing restore targets the same healed baseline.
+	var tail string
+	for idx, arg := range pty.cmd.Args {
+		if arg == "update-environment" && idx+1 < len(pty.cmd.Args) {
+			tail = pty.cmd.Args[idx+1]
+		}
+	}
+	if tail != want {
+		t.Fatalf("queue tail restore = %q, want %q", tail, want)
 	}
 }

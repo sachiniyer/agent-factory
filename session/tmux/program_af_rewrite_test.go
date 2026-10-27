@@ -41,6 +41,36 @@ func TestRewriteProgramCmdByAf_KeepsTheDeclarationInStepWithResume(t *testing.T)
 			agent:     "codex",
 			wantAdded: "--last",
 		},
+		{
+			// The #5238 flag injection splices `resume --last` in after the
+			// injected -c — `codex -c … resume --last`, a positional extension
+			// of the launch command — so the declaration must grow with the
+			// rewrite or every account-scoped codex restore dies at the
+			// boundary (#5238 review).
+			name:      "codex splices resume --last behind the injected flag",
+			program:   "codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			// Same splice through an account-accepted wrapper: the executable
+			// is the codex operand inside `exec`, not the command's first
+			// word — a first-word proof would clear the declaration and the
+			// boundary would refuse the respawn (#5238 review).
+			name:      "exec codex wrapper keeps the proof across the splice",
+			program:   "exec codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			name:      "env codex wrapper keeps the proof across the splice",
+			program:   "env codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := &TmuxSession{program: test.program, generatedArgs: test.declared}
@@ -202,4 +232,38 @@ func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 			"arguments it did not author for this command and the account would transfer across the handoff")
 	require.Empty(t, proof.TrustedExecutable,
 		"an exact executable path is part of the old launch's proof and must not survive replacement")
+}
+
+// GeneratedArgs surfaces the af-authored declaration validateAccountSwapPlan
+// seeds a swap proof from when the resolved base came from the pane's frozen
+// program (#5433): it must return the slice SetLaunchProgram recorded, stay
+// empty when no declaration was recorded, and grow with af's own program
+// rewrites the way launchSnapshot's proof does — and never alias the field
+// so a caller mutating its result cannot race concurrent rewrites.
+func TestGeneratedArgs_ReportsTheRecordedDeclaration(t *testing.T) {
+	session := &TmuxSession{}
+	require.Nil(t, session.GeneratedArgs(),
+		"a session that never recorded a launch declares no af-authored words")
+
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	session.SetLaunchProgram("codex -c check_for_update_on_startup=false", sessionenv.AccountLaunchProof{
+		GeneratedArgs: declared,
+	})
+	require.Equal(t, declared, session.GeneratedArgs(),
+		"the accessor returns the words SetLaunchProgram recorded")
+
+	// af's own rewrites keep the declaration growing alongside the command,
+	// the same invariant launchSnapshot's proof preserves.
+	session.rewriteProgramCmdByAf(resumeProgram)
+	require.Equal(t,
+		[]string{"-c", "check_for_update_on_startup=false", "resume", "--last"},
+		session.GeneratedArgs(),
+		"the accessor mirrors the declaration rewriteProgramCmdByAf keeps")
+
+	// Must snapshot, not alias: mutating the returned slice must not affect a
+	// concurrent read of the field.
+	snap := session.GeneratedArgs()
+	snap[0] = "MUTATED"
+	require.Equal(t, "-c", session.GeneratedArgs()[0],
+		"the accessor returns a copy so a caller cannot corrupt the field it serializes under programMu")
 }

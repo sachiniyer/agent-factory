@@ -111,13 +111,34 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		// A save since the last poll dropped a draft whose task was deleted;
-		// say so once (#4798).
-		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
-			cmds = append(cmds, m.showTransientMessage(notice))
-		}
-		// A reload showed a kept, unconfirmed edit did land (#4824).
-		if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
-			cmds = append(cmds, m.showTransientMessage(notice))
+		// say so once (#4798). Do not consume the notice while the recovery
+		// screen shadows the notice bar: the save that drops a draft can
+		// itself raise that screen (a sibling edit's generic failure), and
+		// Take clears the only durable copy, so an unguarded poll would
+		// swallow the very notice it is the fallback for. Hold it for a
+		// frame whose bar is actually painted.
+		if m.recovery == nil {
+			// Drain every notice a save queued in priority order — a discarded
+			// draft (#4798, lost work), a settled draft (#4824, an unconfirmed
+			// edit that landed), and a cross-repo retarget (#1836, a save that
+			// landed in another project) — and surface them in one message.
+			// showTransientMessage replaces the bar, so per-notice Takes would
+			// drop every notice but the last: a save that both discards an
+			// externally deleted draft and retargets another task to a different
+			// repo runs both branches in this tick, and the later Take would
+			// clobber the more urgent discarded-work warning after both queues
+			// were already cleared. One combined message keeps each notice
+			// visible. The Takes always run (they clear the durable copies),
+			// so a notice a save raised still drains exactly once.
+			notices := []string{
+				m.automations.TaskPane().TakeDiscardedDraftNotice(),
+				m.automations.TaskPane().TakeSettledDraftNotice(),
+				m.automations.TaskPane().TakeCrossRepoRetargetNotice(),
+			}
+			combined := strings.TrimSpace(strings.Join(notices, " "))
+			if combined != "" {
+				cmds = append(cmds, m.showTransientMessage(combined))
+			}
 		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
@@ -209,6 +230,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case killLossCheckedMsg:
+		// The kill confirmation's git checks finished off the event loop (#4848);
+		// complete the dialog they were started for, if it is still open.
+		return m.handleKillLossChecked(msg)
 	case daemonRestartRequestedMsg:
 		// The restart confirm was accepted; run it off the event loop (it stops a
 		// daemon and respawns one), mirroring the kill/archive async dispatch.
@@ -333,6 +358,15 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
+	case remoteDefaultMsg:
+		// A remote target's form opened with the LOCAL default as a guess; this
+		// reply carries the daemon's resolved default_program for the project
+		// (#4889 review), so the field can show the program the implicit create
+		// will actually run.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -369,10 +403,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectionChanged())
 			}
 
+			var restoreCmd tea.Cmd
 			if msg.draft != nil {
 				m.failedCreate = &msg
 				if userStillWatching {
-					m.restoreFailedCreate()
+					_, restoreCmd = m.restoreFailedCreate()
 				}
 			}
 			detail := "Your input is retained. " + msg.err.Error()
@@ -381,7 +416,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				detail += " The next create in this project reopens the failed draft."
 				action = "Press any key to continue."
 			}
-			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged())
+			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance

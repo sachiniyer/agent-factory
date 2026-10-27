@@ -23,8 +23,8 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
-import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
+import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -59,12 +59,12 @@ import type { AccountsState } from "./accounts.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
-import { type ThemeChoice, THEME_CHOICES, currentMode } from "./theme.js";
+import { type ThemeChoice, currentMode } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -249,7 +249,7 @@ export interface AppState {
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
-   *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
+   *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
   /** which session states the rail shows (feat: hide archived by default). A pure
@@ -313,6 +313,10 @@ export interface Actions {
   layoutChanged(): void;
   /** Close the focused split pane; the session itself remains open. */
   closePane?(): void;
+  /** Steps the shared terminal font size for this viewport's device class
+   *  (#5500): ±1 selects the direction; the step size, clamp, and the debounced
+   *  config write all live in terminal-font.ts. */
+  stepTerminalFontSize(delta: number): void;
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
@@ -336,8 +340,10 @@ export interface Actions {
   clearPaneDropHint(): void;
   /** Lands a touch-dragged tab on whichever pane is under the point, splitting or
    *  replacing exactly as a mouse drop does — the same body, not a copy of it
-   *  (split.ts applyTabDrop). False means no pane was under the release. */
-  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean;
+   *  (split.ts applyTabDrop). `landed` false means no pane was under the release;
+   *  `changed` false means the pane rejected the drop and the layout is untouched
+   *  (#4434 — one boolean cannot answer both questions). */
+  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -647,18 +653,6 @@ export function tabRealId(tab: { id?: string }): string {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
 
-/** The appbar label for a theme choice (redesign PR1). */
-function themeLabel(choice: ThemeChoice): string {
-  switch (choice) {
-    case "system":
-      return "System";
-    case "light":
-      return "Light";
-    case "dark":
-      return "Dark";
-  }
-}
-
 /**
  * The rail's session order, mirroring the TUI sidebar (ui/sidebar_model.go): live
  * sessions first ordered oldest-created first, the archived group last ordered
@@ -689,7 +683,17 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
   if (input) input.value = draft;
 }
 
-function loginView(state: AppState, actions: Actions): HTMLElement {
+/** Forgets the in-memory login draft for `root` so an auth-driven return to the
+ *  login view (a resync 401, a token rejection) does not pre-fill the paste form
+ *  with a credential the daemon just rejected. The draft WeakMap is module-private
+ *  and never cleared by renderLogin itself, so disconnect() must call this on an
+ *  auth rejection; the manual-Disconnect path leaves the draft alone because its
+ *  falsy renderLogin guard already resolves `draft` to "". */
+export function clearLoginDraft(root: HTMLElement): void {
+  loginDrafts.set(root, "");
+}
+
+export function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
       detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
@@ -752,7 +756,7 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you log out."),
     form,
   ];
   if (state.loginError) {
@@ -773,8 +777,19 @@ function connectingView(): HTMLElement {
 /** The tokenless login view (#1696): the daemon exempts this client, so there is no
  *  token to paste — just a Connect button that dials in with the empty-token
  *  sentinel. Normally auto-connected on load; this view is what a user sees only if
- *  they explicitly Disconnect on such a daemon. */
-function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+ *  they explicitly Disconnect on such a daemon.
+ *
+ *  Defense in depth against a stale `authRequired: false`: if a 401 reaches this
+ *  view (`loginCondition === "expired"` — the daemon started requiring a token after
+ *  the tokenless probe), degrade into a paste-token form instead of the
+ *  self-contradictory "No token needed." screen that re-issues the just-rejected
+ *  empty-token request. The primary fix flips `authRequired` in connect()'s catch so
+ *  the paste form is reached directly, but this keeps the screen coherent regardless
+ *  of how the staleness arose. */
+export function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -792,6 +807,57 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
       "p",
       { class: "af-subtitle" },
       "No token needed.",
+    ),
+    form,
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+
+/** The degraded form `noAuthLoginView` falls back to when a 401 reached the tokenless
+ *  branch (`loginCondition === "expired"`): the daemon now requires a token this
+ *  client has none of, so surface a paste field instead of the empty-token Connect.
+ *  Mirrors loginView's paste-form branch (title degrades to "Login expired"). */
+function expiredTokenlessView(state: AppState, actions: Actions): HTMLElement {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting,
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting…" : "Connect",
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button,
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token = input.value.trim();
+    if (token !== "") {
+      actions.connect(token);
+    }
+  });
+
+  const children: (Node | string)[] = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host.",
     ),
     form,
   ];
@@ -822,8 +888,6 @@ export class AppShell {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   private readonly viewTabs: Map<View, HTMLElement>;
-  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
-  // the active one highlighted in update().
   private readonly phone = window.matchMedia("(max-width: 768px)");
   private readonly header: HTMLElement;
   private readonly viewNav: HTMLElement;
@@ -907,8 +971,6 @@ export class AppShell {
     this.actions.layoutChanged();
   }
   private readonly appControls: ReturnType<typeof appbarControls>;
-  private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
-  private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
   private readonly configPane: ConfigPane;
@@ -1064,27 +1126,6 @@ export class AppShell {
      *  install (a harness) can leave it out. */
     private readonly installEl?: HTMLElement,
   ) {
-    // Disconnect doubles as "forget the saved token": the credential persists across
-    // visits now, so this button is the only way back to the login prompt on a shared
-    // machine or after a rotation. The title says so — the label alone reads as a
-    // transport action, not a logout.
-    const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
-    disconnect.setAttribute("title", "Disconnect and forget the saved token");
-
-    // The theme toggle: a compact Light/Dark/System segmented control. A click routes
-    // through actions.setTheme, which persists the choice and re-themes the terminals.
-    const themeToggle = h("div", { class: "af-theme-toggle" });
-    themeToggle.setAttribute("role", "group");
-    themeToggle.setAttribute("aria-label", "Theme");
-    for (const choice of THEME_CHOICES) {
-      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
-      opt.setAttribute("data-theme-opt", choice);
-      opt.setAttribute("title", `${themeLabel(choice)} theme`);
-      opt.addEventListener("click", () => this.actions.setTheme(choice));
-      this.themeOpts.set(choice, opt);
-      themeToggle.append(opt);
-    }
-
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
@@ -1140,18 +1181,14 @@ export class AppShell {
     // syncPhone reparents and reopens the picker. Separate lists can dispatch
     // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
-      ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
+      ...(this.installEl ? [this.installEl] : []),
     ], this.phone, this.captureNewTabCancelReturn, () => {
       // The phone disclosure owns the carried desktop actions. A user dismissal
       // retires that state, unlike layout and picker-return programmatic closes.
       const slot = this.terminalChrome?.newTabSlot;
       if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
-    });
+    }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
-    disconnect.addEventListener("click", () => {
-      this.appControls.close();
-      this.actions.disconnect();
-    });
 
     const header = h(
       "header",
@@ -1172,7 +1209,7 @@ export class AppShell {
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
-        !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
+        !target.closest(".af-viewnav")) this.appControls.dismiss();
     });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
@@ -1254,6 +1291,8 @@ export class AppShell {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
       },
+      setTheme: (choice: ThemeChoice) => this.actions.setTheme(choice),
+      disconnect: () => this.actions.disconnect(),
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
@@ -1409,16 +1448,6 @@ export class AppShell {
       this.setNav(false);
     }
 
-    // Highlight the active theme option (redesign PR1) when the choice changes.
-    if (this.lastThemeChoice !== state.themeChoice) {
-      this.lastThemeChoice = state.themeChoice;
-      for (const [choice, opt] of this.themeOpts) {
-        const active = choice === state.themeChoice;
-        opt.classList.toggle("af-theme-opt-active", active);
-        opt.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    }
-
     // The tasks pane mirrors the task projection, SCOPED to the selected project
     // (redesign PR2). It re-renders when either the task list or the project scope
     // changes, so switching projects re-scopes the tasks view too.
@@ -1432,7 +1461,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -1601,6 +1630,7 @@ export class AppShell {
     }
     const activeBefore = document.activeElement as HTMLElement | null;
     let restoreChangedFocus: (() => void) | undefined;
+    const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
       s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
@@ -1615,7 +1645,8 @@ export class AppShell {
         const row = sessionRow(s, s.id === state.selectedId,
           id => this.runRailExit(() => this.actions.open(id)),
           target => this.rowActions(target, s.id === state.selectedId), previous);
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : undefined;
+        if (menu) { menu.open(); reopened.push(menu); }
         if (focusedName) restoreChangedFocus = () =>
           row.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
@@ -1631,6 +1662,7 @@ export class AppShell {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -1657,6 +1689,9 @@ export class AppShell {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("…");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
@@ -2044,8 +2079,15 @@ export class AppShell {
     // Hit-test before dismissal so a release outside both the bar and every pane
     // remains a cancel. The drop itself can synchronously recompose the active kind.
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    // Dismiss only when the drop committed: a landed-but-rejected drop (stale
+    // payload, sole tab on its own edge) changed nothing, so retiring a
+    // user-opened disclosure would imply a transition that did not happen
+    // (#4434). The gesture is still consumed either way — landed means landed.
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
@@ -2329,6 +2371,7 @@ export class AppShell {
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta),
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -2654,11 +2697,20 @@ export class AppShell {
       }
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
-      // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      // Three regions, mirroring the pointerup drop decision below: a pane shows its
+      // split zone, the bar shows its insertion gap, and anywhere else (the header,
+      // appbar controls, or empty space) shows nothing — a release there is a cancel,
+      // so the indicator must not track a finger that is no longer over the bar. The
+      // verdict lives in tabtouch.ts for the same reason `tabPressVerdict` does. The
+      // pane hit-test shows its hint as a side effect, so it runs only when the pointer
+      // is off the bar (short-circuit), exactly as before.
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
 

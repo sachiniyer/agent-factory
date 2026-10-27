@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // TestErrBoxNarrowWidthDoesNotOverflow is a regression test for issue #337.
@@ -259,8 +261,12 @@ func TestSanitizeErrorControls(t *testing.T) {
 		{"delete", "bad\x7fpath", "badpath"},
 		{"UTF-8 NEL", "bad\u0085path", "badpath"},
 		{"newline", "first\nsecond", "first · second"},
-		{"tab", "first\tsecond", "first\tsecond"},
-		{"mixed", "\x1b[31mbad\b\a\f\v\x7f\u0085path\r\nnext\titem\x1b[0m", "badpath · next\titem"},
+		// Tabs are expanded to four spaces — what lipgloss's default
+		// TabWidth renders — so the width budget matches what the
+		// terminal actually draws and the status bar's downstream clamp
+		// does not silently cut the tail. See sanitizeError's comment.
+		{"tab", "first\tsecond", "first    second"},
+		{"mixed", "\x1b[31mbad\b\a\f\v\x7f\u0085path\r\nnext\titem\x1b[0m", "badpath · next    item"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := sanitizeError(tc.raw); got != tc.want {
@@ -308,5 +314,313 @@ func TestErrBoxDetailsHintOverride(t *testing.T) {
 	e.HideDetailsHint(false)
 	if got := e.String(); !strings.Contains(got, "E details") {
 		t.Errorf("unhiding must restore the hint, got %q", got)
+	}
+}
+
+// TestErrBoxHintPaintsWithoutRetaining pins SetHint's contract (#5356 review):
+// a hint answers a key on the same bar and fades on the same Expire timer, but
+// it is never retrievable — acknowledging an empty store must leave it empty,
+// or `E details` would reopen the hint itself as "Last notice".
+func TestErrBoxHintPaintsWithoutRetaining(t *testing.T) {
+	e := NewErrBox()
+
+	e.SetHint(errors.New("No recent error"))
+	if got := e.FullError(); got != "No recent error" {
+		t.Errorf("the hint must paint on the bar, got %q", got)
+	}
+	if text, _ := e.RetainedNotice(); text != "" {
+		t.Errorf("the hint must not enter the retained slot, got %q", text)
+	}
+
+	e.Expire()
+	if got := e.FullError(); got != "" {
+		t.Errorf("the hint must fade on the same timer, still shows %q", got)
+	}
+	if text, _ := e.RetainedNotice(); text != "" {
+		t.Errorf("expiry must not resurrect the hint into retained, got %q", text)
+	}
+
+	// The contrast the contract exists against: a real notice does retain.
+	e.SetNotice(errors.New("No preview to keep"))
+	if text, _ := e.RetainedNotice(); text != "No preview to keep" {
+		t.Errorf("a real notice must still retain for E details, got %q", text)
+	}
+	e.Expire()
+	if text, _ := e.RetainedNotice(); text != "No preview to keep" {
+		t.Errorf("a real notice must survive its fade, got %q", text)
+	}
+}
+
+// The emoji clusters the bug report measures against runewidth's
+// under-reporting: heart+VS16, keycap, and regional-indicator flags. The
+// table is from ui/layout/cells.go; the values are what tmux 3.4 actually
+// advances. The chained ZWJ family is deliberately NOT here: the bug
+// report excludes it ("ZWJ-family emoji measures the same 2 cells on both
+// runewidth and xansi, so it does not trigger the divergence") and its
+// Cells/UpperBound disagreement is a separate concern of the contract
+// measure, not the measure the bug fixes.
+var errBoxMeasureCorpus = []struct {
+	name         string
+	s            string
+	cells, bound int
+}{
+	{"heart+vs16", "\u2764\uFE0F", 2, 2},
+	{"keycap", "1\uFE0F\u20E3", 2, 2},
+	{"regional indicator", "\U0001F1FA\U0001F1F8", 2, 2},
+}
+
+// TestErrBoxStatusLineFitsContractMeasure is the regression test for the
+// silent-hard-cut bug. statusLine trusts its fit test to ensure the error row
+// fits e.width; before this fix the test was on runewidth, which under-reports
+// what the terminal advances on the ordinary VS16/keycap/regional-indicator
+// emoji classes (runewidth 1 where tmux and x-ansi measure 2). A line the
+// fit test accepted therefore rendered wider than the bar, and the status
+// bar's downstream layout.ClampToRect silently right-cut it with no ellipsis,
+// taking trailing content and the `E details` hint itself into the bargain.
+//
+// The fix replaces runewidth with layout.Cells (and the truncator with
+// xansi.Truncate plus the progressive-loop trim from TruncateToCells /
+// truncateToContract); this test pins that on every cluster from the
+// cells.go table the report calls out, statusLine's output fits e.width on
+// the contract measure the bar's clamp enforces — and the `E details` hint
+// survives whole.
+func TestErrBoxStatusLineFitsContractMeasure(t *testing.T) {
+	for _, tc := range errBoxMeasureCorpus {
+		if got := layout.Cells(tc.s); got != tc.cells {
+			t.Fatalf("%s: precondition — layout.Cells = %d, want %d (from cells.go table)", tc.name, got, tc.cells)
+		}
+		if got := layout.CellsUpperBound(tc.s); got != tc.bound {
+			t.Fatalf("%s: precondition — layout.CellsUpperBound = %d, want %d (from cells.go table)", tc.name, got, tc.bound)
+		}
+	}
+
+	// Pick a bar narrow enough each cluster's notice cannot fit untruncated
+	// at its real width, and small enough to force the hint-budget truncation
+	// branch (prefixWidth > 3). The default `E details` hint claims 11
+	// cells, so width=20 leaves 9 cells of prefix: enough to make truncation
+	// visible while keeping the hint intact.
+	const width = 20
+	for _, tc := range errBoxMeasureCorpus {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			notice := strings.Repeat(tc.s, 16) // guaranteed longer than the bar
+			e := NewErrBox()
+			e.SetSize(width, 1)
+			e.SetError(errors.New(notice))
+			line := e.statusLine()
+			if got := layout.CellsUpperBound(line); got > width {
+				t.Errorf("statusLine returned a row the contract measure says is %d "+
+					"cells, over the %d-cell bar: %q", got, width, line)
+			}
+			// And specifically the `E details` hint must survive intact —
+			// the symptom that earned this bug its report.
+			if !strings.Contains(line, "E details") {
+				t.Errorf("the truncated notice must advertise an intact `E details` "+
+					"hint so the user can read the rest from the bar; got %q", line)
+			}
+		})
+	}
+}
+
+// TestErrBoxStatusLineKeepsHintIntactOnHeartVS16 is the narrow form of the
+// bug report's first repro: a heart+VS16 notice where runewidth says the bar
+// is wide enough for the full line plus hint, but x-ansi (the contract
+// measure) says the row is 3 cells over. Before the fix the clamp's silent
+// right-cut produced `❤️❤️❤️…  E deta`; after, the row fits and the hint is
+// whole.
+func TestErrBoxStatusLineKeepsHintIntactOnHeartVS16(t *testing.T) {
+	const heart = "\u2764\uFE0F" // runewidth 1, x-ansi 2, tmux 2
+	e := NewErrBox()
+	e.SetSize(15, 1)
+	e.SetError(errors.New(strings.Repeat(heart, 16)))
+
+	line := e.statusLine()
+
+	// The measure the status bar's clamp uses must agree the row fits.
+	if got := layout.CellsUpperBound(line); got > 15 {
+		t.Fatalf("statusLine emitted a row the contract measure says is %d cells, "+
+			"over the 15-cell bar; the clamp would silently cut it: %q", got, line)
+	}
+
+	// And the hint must survive whole — the bug's headline symptom.
+	if !strings.Contains(line, "E details") {
+		t.Errorf("expected an intact `E details` hint on a clustered notice, got %q", line)
+	}
+	// The bug's specific truncation was `E deta`; assert no partial hint
+	// survives whole-less.
+	if strings.Contains(line, "E deta") && !strings.Contains(line, "E details") {
+		t.Errorf("the hint was truncated mid-word to `E deta`: %q", line)
+	}
+}
+
+// TestErrBoxStatusLineMarksSilentCutWithEllipsis is the bug report's second
+// repro: 30 hearts + `xxxxx` in a 40-cell bar. runewidth reported the line at
+// 35 (≤ 40), so the fit test returned the line untruncated, intending it to
+// fit; the real measure is 65 and the clamp silently cut the tail — 10 hearts
+// and all five filler characters vanished with no truncation marker. After
+// the fix, statusLine sees the real width and marks the cut with `…`.
+func TestErrBoxStatusLineMarksSilentCutWithEllipsis(t *testing.T) {
+	const heart = "\u2764\uFE0F"
+	e := NewErrBox()
+	e.SetSize(40, 1)
+	e.SetError(errors.New(strings.Repeat(heart, 30) + "xxxxx"))
+
+	line := e.statusLine()
+	if got := layout.CellsUpperBound(line); got > 40 {
+		t.Fatalf("statusLine emitted a row the contract measure says is %d cells, "+
+			"over the 40-cell bar: %q", got, line)
+	}
+	// The line must mark the cut — that is the whole reason the bug is
+	// visible. Hard-cut launches no "I have more" affordance at all.
+	if !strings.Contains(line, "…") {
+		t.Errorf("a clipped notice must mark its cut with `…`; got %q", line)
+	}
+	// And the hint must survive whole on exactly this case, which the bug
+	// report called out by name.
+	if !strings.Contains(line, "E details") {
+		t.Errorf("the truncated notice must advertise an intact `E details` hint; got %q", line)
+	}
+}
+
+// TestErrBoxExpandsTabsForWidthBudget pins the second, independent trigger.
+// sanitizeError used to keep tabs ("Tabs remain text"), but lipgloss with
+// the default TabWidth renders every tab as four spaces. So a tab passed
+// the fit test as 0 cells, statusLine returned the line untruncated, and
+// the clamp cut the trailing content silently (e.g. `col1\tcol2` in a 9-cell
+// bar rendered as `col1    ` with `ol2` silently gone). Expanding tabs to
+// four spaces in sanitizeError — what lipgloss would emit anyway — makes
+// the budget match the render.
+func TestErrBoxExpandsTabsForWidthBudget(t *testing.T) {
+	// First confirm sanitizeError expands the tab.
+	if got, want := sanitizeError("col1\tcol2"), "col1    col2"; got != want {
+		t.Fatalf("sanitizeError must expand a tab to the four cells lipgloss "+
+			"renders; got %q, want %q", got, want)
+	}
+
+	e := NewErrBox()
+	e.SetSize(9, 1)
+	e.SetError(errors.New("col1\tcol2"))
+
+	line := e.statusLine()
+	if got := layout.CellsUpperBound(line); got > 9 {
+		t.Fatalf("statusLine emitted a row the contract measure says is %d cells, "+
+			"over the 9-cell bar: %q", got, line)
+	}
+	// The cut must be marked — the absence of a marker is the whole bug.
+	if !strings.Contains(line, "…") {
+		t.Errorf("a tab notice that overruns the bar must mark its cut with `…`; got %q", line)
+	}
+	// And exactly the col1 prefix survives — the silent cut used to take
+	// col2's last runes; the ellipsis version keeps the user's leading
+	// content and remembers there is more.
+	if !strings.HasPrefix(line, "col1") {
+		t.Errorf("the leading col1 text must survive truncation; got %q", line)
+	}
+}
+
+// TestTruncateStatusTextFitsContractMeasure pins the lower-level helper
+// directly. Before the fix, truncateStatusText measured on runewidth and
+// truncated with runewidth.Truncate, so a 2-cell (on xansi) heart passed
+// its 1-cell budget and was returned whole — the very under-reporting
+// statusLine inherits. The fix lets the helper be called from any caller
+// (RecoveryContent uses it too) without exporting the bug.
+func TestTruncateStatusTextFitsContractMeasure(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		text  string
+		width int
+	}{
+		{"heart+vs16 into 1", "\u2764\uFE0F", 1},
+		{"heart+vs16 into 3", "\u2764\uFE0F", 3},
+		{"keycap into 1", "1\uFE0F\u20E3", 1},
+		{"regional indicator into 1", "\U0001F1FA\U0001F1F8", 1},
+		{"plain ascii over width", "a very long error message", 10},
+		{"plain ascii at width", "abcde", 5},
+		{"plain ascii one over width", "abcde", 4},
+		{"zero width", "abcde", 0},
+		{"negative width", "abcde", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := truncateStatusText(tc.text, tc.width)
+			if tc.width <= 0 {
+				if out != "" {
+					t.Fatalf("width <= 0 must return empty, got %q", out)
+				}
+				return
+			}
+			if got := layout.CellsUpperBound(out); got > tc.width {
+				t.Errorf("truncateStatusText returned %d cells, over the %d-cell "+
+					"budget: %q (text=%q)", got, tc.width, out, tc.text)
+			}
+		})
+	}
+}
+
+// TestErrBoxRenderedStatusBarFitsContractMeasure closes the loop
+// end-to-end. The bug's harm lives in the StatusBar output: errBox.String()
+// is the error row ui.StatusBar composes and then hands to
+// layout.ClampToRect. This test drives that whole chain — NewStatusBar →
+// SetRect → String — for every cluster in the cells.go disagreement corpus
+// the report calls out AND for the tab path, and asserts each rendered line
+// honours the bar's contract (<= r.W on the contract measure, plus the
+// `E details` hint survives whole when the prefix budget admits it).
+func TestErrBoxRenderedStatusBarFitsContractMeasure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		notice string
+		width  int
+	}{
+		// The bug report's two repros are the headline cases. Both
+		// narrow the bar enough to land in the hint-budget truncation
+		// branch (`prefixWidth > 3`), which is where the hint was being
+		// silently hard-cut before the fix.
+		{"heart+vs16 narrow bar", strings.Repeat("\u2764\uFE0F", 16), 15},
+		{"heart+vs16 wide bar", strings.Repeat("\u2764\uFE0F", 32), 60},
+		// And the rest of the cells.go disagreement corpus the fix
+		// covers: keycap, regional flags. Same narrow branches as
+		// heart+VS16 so the corpus is symmetric under the contract.
+		{"keycap over bar", strings.Repeat("1\uFE0F\u20E3", 8), 15},
+		{"regional indicator over bar", strings.Repeat("\U0001F1FA\U0001F1F8", 8), 15},
+		// Tab path: the bar must see the 4-cell expansion lipgloss will
+		// emit, mark the cut, and keep the hint — not silently cut
+		// `col2` like the old runewidth math did.
+		{"tab over bar", "col1\tcol2 lots more text", 22},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// The status bar is two rows: hints above, error line below.
+			// Both must honour the contract — the bug's symptom is on
+			// the error row.
+			r := layout.Rect{W: tc.width, H: layout.StatusBarRows}
+			menu := NewMenu()
+			errBox := NewErrBox()
+			sb := NewStatusBar(menu, errBox)
+			sb.SetRect(r)
+			errBox.SetError(errors.New(tc.notice))
+
+			out := sb.String()
+			// Every row must honour the rectangle contract — the bar is
+			// exactly rect.W cells wide on the contract measure, and a
+			// row wider than r.W wraps or pushes the chrome out.
+			lines := strings.Split(out, "\n")
+			if len(lines) != r.H {
+				t.Fatalf("expected %d lines from the status bar, got %d: %q", r.H, len(lines), out)
+			}
+			for i, line := range lines {
+				if got := layout.CellsUpperBound(line); got > tc.width {
+					t.Errorf("line %d of the rendered status bar measures %d cells, "+
+						"over the %d-cell rect: %q", i, got, tc.width, xansi.Strip(line))
+				}
+			}
+			// And the readable hint survives the whole pipeline, end to
+			// end, exactly the surface the bug report's symptom named.
+			// Every case above is in the hint-budget branch
+			// (prefixWidth > 3), so the hint must report.
+			plain := xansi.Strip(out)
+			if !strings.Contains(plain, "E details") {
+				t.Errorf("the rendered status bar must advertise an intact `E details` "+
+					"hint on a clipped clustered notice; got %q", plain)
+			}
+		})
 	}
 }

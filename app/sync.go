@@ -322,8 +322,17 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 		return changed
 	}
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
+		countChanged := m.store.NumTasks() != len(tasks)
 		m.store.SetTasks(tasks)
 		changed = true
+		if countChanged {
+			// The task count feeds the rail's automations-section height
+			// (#1126), read only in relayout — reflow on this poll, as the
+			// TUI's own write paths do, so a CLI-added first task appears and
+			// a removed last one goes (#4965). A same-count edit leaves every
+			// grid input alone, so the 750ms poll doesn't churn the layout.
+			m.relayout()
+		}
 	}
 	// A held draft keeps the pane's list different from disk, so the pane, not
 	// this comparison, says whether the reconcile changed anything visible.
@@ -429,7 +438,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			// first would reclassify its adopted op as local — vetoing every later
 			// retry and turning a transient build failure into the permanent stale row
 			// this change exists to prevent.
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				m.adoptedSnapshotOps.forget(inst)
 				changed = true
 			}
@@ -448,7 +457,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		// Archived→live transition specifically (not merely !Started), so it fires
 		// on real restores without disturbing live in-place updates.
 		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(inst.GetLiveness(), d) != session.LiveArchived {
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				changed = true
 			}
 			continue
@@ -494,6 +503,30 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// exit without each one having to remember this map (#3005).
 	m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
 
+	// Re-pin the selection to the same logical instance (by title) if it
+	// survived the reconcile, BEFORE the pane-prune relayout. Re-resolving by
+	// title correctly re-pins across a swap because the rebuilt instance keeps
+	// the same title (#969). The store's SelectInstance records the assertion;
+	// the sidebar moves its cursor onto the asserted row on its next read. If
+	// the selected title is gone from the snapshot, leave the sidebar's own
+	// clamp behavior as-is.
+	//
+	// The re-pin runs ahead of pruneDeadPanes's relayout for the same #5298
+	// reason the swap path pre-pins ahead of its own: that relayout reads the
+	// sidebar (the footer's row-verb target), and a rebuild running while the
+	// cursor still holds its removal-drifted flat index commits the drifted
+	// row via pushSelection and rewrites the lastCursor* identity evidence the
+	// re-pin's replaced-session (by-name) tab lookup depends on. Running the
+	// assertion first turns that relayout's sync into a cursor move on intact
+	// evidence instead of a drift commit. The re-pin still runs after the
+	// per-row loop and the removals above (which shift indices), so it
+	// re-resolves the survivor by title against the post-removal roster.
+	if selectedTitle != "" {
+		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
+			m.store.SelectInstance(inst)
+		}
+	}
+
 	// Prune panes whose backing session can no longer render — a removed
 	// instance takes its open panes with it (#1088), and a session archived out
 	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
@@ -501,21 +534,10 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// selectionChanged tick, so the focus ring and pane layout are consistent
 	// the moment the reconcile returns. Unconditional: pruneDeadPanes is O(open
 	// panes) and only relayouts when it actually closed something, so a reconcile
-	// with nothing to prune is a cheap no-op.
+	// with nothing to prune is a cheap no-op. The selection re-pin above already
+	// ran, so this relayout's sidebar sync commits a cursor move, not a drift.
 	if m.pruneDeadPanes() {
 		m.relayout()
-	}
-
-	// Re-pin the selection to the same logical instance (by title) if it
-	// survived the reconcile. Re-resolving by title correctly re-pins across a
-	// swap because the rebuilt instance keeps the same title (#969). The store's
-	// SelectInstance records the assertion; the sidebar moves its cursor onto
-	// the asserted row on its next read. If the selected title is gone from the
-	// snapshot, leave the sidebar's own clamp behavior as-is.
-	if selectedTitle != "" {
-		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
-			m.store.SelectInstance(inst)
-		}
 	}
 
 	return changed
@@ -554,8 +576,10 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 // swapInstanceFromSnapshot replaces a stale same-title row with a freshly
 // built instance for the recreated session (#765), preserving the selection.
 // Built BEFORE the swap so a transient build failure leaves the existing row in
-// place rather than dropping it.
-func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
+// place rather than dropping it. selectedTitle is the title of the row the
+// sidebar cursor rested on at the start of this reconcile ("" while it rested on
+// a section header), captured once before the per-row loop — see reconcileSnapshot.
+func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle string) bool {
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
@@ -583,13 +607,46 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
-	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
-		m.relayout()
+	// Pre-pin the cursor to the surviving selectedTitle BEFORE any
+	// sidebar-reading relayout this swap can trigger (#5298 ordering, applied
+	// to the swap path). ReplaceInstanceByTitle re-sorts the whole projection,
+	// so a non-selected swap drifts the cursor's flat index too — an open pane
+	// on the swapped session makes reconcilePanesForTabs call relayout, and a
+	// cursor still holding its removal/re-sort drifted flat index then commits
+	// a different row through pushSelection, rewriting lastCursor* and
+	// clobbering that session's tab identity ahead of the tail by-title re-pin.
+	// Re-pin the surviving selectedTitle (by title) so the relayout's sidebar
+	// sync is a cursor move on intact lastCursor* evidence instead of a drift
+	// commit: a non-selected swap re-resolves the still-present row the cursor
+	// was on, and a selected-swap resolves to the fresh replacement
+	// ReplaceInstanceByTitle kept under that title (same instance the old
+	// selectedTitle==d.Title path pinned). ReplaceInstance's silent re-point
+	// deliberately never asserts — a cursor resting on a section header must
+	// not be yanked onto any row — so the empty-title header guard is retained
+	// here, the same capture reconcileSnapshot uses to drive the tail re-pin.
+	// The sidebar consumes the assertion lazily on its next read; the pane
+	// reconcile's relayout (when a pane closed or re-bound) is that read, so
+	// moveCursorToInstance resolves the replacement's equivalent tab by name
+	// from the corpse's intact evidence instead of letting pushSelection commit
+	// the stale flat index and rewrite lastCursor* first.
+	if selectedTitle != "" {
+		if sel := m.store.GetInstanceByTitle(selectedTitle); sel != nil {
+			m.store.SelectInstance(sel)
+		}
 	}
 	// The tree selection is another binding into the same replaced-session
 	// roster. Carry it through the same name domain as panes: every ID is freshly
-	// minted, while the equivalent replacement tab keeps its name (#1991).
+	// minted, while the equivalent replacement tab keeps its name (#1991). Bound
+	// before the pane reconcile for the same #5298 reason as the in-place path —
+	// a sidebar-reading relayout must not run while the selection binding is
+	// unresolved. The pre-pin above closed the swap's window for the CURSOR too
+	// (the in-place path uses SyncCursorToActiveTab; the swap re-sorts, so it
+	// re-pins by identity via SelectInstance instead), leaving only the active-tab
+	// binding for remapActiveTabForTabs to resolve.
 	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
+	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
+		m.relayout()
+	}
 	return true
 }
 
@@ -618,6 +675,20 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// materialization of the same snapshot.
 	if d.StartupStateUnknown && !inst.StartupStateUnknown() {
 		inst.MarkStartupStateUnknown()
+		changed = true
+	}
+	// Mirror the daemon's durable mechanical evidence BEFORE the liveness
+	// transition below (#5221 review): the task-run completion gate consults it
+	// inside the transition, and a Ready snapshot can carry a turn observation
+	// the edge needs to see. The run marker itself is mirrored outright — a
+	// client that missed the snapshot carrying the evidence (always possible:
+	// the final Ready snapshot scrubs the window fields with the run) cannot
+	// re-derive the end locally, so the daemon's decision is authoritative.
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt,
+		d.TaskRunPromptAttemptAt, d.TaskRunTurnObservedAt) {
+		changed = true
+	}
+	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
 		changed = true
 	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
@@ -687,10 +758,19 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
 		changed = true
 	}
-	// Mirror the daemon's durable mechanical evidence independently of liveness.
-	// An interactive send can change delivery status while the row remains Ready,
-	// and pane churn can race the next Running transition (#3168).
-	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
+	// The environmental wait is the same axis at the non-terminal end: it
+	// appears while the loop defers a retry and disappears when an attempt
+	// goes through or the failure turns structural (#5295). A row whose
+	// tombstone was already adopted keeps it cleared: a delayed pre-kill
+	// snapshot still carries the armed wait while its UserKilled=false
+	// leaves the monotonic tombstone untouched, so applying the snapshot
+	// value here would re-arm a wait no restore can ever consume — the
+	// same lie the tombstone commit itself retires (#5295 review).
+	wait := d.LostRestoreWait
+	if tombstoned {
+		wait = nil
+	}
+	if inst.ReconcileLostRestoreWait(wait) {
 		changed = true
 	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
@@ -724,25 +804,34 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		if tabsChanged {
 			changed = true
 		}
-		// Re-bind the panes whenever the tab IDENTITY list moved — NOT merely when
-		// the reconcile reported a visible change. The two are not the same: an id
-		// adoption is deliberately silent, and a pane bound to an id that just left
-		// the roster must still close. Gating this on tabsChanged left panes on dead
-		// ids whenever the roster change didn't register as "visible" (#1886).
+		// Re-bind the roster's bindings whenever the tab IDENTITY list moved —
+		// NOT merely when the reconcile reported a visible change. The two are
+		// not the same: an id adoption is deliberately silent, and a binding
+		// holding an id that just left the roster must still be repaired.
+		// Gating this on tabsChanged left panes on dead ids whenever the roster
+		// change didn't register as "visible" (#1886).
 		if !sameTabSlotKeys(oldKeys, paneTabKeys(inst)) {
-			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
-				m.relayout()
-			}
 			// The tree's selection is the OTHER binding into that roster, and it
-			// needs the SAME identity remap for the same reason: a reorder lands
-			// entirely here (no local action, #1813), and the clamps only keep the
-			// index in range — which a permutation never violates — so an
-			// index-keyed selection silently becomes a different tab.
+			// needs the SAME identity remap — a reorder lands entirely here (no
+			// local action, #1813), and the clamps only keep the index in range,
+			// which a permutation never violates, so an index-keyed selection
+			// silently becomes a different tab.
+			//
+			// Resolve it BEFORE the pane reconcile's relayout: relayout re-reads
+			// the sidebar (the footer's row-verb target), and a rebuild while
+			// the cursor still holds its pre-shrink flat index drifts it onto the
+			// NEXT row — the following session's instance row when the dropped
+			// tab was the last child — which pushSelection commits as the new
+			// display selection, leaving the remap below no session to repair
+			// (#5298).
 			if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
 				// An in-place roster update never re-sorts the projection, so the
 				// sidebar indices are current and can follow the remapped tab now.
 				m.sidebar.SyncCursorToActiveTab()
 				changed = true
+			}
+			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
+				m.relayout()
 			}
 		}
 	}

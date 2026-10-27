@@ -27,8 +27,10 @@ import (
 // root_agent / root_agent.* on unset are covered separately by
 // TestRootAgentDottedProjectUnsetNamesAdoptedSessionRemedy (which pins the
 // restart notice and the root-agent adoption remedy), so they are not duplicated
-// here; this test covers the two keys #4381 explicitly deferred plus one
-// session-scoped representative to guard the else branch against over-correction.
+// here; this test covers the keys #4381 explicitly deferred plus one
+// session-scoped representative to guard the else branch against
+// over-correction. branch_prefix's stored-but-never-applied interim state
+// (#4539) means its unset prints no effect notice — the last subtest pins that.
 func TestProjectUnsetNoticeMirrorsSet(t *testing.T) {
 	// default_program guards the generic session-scoped else branch (a fix that
 	// routed every key through the restart notice would fail this); on_archive_command
@@ -59,17 +61,21 @@ func TestProjectUnsetNoticeMirrorsSet(t *testing.T) {
 		})
 	}
 
-	// branch_prefix is EffectNextDaemonStart (read from the frozen startup config),
-	// so unsetting it must print the restart notice, not the session-scoped sentence.
-	// This is the wrong-timing half of #4381's deferred unset-side follow-up.
-	t.Run("branch_prefix_must_restart", func(t *testing.T) {
+	// branch_prefix is EffectNextDaemonStart, but a project-scoped value is
+	// stored and never applied (#4539), so clearing it changes nothing a restart
+	// could reveal — the unset prints no effect notice at all. This keeps set
+	// and unset symmetric (the set side likewise suppresses the notice).
+	t.Run("branch_prefix_inert_no_restart_notice", func(t *testing.T) {
 		projectUnsetNoticeRun(t, "branch_prefix", "branch_prefix = \"af-\"\n", func(t *testing.T, got string) {
-			require.Contains(t, got, "restart them to apply",
-				"`af config unset --project branch_prefix` (EffectNextDaemonStart) must "+
-					"print the restart notice like `af config set --project` does. Got: %q", got)
+			require.NotContains(t, got, "restart them to apply",
+				"`af config unset --project branch_prefix` clears a value that was "+
+					"never applied (#4539); a restart notice would promise an effect "+
+					"that does not exist. Got: %q", got)
 			require.NotContains(t, got, "sessions created",
 				"`af config unset --project branch_prefix` must not print the "+
-					"session-scoped sentence. Got: %q", got)
+					"session-scoped sentence either — nothing changes. Got: %q", got)
+			require.Contains(t, got, "cleared branch_prefix override",
+				"the clear itself must still be reported. Got: %q", got)
 		})
 	})
 }

@@ -106,6 +106,11 @@ type configEntry struct {
 	// a missing value (the compiled default applies) from an explicitly
 	// configured empty value.
 	configured bool
+
+	// note is presentation-only and stays out of the JSON payload: an inline
+	// qualifier appended to the rendered value, currently the "stored but not
+	// applied" marker for a personal-project branch_prefix (#4539).
+	note string
 }
 
 // globalConfigReadOrder preserves the historical `af config list` order. It is
@@ -147,6 +152,7 @@ var globalConfigReadOrder = []string{
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
+	"web",
 }
 
 // loadGlobalConfigEntries loads the global config and returns its keys. It
@@ -196,13 +202,18 @@ func formatConfigValue(v any) string {
 // and "I configured the empty/off value". `config get` and JSON output keep
 // their existing script-facing representations.
 func formatConfigListValue(entry configEntry) string {
+	rendered := ""
 	if !isEmptyConfigValue(entry.Value) {
-		return formatConfigValue(entry.Value)
+		rendered = formatConfigValue(entry.Value)
+	} else if !entry.configured {
+		rendered = "(unset)"
+	} else {
+		rendered = formatConfigExplanationValue(entry.Value)
 	}
-	if !entry.configured {
-		return "(unset)"
+	if entry.note != "" {
+		rendered += " " + entry.note
 	}
-	return formatConfigExplanationValue(entry.Value)
+	return rendered
 }
 
 func isEmptyConfigValue(value any) bool {
@@ -225,6 +236,9 @@ func isEmptyConfigValue(value any) bool {
 
 func configEntryFromResolvedValue(value config.ResolvedValue) configEntry {
 	entry := configEntry{Key: value.Key, Value: value.Value}
+	if config.PersonalBranchPrefixIgnored(value) {
+		entry.note = "(project override ignored: not supported yet)"
+	}
 	if value.Winner != nil && value.Winner.Layer != config.SourceBuiltIn.String() {
 		entry.configured = true
 		return entry
@@ -363,9 +377,14 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				}
 				return writeConfigExplanations(cmd.OutOrStdout(), resolved, []config.ResolvedValue{value})
 			}
-			entry := configEntry{Key: value.Key, Value: value.Value}
+			entry := configEntryFromResolvedValue(value)
 			if configJSONFlag {
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
+			}
+			// Scalar get stays script-friendly: the raw value owns stdout and the
+			// advisory lands on stderr, where the user still sees the mark.
+			if entry.note != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), entry.Key+" "+entry.note)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
 			return nil
@@ -505,6 +524,9 @@ Settable keys:
   root_agent.enabled         true | false
   root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
+  web                        compact JSON object of browser-terminal display preferences
+  web.terminal_font_size_phone   number in [4, 32] — xterm font size at the phone breakpoint (default 6.5)
+  web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -557,8 +579,11 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
-is rejected with the location it actually belongs to. Clear an override with
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
+is rejected with the location it actually belongs to. One caveat: a
+per-project branch_prefix is accepted and stored but ignored for now — the
+global prefix applies to every project until #4539 lands the real feature.
+Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
@@ -569,6 +594,8 @@ Examples:
   af config set root_agent.enabled true --project .
   af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
+  af config set web.terminal_font_size_phone 8
+  af config set web.terminal_font_size_desktop 14
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config set default_accounts.codex work --project ~/work/myrepo
@@ -609,6 +636,12 @@ owns.`, tmux.SupportedProgramsString()),
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
+			// Writer warnings (e.g. a stored-but-inert per-project branch_prefix,
+			// #4539) go to stderr like the global write path's, before the
+			// effect notice below.
+			for _, w := range res.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), w)
+			}
 			if res.RequiresRestart {
 				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
@@ -757,8 +790,10 @@ still a present, winning override.
 
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
---project, it clears one migrated global backend setting: docker.mount_agent_credentials,
-ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+--project, it clears one migrated global setting — a network.* key
+(listen_addr, preview_listen_addr, require_token, require_loopback_token,
+cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when

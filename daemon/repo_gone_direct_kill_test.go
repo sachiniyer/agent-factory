@@ -840,3 +840,144 @@ func TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles(t *testing.T)
 	assert.Nil(t, recordFor(t, repoID, "direct-stalled-absent"),
 		"the settled kill must delete the permanently-stuck row")
 }
+
+// TestKillSession_FailedSettleRestoresIdentityQualifiedFence is the daemon-level
+// regression for the failed-settle restore bug. The reclaim gate passes any
+// stalled record regardless of identity, so an identity-qualified stalled
+// record carrying an alternate candidate can reach ClaimWorktreeRelocationForRetry,
+// resolve the primary, and then fail SettleWorktreeRelocationClaim when the
+// settle revalidation probe times out. RestoreStalledWorktreeFenceAfterFailedSettle
+// must then restore the identity and the alternate — never the bare
+// identity-unknown shape the bug installed. The repo is intentionally left
+// present so the kill routes through settleReclaimedStalledIdentity (the
+// repo-present arm of prepareDirectRepoGoneKillCleanup), and the seam fails only
+// the settle revalidation probe (the 2nd probe of the archived path); the
+// reclaim's resolution probe (the 1st) succeeds, so the record is consumed and
+// the settle runs. A counter-based seam makes the sequencing deterministic
+// without racing a physical directory change.
+func TestKillSession_FailedSettleRestoresIdentityQualifiedFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	title := "direct-failed-settle-restore"
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	// The repo stays present: the repo-present arm calls settleReclaimedStalledIdentity,
+	// whose failed-settle branch runs RestoreStalledWorktreeFenceAfterFailedSettle.
+	require.Nil(t, recordFor(t, repoID, title).Worktree.RelocationRecovery,
+		"a direct kill must start from a record-free archive")
+
+	info, err := os.Stat(archivedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	alternate := archivedPath + "-moved"
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryStalled,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+		AlternatePath: alternate,
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+
+	// Fail only the settle revalidation probe (the 2nd probe of archivedPath):
+	// the reclaim's resolution probe (the 1st) succeeds and consumes the record.
+	restoreSeam := sessiongit.SetRelocationIdentityErrorAfterNForTest(
+		archivedPath, context.DeadlineExceeded, 2)
+	t.Cleanup(restoreSeam)
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.Error(t, err, "the failed settle must refuse the kill before the tombstone")
+	assert.ErrorContains(t, err, "retry the kill",
+		"the failed-settle refusal names the recoverable next step")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(archivedPath), "the archived directory must survive the refused kill")
+
+	// The restored in-memory fence must preserve the identity and the alternate
+	// — the core guarantee of the fix. With the bug it bare-wiped both.
+	recovery, unresolved := inst.WorktreeRelocationRecovery()
+	require.True(t, unresolved, "the restored fence must remain so the next kill re-claims")
+	require.NotNil(t, recovery)
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, recovery.State)
+	assert.True(t, recovery.IdentityKnown,
+		"the restored record must keep the identity the reclaim resolved")
+	assert.Equal(t, uint64(stat.Dev), recovery.Device)
+	assert.Equal(t, uint64(stat.Ino), recovery.Inode)
+	assert.Equal(t, alternate, recovery.AlternatePath,
+		"the restored record must keep the alternate candidate")
+}
+
+// TestKillSession_FailedSettleRestoreKeepsAlternateArbitrable is the daemon-level
+// end-to-end for the bug report: after the failed settle + restore, the
+// interrupted relocation completes (the archived bytes rename to the alternate
+// and the primary is gone). A later kill must arbitrate the alternate through
+// the preserved identity — never discharge the fence over the gone primary and
+// proceed record-free. The first kill drives the failed-settle restore with the
+// repo present; the second kill removes the repo, completes the rename, and
+// re-kills, and the reclaim must select the alternate and consume it.
+func TestKillSession_FailedSettleRestoreKeepsAlternateArbitrable(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	title := "direct-failed-settle-arbitrate"
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	info, err := os.Stat(archivedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	movedPath := archivedPath + "-moved"
+	// The record's identity is the primary's; a later rename of the primary to
+	// movedPath carries that identity to the alternate path.
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryStalled,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+		AlternatePath: movedPath,
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+
+	// Kill 1: repo present, reclaim resolves the primary (probe 1), the settle
+	// revalidation probe (probe 2) times out, the restore fires, the kill
+	// refuses. The fence retains the identity and the alternate.
+	restoreSeam := sessiongit.SetRelocationIdentityErrorAfterNForTest(
+		archivedPath, context.DeadlineExceeded, 2)
+	t.Cleanup(restoreSeam)
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.Error(t, err, "the failed settle must refuse the first kill")
+	assert.True(t, exists(archivedPath), "the primary archive must survive the refused kill")
+
+	// The interrupted relocation completes: the archived bytes move to the
+	// recorded alternate, and the primary is gone. Restore the seam first so
+	// the next kill's probes observe the real filesystem.
+	restoreSeam()
+	require.NoError(t, os.Rename(archivedPath, movedPath),
+		"the interrupted move completes, carrying the protected identity to the alternate")
+	require.True(t, exists(movedPath))
+
+	// Kill 2: the origin repo is gone, and the reclaim must arbitrate the
+	// alternate through the preserved identity. With the bug the fence was
+	// bare-wiped and the next kill discharged over the gone primary and
+	// proceeded record-free, orphaning the directory at the alternate.
+	require.NoError(t, os.RemoveAll(repoPath))
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err,
+		"the reclaim must select the alternate through the preserved identity and authorize repo-gone cleanup")
+	assert.False(t, exists(movedPath),
+		"the kill must consume the archive at the arbitrated alternate")
+	assert.Nil(t, recordFor(t, repoID, title),
+		"the settled kill must delete the session row")
+}
