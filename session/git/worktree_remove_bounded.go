@@ -90,7 +90,11 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// repoRoot set as cmd.Dir makes git resolve `-C repoRoot` relative to that
 	// new cwd).
 	if filepath.IsAbs(repoRoot) {
-		if info, err := os.Stat(repoRoot); err == nil && info.IsDir() {
+		// BoundedLstat, not os.Stat: this runner exists to bound filesystem
+		// access, and a plain Stat on a stalled FUSE/NFS root would wedge the
+		// call before the context-controlled git process ever starts (#5136
+		// Codex round 10).
+		if info, err := BoundedLstat(repoRoot); err == nil && info.IsDir() {
 			cmd.Dir = repoRoot
 		}
 	}

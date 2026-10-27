@@ -34,7 +34,8 @@ import (
 // Contract (docs/remote-hooks.md):
 //
 //	launch_cmd --name <slug> --title <title> --repo <cloneURL> \
-//	           [--branch <branch>] [--program <p>]
+//	           [--branch <branch>] [--program <p> --program-resolved] \
+//	           [--session-env <name>…]
 //	    clones <cloneURL> (repo@branch on RESTORE) on the user's infra, starts
 //	    `af agent-server --listen :PORT --repo <clonedir> --title <title> …`
 //	    there, and echoes ONE JSON object on stdout:

@@ -57,9 +57,9 @@ func SetProjectColor(id, color string) (Project, error) {
 		return Project{}, err
 	}
 
-	var updated Project
+	var record projectRecord
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		record, err := readProjectRecord(dir, id)
+		r, err := readProjectRecord(dir, id)
 		if err != nil {
 			return err
 		}
@@ -77,13 +77,16 @@ func SetProjectColor(id, color string) (Project, error) {
 				return fmt.Errorf("write project color: %w", err)
 			}
 		}
-		updated = projectFromRecord(record)
+		record = r
 		return nil
 	})
 	if err != nil {
 		return Project{}, err
 	}
-	return updated, nil
+	// projectFromRecord stats the recorded root for PathExists, which can block
+	// on an unresponsive mount — it runs after the lock is released so a cosmetic
+	// color write cannot stall every other registry mutation.
+	return projectFromRecord(record), nil
 }
 
 // readProjectRecord reads and validates only id's record. A color write needs

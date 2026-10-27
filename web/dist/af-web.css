@@ -1020,6 +1020,14 @@ button:disabled,
 .af-app[data-project-color] [data-af-theme=dark] {
   --af-accent: var(--af-project-accent-dark);
 }
+:root[data-af-theme=light] body[data-project-color],
+body[data-project-color] [data-af-theme=light] {
+  --af-accent: var(--af-project-accent-light);
+}
+:root[data-af-theme=dark] body[data-project-color],
+body[data-project-color] [data-af-theme=dark] {
+  --af-accent: var(--af-project-accent-dark);
+}
 .af-app[data-project-color] .af-appbar {
   background: var(--af-project-color);
   color: var(--af-project-ink);
@@ -1088,6 +1096,12 @@ button:disabled,
 .af-copy-link-desktop {
   min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   justify-content: center;
+}
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
 }
 .af-term-menu .af-copy-link-phone {
   display: none;
@@ -2208,6 +2222,9 @@ button:disabled,
 }
 @media (max-width: 768px) {
   .af-copy-link-desktop {
+    display: none;
+  }
+  .af-term-zoom {
     display: none;
   }
   .af-term-menu .af-copy-link-phone {

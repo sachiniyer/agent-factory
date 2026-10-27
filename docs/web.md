@@ -90,13 +90,23 @@ backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
-Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and More keys. Tap Ctrl or Alt to modify the next key, including the bar’s own
+Tab, **^C**, **Paste** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
+keys, **A−**/**A+** and More keys. The A−/A+ pair steps the terminal's text
+size by half a pixel per press and is display state, not input — it sends no
+keys to the session. Tap Ctrl or Alt to modify the next key, including the bar’s own
 keys; double tap to lock (shown
 by ▸ and an outline), then tap again to release. IME composition is sent unchanged
 and leaves armed modifiers for the next key. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.
+
+**Terminal text size.** At desktop width the terminal header carries the same
+**A−**/**A+** pair (one-pixel steps); on a phone it lives in the keybar's arrow
+row. Each device class keeps its own size — stepping one never touches the
+other — and both persist in the daemon's `[web]` config table
+(`web.terminal_font_size_phone`, `web.terminal_font_size_desktop`, each a
+number in [4, 32]) so the size survives a reload and follows every browser
+attached to this daemon.
 
 ![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
