@@ -899,9 +899,19 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	// so the agent later cannot read or update its existing configuration.
 	// /workspace is freshly created by mkdir -p above, so it has no existing
 	// descendants and a shallow chown is enough.
-	script := fmt.Sprintf("mkdir -p %s %s && chown -R %s %s && chown %s %s",
-		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir), owner,
-		shellQuote(p.sessionHome()), owner, shellQuote(dockerWorkspaceDir))
+	//
+	// The recursive chown prunes the read-only agent-credential bind mounts
+	// (docker.mount_agent_credentials, #2194): they land as single files under
+	// the session home (/root/<rel>) at `docker run`, before this step, and a
+	// `chown -R` that descends into one fails with EROFS and aborts
+	// provisioning before the agent can read its credential (#5424 review).
+	// The mounted file's own host ownership is already correct, so skipping
+	// it loses nothing; the image-shipped parent dirs (.codex, .claude, …)
+	// are still chowned so the agent can read and update them.
+	home := p.sessionHome()
+	homeChown := chownRecursiveScript(home, owner, credentialMountTargets(p.credentialMounts, home))
+	script := fmt.Sprintf("mkdir -p %s %s && %s && chown %s %s",
+		shellQuote(home), shellQuote(dockerWorkspaceDir), homeChown, owner, shellQuote(dockerWorkspaceDir))
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
 	if err != nil {

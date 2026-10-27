@@ -413,3 +413,138 @@ func TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
 	assert.Equal(t, dockerOpDaemonWrite, se.op,
 		"a failed owner READ attempted no unprivileged write — it is dockerd bookkeeping, not a session writer")
 }
+
+// TestCredentialMountTargets pins the parser that extracts the in-container
+// destinations of the read-only agent-credential bind mounts (#2194) that
+// fall under the session home. Each `-v` entry is a "host:container:mode"
+// pair; host and container are absolute unix paths with no colons, so the
+// container destination is the segment between the last two colons. Only
+// strict descendants of home are returned — credentials mount under
+// /root/<rel> for a non-account session, never at /root itself.
+func TestCredentialMountTargets(t *testing.T) {
+	mounts := []string{
+		"-v", "/host/.codex/auth.json:" + dockerContainerHome + "/.codex/auth.json:ro",
+		"-v", "/host/.claude/.credentials.json:" + dockerContainerHome + "/.claude/.credentials.json:ro,z",
+		// A mount NOT under home is dropped.
+		"-v", "/host/other:/opt/other:ro",
+	}
+	targets := credentialMountTargets(mounts, dockerContainerHome)
+	assert.Equal(t, []string{
+		dockerContainerHome + "/.codex/auth.json",
+		dockerContainerHome + "/.claude/.credentials.json",
+	}, targets)
+
+	// home itself is never a prune target: a credential never mounts at
+	// /root, and pruning home would skip the whole chown.
+	assert.Empty(t, credentialMountTargets(
+		[]string{"-v", "/h:" + dockerContainerHome + ":ro"}, dockerContainerHome),
+		"home itself must not be pruned — the chown must still chown it")
+	assert.Empty(t, credentialMountTargets(nil, dockerContainerHome),
+		"no mounts -> no targets")
+}
+
+// TestChownRecursiveScript pins the two shapes the recursive HOME chown
+// takes: a bare `chown -R` when no credential mount lands under the home, and
+// a `find -prune` that skips each read-only credential file otherwise. The
+// prune form chowns home itself and every other descendant so root-owned
+// image config dirs (.codex, .config, …) become accessible, while the
+// mounted credential file — read-only, already owned correctly on the host —
+// is never touched (#5424 review).
+func TestChownRecursiveScript(t *testing.T) {
+	// No prune targets: the plain recursive chown is simpler and stays.
+	assert.Equal(t, "chown -R 1000:1000 "+shellQuote(dockerContainerHome),
+		chownRecursiveScript(dockerContainerHome, "1000:1000", nil))
+
+	// With credential targets, find prunes them and chowns everything else.
+	script := chownRecursiveScript(dockerContainerHome, "1000:1000", []string{
+		dockerContainerHome + "/.codex/auth.json",
+		dockerContainerHome + "/.claude/.credentials.json",
+	})
+	assert.Contains(t, script, "find "+shellQuote(dockerContainerHome),
+		"the prune form walks home with find")
+	assert.Contains(t, script, "-path "+shellQuote(dockerContainerHome+"/.codex/auth.json"),
+		"the first credential target is a prune path")
+	assert.Contains(t, script, "-path "+shellQuote(dockerContainerHome+"/.claude/.credentials.json"),
+		"the second credential target is a prune path")
+	assert.Contains(t, script, "-prune",
+		"the credential targets are pruned, not chowned")
+	assert.Contains(t, script, "-exec chown 1000:1000 {} +",
+		"everything else under home is chowned to the probed uid")
+	assert.NotContains(t, script, "chown -R",
+		"the prune form never uses chown -R, which would descend into the read-only mount")
+}
+
+// TestPrepareNonAccountUser_PrunesCredentialMountsFromRecursiveChown pins
+// the fix for the read-only credential mount regression (#5424 review): when
+// docker.mount_agent_credentials is on, the agent's credential file is
+// bind-mounted read-only under /root at `docker run`, before this step. The
+// recursive HOME chown must prune that mount — a `chown -R` that descends
+// into it fails with EROFS and aborts provisioning before the agent can read
+// its credential. The image-shipped parent dirs (.codex, .claude, …) are
+// still chowned so the agent can read and update them, and /workspace stays a
+// shallow chown because mkdir -p just created it.
+func TestPrepareNonAccountUser_PrunesCredentialMountsFromRecursiveChown(t *testing.T) {
+	credTarget := dockerContainerHome + "/.codex/auth.json"
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{
+		containerID: "cid",
+		credentialMounts: []string{
+			"-v", "/host/.codex/auth.json:" + credTarget + ":ro",
+		},
+	}
+	require.NoError(t, p.prepareNonAccountUser())
+
+	chown := findExecCall(calls, "--user 0:0", "chown")
+	require.NotNil(t, chown, "prepareNonAccountUser must chown HOME and /workspace as root; calls=%v", calls)
+	joined := strings.Join(chown, " ")
+	require.Contains(t, joined, "mkdir -p "+shellQuote(dockerContainerHome)+" "+shellQuote(dockerWorkspaceDir),
+		"HOME and /workspace must be created; call=%v", chown)
+	// The recursive HOME chown prunes the credential mount instead of a
+	// bare chown -R, which would descend into the read-only bind and EROFS.
+	require.Contains(t, joined, "find "+shellQuote(dockerContainerHome),
+		"HOME chown uses find so the credential mount can be pruned; call=%v", chown)
+	require.Contains(t, joined, "-path "+shellQuote(credTarget),
+		"the credential mount target must be a prune path; call=%v", chown)
+	require.Contains(t, joined, "-prune",
+		"the credential mount must be pruned, not chowned; call=%v", chown)
+	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+		"a bare recursive chown would EROFS the read-only credential mount; call=%v", chown)
+	// /workspace is freshly created by mkdir -p, so its chown stays shallow.
+	require.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		"/workspace must still be shallow-chowned; call=%v", chown)
+	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		"/workspace is freshly created; its chown must stay shallow; call=%v", chown)
+	require.Equal(t, dockerNonRootImageUser, p.containerUser,
+		"containerUser must record the probed uid:gid; calls=%v", calls)
+}
+
+// TestPrepareNonAccountUser_NoCredentialMount_RecursesPlainly pins that
+// without a credential mount the HOME chown keeps its simple `chown -R`
+// form — no find/prune overhead, and existing assertions about the recursive
+// chown (TestPrepareNonAccountUser_ChownsHomeRecursively) still hold.
+func TestPrepareNonAccountUser_NoCredentialMount_RecursesPlainly(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid"} // no credentialMounts
+	require.NoError(t, p.prepareNonAccountUser())
+	chown := findExecCall(calls, "--user 0:0", "chown")
+	require.NotNil(t, chown, "prepareNonAccountUser must chown as root; calls=%v", calls)
+	joined := strings.Join(chown, " ")
+	require.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+		"with no credential mount the HOME chown stays a plain chown -R; call=%v", chown)
+	require.NotContains(t, joined, "find",
+		"find is only needed when a credential mount must be pruned; call=%v", chown)
+}

@@ -101,7 +101,18 @@ const (
 	// dockerOpRootExec is a `docker exec` run as in-container uid 0 —
 	// privileged inside the container's own user namespace, which still
 	// means an ordinary user when the engine remaps uids (name=userns).
+	// It is the class the prepare steps (prepareAccountUser,
+	// prepareNonAccountUser) carry: their mkdir+chown writes the session
+	// home/account mounts and /workspace.
 	dockerOpRootExec
+	// dockerOpChmod is the root exec copyAfBinary uses to chmod the copied
+	// `af` binary at /usr/local/bin/af. It is a root exec like
+	// dockerOpRootExec, but its single write root is /usr/local/bin/af —
+	// not the home/workspace/account paths the prepare steps write — so a
+	// chmod failure's capacity verdict may only be borrowed by a bind
+	// covering the binary path, never by an unrelated bind at the home or
+	// workspace that the chmod never touched (#5424 review).
+	dockerOpChmod
 	// dockerOpSessionExec is a `docker exec` run as the session's user —
 	// the account owner's uid:gid when a session mounts an account, else
 	// whatever USER the image declares. A non-root container user cannot
@@ -666,7 +677,7 @@ func unescapeMountinfoPath(s string) string {
 // out.
 func (p *dockerProvisioner) dockerStepWriterUnprivileged(info dockerEngineInfo, op dockerOpClass) bool {
 	switch op {
-	case dockerOpSessionExec, dockerOpRootExec:
+	case dockerOpSessionExec, dockerOpRootExec, dockerOpChmod:
 	default:
 		return false
 	}
@@ -694,9 +705,10 @@ func (p *dockerProvisioner) dockerStepWriterUnprivileged(info dockerEngineInfo, 
 	if !bypass {
 		return false
 	}
-	if op == dockerOpRootExec {
+	if op == dockerOpRootExec || op == dockerOpChmod {
 		// uid 0's own credentials are privileged unless this container is
-		// still under the daemon's userns remap.
+		// still under the daemon's userns remap. The chmod of the copied
+		// `af` binary runs as --user 0:0 too, so it shares this rule.
 		return info.userns && !usernsHost
 	}
 	if info.userns && !usernsHost {
@@ -747,6 +759,14 @@ func dockerUserUnprivileged(user string) bool {
 // for the agent-server banner redirect.
 func (p *dockerProvisioner) dockerOpWriteRoots(op dockerOpClass) []string {
 	switch op {
+	case dockerOpChmod:
+		// copyAfBinary's root chmod writes a single path — the copied
+		// `af` binary at /usr/local/bin/af — and nothing else, so that
+		// path alone is the write root. A bind covering it (at
+		// /usr/local/bin/af, /usr/local/bin, or /) may borrow the Bavail
+		// window for a chmod failure; an unrelated bind at the home or
+		// workspace the chmod never touched may not (#5424 review).
+		return []string{dockerAfBinaryPath}
 	case dockerOpRootExec:
 		roots := []string{dockerWorkspaceDir}
 		if p.spec.Account.Dir == "" {

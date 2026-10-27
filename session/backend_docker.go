@@ -667,10 +667,14 @@ func (p *dockerProvisioner) copyAfBinary() error {
 	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
 		// execSh runs as --user 0:0 unconditionally (docker cp lands the
 		// binary root-owned, so only root can chmod it), so the failure is a
-		// root exec regardless of session kind — classify it as such so the
-		// capacity verdict doesn't evaluate it under the non-root session
-		// identity.
-		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
+		// root exec regardless of session kind. It is given its own class
+		// (dockerOpChmod) rather than dockerOpRootExec because its single
+		// write root is /usr/local/bin/af — not the home/workspace/account
+		// paths the prepare steps' root execs write — so a chmod failure's
+		// capacity verdict may only be borrowed by a bind covering the
+		// binary, never by an unrelated bind at the home or workspace
+		// (#5424 review).
+		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), dockerOpChmod)
 	}
 	return nil
 }
