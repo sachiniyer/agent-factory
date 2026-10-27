@@ -593,17 +593,30 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // the store that this very call retired (#3684 review). Callers that only need
 // the error discard it.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
+	updated, _, err := UpdateTaskStatusIf(taskID, lastRunAt, lastRunStatus, nil)
+	return updated, err
+}
+
+// UpdateTaskStatusIf is UpdateTaskStatus with a compare-and-set: guard sees the
+// task row as committed on disk, under the same file lock the write takes, and
+// the write happens only when it returns true (nil guard = always write). It is
+// how a status writer keyed to ONE run (#5645) refuses to overwrite another
+// run's outcome — the decision and the write cannot be separated by a
+// concurrent writer. applied reports whether the row was written; when it was
+// not, the returned Task is the unmodified row.
+func UpdateTaskStatusIf(taskID string, lastRunAt *time.Time, lastRunStatus string, guard func(Task) bool) (Task, bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	var updated Task
+	applied := false
 	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
@@ -614,6 +627,11 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
+				if guard != nil && !guard(tasks[i]) {
+					updated = tasks[i]
+					return nil
+				}
+				applied = true
 				// nil means "preserve the on-disk LastRunAt": a status-only
 				// update must not clobber a newer event-delivery timestamp that
 				// a concurrent writer committed while this caller held a stale
@@ -631,6 +649,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		if !found {
 			return fmt.Errorf("task with id %q not found", taskID)
 		}
+		if !applied {
+			return nil
+		}
 
 		generation, err := writeTasks(tasks)
 		if err != nil {
@@ -640,9 +661,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		return nil
 	})
 	if lockErr != nil {
-		return Task{}, lockErr
+		return Task{}, false, lockErr
 	}
-	return updated, nil
+	return updated, applied, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it

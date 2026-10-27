@@ -271,7 +271,7 @@ func TestRemoteAgentClient_DialStreamByIDAddressing(t *testing.T) {
 	mu.Lock()
 	query = ""
 	mu.Unlock()
-	_, err = rc.dialStream(context.Background(), 2, "")
+	_, err = rc.dialStream(context.Background(), 2, "", 0)
 	require.Error(t, err)
 	mu.Lock()
 	got = query

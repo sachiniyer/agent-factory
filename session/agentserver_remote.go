@@ -672,18 +672,24 @@ func (c *remoteAgentClient) health() (agentHealthResp, error) {
 	return resp, nil
 }
 
-// dialStream opens the WS PTY subscription to tab `tab` (from the live tail). The
+// dialStream opens the WS PTY subscription to tab `tab` (or the tab named by
+// stable id `tabID`, #5571 W4.3 — see dialStreamByID for when that is safe to
+// send). A nonzero `since` is the caller's cursor into the sandbox's output
+// ring, sent as ?since= so the remote broker replays the gap produced while a
+// previous socket was down (#5571 W1.2); 0 subscribes at the live tail. The
 // token rides both the Authorization header and the ?access_token= query — the
 // agent-server honors either, and the query mirrors the browser WS path Phase 5
-// needs. The read limit is raised off the 32 KiB default: a repaint of a wide pane
-// is a single large binary frame. tabID selects the stable-id addressing arm
-// (#5571 W4.3) — see dialStreamByID for when that is safe to send.
-func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID string) (*websocket.Conn, error) {
+// needs. The read limit is raised off the 32 KiB default: a repaint of a wide
+// pane is a single large binary frame.
+func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID string, since uint64) (*websocket.Conn, error) {
 	q := url.Values{}
 	if tabID != "" {
 		q.Set("tab_id", tabID)
 	} else if tab != 0 {
 		q.Set("tab", strconv.Itoa(tab))
+	}
+	if since != 0 {
+		q.Set("since", strconv.FormatUint(since, 10))
 	}
 	q.Set(agentproto.AccessTokenQueryParam, c.token)
 	u := c.wsBase + "/v1/sessions/" + url.PathEscape(c.title) + "/stream?" + q.Encode()
@@ -728,7 +734,7 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID strin
 // ?tab_id= and would silently bind the AGENT tab — the query carries no strict
 // decode to refuse on, so the features check is the only guard.
 func (c *remoteAgentClient) dialStreamByID(ctx context.Context, tabID string) (*websocket.Conn, error) {
-	return c.dialStream(ctx, 0, tabID)
+	return c.dialStream(ctx, 0, tabID, 0)
 }
 
 // splitHTTPBaseURL validates an agent-server base URL and derives its REST
