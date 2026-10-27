@@ -566,6 +566,18 @@ func (i *Instance) SetStartedForTest(started bool) {
 	}
 }
 
+// SetBranchForTest sets the branch name recorded on the instance. Test-only:
+// the real flow sets it inside LocalBackend.Start, which unit tests that wire a
+// worktree with SetGitWorktreeForTest never run.
+func (i *Instance) SetBranchForTest(branch string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Branch != branch {
+		i.Branch = branch
+		i.touchLocked()
+	}
+}
+
 // MarkLoadRuntimeReplacedForTest seeds the loader settlement owed by a
 // confirmed Start(false) respawn. Production sets it only from LocalBackend.
 func (i *Instance) MarkLoadRuntimeReplacedForTest() {
