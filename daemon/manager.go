@@ -896,6 +896,7 @@ func (m *Manager) restoreInstances() error {
 	// marked session would sit forever with nothing scheduled to reap it.
 	m.armOwedTaskLifecyclesLocked()
 	m.mu.Unlock()
+	m.reattachRestoredRuntimes(instances)
 	return nil
 }
 
