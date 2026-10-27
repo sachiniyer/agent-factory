@@ -181,6 +181,81 @@ func TestSSHIdentityFileMustBeReadable(t *testing.T) {
 	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{Host: "h.example.com"}))
 }
 
+// A literal '%' in ssh.identity_file must be REFUSED even when the path names a
+// real, readable, regular key — because ssh percent-token-expands -i/IdentityFile
+// values (ssh_config(5): %%, %C, %d, %h, %i, %j, %k, %L, %l, %n, %p, %r, %u), so ssh
+// would load a DIFFERENT file than the one this guard proves readable. The literal
+// path can exist and be a perfectly good key while the expanded path does not, and
+// ssh's startup pre-stat of the literal -i value SUCCEEDS (no "Warning: Identity
+// file … not accessible"), so the divergence surfaces only at key-load time — or
+// never, when an agent key authenticates instead. That is the one input class the
+// stat/open guard above CANNOT see: silent wrong-identity auth, the exact failure
+// verifySSHIdentityFile exists to prevent.
+//
+// REFUSED, NOT ESCAPED: doubling % to %% (the way escapeSSHPercent does for
+// ProxyCommand) is measured to be WORSE for -i — ssh's startup pre-stat then sees
+// the literal %%d path (nonexistent), prints the warning and drops the identity,
+// falling back to defaults. So the guard refuses, and the composition stays
+// literal (see TestSSHCommandCompositionDoesNotEscapePercentInIdentity).
+func TestSSHIdentityFileRefusesAPercentTokenExpandedPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// A directory whose name is literally %d — a real, stat-able, open-able path.
+	// %d is ssh's home-directory token, so a working key here is what ssh never gets
+	// to load: ssh rewrites the path before reading it.
+	pctDir := filepath.Join(dir, "%d")
+	require.NoError(t, os.Mkdir(pctDir, 0o700))
+	percentKey := filepath.Join(pctDir, "client_key")
+	require.NoError(t, os.WriteFile(percentKey, []byte("a-real-readable-file"), 0o600))
+
+	// PRE-FIX THIS WOULD PASS: the literal file exists, is regular and readable —
+	// every check verifySSHIdentityFile performs succeeds on the literal path —
+	// and then ssh would silently load a different identity. So the assertion is
+	// the REFUSAL, not the file existing.
+	err := verifySSHIdentityFile(config.SSHConfig{Host: "h.example.com", IdentityFile: percentKey})
+	require.Error(t, err, "an identity path containing % must be refused: ssh would expand it to a "+
+		"different path than af verified and silently authenticate as someone else")
+	assert.Contains(t, err.Error(), percentKey, "the operator needs to see WHICH path")
+	assert.Contains(t, err.Error(), "backend=ssh")
+	assert.Contains(t, err.Error(), "%",
+		"the message must say WHY — that ssh expands % as a token")
+	assert.NotContains(t, err.Error(), "not accessible",
+		"this is the percent-token refusal, not a missing-path/directory/mode refusal")
+
+	// Every representative token is refused — not just %d. %q is measured to make ssh
+	// die loudly-but-late (after connect); the others silently diverge. The guard
+	// cannot know which token ssh supports, so it refuses any %.
+	tokenDir := filepath.Join(dir, "tokens")
+	require.NoError(t, os.Mkdir(tokenDir, 0o700))
+	for _, token := range []string{"%d", "%h", "%p", "%C", "%q", "key%name", "100%key"} {
+		// The FILENAME keeps its % — a real, stat-able, readable regular file whose
+		// path contains the token, so the refusal is the % check, not a stat failure.
+		p := filepath.Join(tokenDir, token)
+		require.NoError(t, os.WriteFile(p, []byte("k"), 0o600))
+		assert.Error(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: p}),
+			"token %q in an identity path must be refused", token)
+	}
+
+	// A '%' that arrives via expandUserPath (a HOME containing %) is caught too,
+	// because the check runs on the EXPANDED value — the exact string af hands ssh.
+	// Pin that by pointing ~ at a home whose own path contains %.
+	pctHome := filepath.Join(dir, "home%dir")
+	require.NoError(t, os.MkdirAll(filepath.Join(pctHome, ".ssh"), 0o700))
+	homeKey := filepath.Join(pctHome, ".ssh", "id_ed25519")
+	require.NoError(t, os.WriteFile(homeKey, []byte("k"), 0o600))
+	t.Setenv("HOME", pctHome)
+	// os.UserHomeDir honours $HOME, so expandUserPath("~/...") lands inside pctHome.
+	assert.Error(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: "~/.ssh/id_ed25519"}),
+		"a % that arrived via HOME expansion must be refused too — af hands ssh the expanded path")
+
+	// NO REGRESSION: a readable key with no % anywhere still passes. This is the
+	// overwhelming majority of real paths, and they must behave identically.
+	plain := filepath.Join(dir, "plain_id_ed25519")
+	require.NoError(t, os.WriteFile(plain, []byte("k"), 0o600))
+	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: plain}),
+		"a % free readable key must keep passing — nothing about the guard changed for it")
+}
+
 // Composition must not touch the filesystem, whatever the identity file says.
 func TestSSHCommandCompositionIgnoresAnUnreadableIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
