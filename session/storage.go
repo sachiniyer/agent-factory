@@ -555,6 +555,10 @@ type TabData struct {
 	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
 	// so `af sessions get` shows the target.
 	URL string `json:"url,omitempty"`
+	// Proposal is the slug a docs tab edits; empty for every other kind.
+	Proposal string `json:"proposal,omitempty"`
+	// PushMode is a docs tab's push mode, "auto" or "manual"; empty means auto.
+	PushMode string `json:"push_mode,omitempty"`
 	// WebProxied is derived at JSON encoding with IsLoopbackWebTarget, the
 	// daemon proxy's predicate. A pointer preserves explicit false for web tabs;
 	// non-web tabs omit it. Stored/input values never override the derivation.
