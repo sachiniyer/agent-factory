@@ -79,5 +79,6 @@ func sandboxOwner(ctx context.Context) (string, bool) {
 // on: the constraint itself lives in the handler, which is the only place that
 // knows what "the caller's own" means for that route.
 var sandboxConstrainedRoutes = map[string]string{
-	"/v1/Snapshot": "returns ONLY the caller's own session, and no delivery alarms",
+	"/v1/Snapshot":     "returns ONLY the caller's own session, and no delivery alarms",
+	"/v1/SetAttention": "targets ONLY the caller's own session: the owner id replaces every selector in the request",
 }

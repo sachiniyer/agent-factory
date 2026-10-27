@@ -208,26 +208,33 @@ function paintFavicon(): void {
 }
 
 /** Sets the project color on the app root, where CSS turns it into the accent for
- *  both themes and the app bar fill, or removes it. surfaces are the light and dark
- *  theme surfaces the accent must stay legible against. */
+ *  both themes and the app bar fill, or removes it. document.body is stamped too:
+ *  controls mounted straight onto it — the phone keybar, its paste sheet — never
+ *  inherit from the app root. surfaces are the light and dark theme surfaces the
+ *  accent must stay legible against. */
 export function applyProjectColor(
   root: HTMLElement,
   color: string | null,
   surfaces: () => { light: readonly string[]; dark: readonly string[] },
 ): void {
+  const els = new Set([root, document.body]);
   if (color === null) {
-    if (root.dataset.projectColor === undefined) return;
-    delete root.dataset.projectColor;
-    for (const name of PROJECT_VARS) root.style.removeProperty(name);
+    for (const el of els) {
+      if (el.dataset.projectColor === undefined) continue;
+      delete el.dataset.projectColor;
+      for (const name of PROJECT_VARS) el.style.removeProperty(name);
+    }
     return;
   }
-  if (root.dataset.projectColor === color) return;
   const { light, dark } = surfaces();
-  root.dataset.projectColor = color;
-  root.style.setProperty("--af-project-color", color);
-  root.style.setProperty("--af-project-ink", markInk(color));
-  root.style.setProperty("--af-project-accent-light", accentOn(color, light));
-  root.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  for (const el of els) {
+    if (el.dataset.projectColor === color) continue;
+    el.dataset.projectColor = color;
+    el.style.setProperty("--af-project-color", color);
+    el.style.setProperty("--af-project-ink", markInk(color));
+    el.style.setProperty("--af-project-accent-light", accentOn(color, light));
+    el.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  }
 }
 
 function accentOn(color: string, surfaces: readonly string[]): string {

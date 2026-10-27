@@ -217,6 +217,10 @@ export interface AppState {
    *  layout mirror), so the tab bar can flag which tabs are already open in a pane.
    *  Defaults to [activeTab] — one pane — for the unsplit case. */
   shownTabs: number[];
+  /** the subset of shownTabs whose pane's stream is open — a connecting or
+   *  reconnecting pane shows its placeholder, not the tab's content, so attention
+   *  acknowledgement waits for the agent tab to land here. */
+  openTabs: number[];
   /** an actionable message shown as a transient toast when a tab op (create/close)
    *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
@@ -317,6 +321,10 @@ export interface Actions {
   layoutChanged(): void;
   /** Close the focused split pane; the session itself remains open. */
   closePane?(): void;
+  /** Steps the shared terminal font size for this viewport's device class
+   *  (#5500): ±1 selects the direction; the step size, clamp, and the debounced
+   *  config write all live in terminal-font.ts. */
+  stepTerminalFontSize(delta: number): void;
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
@@ -1352,6 +1360,7 @@ export class AppShell {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectColor(this.el, null, themeSurfaces);
     applyProjectFavicon(null);
   }
 
@@ -2424,6 +2433,7 @@ export class AppShell {
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta),
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;

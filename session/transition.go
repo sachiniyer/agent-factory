@@ -761,6 +761,30 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
 	}
+	// An attention request belongs to the agent that wrote it: a committed
+	// handoff swaps the runtime without crossing a liveness edge, so nothing
+	// else drops the outgoing agent's question for the incoming one.
+	if ev.kind == tkCommitHandoff {
+		i.attention = nil
+	}
+	// tkCommitArchive is the single commit edge every archive route converges
+	// on — local worktree relocation and remote branch-push alike — so it is the
+	// one place the durable archive timestamp can be stamped without a second
+	// per-route agreement (#5136). A re-archive overwrites it with the NEW
+	// commit, which is correct: the age prune measures belongs to the shelf the
+	// record currently sits on.
+	if ev.kind == tkCommitArchive {
+		i.archivedAt = time.Now()
+	}
+	// The mirror rule (#5136 review): a row that LEAVES the archive no longer
+	// sits on the shelf its timestamp measures — restore moves LiveArchived to
+	// Lost at the begin edge (both tkBeginRestore entries), so keying the
+	// clear on the liveness boundary rather than one event kind also covers
+	// any future un-archive edge. A later re-archive stamps the new shelf's
+	// own commit above.
+	if from.liveness == LiveArchived && to.liveness != LiveArchived {
+		i.archivedAt = time.Time{}
+	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)
 		i.archiveSettled = nil

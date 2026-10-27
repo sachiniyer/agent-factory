@@ -65,6 +65,13 @@ import {
   updateTask,
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
+import {
+  bindTerminalFontPersist,
+  setTerminalFontSizes,
+  stepTerminalFontSize,
+  terminalFontClassForKey,
+  terminalFontSizesFromConfig,
+} from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -111,7 +118,7 @@ import {
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
-import { createFencedRefetcher, createLatestRequestGate } from "./refetch.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff, type LatestRequest } from "./refetch.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -172,6 +179,7 @@ const store = new Store<AppState>({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -297,7 +305,7 @@ const splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs }),
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs }),
 });
 
 let root: HTMLElement | null = null;
@@ -448,15 +456,37 @@ async function connect(candidate: string): Promise<void> {
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then(tasks => ({ tasks, error: "" }))
       .catch(error => ({ tasks: [] as TaskData[], error: errorText(error) })),
     fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null),
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  // Landed ahead of phase:"app", so the first AttachTerminal's constructor —
+  // and the grid its initial OpResize reports — already reflects the persisted
+  // sizes rather than the defaults the controller started on.
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    // The connect-time read fell back to the compiled defaults. That must not
+    // be the last word — a transient GetConfig failure would otherwise leave
+    // the terminal on un-persisted sizes until an unrelated action refetched,
+    // and on a reconnect the module singleton would keep the PREVIOUS
+    // connection's sizes. The bounded reconcile retries through the fenced
+    // refetcher, so the first landed read applies the served values through
+    // the normal commit — always, not only when this fetch succeeded.
+    void reconcileConfigRead(candidate, attempt);
+  }
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
@@ -475,6 +505,7 @@ async function connect(candidate: string): Promise<void> {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks,
@@ -547,6 +578,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks: [],
@@ -1172,12 +1204,37 @@ function openDeleteProject(root: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         const connection = connectionGeneration;
-        void projectColorWriter.cancel(root).then(() => {
+        void projectColorWriter.cancel(root).then(async () => {
           if (!isCurrentConnection(connection, tok)) return;
+          // A registration whose outcome never reached us can still commit
+          // daemon-side: a delete sent now would run first as a no-op and the
+          // registration would land after it. Re-drive the idempotent call so
+          // the registration is determinate before the delete.
+          const learned = projectColorRegistrations.get(root);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+              // Committed or determinately refused: either way the record's
+              // fate is settled, so the delete is safe to send.
+            }
+            projectColorRegistrations.delete(root);
+          }
           return deleteProject(root, tok)
-            .then(() => { if (modal === m) closeModal(); })
+            .then(() => {
+              projectColorRegistrations.delete(root);
+              if (modal === m) closeModal();
+            })
             .catch((e) => {
               if (isMutationCommittedError(e)) {
+                projectColorRegistrations.delete(root);
                 if (modal === m) closeModal();
                 requestResync();
                 refreshRegisteredProjects();
@@ -1893,6 +1950,13 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
+/** Counts config reads that committed through the fence — the landing witness
+ *  for the connect-time read's background reconcile below: only a response
+ *  that passed the generation AND token checks moves it, so a request disowned
+ *  mid-flight still lets the retry continue (the newer read owns that outcome)
+ *  while a transport failure leaves it free to try again. */
+let configReadCommits = 0;
+
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1912,6 +1976,11 @@ const configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
+    // Every config read is also the font sizes' update path (#5500): a value
+    // stepped from another client lands here on the next read, and our own
+    // save's echo refetch is a no-op through the set() change guard.
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -1923,8 +1992,43 @@ const configRefetcher = createFencedRefetcher({
   },
 });
 
-function refreshConfig(): void {
-  configRefetcher.refresh();
+function refreshConfig(): Promise<void> {
+  return configRefetcher.refresh();
+}
+
+/** Backoff for the background reconcile behind a failed connect-time config
+ *  read: enough attempts to absorb a brief unavailability window without
+ *  turning a dead daemon into an endless poller. */
+const CONNECT_CONFIG_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+/** Retries the config read after the connect-time fetch fell back to
+ *  defaults (#5500). The commit counter is the landing witness — only a read
+ *  that passed the fence counts, so a refresh disowned by a newer one does
+ *  not end the loop (that newer read owns the outcome) and a transport
+ *  failure retries. The connect attempt's freshness is re-checked before
+ *  every request: a disconnect or a newer connect ends the loop rather than
+ *  fetching for a session that is gone.
+ *
+ *  The loop is SILENT: a per-retry toast would keep reporting a failure the
+ *  loop recovered from — or is about to — so the in-flight reads suppress
+ *  the fenced onError. Only a fully spent budget surfaces, and then through
+ *  one ordinary loud read whose onError carries the daemon's real message
+ *  (and which still lands the sizes if that last request happens to
+ *  succeed). */
+async function reconcileConfigRead(candidate: string, attempt: LatestRequest): Promise<void> {
+  const landed = await retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await configRefetcher.refresh({ silent: true });
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    ms => new Promise<void>(resolve => window.setTimeout(resolve, ms)),
+  );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -2065,12 +2169,15 @@ function doOpenAccountLogin(agent: string, name: string): void {
  *  the only side that can keep the user's order. */
 const queueConfigSave = createKeyedQueue();
 
-function applyConfigValue(key: string, value: string): void {
+/** Returns the queue item's settle promise — the write AND the refetch it
+ *  triggers — so the font controls' stale-read guard can cover the whole round
+ *  trip rather than lapsing when the POST alone lands. */
+function applyConfigValue(key: string, value: string): Promise<void> {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
@@ -2082,8 +2189,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
         // current session's config view — the write committed and the daemon
         // holds the new value; an open config view would otherwise display the
         // pre-write state until the user leaves and re-enters.
-        refreshConfig();
-        return;
+        return refreshConfig();
       }
       store.set({
         configStatus: {
@@ -2094,13 +2200,28 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
           error: "",
         },
       });
-      refreshConfig();
+      // Awaited, not fired: the queue item — and with it the font module's
+      // pending-save guard — is not done until the post-write read has landed.
+      return refreshConfig();
     })
     .catch((err: unknown) => {
       if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+      // A font-size save has no manifest row to hang this error on — the pane
+      // renders only the `web` table row — so it must reach the shared toast or
+      // the stepped size would keep displaying as though it had saved.
+      if (terminalFontClassForKey(key) !== null) {
+        surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+      }
     });
 }
+
+// The font-size controls' saves ride the same path (#5500): the per-key queue
+// serializes a phone-size write against a desktop-size write, the returned
+// promise carries the write's whole round trip back to the font module's
+// stale-read guard, and a failed write leaves the applied size on screen while
+// the error surfaces on the toast — the size is display state first.
+bindTerminalFontPersist(applyConfigValue);
 
 // How often an OPEN tasks view refetches, for the verdicts that change with the
 // clock rather than with an event (#3626).
@@ -2215,6 +2336,13 @@ function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
 }
 
+/** What the writer learned about a root's durable registration. A settled id
+ *  feeds later queued writes — a choice captured before the first write
+ *  registered the project must not call registerProject again, or a rebind in
+ *  between would register the old root as a second project. An uncertain one
+ *  gates a following delete until registerProject makes it determinate. */
+const projectColorRegistrations = new Map<string, { id: string } | { uncertain: true }>();
+
 /** Sets a project's color. A project known only from its sessions has no registry
  *  record to hold a color, so it is registered first (idempotent on the daemon).
  *  Each choice is fenced to the connection and credential it was made under, and
@@ -2224,7 +2352,17 @@ const projectColorWriter = createLatestWriter<{ color: string; tok: string; conn
   async (root, { color, tok, connection, projectId: known }) => {
     const current = (): boolean => isCurrentConnection(connection, tok);
     if (!current()) return;
-    const projectId = known ?? (await registerProject(root, tok)).id;
+    const learned = projectColorRegistrations.get(root);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root, tok);
+        projectColorRegistrations.set(root, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root, { uncertain: true });
+        throw e;
+      }
+    })();
     if (!current()) return;
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();
@@ -2640,6 +2778,7 @@ const actions = {
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

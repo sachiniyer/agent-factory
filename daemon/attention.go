@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"time"
 
@@ -33,8 +34,18 @@ type SetAttentionResponse struct {
 // SetAttention records or clears an agent's request for the user and
 // publishes the row so every open client repaints it.
 func (s *controlServer) SetAttention(req SetAttentionRequest, resp *SetAttentionResponse) error {
+	return s.setAttention(context.Background(), req, resp)
+}
+
+// setAttention is the ctx-aware form the HTTP route calls: a sandbox callback
+// credential may speak only for its own session, so the owner replaces every
+// selector the request carried.
+func (s *controlServer) setAttention(ctx context.Context, req SetAttentionRequest, resp *SetAttentionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
+	}
+	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
+		req = SetAttentionRequest{ID: owner, Reason: req.Reason, Clear: req.Clear, SetAt: req.SetAt}
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err

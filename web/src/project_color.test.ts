@@ -48,6 +48,9 @@ test("markInk keeps the mark legible on light and dark tiles", () => {
   assert.equal(markInk("#000000"), "#ffffff");
   assert.equal(markInk("#ffffff"), "#1f1f1f");
   assert.equal(markInk("#fde047"), "#1f1f1f");
+  // Mid-light tiles can favour the dark ink where a fixed luminance threshold
+  // picks white: on #ca8a04 dark reads ~5.6:1 against white's ~2.9:1.
+  assert.equal(markInk("#ca8a04"), "#1f1f1f");
 });
 
 test("the favicon SVG paints the tile in the project color", () => {
@@ -252,4 +255,10 @@ test("the favicon blink follows a reduced-motion change", (t) => {
   motion.set(false);
   t.mock.timers.tick(FAVICON_BLINK_MS);
   assert.equal(frame(), "plain", "the blink resumes");
+});
+
+test("body-mounted controls take the project accent too", () => {
+  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+  assert.match(css, /body\[data-project-color\] \[data-af-theme="light"\] \{\s*--af-accent: var\(--af-project-accent-light\);/);
+  assert.match(css, /body\[data-project-color\] \[data-af-theme="dark"\] \{\s*--af-accent: var\(--af-project-accent-dark\);/);
 });

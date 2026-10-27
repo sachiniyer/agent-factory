@@ -85,6 +85,12 @@ func (i *Instance) SetAttention(reason string, now time.Time) (AttentionUndo, er
 	}
 	previous := i.attention
 	i.attention = &Attention{Reason: NormalizeAttentionReason(reason), SetAt: now.UTC()}
+	// A request set while the agent already waits at Ready counts the idle spell
+	// it inherits: IdleSince zero reads as long enough, so the next Running edge
+	// clears rather than surviving a full idle/run cycle as stale.
+	if i.liveness == LiveReady {
+		i.attention.SeenIdle = true
+	}
 	// A status decision captured before the request must not mark it seen idle
 	// or clear it; the poll re-observes on its next tick.
 	i.stateEpoch++

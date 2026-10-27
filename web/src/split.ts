@@ -91,7 +91,7 @@ export interface SplitCallbacks {
   /** The layout mirror the store keeps for the tab bar: which tab the focused pane
    *  shows (activeTab), which tabs are shown across all panes, and the pane count.
    *  Fired only on a real change, so it can safely write the store without looping. */
-  onLayout(info: { focusedTab: number; shownTabs: number[]; paneCount: number }): void;
+  onLayout(info: { focusedTab: number; shownTabs: number[]; openTabs: number[]; paneCount: number }): void;
 }
 
 /** One live pane: its persistent DOM (reused across tree re-renders so the xterm is
@@ -1862,6 +1862,9 @@ export class SplitView {
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
+    // A status flip moves a tab in or out of openTabs; report() dedups when it
+    // does not.
+    this.report();
   }
 
   private onPaneFocus(leafId: string, focused: boolean): void {
@@ -1903,16 +1906,24 @@ export class SplitView {
     // change (#1901 Codex).
     this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    // A tab counts as answerable only while its pane's stream is open: a
+    // connecting/reconnecting pane shows the Connecting placeholder, not the
+    // agent's question, so attention acknowledgement keys off openTabs.
+    const openTabs = this.tree
+      ? leaves(this.tree)
+          .filter((l) => this.panes.get(l.id)?.status === "open")
+          .map((l) => l.tab)
+      : [];
     const focusedTab = this.focusedId ? (findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0) : 0;
     const paneCount = shownTabs.length;
-    const shownKey = shownTabs.join(",");
+    const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
-    this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+    this.cb.onLayout({ focusedTab, shownTabs, openTabs, paneCount });
   }
 
   /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the

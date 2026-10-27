@@ -191,6 +191,12 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
+	// worktreeMissing is true once a bounded probe proved the tracked worktree
+	// path absent with no af relocation owning it — deleted outside af (#5102).
+	// Persisted with the worktree record; see worktree_missing.go for who sets
+	// and clears it. Mutex-protected.
+	worktreeMissing       bool
+	worktreeMissingReason string
 	// Durable delivery and pane-churn evidence; never a semantic claim (#3168).
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
@@ -374,6 +380,15 @@ type Instance struct {
 	// uncertainty into permission to delete its workspace (#2207, #3340).
 	// Persisted so a daemon restart cannot re-arm the destructive path.
 	startupStateUnknown bool
+
+	// archivedAt records when this session's archive committed — the moment the
+	// worktree move and teardown were declared done, local or remote (#5136).
+	// It is the timestamp `af sessions prune --older-than` measures age from:
+	// UpdatedAt cannot serve because it also advances on unrelated mutations
+	// after the archive. Persisted; records archived before the field existed
+	// carry no value and the prune cutoff falls back to UpdatedAt, which for an
+	// untouched archived row still approximates its archive time. Guarded by mu.
+	archivedAt time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend

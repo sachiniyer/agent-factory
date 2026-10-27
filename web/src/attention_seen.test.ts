@@ -21,6 +21,7 @@ function view(over: Partial<AttentionView> = {}): AttentionView {
     sessions: [session("a", "t1"), session("b", null)],
     selectedId: "a",
     shownTabs: [0],
+    openTabs: [0],
     ...over,
   };
 }
@@ -34,8 +35,13 @@ test("attention_seen: nothing clears while the page is not in front", () => {
 });
 
 test("attention_seen: another tab alone does not count", () => {
-  assert.equal(attentionSeen(view({ shownTabs: [1] }), true), null);
-  assert.equal(attentionSeen(view({ shownTabs: [1, 0] }), true), "a");
+  assert.equal(attentionSeen(view({ shownTabs: [1], openTabs: [1] }), true), null);
+  assert.equal(attentionSeen(view({ shownTabs: [1, 0], openTabs: [1, 0] }), true), "a");
+});
+
+test("attention_seen: a pane still connecting does not count", () => {
+  assert.equal(attentionSeen(view({ openTabs: [] }), true), null);
+  assert.equal(attentionSeen(view({ shownTabs: [0, 1], openTabs: [1] }), true), null);
 });
 
 test("attention_seen: the tasks view and other sessions do not count", () => {
