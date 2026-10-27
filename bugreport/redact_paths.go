@@ -364,7 +364,10 @@ func uriStartForPath(s string, start int) (int, bool) {
 	// (an earlier delimiter in a percent-decoded view does not change that),
 	// and a component-leading root where the delimiter is immediately before
 	// the slash ("#/root"), which begins the fragment/query rather than
-	// following text inside it.
+	// following text inside it. A component-leading fragment root may itself
+	// be preceded by a query ("...?next#/root"): the "?" is the query
+	// delimiter and the authority lies before it, so the backward scan keeps
+	// walking across the query rather than rejecting there.
 	i := start - 1
 	for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
 		i--
@@ -375,12 +378,25 @@ func uriStartForPath(s string, start int) (int, bool) {
 		}
 		if i+1 == start {
 			// Treat the delimiter as the authority end and keep walking back
-			// over the authority to find the "//" marker.
+			// over the authority to find the "//" marker. When the delimiter
+			// starts a fragment, a preceding "?" is the query delimiter and
+			// the real authority end lies before it, so keep scanning across
+			// the query; a second "#" or a "?" inside the query is malformed
+			// and is rejected.
+			outer := prefix[i]
 			i--
-			for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
-				i--
-			}
-			if i >= 0 && (prefix[i] == '?' || prefix[i] == '#') {
+			for {
+				for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
+					i--
+				}
+				if i < 0 || prefix[i] == '/' {
+					break
+				}
+				if outer == '#' && prefix[i] == '?' {
+					outer = '?'
+					i--
+					continue
+				}
 				return 0, false
 			}
 		}

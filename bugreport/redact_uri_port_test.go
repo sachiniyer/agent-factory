@@ -58,6 +58,15 @@ func TestURIStartForPathAcceptsPortBearingAuthorities(t *testing.T) {
 		{name: "component-leading root in fragment malformed authority", in: "vscode://[bad#/srv/repo", want: true},
 		{name: "component-leading root in fragment empty host", in: "vscode://#/srv/repo", want: true},
 		{name: "component-leading root in query malformed authority", in: "vscode://[bad?/srv/repo", want: true},
+		// A component-leading fragment root preceded by a query
+		// ("vscode://[bad?next#/srv/repo") is still a root boundary: the "?"
+		// is the query delimiter and the authority lies before it, so the
+		// backward scan must keep walking across the query rather than reject.
+		{name: "component-leading root after query then fragment", in: "vscode://[bad?next#/srv/repo", want: true},
+		// A second "?" or "#" inside the fragment's preceding region is
+		// malformed and must not become a root boundary.
+		{name: "root suffix after query then fragment", in: "vscode://[bad?next#/prefix/srv/repo", want: false},
+		{name: "root suffix after second query", in: "vscode://[bad?next?/srv/repo", want: false},
 		// A direct no-authority "scheme:/path" whose colon sits at start-1 is a
 		// root boundary even when an earlier "?" or "#" appears in a
 		// percent-decoded view (e.g. a query value decoding to
@@ -369,6 +378,14 @@ func TestScrubbersRedactComponentLeadingRootInsideFragmentOrQuery(t *testing.T) 
 			name: "malformed authority component-leading query",
 			in:   "open vscode://[bad?" + siblingLeakRepo + " failed",
 			want: "open vscode://[bad?[repo:1] failed",
+		},
+		// A component-leading fragment root preceded by a query
+		// ("vscode://[bad?next#/srv/...") still leaks through every scrubber
+		// unless the backward scan keeps walking across the query delimiter.
+		{
+			name: "malformed authority component-leading fragment after query",
+			in:   "open vscode://[bad?next#" + siblingLeakRepo + " failed",
+			want: "open vscode://[bad?next#[repo:1] failed",
 		},
 	}
 	for _, c := range cases {
