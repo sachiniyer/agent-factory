@@ -234,6 +234,17 @@ func (m *home) handleTabDragRelease(msg tea.MouseMsg) (bool, tea.Cmd) {
 	if drag == nil {
 		return false, nil
 	}
+	// A modal opened between the press and the release owns the screen —
+	// mirror handleTabDragPress's stateDefault guard. The modal's KeyMsg
+	// does not clear m.tabDrag (only release/wheel/second-button do), so a
+	// release arriving under the overlay would otherwise dispatch the click
+	// (SelectTabRow + focusRegionClick) or the active drop (openOrFocusPane)
+	// behind it. Drop the stale drag so the next gesture starts clean and
+	// swallow the release so nothing mutates behind a modal (#1774 class).
+	if m.state != stateDefault {
+		m.clearDragState()
+		return false, nil
+	}
 	if !drag.active {
 		now := m.mouseClock()
 		double := drag.zone == m.lastClickZone && now.Sub(m.lastClickAt) <= doubleClickInterval
@@ -401,8 +412,21 @@ func isWheelButton(b tea.MouseButton) bool {
 // PR the wheel scrolled whatever the focus ring pointed at. Tree zones map
 // to cursor movement (the tree's only scroll primitive, same as j/k), pane
 // zones to that pane's capture scroll, the automations section to its task
-// cursor. Modal overlays own the screen, so the wheel is inert under them.
+// cursor. Modal overlays own the screen, so the wheel is inert under them —
+// with one exception: a scrollable confirmation pages its body on the wheel
+// (#5171), since "resize the terminal" was never an answer for unread risk
+// text.
 func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
+	if m.state == stateConfirm {
+		if m.confirmationOverlay != nil && m.confirmationOverlay.Scrollable() {
+			if msg.Button == tea.MouseButtonWheelUp {
+				m.confirmationOverlay.ScrollUp()
+			} else {
+				m.confirmationOverlay.ScrollDown()
+			}
+		}
+		return nil
+	}
 	if m.state != stateDefault {
 		return nil
 	}

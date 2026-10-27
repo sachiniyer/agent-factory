@@ -72,6 +72,15 @@ func (t *TmuxSession) rewriteProgramCmdByAf(rewrite func(string) string) {
 	t.program = after
 	added, ok := sessionenv.GeneratedArgsBetween(before, after)
 	if !ok {
+		// The resume rewrite can still be an INSERTION rather than an
+		// extension — a wrapper-anchored or oddly-shaped command the
+		// positional diff cannot describe. Re-derive the declaration as a
+		// splice before clearing it — a merge keeps the account proof across
+		// restore, a refusal still clears (#5238 review).
+		if merged, mergeOK := sessionenv.GeneratedArgsByInsertion(before, after, t.generatedArgs); mergeOK {
+			t.generatedArgs = merged
+			return
+		}
 		t.generatedArgs = nil
 		t.trustedExecutable = ""
 		return

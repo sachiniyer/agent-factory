@@ -256,7 +256,7 @@ func TestAutostartSupervision_DarwinLoadedOutsideGUIDomain(t *testing.T) {
 	require.True(t, info.UnitPresent)
 	require.NoError(t, info.LoadedElsewhere.Cause(), "launchd answered both questions")
 	requireAnswer(t, "yes", info.LoadedElsewhere)
-	require.Equal(t, launchdDomainTarget(), info.Domain)
+	require.Equal(t, launchdServiceTarget(), info.Domain)
 	// Whether that other domain is actually RUNNING it is not something
 	// `launchctl list` establishes — it reports that the label is known. The
 	// finding is the domain mismatch; claiming a liveness we never observed
@@ -332,7 +332,7 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 			return answered("disabled services = {\n}\n", 0)
 		}
 		if args[0] == "print" {
-			require.Equal(t, launchdDomainTarget(), args[1],
+			require.Equal(t, launchdServiceTarget(), args[1],
 				"doctor must probe the same domain the restart path kickstarts")
 			return answered("\tstate = running\n\tpid = 4321\n", 0)
 		}
@@ -898,7 +898,7 @@ func TestLaunchdEnabled_DisabledAgentIsNotEnabled(t *testing.T) {
 	withAutostartTestEnv(t, "darwin")
 	withProbeCommand(t, func(_ string, args ...string) probeResult {
 		require.Equal(t, "print-disabled", args[0])
-		require.Equal(t, launchdUserDomain(), args[1],
+		require.Equal(t, launchdGUIDomain(), args[1],
 			"must ask the SAME domain af's restarts target, or the answer is about nothing")
 		return answered("disabled services = {\n\t\""+autostartLaunchdLabel+"\" => true\n}\n", 0)
 	})

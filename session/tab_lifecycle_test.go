@@ -15,6 +15,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// existingDir returns path after ensuring it exists. tmux.Start refuses to
+// spawn into a directory that is not there (#5172), so a fixture worktree path
+// that is meant to stand in for a real worktree must be real on disk.
+func existingDir(t *testing.T, path string) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(path, 0o755))
+	return path
+}
+
 // startedMockInstance builds a started local instance whose agent tab is a
 // mock-backed tmux session (#930 PR 4). AddShellTab spawns siblings off that
 // session, so they inherit the mock PTY factory / executor and stay hermetic —
@@ -34,7 +43,7 @@ func startedMockInstance(t *testing.T, agentName string, extraAlive ...string) *
 
 	repoPath := "/tmp/tab-lifecycle-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
