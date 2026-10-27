@@ -54,6 +54,14 @@ func TestRecordRunStatusInterleavings(t *testing.T) {
 			{k1, RunStartedStatus, at(1)}, {k1, "sent", at(2)}, {k1, RunStartedStatus, at(3)}}, "sent"},
 		{"unkeyed write advances the clock past an older run", []runOp{
 			{k1, RunStartedStatus, at(1)}, {RunKey{}, "errored: boom", at(120)}, {k1, failed, at(121)}}, "errored: boom"},
+		{"late older unkeyed error after a newer keyed started", []runOp{
+			{k2, RunStartedStatus, at(61)}, {RunKey{}, "errored: slow create timed out", at(5)}}, RunStartedStatus},
+		{"late older unkeyed error after a newer keyed terminal", []runOp{
+			{k2, RunStartedStatus, at(61)}, {k2, "sent", at(62)}, {RunKey{}, "errored: slow create timed out", at(5)}}, "sent"},
+		{"unkeyed error at exactly the run's start wins the tie", []runOp{
+			{k2, RunStartedStatus, at(61)}, {RunKey{}, "errored: boom", k2.StartedAt}}, "errored: boom"},
+		{"unkeyed write without a time writes status and keeps the clock", []runOp{
+			{k2, RunStartedStatus, at(61)}, {RunKey{}, "stopped", time.Time{}}, {k1, failed, at(62)}}, "stopped"},
 		{"legacy row without a key accepts a keyed writer", []runOp{
 			{RunKey{}, "stopped", time.Time{}}, {k1, failed, at(1)}}, failed},
 	}
@@ -112,4 +120,27 @@ func TestRecordRunStatusReplayKeepsLastRunAt(t *testing.T) {
 	got, err := GetTask("f9a0b1c2")
 	require.NoError(t, err)
 	assert.True(t, got.LastRunAt.Equal(first))
+}
+
+// The run clock only moves forward: a late older unkeyed write is refused, and
+// an accepted one never sets it earlier than the current run's start.
+func TestRecordRunStatusClockIsMonotonic(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, AddTask(Task{ID: "f9a0b1c2", Name: "t", CronExpr: "0 * * * *", Prompt: "p", ProjectPath: "/tmp", Enabled: true}))
+	base := time.Date(2026, time.October, 27, 12, 0, 0, 0, time.UTC)
+	k2 := RunKey{ID: "run-2", StartedAt: base.Add(time.Hour)}
+	now := base.Add(time.Hour + time.Minute)
+	_, _, err := RecordRunStatus("f9a0b1c2", k2, &now, RunStartedStatus)
+	require.NoError(t, err)
+
+	old := base
+	_, applied, err := RecordRunStatus("f9a0b1c2", RunKey{}, &old, "errored: late")
+	require.NoError(t, err)
+	assert.False(t, applied)
+	got, err := GetTask("f9a0b1c2")
+	require.NoError(t, err)
+	assert.Equal(t, RunStartedStatus, got.LastRunStatus)
+	assert.Equal(t, "run-2", got.LastRunID)
+	assert.True(t, got.LastRunStartedAt.Equal(k2.StartedAt), "the clock must not rewind")
+	assert.True(t, got.LastRunAt.Equal(now), "a refused write leaves LastRunAt alone")
 }

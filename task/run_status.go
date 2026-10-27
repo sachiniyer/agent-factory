@@ -35,6 +35,11 @@ func runOrder(a, b RunKey) int {
 	if a.ID != "" && a.ID == b.ID {
 		return 0
 	}
+	// An unkeyed write that tied the clock has no id to break the tie with: it
+	// is the same instant, so it is the same position.
+	if a.StartedAt.Equal(b.StartedAt) && (a.ID == "" || b.ID == "") {
+		return 0
+	}
 	switch {
 	case a.StartedAt.Before(b.StartedAt):
 		return -1
@@ -65,8 +70,14 @@ func (t Task) lastRunKey() RunKey {
 // Rules, for a write of status s by run k against the committed row (cur, with
 // run key c):
 //
-//  1. Unkeyed (k zero): write through, and advance the row's run clock to the
-//     write time so an older keyed run can no longer claim the row.
+//  1. Unkeyed (k zero), carrying a write time `at`: ordered like any other
+//     writer by that time against the current run's start. If `at` is BEFORE
+//     it, the write is a NO-OP — a late event from an older occurrence never
+//     overwrites a newer run. Otherwise (equal time included: the later
+//     arrival wins a tie) it writes and moves the run clock to `at`; the
+//     clock is monotonic, never set backward. Unkeyed with a nil `at`
+//     carries no ordering information: it writes the status through and
+//     leaves the run key and clock untouched.
 //  2. k older than c: no-op. A stale writer never overwrites a newer run.
 //  3. k newer than c (or the row has no key): adopt k as the current run and
 //     write.
@@ -76,11 +87,11 @@ func (t Task) lastRunKey() RunKey {
 //     else overwrites.
 //
 // It reports whether to write.
-func runStatusTransition(cur Task, k RunKey, status string) bool {
-	if k.IsZero() {
-		return true
-	}
+func runStatusTransition(cur Task, k RunKey, status string, at *time.Time) bool {
 	c := cur.lastRunKey()
+	if k.IsZero() {
+		return at == nil || c.StartedAt.IsZero() || !at.Before(c.StartedAt)
+	}
 	if c.IsZero() {
 		return true
 	}
@@ -107,14 +118,19 @@ func runStatusTransition(cur Task, k RunKey, status string) bool {
 // lastRunAt nil leaves LastRunAt untouched, as UpdateTaskStatus does.
 func RecordRunStatus(taskID string, k RunKey, lastRunAt *time.Time, status string) (Task, bool, error) {
 	return updateTaskStatusLocked(taskID, lastRunAt, status, func(cur Task) bool {
-		return runStatusTransition(cur, k, status)
+		return runStatusTransition(cur, k, status, lastRunAt)
 	}, func(t *Task) {
 		switch {
 		case k.IsZero():
 			if lastRunAt != nil {
 				// The clock advances without an identity, so a keyed run that
-				// started earlier is ordered behind this write.
+				// started earlier is ordered behind this write — and never
+				// moves backward (the transition already refused an earlier
+				// time; max keeps that true if the guard is ever loosened).
 				at := *lastRunAt
+				if t.LastRunStartedAt != nil && t.LastRunStartedAt.After(at) {
+					at = *t.LastRunStartedAt
+				}
 				t.LastRunID, t.LastRunStartedAt = "", &at
 			}
 		default:
