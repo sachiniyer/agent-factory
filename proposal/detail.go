@@ -26,6 +26,9 @@ type Detail struct {
 	Templates        []string `json:"templates"`
 	OpenQuestions    int      `json:"open_questions"`
 	AttachedSessions []string `json:"attached_sessions"`
+	// Push is the push status of the requesting session; nil without a
+	// session, or when the session is not attached to this proposal.
+	Push *PushStatus `json:"push"`
 }
 
 var questionCallout = regexp.MustCompile(`(?im)^[ \t]*>[ \t]*\[!question\]`)

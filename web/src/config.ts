@@ -41,6 +41,7 @@ import {
 import { h } from "./dom.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
+import { THEME_CHOICES, type ThemeChoice } from "./theme.js";
 
 /** The config list is ONE global manifest, so every rebuild shows the same list and
  *  the reader's place is always worth keeping — there is no project or filter here to
@@ -61,6 +62,19 @@ export interface ConfigActions {
    *  host, not a settable key, and routing them through the config writer would
    *  be the category error #3385 asks this surface to avoid. */
   accounts: AccountActions;
+  setTheme: (choice: ThemeChoice) => void;
+  disconnect: () => void;
+}
+
+export function themeLabel(choice: ThemeChoice): string {
+  switch (choice) {
+    case "system":
+      return "System";
+    case "light":
+      return "Light";
+    case "dark":
+      return "Dark";
+  }
 }
 
 /** The outcome of the last save, as the shell learned it from the daemon. */
@@ -265,6 +279,7 @@ export class ConfigPane {
   /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
    *  Accounts. Same "not config" rule: see quota.ts. */
   private quota: QuotaState = emptyQuotaState();
+  private theme: ThemeChoice = "system";
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -285,6 +300,7 @@ export class ConfigPane {
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
   private lastQuota: QuotaState | null = null;
+  private lastTheme: ThemeChoice | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -293,8 +309,16 @@ export class ConfigPane {
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState, quota: QuotaState): void {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota) {
+  update(
+    entries: ConfigEntry[],
+    path: string,
+    status: ConfigStatus | null,
+    accounts: AccountsState,
+    quota: QuotaState,
+    theme: ThemeChoice = this.theme,
+  ): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
+      && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     // Captured before `lastStatus` is overwritten below: it is the EDGE that
@@ -310,6 +334,8 @@ export class ConfigPane {
     this.lastStatus = status;
     this.lastAccounts = accounts;
     this.lastQuota = quota;
+    this.lastTheme = theme;
+    this.theme = theme;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
@@ -533,10 +559,49 @@ export class ConfigPane {
     // for, and daemon-reported sections above them would push them below the fold.
     this.el.replaceChildren(
       head,
-      h("div", { class: "af-config-list" }, ...content),
+      h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota),
     );
+  }
+
+  /** Theme and the saved token live in this browser's localStorage, not in
+   *  config.toml, so neither goes through `save`. */
+  private renderBrowser(): HTMLElement[] {
+    const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, "This browser"));
+    const select = h("select", { class: "af-input af-config-input af-theme-select" });
+    select.setAttribute("aria-label", "Theme");
+    for (const choice of THEME_CHOICES) {
+      const opt = h("option", { value: choice }, themeLabel(choice));
+      opt.selected = choice === this.theme;
+      select.append(opt);
+    }
+    select.addEventListener("change", () => this.actions.setTheme(select.value as ThemeChoice));
+    const row = h(
+      "div",
+      { class: "af-config-row af-theme-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Theme"),
+        h("span", { class: "af-config-purpose" }, "Color scheme for this browser. System follows your device setting."),
+      ),
+      h("div", { class: "af-config-control" }, select),
+    );
+    const disconnect = h("button", { type: "button", class: "af-ghost af-config-disconnect" }, "Log out");
+    disconnect.addEventListener("click", () => this.actions.disconnect());
+    const tokenRow = h(
+      "div",
+      { class: "af-config-row af-disconnect-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Saved token"),
+        h("span", { class: "af-config-purpose" }, "Forget the token saved in this browser and go back to the login screen."),
+      ),
+      h("div", { class: "af-config-control" }, disconnect),
+    );
+    return [heading, row, tokenRow];
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written
