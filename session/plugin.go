@@ -109,7 +109,16 @@ func ensurePluginDir(callbackUnavailable bool) (string, error) {
 		return "", err
 	}
 
-	pluginDir := filepath.Join(configDir, "plugin")
+	// The callbackless variant gets its own directory for the same reason the
+	// aider seam gets its own filename: sessions on a shared remote user share
+	// this config dir, and two variants at one path flap — the later launch
+	// rewrites the plugin the earlier session is about to read (#5571 W3.1,
+	// PR #5577 review).
+	pluginName := "plugin"
+	if callbackUnavailable {
+		pluginName = "plugin-callbackless"
+	}
+	pluginDir := filepath.Join(configDir, pluginName)
 	commandsDir := filepath.Join(pluginDir, "commands")
 	hooksDir := filepath.Join(pluginDir, "hooks")
 	manifestDir := filepath.Join(pluginDir, ".claude-plugin")

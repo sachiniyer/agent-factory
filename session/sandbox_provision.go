@@ -143,6 +143,29 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
+// revalidateCallbackBeforeEnv re-checks the minted credential at the LAST step
+// that can still keep a dead grant out of the launched agent-server's
+// environment (#5571 W3.1, PR #5577 review): once the env file is written and
+// the server inherits it, the server's own process env is fixed — a post-launch
+// revalidation could only mark the daemon-side record while the agent kept
+// being taught af verbs that all fail. The clone/binary window is where a
+// listener move or auth change lands, so the check runs after it and before
+// writeCallbackEnv. A loss degrades: the token pair is cleared (writeCallbackEnv
+// and the launch prefix both no-op on empty, so the inner server degrades
+// itself) and the reason is returned for the result's CallbackUnavailable —
+// outer and inner records agree. The caller's post-provision revalidation still
+// runs for the residual banner/tunnel window and revokes the dead grant.
+func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
+	if w.spec.CallbackToken == "" || w.spec.CallbackRevalidate == nil {
+		return ""
+	}
+	if err := w.spec.CallbackRevalidate(); err != nil {
+		w.spec.CallbackURL, w.spec.CallbackToken = "", ""
+		return err.Error()
+	}
+	return ""
+}
+
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
 // remote, in a file only the sandbox user can read (#2999).
 //

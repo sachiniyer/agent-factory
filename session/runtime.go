@@ -83,6 +83,16 @@ type ProvisionSpec struct {
 	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
+	// CallbackRevalidate re-checks the minted credential's posture INSIDE
+	// provisioning, at the last step that can still keep a dead credential out
+	// of the launched agent-server's environment — after the clone/binary
+	// window (where a listener move or auth change lands) and before the
+	// callback env is committed to the host. Once that file is written the
+	// server's own process env is fixed, so a post-launch revalidation could
+	// only mark the daemon-side record while the agent kept being taught af
+	// verbs that all fail (#5571 W3.1, PR #5577 review). Set by
+	// mintForProvision next to the pair it validates; nil means nothing to check.
+	CallbackRevalidate func() error
 	// CloneURL is the git remote an off-box runtime clones the workspace from —
 	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
 	// self-contained test. Empty for the in-process local runtime. On a fresh

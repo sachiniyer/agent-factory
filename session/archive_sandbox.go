@@ -341,7 +341,11 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
-	res.CallbackUnavailable = cred.UnavailableReason
+	// A runtime-set reason (the mid-provision loss detected before the env
+	// commit, PR #5577 review) is more precise than the mint's — keep it.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
+	}
 	// EVERY exit below this line disposes of the replacement through
 	// discardUnusableReplacement — the same reason the credential revoke above is a
 	// defer rather than a line per branch. What the exits share is not the message

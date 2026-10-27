@@ -174,3 +174,76 @@ func TestRevokeSandboxCredential_IsSeparableFromResettingTheRuntime(t *testing.T
 	bare := &Instance{Title: "local"}
 	assert.NotPanics(t, func() { bare.revokeSandboxCredential() })
 }
+
+// The mid-provision recheck (#5571 W3.1, PR #5577 review): a grant that dies
+// inside the clone/binary window must be caught BEFORE the env file commits —
+// after launch the server's own process env is fixed and a daemon-side degrade
+// would leave the inner agent being taught af verbs that all fail.
+func TestRevalidateCallbackBeforeEnv_ClearsThePairOnLoss(t *testing.T) {
+	lost := errors.New("the listener moved while the sandbox was provisioning")
+	w := &sandboxWorkspace{spec: ProvisionSpec{
+		CallbackURL:   "http://10.0.0.5:8443",
+		CallbackToken: "secret",
+		CallbackRevalidate: func() error {
+			return lost
+		},
+	}}
+	assert.Equal(t, lost.Error(), w.revalidateCallbackBeforeEnv())
+	assert.Empty(t, w.spec.CallbackToken, "a lost grant must not be committed to the host")
+	assert.Empty(t, w.spec.CallbackURL)
+}
+
+func TestRevalidateCallbackBeforeEnv_KeepsALiveGrant(t *testing.T) {
+	checked := false
+	w := &sandboxWorkspace{spec: ProvisionSpec{
+		CallbackURL:   "http://10.0.0.5:8443",
+		CallbackToken: "secret",
+		CallbackRevalidate: func() error {
+			checked = true
+			return nil
+		},
+	}}
+	assert.Empty(t, w.revalidateCallbackBeforeEnv())
+	assert.True(t, checked)
+	assert.Equal(t, "secret", w.spec.CallbackToken)
+}
+
+// A session with nothing granted, or nothing able to check it, must not even
+// reach for the check — and an unset token must skip it entirely.
+func TestRevalidateCallbackBeforeEnv_SkipsNothingToLose(t *testing.T) {
+	var noHook sandboxWorkspace
+	assert.Empty(t, noHook.revalidateCallbackBeforeEnv())
+
+	called := false
+	noToken := &sandboxWorkspace{spec: ProvisionSpec{
+		CallbackRevalidate: func() error { called = true; return errors.New("lost") },
+	}}
+	assert.Empty(t, noToken.revalidateCallbackBeforeEnv(),
+		"no token means nothing was minted — do not spend a check on it")
+	assert.False(t, called)
+
+	withToken := &sandboxWorkspace{spec: ProvisionSpec{CallbackToken: "secret"}}
+	assert.Empty(t, withToken.revalidateCallbackBeforeEnv(),
+		"a credential with no revalidate hook is left alone")
+}
+
+// mintForProvision must hand the runtime the SAME check the post-provision
+// revalidation runs — a spec carrying a credential but no way to re-check it
+// would resurrect the drift this field exists to close.
+func TestMintForProvision_WiresTheRevalidateHook(t *testing.T) {
+	creds := &fakeCreds{}
+	var spec ProvisionSpec
+	cred := mintForProvision(&spec, BackendSSH, creds)
+	require.True(t, cred.Granted())
+	require.NotNil(t, spec.CallbackRevalidate, "the runtime must be able to re-check before committing the env")
+
+	// The wired hook is the credential's own revalidation.
+	creds.invalid = errors.New("posture changed")
+	assert.EqualError(t, spec.CallbackRevalidate(), "posture changed")
+
+	// A refused mint grants nothing and wires nothing.
+	creds2 := &fakeCreds{mintErr: errors.New("no listener")}
+	var spec2 ProvisionSpec
+	mintForProvision(&spec2, BackendSSH, creds2)
+	assert.Nil(t, spec2.CallbackRevalidate)
+}

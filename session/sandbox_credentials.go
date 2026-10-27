@@ -127,6 +127,11 @@ func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCreden
 		return SandboxCredential{UnavailableReason: err.Error()}
 	}
 	spec.CallbackURL, spec.CallbackToken = cred.URL, cred.Token
+	// The runtime must be able to re-check the grant before it commits the env
+	// to the host — the post-provision revalidation the caller runs is already
+	// too late to keep a dead token out of the launched server's environment
+	// (#5571 W3.1, PR #5577 review).
+	spec.CallbackRevalidate = cred.Revalidate
 	return cred
 }
 

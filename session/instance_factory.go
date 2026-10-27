@@ -206,7 +206,12 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// being silent instead. The reason rides the result onto the instance's
 	// durable record so every surface can say "af callback unavailable: …"
 	// instead of leaving the agent to discover af commands all fail (#5571 W3.1).
-	res.CallbackUnavailable = cred.UnavailableReason
+	// A runtime may already have set the reason — the mid-provision loss the
+	// provisioner detects just before committing the env is more precise than
+	// the mint's, so it wins.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
+	}
 	// Revalidate now that the sandbox exists: provisioning is the long window, and
 	// a listener move or an auth change inside it leaves the sandbox holding a
 	// credential that was revoked while it was being written in.

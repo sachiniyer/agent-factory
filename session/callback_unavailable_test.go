@@ -63,47 +63,64 @@ func TestCallbackUnavailableReasonForPrefersTheProvisionReason(t *testing.T) {
 // a session with no af callback must not be taught af verbs that all fail.
 // Claude reads commands/af.md through --plugin-dir; aider reads the same
 // document through --read.
-func TestEnsurePluginDirWritesTheCallbacklessGuidance(t *testing.T) {
+//
+// Each variant owns a DISTINCT path: sessions sharing a remote user's config
+// dir would otherwise flap, the later launch rewriting the file the earlier
+// session then reads (PR #5577 review).
+func TestEnsurePluginDirIsolatesTheCallbacklessGuidance(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	dir, err := ensurePluginDir(true)
+	lessDir, err := ensurePluginDir(true)
 	require.NoError(t, err)
+	assert.Contains(t, lessDir, "plugin-callbackless")
 
-	body, err := os.ReadFile(filepath.Join(dir, "commands", "af.md"))
+	body, err := os.ReadFile(filepath.Join(lessDir, "commands", "af.md"))
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "cannot reach the daemon",
 		"the callbackless variant must say plainly why af verbs are omitted")
 	assert.NotContains(t, string(body), "af tasks list",
 		"a callbackless session must not be taught verbs that all fail")
 
-	// ...and a later non-degraded session restores the full document — the file
-	// is per-host, so the last writer wins and no session is stuck on the
-	// reduced variant forever.
-	_, err = ensurePluginDir(false)
+	// A callback-enabled session on the same host gets its own dir — and the
+	// callbackless file beside it must be left exactly as written.
+	fullDir, err := ensurePluginDir(false)
 	require.NoError(t, err)
-	body, err = os.ReadFile(filepath.Join(dir, "commands", "af.md"))
+	assert.NotEqual(t, lessDir, fullDir)
+	fullBody, err := os.ReadFile(filepath.Join(fullDir, "commands", "af.md"))
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "af tasks list")
+	assert.Contains(t, string(fullBody), "af tasks list")
+
+	body, err = os.ReadFile(filepath.Join(lessDir, "commands", "af.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "cannot reach the daemon",
+		"a later full-variant launch must not rewrite the callbackless plugin")
 }
 
-func TestEnsureAiderReadFileWritesTheCallbacklessGuidance(t *testing.T) {
+func TestEnsureAiderReadFileIsolatesTheCallbacklessGuidance(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	path, err := ensureAiderReadFile(true)
+	lessPath, err := ensureAiderReadFile(true)
 	require.NoError(t, err)
+	assert.Contains(t, lessPath, "af-skill-callbackless.md")
 
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(lessPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "cannot reach the daemon")
 	assert.NotContains(t, string(body), "af tasks list")
 
-	_, err = ensureAiderReadFile(false)
+	fullPath, err := ensureAiderReadFile(false)
 	require.NoError(t, err)
-	body, err = os.ReadFile(path)
+	assert.NotEqual(t, lessPath, fullPath)
+	fullBody, err := os.ReadFile(fullPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "af tasks list")
+	assert.Contains(t, string(fullBody), "af tasks list")
+
+	body, err = os.ReadFile(lessPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "cannot reach the daemon",
+		"a later full-variant launch must not rewrite the callbackless file")
 }
 
 // The doc the two seams share must hold both halves of the contract itself:

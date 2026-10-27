@@ -173,6 +173,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
 	}
+	// Re-check the callback credential at the LAST step that can still keep a
+	// dead grant out of the launched agent-server's environment (#5571 W3.1,
+	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
+	callbackLost := w.revalidateCallbackBeforeEnv()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
@@ -208,6 +212,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		},
 		Endpoint: endpoint,
 		Teardown: teardown,
+		// A credential that died mid-provision (the re-check above, before the
+		// env commit) is reported here — the caller's own revalidation names the
+		// residual window after launch, and the later write must not clobber an
+		// earlier, more precise reason.
+		CallbackUnavailable: callbackLost,
 	}, nil
 }
 
