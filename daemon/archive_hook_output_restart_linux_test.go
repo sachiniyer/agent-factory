@@ -56,6 +56,12 @@ func TestArchiveHookOutputSurvivesRunnerExit(t *testing.T) {
 	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForArchiveRestartValue(t, pidFile, 5*time.Second)
+	// archive_hook.go launches the hook with Setpgid into its own group, so
+	// the runner group's reap does not cover it: runner's death adopts the
+	// hook to this test binary under the subreaper mark, and it would sit a
+	// zombie until the package exits even after the group kill below (#4417
+	// review). Registered before the kill so LIFO order runs kill-then-reap.
+	t.Cleanup(func() { testguard.ReapGroupOrphans(t, hookPID) })
 	t.Cleanup(func() { _ = syscall.Kill(-hookPID, syscall.SIGKILL) })
 	if err := runner.Process.Kill(); err != nil {
 		t.Fatalf("stop helper daemon generation: %v", err)
