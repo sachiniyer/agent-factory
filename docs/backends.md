@@ -592,10 +592,10 @@ inherit it. A local token is never copied to the SSH host implicitly.
   (`AllowTcpForwarding yes` — the default on most distros; the runtime reaches the
   remote agent-server through an SSH local-forward tunnel).
 - `git`, `tmux`, `sh`, and a platform af ships a binary for (Linux/Darwin on
-  amd64/arm64 — release builds are static, `CGO_ENABLED=0`, so libc is not a
-  constraint). The `af` binary is installed onto the remote for you — the
+  amd64/arm64; the linux release artifact streamed to a host is a separate
+  static `CGO_ENABLED=0` build, so the host's libc is not a constraint there). The `af` binary is installed onto the remote for you — the
   daemon's own build on a same-platform host, the matching release artifact
-  otherwise, always version-checked against the daemon — so there is nothing to
+  (`agent-factory-linux-<arch>-static` on linux) otherwise, always version-checked against the daemon — so there is nothing to
   pre-install. For an air-gapped or unbuilt-platform host set the global
   `sandbox.binary` key to a daemon-local `af` build for that host.
 - The agent CLIs you intend to run (claude, codex, aider, gemini, …).

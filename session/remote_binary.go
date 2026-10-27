@@ -121,6 +121,19 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// releaseArtifactURL names the release archive streamed to a host. A linux
+// host's libc is unknown (musl, old glibc, none), so it gets the separate
+// CGO_ENABLED=0 agent-factory-linux-<arch>-static archive; the installed
+// (cgo) artifacts stay what install.sh and upgrades fetch. Darwin has no libc
+// concern and uses the normal archive.
+func releaseArtifactURL(tag string, plat remotePlatform) string {
+	if plat.goos == "linux" {
+		return fmt.Sprintf("%s/download/%s/%s-%s-%s-static.tar.gz",
+			autoupdate.ReleaseBaseURL, tag, autoupdate.CandidateBinaryName, plat.goos, plat.goarch)
+	}
+	return autoupdate.DownloadURL(tag, plat.goos, plat.goarch)
+}
+
 // releaseBinary fetches (once) and caches the release artifact matching the
 // daemon's version for a foreign host platform — the verified path when the
 // daemon's own binary cannot run there (#5571 W2.2). The download is the same
@@ -141,7 +154,7 @@ func releaseBinary(ctx context.Context, plat remotePlatform) (remoteBinaryCandid
 	if _, err := os.Stat(cachePath); err == nil {
 		return remoteBinaryCandidate{path: cachePath, label: fmt.Sprintf("cached release artifact %s %s/%s", tag, plat.goos, plat.goarch)}, nil
 	}
-	url := autoupdate.DownloadURL(tag, plat.goos, plat.goarch)
+	url := releaseArtifactURL(tag, plat)
 	binary, err := autoupdate.DefaultCandidateStager().DownloadWithContext(ctx, url, sshProvisionStepTimeout)
 	if err != nil {
 		return remoteBinaryCandidate{}, fmt.Errorf("fetching the release artifact %s for %s/%s failed (%v) — if this host is air-gapped, set sandbox.binary to a daemon-local af build for it", tag, plat.goos, plat.goarch, err)

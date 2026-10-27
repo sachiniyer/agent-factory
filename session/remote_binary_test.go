@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -388,4 +389,11 @@ func TestStartAgentServerPrependsTheSessionDirToPATH(t *testing.T) {
 	assert.Contains(t, launch, `& echo $!`)
 	assert.True(t, strings.Index(launch, "PATH=") < strings.Index(launch, "nohup"),
 		"the prefix must sit left of nohup so it lands in the server's environment")
+}
+
+func TestReleaseArtifactURLUsesStaticArchiveOnLinuxOnly(t *testing.T) {
+	assert.Equal(t, autoupdate.ReleaseBaseURL+"/download/v1.0.9/agent-factory-linux-arm64-static.tar.gz",
+		releaseArtifactURL("v1.0.9", remotePlatform{goos: "linux", goarch: "arm64"}))
+	assert.Equal(t, autoupdate.DownloadURL("v1.0.9", "darwin", "arm64"),
+		releaseArtifactURL("v1.0.9", remotePlatform{goos: "darwin", goarch: "arm64"}))
 }
