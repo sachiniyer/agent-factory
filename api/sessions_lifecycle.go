@@ -38,7 +38,7 @@ be lost. Archive instead to keep the session restorable.
 		// all-repo search; a non-empty one confines the kill to that repo so a
 		// same-titled session in a different repo is never destroyed by
 		// mistake. Mirrors sessionsListCmd's resolveRepoID() usage.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -116,6 +116,9 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		var repoID string
 		var sessionID string
 		if sessionsArchiveSelf {
+			if apiclient.IsRemoteTarget() {
+				return jsonError(remoteSelfRefusal("--self"))
+			}
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
 			}
@@ -158,7 +161,7 @@ their worktree. Local archives print the relocated worktree path on success.`,
 			// to that repo so a same-titled session in another repo is never
 			// touched.
 			var err error
-			repoID, err = resolveRepoID()
+			repoID, err = resolveRepoIDForLookup()
 			if err != nil {
 				return jsonError(err)
 			}
@@ -209,7 +212,7 @@ applies to this one session and this one command; there is no global equivalent.
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}

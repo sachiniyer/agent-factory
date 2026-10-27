@@ -168,6 +168,14 @@ func TestBackendKindForType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendHook, got)
 
+	// Every off-box kind round-trips through its persisted type (W10.2).
+	for _, kind := range offBoxKinds() {
+		got, err := backendKindForType(offBoxBackendType[kind])
+		require.NoError(t, err, string(kind))
+		assert.Equal(t, kind, got)
+		assert.True(t, isSandboxBackendType(offBoxBackendType[kind]), string(kind))
+	}
+
 	for _, bad := range []string{"local", "", "nope"} {
 		if _, err := backendKindForType(bad); err == nil {
 			t.Fatalf("backendKindForType(%q): want error", bad)
@@ -187,7 +195,7 @@ func TestNewInertSandboxBackend(t *testing.T) {
 	for _, tc := range []struct {
 		typ  string
 		want string
-	}{{"docker", "docker"}, {"ssh", "ssh"}, {"remote", "remote"}} {
+	}{{"docker", "docker"}, {"ssh", "ssh"}, {"sandbox", "sandbox"}, {"remote", "remote"}} {
 		b := newInertSandboxBackend(tc.typ)
 		assert.Equal(t, tc.want, b.Type())
 		caps := b.Capabilities()
@@ -207,7 +215,7 @@ func TestNewInertSandboxBackend(t *testing.T) {
 // Type/Capabilities. The hook ("remote") backend now loads the same way, since
 // its provision-and-expose migration made it re-provisionable like docker/ssh.
 func TestFromInstanceData_SandboxBackends(t *testing.T) {
-	for _, typ := range []string{"docker", "ssh", "remote"} {
+	for _, typ := range []string{"docker", "ssh", "sandbox", "remote"} {
 		t.Run(typ+" archived loads inert + Archived", func(t *testing.T) {
 			inst, err := FromInstanceData(InstanceData{
 				ID:          "id1",

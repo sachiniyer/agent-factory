@@ -98,11 +98,20 @@ Working style:
   To prove such a test fails without its fix, dispatch a probe run
   (`-f probe=true`, docs/dev/probe-runs.md), not a full PR Validation run.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
-  merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
-  doing. Green CI is the floor, not the bar — the Codex review lands after it.
-  Whoever wrote the PR gates and merges it; that is not a root queue. The
-  audit trail is in PR descriptions and issue close-out comments, not
-  pre-approval.
+  close issues that aren't worth doing. **Throughput mode (owner decision
+  2026-10-27):** optimize for merge throughput and fix forward on master. A PR
+  lands on green `Build` + `Lint` for its current head — `.github/workflows/
+  auto-merge.yml` squash-merges it (see `.github/auto-merge.md`); nothing waits
+  on Codex, play-tests or a maintainer. P1 Codex findings must be fixed (reply
+  `RESOLVED in <sha>`); P2/P3 are advisory — fix if cheap, else reply
+  `ACCEPTED: <reason>`. Play-tests and the wider suites verify on master, not
+  before merge, and a regression they find is fixed forward on master as the
+  highest-priority work. The nightly stable release preflight (full `go vet`
+  plus the `-race` suite) remains the hard gate between master and users. To
+  keep a PR from merging, label it `no-auto-merge` (or `hold`). The audit trail
+  is in PR descriptions and issue close-out comments, not pre-approval. The old
+  Auto Gate and the hand procedure in `.claude/skills/gate-pr.md` apply only if
+  the gate is re-enabled.
 
 ## Build & Development
 
@@ -452,7 +461,7 @@ stack, revert the foreign paths out of your tree, and say so in the PR.
 - All Go files must be `gofmt`-formatted
 - PRs target `master` branch
 - Keep PRs focused and small
-- Run the full gate suite above before submitting
+- Run the local checks above before submitting
 - Version is stored in `main.go` (`version` var) and auto-bumped by CI
 - Treat exported Go identifiers as repository-internal implementation, not a
   supported import API; removing one is not a breaking change and does not
