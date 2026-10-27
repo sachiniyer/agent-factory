@@ -5,47 +5,48 @@ import (
 	"testing"
 )
 
-func TestSelectAccountCandidate_LimitedAmbientSessionUsesConfiguredAccount(t *testing.T) {
-	got, ok := SelectAccountCandidate(AccountSelection{
+func TestSelectAccountCandidates_LimitedAmbientSessionUsesConfiguredAccount(t *testing.T) {
+	got := SelectAccountCandidates(AccountSelection{
 		Candidates: []string{"work", "personal"},
 		Registered: []string{"personal", "work"},
 	})
-	if !ok || got != "work" {
-		t.Fatalf("SelectAccountCandidate = (%q, %v), want (work, true)", got, ok)
+	want := []string{"work", "personal"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SelectAccountCandidates = %q, want %q", got, want)
 	}
 }
 
-func TestSelectAccountCandidate_AllCandidatesLimitedFallsBackToWait(t *testing.T) {
-	got, ok := SelectAccountCandidate(AccountSelection{
+func TestSelectAccountCandidates_AllCandidatesLimitedFallsBackToWait(t *testing.T) {
+	got := SelectAccountCandidates(AccountSelection{
 		Candidates: []string{"work", "personal"},
 		Registered: []string{"personal", "work"},
 		Limited:    []string{"work", "personal"},
 	})
-	if ok || got != "" {
-		t.Fatalf("SelectAccountCandidate = (%q, %v), want no swap", got, ok)
+	if len(got) != 0 {
+		t.Fatalf("SelectAccountCandidates = %q, want no swap", got)
 	}
 }
 
-func TestSelectAccountCandidate_ExplicitAccountPinIsNeverOverridden(t *testing.T) {
-	got, ok := SelectAccountCandidate(AccountSelection{
+func TestSelectAccountCandidates_ExplicitAccountPinIsNeverOverridden(t *testing.T) {
+	got := SelectAccountCandidates(AccountSelection{
 		CurrentAccount: "work",
 		Candidates:     []string{"personal"},
 		Registered:     []string{"personal", "work"},
 	})
-	if ok || got != "" {
-		t.Fatalf("SelectAccountCandidate = (%q, %v), want explicit account pin preserved", got, ok)
+	if len(got) != 0 {
+		t.Fatalf("SelectAccountCandidates = %q, want explicit account pin preserved", got)
 	}
 }
 
-func TestSelectAccountCandidate_CurrentAutomaticAccountIsNotAReplacement(t *testing.T) {
-	got, ok := SelectAccountCandidate(AccountSelection{
+func TestSelectAccountCandidates_CurrentAutomaticAccountIsNotAReplacement(t *testing.T) {
+	got := SelectAccountCandidates(AccountSelection{
 		CurrentAccount:      "work",
 		CurrentAutoSelected: true,
 		Candidates:          []string{"work"},
 		Registered:          []string{"work"},
 	})
-	if ok || got != "" {
-		t.Fatalf("SelectAccountCandidate = (%q, %v), want ordinary same-account resume", got, ok)
+	if len(got) != 0 {
+		t.Fatalf("SelectAccountCandidates = %q, want ordinary same-account resume", got)
 	}
 }
 

@@ -559,7 +559,35 @@ func isSandboxBackendType(t string) bool {
 // a LOCAL session that is Lost loads started=true and already survives, and a
 // local row that never started is the junk the checkpoint's !Started() skip is for.
 func lostSandboxRecord(data InstanceData) bool {
-	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
+	// EffectiveLiveness, not data.Liveness directly, so a pre-#1195 sandbox row
+	// (LivenessUnset with a legacy Status: Lost/Dead) rolls forward to LiveLost
+	// exactly as FromInstanceData does on load. Reading data.Liveness here would
+	// miss that row while the loader treats it as a lost sandbox record, so the
+	// loaded form would release its slot and the raw ghost would still hold it —
+	// the cap wedges on the very legacy row the release exists for.
+	return isSandboxBackendType(data.BackendType) && EffectiveLiveness(data) == LiveLost
+}
+
+// LostSandboxRecord is the exported form of lostSandboxRecord for the raw-row
+// cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot), which
+// must mirror holdsTaskRunSlot for the row's known materialized form. A
+// sandbox-backed LiveLost row always loads inert (started=false, per
+// FromInstanceData's sandbox branch), so its live arm releases —
+// canAutoRestoreLostSession returns false because ValidateRuntimeAction refuses
+// a !Started session. LostSandboxRecord lets the raw arm reach the same verdict
+// when the row ghosts and no in-memory Instance exists to consult Started.
+func LostSandboxRecord(data InstanceData) bool {
+	return lostSandboxRecord(data)
+}
+
+// IsSandboxBackendType is the exported form of isSandboxBackendType for the
+// raw-row cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot).
+// A sandbox-backed row routes its hold/release verdict through the loader's inert
+// rewrite (see session.LoadedActivity), so the raw arm must recognize the same
+// backend set the loader's sandbox branch does rather than gating on the stored
+// liveness, which a row ghosted mid-run has not yet rolled forward to LiveLost.
+func IsSandboxBackendType(t string) bool {
+	return isSandboxBackendType(t)
 }
 
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,

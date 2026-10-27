@@ -33,9 +33,9 @@ func TestAutomationsOverdueRowIsMarkedWhenCollapsed(t *testing.T) {
 	a.SetRect(layout.Rect{W: 100, H: 3})
 
 	out := a.View()
-	assert.Contains(t, out, "[!]  nightly-sweep",
+	assert.Contains(t, out, "[!] nightly-sweep",
 		"an overdue task carries a static warning glyph in place of the enabled tick:\n%s", out)
-	assert.NotContains(t, out, "[✓]  nightly-sweep",
+	assert.NotContains(t, out, "[✓] nightly-sweep",
 		"a task that has stopped firing must not keep reading as healthy")
 }
 
@@ -46,7 +46,7 @@ func TestAutomationsHealthyRowKeepsItsTick(t *testing.T) {
 	a.SetRect(layout.Rect{W: 100, H: 3})
 
 	out := a.View()
-	assert.Contains(t, out, "[✓]  nightly-sweep")
+	assert.Contains(t, out, "[✓] nightly-sweep")
 	assert.NotContains(t, out, "[!]")
 }
 
@@ -59,7 +59,7 @@ func TestAutomationsExpandedRowExplainsOverdue(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	require.Contains(t, out, "▾[!]  nightly-sweep")
+	require.Contains(t, out, "▾  [!] nightly-sweep")
 	assert.Regexp(t, `overdue · missed 18 .*0 3 \* \* \*`, out,
 		"the warning leads the detail line, ahead of the task's own configuration, "+
 			"because a narrow rail ellipsizes from the right:\n%s", out)
@@ -131,12 +131,15 @@ func TestAutomationsOverdueSurvivesTheNarrowRail(t *testing.T) {
 
 // TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum: the compact mode
 // has no rows, so this one line is the entire section — and it is also the
-// narrowest thing the rail ever draws. At 22 columns #3641's ladder has shed the
-// noun and the secondary number; the count that says something is WRONG has to
-// be what survives that last rung, or the degraded rail shows no warning at all.
+// narrowest thing the rail ever draws. At 22 columns the ladder has shed the
+// affordance and the secondary numbers; the count that says something is WRONG
+// has to survive beside the section's name (#5372 made the noun the last
+// fragment shed, so the warning primary and the noun are the floor pair), or
+// the degraded rail shows no warning at all.
 //
-// It survives as the row glyph rather than the word, and that is a width
-// decision rather than a style one — see TestAutomationsCompactPrimaryFitsAtAnyCount.
+// The warning survives as the row glyph rather than the word, and that is a
+// width decision rather than a style one — see
+// TestAutomationsCompactPrimaryFitsAtAnyCount.
 func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 	a := newTestAutomations([]task.Task{overdueStripTask(), stripTasks()[1]})
 	a.SetRect(layout.Rect{W: 22, H: 1})
@@ -144,20 +147,28 @@ func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "compact strip at the rail minimum")
-	assert.Contains(t, out, "[!] 1", "the warning count outranks the total here:\n%s", out)
-	assert.Contains(t, out, "m manage", "and the manager key is still the last thing cut")
+	assert.Contains(t, out, "Automations: [!] 1",
+		"the warning count outranks the total here, beside the noun (#5372):\n%s", out)
+	assert.NotContains(t, out, "m manage",
+		"the affordance sheds ahead of the noun at this width:\n%s", out)
 }
 
-// TestAutomationsCompactPrimaryFitsAtAnyCount: #3641's last rung exists to keep
-// the manage affordance from being clipped at the 22-column rail minimum, and a
-// three-digit count spelled out as "100 overdue" needs 12 of the 11 cells that
-// rung has — measured, it fell straight through to the clip and truncated the
-// affordance, which is the contract that rung protects. The glyph form fits at
-// any count, and a spelling chosen by digit count would be no better: rebinding
-// the manager key changes the budget.
+// TestAutomationsCompactPrimaryFitsAtAnyCount: the glyph primary exists because
+// a three-digit count spelled out as "100 overdue" needs 12 cells and used to
+// fall straight through #3641's last rung to the clip. Under #5372's re-order
+// the narrowest supported rendering is " Automations: [!] 100" — the glyph
+// beside the noun — which fits at any count, where a spelling picked by digit
+// count would break when a keys rebind repriced the affordance.
+//
+// The ONE exception is a primary too wide to sit beside the name: past four
+// digits "[!] 10000" is 9 cells and the joint fit needs 23, so the compact
+// line — the whole section — keeps the warning rather than the noun
+// (" [!] 10000"). A hidden ten-thousand-task warning would be worse than an
+// unnamed count; and the affordance cannot borrow a slot here — it only
+// rejoins beside the full joint spelling, or the hint would hump.
 func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 	last := time.Date(2026, time.June, 14, 3, 0, 0, 0, time.UTC)
-	for _, overdue := range []int{1, 99, 150} {
+	for _, overdue := range []int{1, 99, 150, 9999, 10000} {
 		var tasks []task.Task
 		for i := 0; i < overdue; i++ {
 			tasks = append(tasks, task.Task{
@@ -172,8 +183,23 @@ func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
 		out := a.View()
 		assert.Contains(t, out, fmt.Sprintf("[!] %d", overdue),
 			"the warning count survives at %d overdue:\n%s", overdue, out)
-		assert.Contains(t, out, "m manage",
-			"and the affordance is still the last thing cut at %d overdue:\n%s", overdue, out)
+		if overdue <= 9999 {
+			assert.Contains(t, out, "Automations:",
+				"the noun is still the last fragment standing at %d overdue (#5372):\n%s", overdue, out)
+		} else {
+			assert.NotContains(t, out, "Automations:",
+				"past the joint fit the warning outranks the noun at %d overdue:\n%s", overdue, out)
+			assert.NotContains(t, out, "m manage",
+				"the affordance can only rejoin beside the full joint spelling — borrowing it here would hump the hint at the joint's own boundary:\n%s", out)
+			// And the count itself is never clipped: below the joint fit the
+			// primary renders alone, at and above it the joint does — so the
+			// warning is on the line at every width the rail can produce.
+			for w := 22; w <= 36; w++ {
+				a.SetRect(layout.Rect{W: w, H: 1})
+				assert.Containsf(t, a.View(), fmt.Sprintf("[!] %d", overdue),
+					"%d overdue at rail width %d: the warning is on the line:\n%s", overdue, w, a.View())
+			}
+		}
 	}
 }
 
@@ -206,7 +232,7 @@ func TestAutomationsMarksATaskThatCanNeverFire(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "▾[!]  nightly-sweep",
+	assert.Contains(t, out, "▾  [!] nightly-sweep",
 		"a task that can never fire carries the same warning glyph as one that stopped:\n%s", out)
 	assert.Contains(t, out, "No upcoming run",
 		"and the detail line keeps #2596's wording rather than repeating itself:\n%s", out)
@@ -240,16 +266,17 @@ func TestAutomationsDiagnosesAMalformedExpression(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "▾[!]  nightly-sweep")
+	assert.Contains(t, out, "▾  [!] nightly-sweep")
 	assert.Regexp(t, `Invalid cron expression .*99 \* \* \* \*`, out,
 		"the reason LEADS the line, ahead of the expression it is about:\n%s", out)
 	assert.NotContains(t, out, "next ", "and no fire time is promised")
 }
 
-// TestAutomationsDiagnosisSurvivesTheRailMinimum: at 22 columns the detail line
-// keeps 16 cells and is clipped from the right, so a reason placed behind the
-// expression leaves the mark unexplained — which is the whole failure the mark
-// exists to prevent, one level down.
+// TestAutomationsDiagnosisSurvivesTheRailMinimum: at 22 columns the field
+// budget is the rail minus the fixed 7-cell indent (15 cells), so the whole-
+// or-omit rule (#5153) omits the 23-cell reason entirely rather than clipping
+// it to an unreadable prefix — the [!] mark still flags the row and the detail
+// shows the fields that DO fit whole.
 func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
 	broken := stripTasks()[0]
 	broken.CronExpr, broken.Unschedulable = "99 * * * *", true
@@ -259,8 +286,11 @@ func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "Invalid cron",
-		"enough of the reason has to survive the clip to read as one:\n%s", out)
+	assert.Contains(t, out, "[!]", "the row keeps its warning mark:\n%s", out)
+	assert.Contains(t, out, "99 * * * *",
+		"a field the rail can show whole is what fills the detail:\n%s", out)
+	assert.NotContains(t, out, "…",
+		"the reason is omitted whole, never clipped mid-token:\n%s", out)
 }
 
 // TestAutomationsMarksAnUnassessableRowUnknown: a record whose health could not
@@ -276,7 +306,7 @@ func TestAutomationsMarksAnUnassessableRowUnknown(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "▾[?]  nightly-sweep",
+	assert.Contains(t, out, "▾  [?] nightly-sweep",
 		"unknown gets its own mark, not a tick and not a warning:\n%s", out)
 	assert.NotContains(t, out, "[✓]")
 	assert.NotContains(t, out, "[!]")
@@ -323,8 +353,13 @@ func TestAutomationsLeadsWithBothUnschedulableDiagnoses(t *testing.T) {
 
 		a.SetRect(layout.Rect{W: 22, H: 4})
 		narrow := a.View()
-		assert.Contains(t, narrow, tc.want[:8],
-			"%q: enough of it survives the rail minimum to read as a reason:\n%s", tc.expr, narrow)
+		if layout.Cells(tc.want) <= 22-itemPrefixWidth {
+			assert.Contains(t, narrow, tc.want,
+				"%q: the reason fits whole in the rail minimum's field budget:\n%s", tc.expr, narrow)
+		} else {
+			assert.NotContains(t, narrow, tc.want[:8],
+				"%q: the reason is omitted whole rather than clipped mid-token:\n%s", tc.expr, narrow)
+		}
 	}
 }
 
@@ -345,13 +380,19 @@ func TestAutomationsDiagnosesEveryUnschedulableShape(t *testing.T) {
 		a.SetRect(layout.Rect{W: 100, H: 4})
 		a.Focus()
 		wide := a.View()
-		assert.Contains(t, wide, "▾[!]  nightly-sweep", "%q is marked", tc.expr)
+		assert.Contains(t, wide, "▾  [!] nightly-sweep", "%q is marked", tc.expr)
 		assert.Contains(t, wide, tc.want, "%q reads %q:\n%s", tc.expr, tc.want, wide)
 		assert.Equal(t, 1, strings.Count(wide, tc.want), "%q: said once", tc.expr)
 
 		a.SetRect(layout.Rect{W: 22, H: 4})
-		assert.Contains(t, a.View(), tc.want[:8],
-			"%q: the reason survives the rail minimum", tc.expr)
+		narrow := a.View()
+		if layout.Cells(tc.want) <= 22-itemPrefixWidth {
+			assert.Contains(t, narrow, tc.want,
+				"%q: the reason fits whole in the rail minimum's field budget", tc.expr)
+		} else {
+			assert.NotContains(t, narrow, tc.want[:8],
+				"%q: the reason is omitted whole rather than clipped mid-token", tc.expr)
+		}
 	}
 }
 

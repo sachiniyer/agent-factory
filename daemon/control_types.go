@@ -371,6 +371,9 @@ type CreateTabRequest struct {
 	// Port is a convenience for a web tab: when set (and URL is empty) the target
 	// becomes http://localhost:<port>.
 	Port int `json:"port,omitempty"`
+	// Proposal is the slug a docs tab (Kind=="docs") edits. It must exist in the
+	// session's project, and it is refused for every other kind.
+	Proposal string `json:"proposal,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the target session by id first, so web and retained TUI
 	// tab-create actions cannot hit a same-title replacement (#1592 Phase 5 PR7,
@@ -640,6 +643,13 @@ type PingResponse struct {
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
+	// PID is the acknowledging daemon's process id (#5007). RequestShutdown
+	// cross-checks it against the PID the pre-shutdown Ping reported on the
+	// same connection and drops the target on a mismatch; it never uses it
+	// alone, because a PID learned only from the ack cannot be pinned before
+	// the daemon may exit. Additive: a daemon built before this field decodes
+	// as 0, which skips the cross-check.
+	PID int `json:"pid,omitempty"`
 }
 
 // ReleaseUpgradeProbationRequest asks a probationary upgrade candidate to leave
