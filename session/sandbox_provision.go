@@ -175,9 +175,6 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 	return nil
 }
 
-// startAgentServer launches `af agent-server` headless on the remote, detached
-// via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
-// captures the background PID.
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
 // remote, in a file only the sandbox user can read (#2999).
 //
@@ -205,12 +202,23 @@ func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
 	return nil
 }
 
+// startAgentServer launches `af agent-server` headless on the remote, detached
+// (setsid where available, plus nohup) with its banner + log redirected to
+// files, bound to 127.0.0.1:0, and captures the background PID.
 func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	filteredInner, err := w.agentServerCommand()
 	if err != nil {
 		return err
 	}
-	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
+	// setsid, when the host has it, moves the agent-server into its own session
+	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
+	// whose SIGHUP/session-kill nohup alone does not survive under
+	// KillUserProcesses=yes. It is a plain background child of this
+	// non-interactive shell — never a process-group leader — so setsid execs in
+	// place rather than forking, and `$!` below is still the agent-server's own
+	// PID, which the reap-side argv[0] identity check depends on. Hosts without
+	// setsid (macOS) keep the previous nohup-only launch.
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; nohup $d %s >%s 2>%s </dev/null & echo $!",
 		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
