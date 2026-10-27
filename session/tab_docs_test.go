@@ -74,3 +74,39 @@ func TestDocsTabKindProperties(t *testing.T) {
 	assert.NoError(t, Capabilities{}.RefuseTabKind(TabKindDocs, ""), "a docs tab needs nothing from the workspace")
 	assert.Equal(t, "My notes", TabLabel(&Tab{Name: "My notes", Kind: TabKindDocs}))
 }
+
+func TestDocsTab_PushModePersists(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedMockInstance(t, "af_docs_push_mode")
+	_, err := inst.AddDocsTab("auth-rework", "")
+	require.NoError(t, err)
+	_, err = inst.AddDocsTab("other", "")
+	require.NoError(t, err)
+	before := inst.GetTabs()[1]
+
+	assert.Equal(t, 1, inst.SetDocsTabsPushMode("auth-rework", "manual"))
+	assert.Equal(t, 0, inst.SetDocsTabsPushMode("missing", "manual"))
+	assert.Equal(t, "", before.PushMode, "the mode is set copy-on-write")
+
+	data := inst.ToInstanceData()
+	raw, err := json.Marshal(data.Tabs[1])
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	assert.Equal(t, "manual", wire["push_mode"])
+	assert.NotContains(t, string(mustJSON(t, data.Tabs[2])), "push_mode", "an unset mode is omitted")
+
+	restored := &Instance{}
+	restoreLocalTabs(restored, data)
+	assert.Equal(t, "manual", restored.Tabs[1].PushMode, "the mode must survive a restart")
+	assert.Equal(t, "", restored.Tabs[2].PushMode)
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	return raw
+}

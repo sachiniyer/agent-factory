@@ -225,6 +225,7 @@ func (s *Service) seen(r *resolved, slug, file string) {
 // committed records a doc the daemon committed and publishes the change.
 func (s *Service) committed(r *resolved, slug, file, commit string, author Author) {
 	s.seen(r, slug, file)
+	s.markUnsentStale(r.repoID, slug, "")
 	ids, _ := s.attachedTo(r, slug)
 	s.mu.Lock()
 	for _, id := range s.lastSet[r.repoID][slug] {
