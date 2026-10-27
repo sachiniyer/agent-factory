@@ -150,6 +150,13 @@ type Instance struct {
 	// exactly once per process. A restart re-derives the same end from the same
 	// durable verdict, so the re-stamp is idempotent.
 	taskRunFailedStamp bool
+	// taskRunFailurePending is the DURABLE twin of taskRunFailedStamp (#5646):
+	// raised where the run ends failed, persisted with the row, and cleared only
+	// when the daemon acknowledges the task's status write (or its refusal).
+	// The in-memory stamp dies with the process; this survives a restart that
+	// lands between the edge and the stamp, which would otherwise leave the task
+	// reading "started" forever for a run that provably failed.
+	taskRunFailurePending bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
