@@ -8,9 +8,10 @@ import (
 )
 
 // persistWatcherStatus records a watcher lifecycle status on the task:
-// "stopped", or "errored: <exit>: <first output line>" from the crash-loop
-// breaker (#797). LastRunAt is preserved — it tracks event deliveries, not
-// supervision changes. Passing nil for lastRunAt tells UpdateTaskStatus to
+// "stopped", or the crash-loop breaker's "errored: gave up after N failures
+// in W (last: <exit>): <newest output line>" (#797, #5329). LastRunAt is
+// preserved — it tracks event deliveries, not supervision changes. Passing
+// nil for lastRunAt tells UpdateTaskStatus to
 // leave LastRunAt untouched: reading it here (outside the file lock) and
 // writing it back would revert a newer timestamp a concurrent deliverWatchEvent
 // committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips

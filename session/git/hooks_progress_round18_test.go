@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressStorageBailoutKeepsCompletionPending(t *testing.T) {
@@ -98,12 +99,11 @@ func TestHookProgressSuccessorWaitsForWinningReceiptExit(t *testing.T) {
 	p := &hookProgress{Directory: t.TempDir()}
 	started := filepath.Join(t.TempDir(), "started")
 	release := filepath.Join(t.TempDir(), "release")
-	command := "touch " + shellQuoteForShim(started) + "; while [ ! -f " + shellQuoteForShim(release) + " ]; do sleep 0.01; done"
+	command := "touch " + shellQuoteForShim(started) + "; " +
+		testguard.BoundedGateWait(release, 10*time.Millisecond, 5*time.Minute)
 
 	winner := exec.Command("sh", p.command(0, command)...)
-	if err := winner.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, winner)
 	winnerDone := make(chan error, 1)
 	go func() { winnerDone <- winner.Wait() }()
 	winnerFinished := false
@@ -121,9 +121,7 @@ func TestHookProgressSuccessorWaitsForWinningReceiptExit(t *testing.T) {
 	waitForPath(t, started, 5*time.Second)
 
 	successor := exec.Command("sh", p.command(0, command)...)
-	if err := successor.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, successor)
 	successorDone := make(chan error, 1)
 	go func() { successorDone <- successor.Wait() }()
 	select {
