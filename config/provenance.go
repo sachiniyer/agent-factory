@@ -212,6 +212,43 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 	ref := sourceReference(candidates[winner].document, winnerTrace.KeyPath)
 	result.Winner = &ref
 
+	// The dotted read — `af config get web.terminal_font_size_phone` — needs
+	// per-leaf origins to project one leaf (#5500). Each leaf's source is the
+	// highest-precedence candidate whose document actually configured it,
+	// else the built-in the loader materialized the field from: the
+	// whole-table winner alone cannot answer for a leaf its document never
+	// set, and ResolvedValuePath refuses to project without a real leaf
+	// origin rather than fabricate one. Scoped to web deliberately — it is
+	// the only replace-merged table with fixed settable leaves, and a
+	// subkey walk over every replace-merged key would re-provenance tables
+	// no caller asked about. root_agent's leaves already project through
+	// resolveComposite under MergeTableByField.
+	if entry.Key == "web" {
+		subkeys := settableKeySpecs[entry.Key].subkeys
+		origins := make(map[string]SourceRef, len(subkeys))
+		for leaf := range subkeys {
+			for i := len(candidates) - 1; i >= 0; i-- {
+				candidate := &candidates[i]
+				trace := &result.Candidates[candidate.traceIndex]
+				if !trace.Allowed || !trace.Present {
+					continue
+				}
+				configured, _ := candidate.document.metadata.topLevel(entry.Key)
+				leaves, _, _, _, err := compositeLeaves(candidate.typed, configured, candidate.document.isBuiltIn())
+				if err != nil {
+					return computedValue{}, err
+				}
+				if _, ok := leaves[leaf]; ok {
+					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
+					break
+				}
+			}
+		}
+		if len(origins) > 0 {
+			result.Origins = origins
+		}
+	}
+
 	for i := range candidates {
 		if i == winner {
 			continue

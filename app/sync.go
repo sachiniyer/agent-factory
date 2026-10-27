@@ -714,6 +714,21 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
 		changed = true
 	}
+	// The environmental wait is the same axis at the non-terminal end: it
+	// appears while the loop defers a retry and disappears when an attempt
+	// goes through or the failure turns structural (#5295). A row whose
+	// tombstone was already adopted keeps it cleared: a delayed pre-kill
+	// snapshot still carries the armed wait while its UserKilled=false
+	// leaves the monotonic tombstone untouched, so applying the snapshot
+	// value here would re-arm a wait no restore can ever consume — the
+	// same lie the tombstone commit itself retires (#5295 review).
+	wait := d.LostRestoreWait
+	if tombstoned {
+		wait = nil
+	}
+	if inst.ReconcileLostRestoreWait(wait) {
+		changed = true
+	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
 	// daemon heals a root and clears when any client opens that session's pane,
 	// both while the liveness sits at Ready. Reconciling it here is what makes an
