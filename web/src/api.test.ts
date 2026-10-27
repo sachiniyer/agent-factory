@@ -249,6 +249,39 @@ test("resumeFromLimit surfaces a successful response's committed settlement warn
   assert.equal(isMutationCommittedError(err), true);
 });
 
+test("resumeFromLimit surfaces a not-performed resume's committed rebuild warning, not the generic no-op reason", async () => {
+  // The respawn-rebuilt-then-failed path (daemon/limit.go) returns ok:false with a
+  // committed mutation warning: the rebuild mutated durable state even though the
+  // resume did not complete. The web must surface that committed warning rather
+  // than the ok:false "another operation owns its retry" reason, which would hide
+  // an unsafe-to-repeat committed mutation behind a generic retryable no-op.
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: false,
+        reason: "the session changed or another operation owns its retry",
+        code: "mutation_committed",
+        warning: "re-spawn for \"feature\" failed after recovery rebuilt its worktree",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed mutation must surface as ApiError, not a plain Error");
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /rebuilt its worktree/);
+  assert.doesNotMatch(err.message, /another operation owns/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 // #2013: a handoff STOPS a live agent and starts another, so it must key by stable
 // id like kill/archive — a title-resolved misroute would tear down an unrelated
 // repo's agent. `brief` is deliberately never sent from the web (the mission

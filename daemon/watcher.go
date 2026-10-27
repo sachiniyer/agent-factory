@@ -49,9 +49,9 @@ import (
 //     are expired at replay time with a logged count (#1129)
 //   - each run buffers its recent output (last 10 lines / 2KB: stdout lines
 //     that did not become delivered events, plus stderr). Non-zero exits log
-//     that tail, and the crash-loop breaker persists "errored: <exit>:
-//     <first line>" into last_run_status so `af tasks list` and the TUI
-//     show why the task errored (#797)
+//     that tail, and the crash-loop breaker persists "errored: gave up after
+//     N failures in W (last: <exit>): <newest line>" into last_run_status so
+//     `af tasks list` and the TUI show why the task errored (#797, #5329)
 const (
 	// maxWatchLineBytes caps how much of a single stdout line becomes an
 	// event; the rest of the line is discarded with a logged note.
@@ -124,14 +124,16 @@ type watcherSupervisor struct {
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
-	// lifecycle statuses without a task store, and queueDir redirects the
+	// lifecycle statuses without a task store, recoverStatus substitutes the
+	// conditional stale-terminal recovery write, and queueDir redirects the
 	// durable event queues to a scratch directory.
-	loadTasks   func() ([]task.Task, error)
-	deliver     func(taskID, line string, options watchDeliveryOptions) error
-	setStatus   func(taskID, status string)
-	recordDrops func(taskID string, total int, droppedAt time.Time) error
-	logPath     func(taskID string) (string, error)
-	queueDir    func() (string, error)
+	loadTasks     func() ([]task.Task, error)
+	deliver       func(taskID, line string, options watchDeliveryOptions) error
+	setStatus     func(taskID, status string)
+	recoverStatus func(taskID string, armed task.Task, status string) (bool, error)
+	recordDrops   func(taskID string, total int, droppedAt time.Time) error
+	logPath       func(taskID string) (string, error)
+	queueDir      func() (string, error)
 	// observeTargetLimit orders a backlog event's retention admission against
 	// limit publication. A later transition cannot make that already-admitted
 	// event retroactively part of the protected episode.
@@ -180,6 +182,7 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		observeTargetLimit: func(string) (bool, error) {
 			return false, nil
 		},
+		recoverStatus:    task.RecoverStaleWatcherStatus,
 		shell:            watcherShell(),
 		lifelineExe:      resolveWatchLifelineExe(),
 		baseBackoff:      watcherBaseBackoff,
@@ -226,6 +229,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		startedCh:      make(chan struct{}),
 		dropped:        dropped,
 		persistedDrops: dropped,
+		armTask:        t,
 	}
 	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
 	// the right repo's snapshot (#1238). A resolution failure only costs the
@@ -249,8 +253,10 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 
 // watcherSignature captures the fields that define the watch process itself;
 // a change to any of them restarts the script on reload.
-// tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
-// to keep watcher.go under its file-length ceiling, #1145).
+// tailBuffer and its failure/give-up summary helpers live in tailbuffer.go
+// (extracted to keep watcher.go under its file-length ceiling, #1145), and
+// the run-health helpers — signal classification, backoff pacing, and stale
+// terminal-status recovery — in watcher_health.go.
 
 // taskWatcher supervises one watch task: it restarts the script with backoff
 // on failure and feeds its stdout lines to the supervisor's deliver hook.
@@ -297,6 +303,14 @@ type taskWatcher struct {
 	lastDroppedAt   time.Time
 	lastDeliveredAt time.Time
 	terminalStatus  string
+	// runAlive marks that a watch process is currently running, so the
+	// crashWindow recovery timer can tell "alive a full window" from "died
+	// just before it" — only the former may retire a stale terminal status.
+	runAlive bool
+	// armTask is the store row this watcher armed over: the recovery may
+	// replace its last_run_status only while the stored row is still this
+	// one — any rewrite since is newer evidence (Codex #5457).
+	armTask task.Task
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
@@ -424,7 +438,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.persistTerminalStatus(failureSummary(runErr, tail))
+			w.persistTerminalStatus(giveUpSummary(runErr, tail, len(failures), w.sup.crashWindow))
 			return
 		}
 
@@ -444,39 +458,6 @@ func (w *taskWatcher) run() {
 		}
 		backoff = next
 	}
-}
-
-// nextBackoff computes the delay before the next restart and the backoff to
-// carry into the following cycle. A run that stayed healthy for a whole crash
-// window resets the chain: it waits baseBackoff and leaves the carried backoff
-// at baseBackoff, so the next failure restarts the documented 1s→2s→4s…
-// sequence from the base rather than from 2*baseBackoff (#1005). An unhealthy
-// run waits the current backoff and doubles it toward maxBackoff for next time.
-func nextBackoff(current, base, max time.Duration, healthy bool) (wait, next time.Duration) {
-	if healthy {
-		return base, base
-	}
-	next = current * 2
-	if next > max {
-		next = max
-	}
-	return current, next
-}
-
-// exitedFromSignal reports whether err is an exec exit caused by the given
-// signal (as opposed to a non-zero exit code or a start failure), whether the
-// shell was started directly or its lifeline reported it.
-func exitedFromSignal(err error, sig syscall.Signal) bool {
-	var shellExit *watchShellExit
-	if errors.As(err, &shellExit) {
-		return shellExit.sig == sig
-	}
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
-		return false
-	}
-	ws, ok := ee.Sys().(syscall.WaitStatus)
-	return ok && ws.Signaled() && ws.Signal() == sig
 }
 
 // runOnce spawns the script once and consumes its stdout until the shell
@@ -578,6 +559,12 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	if w.startedCh != nil {
 		w.startedOnce.Do(func() { close(w.startedCh) })
 	}
+	// A run that stays alive a full crash window has proven healthy, so
+	// while it runs a timer retires a stale terminal status from an earlier
+	// life (#5441). Arming HERE — after startWatchProcess confirms the shell
+	// is running — makes the window measure real liveness (Codex #5457).
+	disarm := w.armRecovery()
+	defer disarm()
 	// The run's anchor pins the process-group number for the run's whole
 	// life: a live member that ignores the group's SIGTERM — proven before
 	// the spawn returns — so kill(-pgid) can only ever name this run's own
@@ -645,6 +632,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// (reapWatchGroupLeader).
 	groupKilled, waitErr := reapWatchGroupLeader(cmd, anchor, func() {
 		close(leaderExited)
+		// The run ends when the leader is observed dead: disarm HERE, not
+		// at runOnce return — reader drain can hold runOnce open past the
+		// crash window, and a timer firing then would write "started" for
+		// a process that no longer exists.
+		disarm()
 		<-watchdogDone
 	})
 	if lifeline != nil {

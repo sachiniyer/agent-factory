@@ -554,11 +554,18 @@ export interface ResumeFromLimitResult {
 
 export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
   const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
+  // A committed-but-not-performed resume (daemon/limit.go's respawn-fail-after-
+  // rebuild path) returns ok:false alongside the committed warning: the rebuild
+  // mutated durable workspace state even though the resume did not complete. The
+  // ok:false branch below would otherwise swallow that warning and surface the
+  // generic "another operation owns its retry" reason, hiding an unsafe-to-repeat
+  // committed mutation. Check the committed warning first, the way the daemon's
+  // other committed outcomes already do (#3236).
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 

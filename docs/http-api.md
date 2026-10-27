@@ -116,6 +116,10 @@ daemon does not emit those gateway statuses. The marker is a
 protocol convention, not authentication against a proxy that deliberately copies
 it.
 
+`error.code: "proposal_conflict"` is the one failure that also carries `data`:
+a `409` from `SaveProposalDoc` puts the three versions of the doc there so the
+editor can show the conflict. Every other failure keeps `data: null`.
+
 `error.code: "mutation_committed"` is the existing, separate outcome marker for a
 mutation that reached durable storage before a follow-up failed. It takes
 precedence over `daemon_rejected` if both occur: surface the detail without
@@ -137,6 +141,7 @@ definitive refusal, not an uncertain outcome.
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
 | `409 Conflict` | `POST /v1/RebindProject` and `POST /v1/RebindProjectGuarded`: part of the request's expected pair no longer matches the project's record — `expected_root` against the recorded root, `expected_checkout_id` against the recorded checkout marker (which a same-path reclone or repair rotates) — because another rebind or re-clone landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
+| `409 Conflict` | `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
