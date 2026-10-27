@@ -506,6 +506,11 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		releaseObservationFence()
 		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
+	// A successful send is the user's answer to an attention request. Capture the
+	// request BEFORE transport: an agent that raises a new one while the prompt
+	// is in flight is asking a question the user never saw, and the keyed clear
+	// must leave it alone.
+	answered := instance.Attention()
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
 	// is the reliable command path automated deliveries need. This crosses the
@@ -531,11 +536,11 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin {
+	if !req.TaskOrigin && answered != nil {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user.
-		m.clearAttentionOnInput(instance)
+		m.clearAttentionRequest(instance, answered.SetAt)
 	}
 	return status, nil
 }
