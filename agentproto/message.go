@@ -162,6 +162,9 @@ const (
 	// Data is a marshaled proposal.Change; Commit is null for an edit seen on
 	// disk that is not committed yet.
 	EventProposalChanged EventType = "proposal.changed"
+	// EventProposalPush signals that a session's proposal push status changed.
+	// Its Data is a marshaled proposal.PushStatus.
+	EventProposalPush EventType = "proposal.push"
 )
 
 // Event is one message on the events plane. Data carries the same projection the

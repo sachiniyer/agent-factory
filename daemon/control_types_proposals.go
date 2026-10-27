@@ -112,6 +112,26 @@ type CheckpointProposalRequest struct {
 
 type CheckpointProposalResponse = proposal.Checkpoint
 
+type SetProposalPushModeRequest struct {
+	SessionID string `json:"session_id"`
+	// Mode is auto or manual.
+	Mode string `json:"mode"`
+}
+
+type SetProposalPushModeResponse = proposal.PushStatus
+
+type HoldProposalPushRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type HoldProposalPushResponse = proposal.PushStatus
+
+type SendProposalChangesRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type SendProposalChangesResponse = proposal.PushStatus
+
 func errUnknownProposalMethod(method string) error {
 	return fmt.Errorf("internal: %q is not a proposal route", method)
 }
