@@ -642,7 +642,7 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
   assert.equal(jobKey(job, "needs"), "[build]");
   assert.equal(
     jobKey(job, "if"),
-    "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))",
+    "${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}",
   );
 
   // The only write permission in the workflow, scoped to this job — and this
@@ -689,10 +689,10 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
       "github.actor",
       "github.event.pull_request.head.repo.fork",
       "github.event.pull_request.head.sha",
-      "github.event_name",
       "github.sha",
       "inputs.probe",
       "secrets.GITHUB_TOKEN",
+      "vars.AUTO_GATE_ENABLED",
     ],
     "only run-derived values, platform booleans, the probe gate, and the token may reach this job",
   );
@@ -13246,6 +13246,7 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     "dispatch:build.yml",
     "dispatch:docs.yml",
     "dispatch:lint.yml",
+    "dispatch:pr.yml",
     "dispatch:tui-driver-selftest.yml",
     "dispatch:web-selftest.yml",
   ]);
