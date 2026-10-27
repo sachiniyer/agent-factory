@@ -13124,10 +13124,13 @@ function projectName(root2) {
   const parts = root2.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || root2;
 }
+function projectRoot(s) {
+  return s.worktree?.repo_path || s.path || "";
+}
 function projectSummaries(sessions, tasks, registeredRoots = []) {
   const byRoot = /* @__PURE__ */ new Map();
   for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
+    const root2 = projectRoot(s);
     if (!root2) {
       continue;
     }
@@ -13182,7 +13185,7 @@ function projectMeta(p) {
 function pickerProjects(sessions, tasks, registeredRoots = []) {
   const roots = /* @__PURE__ */ new Set();
   for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
+    const root2 = projectRoot(s);
     if (root2) {
       roots.add(root2);
     }
@@ -13203,7 +13206,7 @@ function scopeToProject(sessions, root2) {
   if (!root2) {
     return [];
   }
-  return sessions.filter((s) => s.worktree?.repo_path === root2);
+  return sessions.filter((s) => projectRoot(s) === root2);
 }
 function validRoots(sessions, tasks, registeredRoots = []) {
   return new Set(projectSummaries(sessions, tasks, registeredRoots).map((p) => p.root));
@@ -13216,7 +13219,7 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   const valid = new Set(summaries.map((p) => p.root));
   let best = null;
   for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
+    const root2 = projectRoot(s);
     if (!root2 || isArchived(s) || !valid.has(root2)) {
       continue;
     }
@@ -13224,8 +13227,9 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
       best = s;
     }
   }
-  if (best?.worktree?.repo_path) {
-    return best.worktree.repo_path;
+  const bestRoot = best ? projectRoot(best) : "";
+  if (bestRoot) {
+    return bestRoot;
   }
   let bestTask = null;
   for (const t of tasks) {
@@ -13263,7 +13267,7 @@ function persistProjectChoice(root2) {
   }
 }
 function projectDeletionBreakdown(sessions, root2) {
-  const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
+  const live = sessions.filter((s) => projectRoot(s) === root2 && !isArchived(s));
   const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
   return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }
@@ -18989,7 +18993,7 @@ function resolveRoute() {
   try {
     const session = route && store.get().sessions.find((s) => s.id === route.session);
     if (session?.id) {
-      if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+      if (projectRoot(session)) switchProject(projectRoot(session));
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else {
@@ -19072,7 +19076,7 @@ function switchProject(root2) {
   }
   clearTabError();
   const sel = selectedSessionData();
-  const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
+  const keep = sel && projectRoot(sel) === root2 ? store.get().selectedId : null;
   splitView.blur();
   store.set({
     selectedProject: root2,
@@ -20135,7 +20139,7 @@ function doHandoff() {
     handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      loadAccounts: () => loadCreateAccounts(projectRoot(sel)),
       currentAccount: sel.account,
       onSubmit: (to, account) => {
         const tok = token;
@@ -20374,7 +20378,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {
     const sel = sessions.find((s) => s.id === selectedId);
-    if (sel && sel.worktree?.repo_path !== selectedProject) {
+    if (sel && projectRoot(sel) !== selectedProject) {
       selectedId = null;
     }
   }
