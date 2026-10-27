@@ -583,8 +583,9 @@ number, dispatch PR number, workflow-run head SHA, or
 status SHA (in that order), falling back to the unique run ID. With
 `cancel-in-progress: false`, newer pending evaluation jobs replace older pending
 jobs for that target/head; active transactions are never cancelled. Every
-comment event remains subscribed, including marker replies. The surviving job
-re-reads current PR, review, and check state.
+comment event remains subscribed, including marker replies; a comment on a
+plain issue names no PR, so the resolver job's `if` skips it before a runner
+is assigned. The surviving job re-reads current PR, review, and check state.
 
 `resolveAggregateHeads` consumes a synchronize payload's `before` in the
 ungrouped resolver, and invalidation covers both current and previous heads.

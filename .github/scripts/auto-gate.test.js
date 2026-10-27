@@ -708,7 +708,15 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
   const jobs = Object.fromEntries([...workflow.slice(workflow.indexOf("\njobs:")).matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
   )].map((match) => [match[1], match[2]]));
-  assert.doesNotMatch(jobs["auto-gate"], /^    (?:concurrency|needs|if):/m);
+  assert.doesNotMatch(jobs["auto-gate"], /^    (?:concurrency|needs):/m);
+  // The resolver's only permitted job-level condition skips comments on
+  // plain issues: issue.pull_request is unset there, no PR/head pair can be
+  // selected, and a job that never starts strands no committed selection —
+  // the #5160 no-queued-boundary invariant below is untouched by it.
+  assert.equal(
+    jobKey(jobs["auto-gate"], "if"),
+    "github.event_name != 'issue_comment' || github.event.issue.pull_request",
+  );
   assert.match(jobs["auto-gate"], /autoGate\.resolveAggregateHeads\(\{ context, targets \}\)/);
   assert.match(jobs["auto-gate"], /payload\.before/);
   // Selection and invalidation are one job: a second job queued between them is

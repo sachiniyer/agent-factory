@@ -26,6 +26,13 @@ on:
   # the reconciliation pass's job. A suite completing on the master head never
   # resolved a pull-request target anyway (no open PR owns that commit), so
   # merge-triggered verification suites did no fleet re-evaluation here.
+  # issue_comment covers pull-request comments — a PR is an issue — so
+  # markers, review requests, and approvals re-gate here. It also fires on
+  # every plain issue, which resolves no PR/head pair and used to take a
+  # runner just to reach that conclusion and exit (2026-10-27: 36 of 53
+  # queued Auto Gate runs at one point were plain-issue comments). on: has
+  # no issue_comment/PR-ness predicate, so the first job's `if` skips those
+  # events instead; a job skipped by `if` never reaches a runner.
   issue_comment:
     types: [created, edited, deleted]
   pull_request_review:
@@ -159,6 +166,15 @@ jobs:
   auto-gate:
     name: Resolve event heads
     runs-on: ubuntu-latest
+    # A comment on a plain issue resolves no target: the resolver takes the PR
+    # number from issue.pull_request, which exists only when the commented
+    # issue is a pull request. Skipping the job costs no runner and strands
+    # nothing — selection never ran, so there is no coverage to invalidate —
+    # and apply-gate skips in turn because a skipped job's outputs are empty.
+    # The only artifact left behind is a skipped "Resolve event heads" check
+    # run on the default-branch head, which the ruleset does not require.
+    # Every other event, and every comment on a PR, runs exactly as before.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
       aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
