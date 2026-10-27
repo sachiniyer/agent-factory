@@ -171,9 +171,10 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 	// signals it, and t.Cleanup collects whatever is left. `exec` so the shell
 	// BECOMES that process — a trailing `sleep 300` as a child would outlive the
 	// Kill below.
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+	script := fmt.Sprintf("%s; "+
 		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
-		trigger, EnvMarkerGeneration, recordPIDShell("$!", pidFile))
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
+		EnvMarkerGeneration, recordPIDShell("$!", pidFile))
 	parentCmd := exec.Command("sh", "-c", script)
 	parentCmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),

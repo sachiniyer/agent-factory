@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +153,23 @@ func TestUnavailableTasksCreateClearsLoadFailure(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = setupRealRepo(t)
 	t.Chdir(h.repoRoot)
+	// Mirror the production startup that newHome runs when af launches inside a
+	// git repo: resolve the active scope so the post-save reload (the
+	// active-scope LoadTasksForKnownRepo) reads the created task's project. The
+	// previous cwd-based reload masked the missing repoID in this test, but the
+	// active-scope scoping must have a non-empty repoID to find anything.
+	//
+	// Resolve the scope through git (RepoFromPath) rather than hashing the raw
+	// repo root: the task's RepoID is derived the same way (task.repoIDForPath ->
+	// RepoFromPath -> RepoIDFromRoot(identityRoot)), and git resolves symlinks
+	// (e.g. macOS /var -> /private/var) so RepoIDFromRoot(h.repoRoot) would hash
+	// the unresolved path while the created task hashes the resolved one and the
+	// active-scope match (t.RepoID == s.id) would drop it. initTestGitRepo does
+	// the same resolution; setupRealRepo returns the unresolved t.TempDir path.
+	repo, err := config.RepoFromPath(h.repoRoot)
+	require.NoError(t, err)
+	h.repoRoot = repo.Root
+	h.repoID = repo.ID
 	h.termWidth, h.termHeight = 100, 30
 	h.relayout()
 	pane := h.automations.TaskPane()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/programprivacy"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -320,7 +321,13 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 		m.mu.Unlock()
 		return true
 	}
-	if strings.TrimSpace(runningProgram) == "" || configuredProgram == runningProgram {
+	// A quoting-only difference is not drift (#5504): two spellings of the same
+	// literal argv run identically, so the comparison is on parsed words, not
+	// bytes. When either side is not a plain literal word list the parse cannot
+	// vouch for it, and the byte compare above remains the whole verdict —
+	// identical bytes are no drift and different bytes stay warnable.
+	if strings.TrimSpace(runningProgram) == "" || configuredProgram == runningProgram ||
+		sessionenv.LiteralCommandsEqual(configuredProgram, runningProgram) {
 		m.mu.Unlock()
 		return false
 	}
@@ -372,6 +379,45 @@ func (m *Manager) applyLiveConfigAndInvalidateRootProgramDrift(newCfg *config.Co
 	}
 }
 
+// rootProgramDriftSignal names the structural difference a drift warning
+// otherwise hides. programprivacy.Redact collapses both commands to an agent
+// name — legitimately, since the raw text can carry user paths and flag
+// values — so two genuinely different commands can display as identical
+// strings (#5504). The signal keeps them distinguishable by reporting only
+// WHAT differs structurally: which word index, how many words, or that one
+// side never parsed as a literal word list at all. No path, flag name, or
+// flag value leaves this function.
+func rootProgramDriftSignal(configured, running string) string {
+	configuredArgv, configuredOK := sessionenv.LiteralCommandArgv(configured)
+	runningArgv, runningOK := sessionenv.LiteralCommandArgv(running)
+	if !configuredOK || !runningOK || len(configuredArgv) == 0 || len(runningArgv) == 0 {
+		// The drift verdict fell back to byte comparison, so all that is
+		// provable is that the command texts differ.
+		return "command text differs"
+	}
+	if configuredArgv[0] != runningArgv[0] {
+		return "executable differs"
+	}
+	if len(configuredArgv) != len(runningArgv) {
+		return fmt.Sprintf("word count differs (configured %d, running %d)",
+			len(configuredArgv), len(runningArgv))
+	}
+	for i := range configuredArgv {
+		if configuredArgv[i] != runningArgv[i] {
+			return fmt.Sprintf("word %d differs", i)
+		}
+	}
+	return "command text differs"
+}
+
 func (m *Manager) logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram string) {
-	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; restart the daemon, then kill the root", workspace, programprivacy.Redact(configuredProgram), programprivacy.Redact(runningProgram))
+	// The signal rides on the running fragment: whenever the warning is
+	// emitted the commands really differ, so a fragment like
+	// "claude" (word 2 differs) can never be the identical string a bare
+	// redaction would print twice (#5504).
+	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q (%s) · the live root was adopted as-is; restart the daemon, then kill the root",
+		workspace,
+		programprivacy.Redact(configuredProgram),
+		programprivacy.Redact(runningProgram),
+		rootProgramDriftSignal(configuredProgram, runningProgram))
 }

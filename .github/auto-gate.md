@@ -304,12 +304,18 @@ Docs or Dependency review run cannot satisfy that wait. If PR Validation never
 appears, the helper dispatches it. Recovery rechecks the PR before those
 writes and after the wait; a changed head must itself be recovered before it
 becomes a target. Six bounded recovery attempts prevent endless polling.
-Exhaustion fails with a recovery command instead of publishing a stale target.
+A poll that never observed a successor ends quietly only when every read
+confirmed the initiating SHA (#5064): the successor's own events re-evaluate
+the head once its push lands. A read that answered without a resolvable head
+spoils that exit and fails loudly instead. Otherwise exhaustion fails with a
+recovery command instead of publishing a stale target.
 Ordinary manual dispatch without `previous_head_sha` keeps its single-read
 behavior. Queued/running runs still receive no approval writes.
 
-The follow-up dispatch is single-shot. A failure is an infrastructure error,
-not an ordinary refusal. The caller posts the recovery command on the PR, where
+The follow-up dispatch reconciles against any run the ambiguous failure may have
+created before retrying (#5010); only a definitive refusal or an exhausted retry
+still fails the run. A failure is then an infrastructure error, not an ordinary
+refusal. The caller posts the recovery command on the PR, where
 it stays visible even if the head moves again, and includes the observed
 post-update SHA when available. The initiating lane does not write an aggregate
 on the successor head: that head has its own serialized owner, whose newer PASS
@@ -697,13 +703,29 @@ reevaluated per pass, so S simultaneously stale decisions
 drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
-The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
+The scan costs `ceil(N / 100)` GraphQL requests per snapshot, plus `ceil(B / 25)`
+GraphQL requests that re-read the outputs of the B completed non-success
+decisions whose output the page dropped, batched by node id (#4975). A pass that
+retains not-yet-eligible work re-runs that whole snapshot on each in-pass rescan
+(see below). Every rescan fetches current repository state, so both `N` and `B`
+can change between snapshots (e.g. a decision that becomes blocked after the
+initial scan adds output batches only to later scans). The per-pass total is
+therefore the sum over the initial scan plus each rescan,
+`Σ_i (max(1, ceil(N_i / 100)) + ceil(B_i / 25))` requests, with the rescans bounded by
+the sixteen-minute retention wait. A snapshot with no open PRs still costs one page
+(`requiredCheckReconciliationSnapshot` issues its initial GraphQL query before it can
+discover that pagination is finished), so the page-read term is `max(1, …)`. For a
+population that does not change
+between scans this collapses to `(1 + rescans) × (max(1, ceil(N / 100)) + ceil(B / 25))`.
+The rate window holds
 ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
 by pass completion instead — one running pass plus one pending successor in the
 shared group, each link capped at ten evaluations — and a scheduled pass adds a
 few more.
-That is one request per pass (about 12/hour) through the 83-head REST-quota
-threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
+That is one request per snapshot (about 12/hour) through the 83-head REST-quota
+threshold, or two (about 24/hour) for 120 PRs, before bounded retries — plus the
+`ceil(B / 25)` output-batch reads above (four at the 83-head threshold when every
+head is blocked, before bounded retries), each repeated per in-pass rescan. The scan
 does no per-head REST reads except when a queued check run faces a dated
 rival; it then re-reads just that head via `listForRef` to order the run
 (#4427). Each other run pays one REST read for the marker,

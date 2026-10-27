@@ -10,9 +10,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // startStubHookLauncher starts a live process that looks EXACTLY like a
@@ -46,20 +47,8 @@ func startStubHookLauncher(t *testing.T, program, unit, body string) int {
 			"--user", "--scope", "--quiet", "--collect", "--unit=" + unit,
 			"--property=TimeoutStopSec=" + HookScopeStopTimeout, "--", "sh", "-c", "make dev_install",
 		},
-		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start stub launcher: %v", err)
-	}
-	reaped := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(reaped)
-	}()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-reaped
-	})
+	testguard.StartGroupProcess(t, cmd)
 	// Wait for the pid file: until execve completes the child's /proc entry
 	// still carries the TEST binary's argv, so starting the sweep before then
 	// would test a process that has not become the launcher yet.
@@ -118,7 +107,7 @@ func TestAForeignLauncherIsNotAdopted(t *testing.T) {
 	installSystemctlShim(t, "exit 0\n")
 	ours := HookScopeUnitPrefix("s1")
 	theirs := HookScopeUnitPrefix("s2")
-	startStubHookLauncher(t, "systemd-run", HookScopeUnit(theirs, "g0", 0), "while :; do sleep 1; done")
+	startStubHookLauncher(t, "systemd-run", HookScopeUnit(theirs, "g0", 0), testguard.BoundedSpin(time.Second, 5*time.Minute))
 
 	launchers, err := RunningHookLaunchers(ours)
 	if err != nil {
@@ -157,7 +146,7 @@ func TestAForeignLauncherIsNotAdopted(t *testing.T) {
 func TestAProcessThatMerelyNamesAScopeIsNotALauncher(t *testing.T) {
 	prefix := HookScopeUnitPrefix("s1")
 	unit := HookScopeUnit(prefix, "g0", 0)
-	startStubHookLauncher(t, "grep", unit, "while :; do sleep 1; done")
+	startStubHookLauncher(t, "grep", unit, testguard.BoundedSpin(time.Second, 5*time.Minute))
 
 	launchers, err := RunningHookLaunchers(prefix)
 	if err != nil {
@@ -217,7 +206,7 @@ func TestStopHookScopesRefusesWhenALauncherNeverRegisters(t *testing.T) {
 	shortenLauncherSettle(t, 300*time.Millisecond, 20*time.Millisecond)
 	prefix := HookScopeUnitPrefix("s1")
 	unit := HookScopeUnit(prefix, "g0", 0)
-	pid := startStubHookLauncher(t, "systemd-run", unit, "while :; do sleep 1; done")
+	pid := startStubHookLauncher(t, "systemd-run", unit, testguard.BoundedSpin(time.Second, 5*time.Minute))
 
 	err := StopHookScopes(prefix)
 	if err == nil {
@@ -287,7 +276,7 @@ func holdStubHookLauncher(t *testing.T, program, unit string) (release func()) {
 	gate := filepath.Join(t.TempDir(), "release")
 	// `sleep 1` rather than a fractional or busy loop: portable to any POSIX sh,
 	// and the wait for the release below is generous enough to absorb it.
-	startStubHookLauncher(t, program, unit, fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+	startStubHookLauncher(t, program, unit, testguard.BoundedGateWait(gate, time.Second, 5*time.Minute))
 	return func() {
 		t.Helper()
 		if err := os.WriteFile(gate, nil, 0o600); err != nil {
@@ -345,7 +334,7 @@ printf '%s\n' '`+unit+` loaded active running Hook'
 exit 0
 `)
 	shortenLauncherSettle(t, budget, 50*time.Millisecond)
-	startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g1", 0), "while :; do sleep 1; done")
+	startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g1", 0), testguard.BoundedSpin(time.Second, 5*time.Minute))
 
 	start := time.Now()
 	err := StopHookScopes(prefix)

@@ -30,7 +30,31 @@ import (
 // substitution, a rewrite that edited an existing word — declares NOTHING and so
 // fails closed: an account-scoped launch is then refused rather than proceeding
 // unverified, and an unscoped launch is unaffected because nothing reads this.
-func accountLaunchProof(base, final string, trustBase bool) sessionenv.AccountLaunchProof {
+//
+// base is the command BEFORE af's own launch rewrites. final is what the pane
+// will run. trustBase is true only when base exactly matches the built-in
+// detected override from the same resolved config snapshot. paneGeneratedArgs
+// is the af-authored argument declaration a pane recorded for its frozen program
+// and is non-empty only when the swap's base came from ResolvedPaneProgram
+// rather than RuntimeProgram (see validateAccountSwapPlan): that base already
+// carries af's own injected flags, so the proof must seed from the recorded
+// declaration instead of recomputing it from a base that treats af's words as
+// the user's (#5433). trustBase and paneGeneratedArgs are mutually exclusive —
+// the pane-fallback path resets trustBase to false — and paneGeneratedArgs is
+// ignored whenever trustBase is set, so the built-in claude override keeps its
+// exact declared word.
+//
+// paneTrustedExecutable is the pane's recorded executable provenance
+// (TmuxSession.TrustedExecutable), paired with paneGeneratedArgs. A pane
+// launched from an untrusted absolute override records an empty
+// TrustedExecutable deliberately, so the proof carries that empty provenance
+// instead of the base's first word — inferring the path would launder a
+// repository-controlled executable into the account boundary's trust, the same
+// rule a fresh launch enforces by refusing a path-qualified executable whose
+// exact path did not come from af's built-in detection
+// (internal/sessionenv/account.go:47-54). It is empty unless the pane-fallback
+// path seeded from ResolvedPaneProgram.
+func accountLaunchProof(base, final string, trustBase bool, paneGeneratedArgs []string, paneTrustedExecutable string) sessionenv.AccountLaunchProof {
 	var trustedBaseArgs []string
 	if trustBase {
 		// DefaultConfig appends this exact word. GetClaudeCommand may return an
@@ -38,10 +62,26 @@ func accountLaunchProof(base, final string, trustBase bool) sessionenv.AccountLa
 		// so an alias such as `claude --settings ...` is still refused rather than
 		// laundered through the built-in executable proof.
 		trustedBaseArgs = []string{config.DetectedClaudePermissionsFlag}
+	} else if len(paneGeneratedArgs) > 0 {
+		// The pane's recorded declaration, passed through so an insertion-shaped
+		// rewrite (a codex resume splice ahead of af's flag) merges via the
+		// GeneratedArgsByInsertion fallback GenerateAccountLaunchProof now tries
+		// when GeneratedArgsBetween cannot describe a mid-command insertion.
+		trustedBaseArgs = append([]string(nil), paneGeneratedArgs...)
 	}
 	proof, ok := sessionenv.GenerateAccountLaunchProof(base, final, trustedBaseArgs)
 	if !ok {
 		return sessionenv.AccountLaunchProof{}
+	}
+	// The pane-fallback base may be an untrusted absolute override whose
+	// recorded proof left TrustedExecutable empty: GenerateAccountLaunchProof
+	// derives the declared args from the recorded declaration but infers the
+	// executable from the base string, which would trust a path the launcher
+	// never vouched for. Replace it with the pane's recorded provenance so the
+	// proof carries exactly what the launch recorded — empty for an untrusted
+	// override, the detected path for a built-in one — and nothing more.
+	if len(paneGeneratedArgs) > 0 {
+		proof.TrustedExecutable = paneTrustedExecutable
 	}
 	return proof
 }
