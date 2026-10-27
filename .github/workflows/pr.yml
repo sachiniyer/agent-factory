@@ -3,14 +3,33 @@ name: PR Validation
 on:
   pull_request:
     branches: [master]
+  # The post-merge verification lane. A master push runs EVERY job below —
+  # including the ones that never run on a pull_request any more (the macOS
+  # suite, the two systemd lanes, the web selftest and the performance
+  # baselines), which is what "verify on master" means here. A merge made with
+  # GITHUB_TOKEN suppresses push workflows (#3435); pr.yml is in the gate's
+  # MASTER_PUSH_WORKFLOWS list so the post-merge dispatch loop re-raises it,
+  # and the nightly schedule below is the backstop when nothing re-raises a
+  # suppressed or cancelled run at all. The concurrency group cancels a stale
+  # master run when a newer merge lands, so a burst of merges verifies the tip.
+  push:
+    branches: [master]
+  # Full suite on master once a day. The push lane verifies each landing tip;
+  # this is the catch-all for the lanes a push cannot reach — a GITHUB_TOKEN
+  # merge nobody re-raised, and any regression that only the heavy jobs see.
+  schedule:
+    - cron: '37 4 * * *'
   # A merge queue creates a temporary gh-readonly-queue/… ref and dispatches the
   # merge_group event. The required "Lint" and "Build" checks below MUST run on
   # that event and report against the merge_group ref, or the queue never gets a
-  # result and every merge stalls forever. The jobs are the SAME ones the PR runs
-  # (none is gated on github.event_name), so they report the identical "Lint" and
-  # "Build" check contexts on the merged-result ref. Do NOT filter merge_group by
-  # branch — the queue only ever targets master, and a base-branch filter here is
-  # an easy way to silently stop the checks from running.
+  # result and every merge stalls forever. The required checks are the SAME
+  # jobs the PR runs, so they report the identical "Lint" and "Build" check
+  # contexts on the merged-result ref; the heavy jobs the PR skips run here too,
+  # gated by the scope outputs rather than by github.event_name directly (see
+  # web-selftest-scope for why that indirection exists). Do NOT filter
+  # merge_group by branch — the queue only ever targets master, and a
+  # base-branch filter here is an easy way to silently stop the checks from
+  # running.
   merge_group:
 
   # Auto Gate dispatches this when a head has no PR Validation run at all, so a
@@ -29,15 +48,17 @@ on:
   # check run there, skipped ones included. The gates read the required "Build"
   # and "Lint" by exact name and take the newest (auto-gate.js
   # latestRequiredState), and the ruleset counts a skipped check as passing. So a
-  # probe must never report under a name a PR run uses. That is why the
-  # always-running jobs carry a probe-aware `name:`. GitHub does not evaluate the
-  # name of a skipped job (github.com/orgs/community/discussions/13261), so a
-  # probe's skipped rows are named by the bare expression, such as
+  # probe must never report under a name a PR run uses. That is why the jobs
+  # that still run on every pull_request carry a probe-aware `name:`. GitHub
+  # does not evaluate the name of a skipped job
+  # (github.com/orgs/community/discussions/13261), so a probe's skipped rows are
+  # named by the bare expression, such as
   # `inputs.probe && 'Lint (skipped by probe)' || 'Lint'` (measured on #4565),
   # and match no check. Were that ever fixed, they would read
-  # "… (skipped by probe)", which matches none either. test-systemd skips as one
-  # row, still named `Test (systemd, ${{ matrix.os }})`. web-selftest and perf keep plain names: they skip on ordinary PRs
-  # too, where an expression name would show raw, and no gate reads them.
+  # "… (skipped by probe)", which matches none either. The heavy jobs keep plain
+  # names: they now skip on ordinary PRs too, where an expression name would
+  # show raw, and no gate reads them. test-systemd skips as one row, still named
+  # `Test (systemd, ${{ matrix.os }})`.
   workflow_dispatch:
     inputs:
       probe:
@@ -453,7 +474,13 @@ jobs:
   # while the exact tmux server and pane PIDs survive.
   test-systemd:
     name: Test (systemd, ${{ matrix.os }})
-    if: ${{ !inputs.probe }}
+    # Runs on the post-PR lanes only (master push, nightly, merge_group,
+    # dispatch) — never on pull_request. The event test is the scope job's
+    # `heavy` output rather than an `if:` on the event: see web-selftest-scope
+    # for why `if:` cannot carry it. The need also preserves the probe skip —
+    # a probe skips the scope job, so this never sees `heavy == 'true'`.
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.heavy == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -652,53 +679,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      run: ${{ steps.scope.outputs.run }}
-      perf_run: ${{ steps.scope.outputs.perf_run }}
+      heavy: ${{ steps.scope.outputs.heavy }}
+      selftest: ${{ steps.scope.outputs.selftest }}
+      perf: ${{ steps.scope.outputs.perf }}
     steps:
-      # depth 2 is exactly what the diff below needs and no more: on a
-      # pull_request event the checked-out HEAD is refs/pull/N/merge, whose first
-      # parent is the base tip and whose second is the PR head.
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
-
-      - name: Decide whether the web selftest applies
+      - name: Decide which heavy jobs apply to this event
         id: scope
         run: |
           set -euo pipefail
-
-          # merge_group (and anything else that ever gains this workflow) has no
-          # merge commit to diff against here. Run the suite rather than guess:
-          # the queue only ever runs changes a PR already scoped.
-          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
-            echo "::notice::event is ${GITHUB_EVENT_NAME}, not pull_request — running the web selftest."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "perf_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # The event gate. A pull_request runs none of the heavy jobs (macOS,
+          # systemd, web selftest, perf): master and the nightly verify them
+          # instead (owner decision 2026-10-27, merge throughput). Every other
+          # event runs them. `selftest` is false on `push` only because
+          # web-selftest.yml's own push trigger already runs that suite on
+          # master; merge_group, schedule and dispatch still call it.
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            heavy=false selftest=false perf=false
+          else
+            heavy=true perf=true selftest=true
+            [ "${GITHUB_EVENT_NAME}" = "push" ] && selftest=false
           fi
-
-          # `git diff HEAD^1 HEAD` on the merge commit is the PR's effective change
-          # against the base — the same thing the workflow-level `paths:` filter
-          # would compute. If the parent is missing (a shallower clone than
-          # expected, a ref that is not a merge commit), that is a broken diff, not
-          # an empty one.
-          if ! base="$(git rev-parse --verify --quiet HEAD^1)"; then
-            echo "::warning::no base parent on HEAD — running the web selftest rather than guessing."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "perf_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # --no-renames is load-bearing, not stylistic. With rename detection on,
-          # `git diff --name-only` reports a rename as the NEW path ONLY — so
-          # moving scripts/container/web-selftest-entry.sh to an unwatched name
-          # would delete a harness entrypoint while the changed-path list never
-          # mentions it, and the suite would skip the PR that broke it. Disabling
-          # detection reports the rename as a delete plus an add, so the watched
-          # source path is present. Verified: `git diff --name-only` prints 1 path
-          # for a pure rename, `--no-renames` prints both.
-          git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
-          node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
-          node .github/scripts/web-selftest-scope.js changed-paths.txt perf >> "$GITHUB_OUTPUT"
+          echo "::notice::event=${GITHUB_EVENT_NAME} heavy=${heavy} selftest=${selftest} perf=${perf}"
+          {
+            echo "heavy=${heavy}"
+            echo "selftest=${selftest}"
+            echo "perf=${perf}"
+          } >> "$GITHUB_OUTPUT"
 
   # The web client's acceptance proof (#1592 Phase 5 PR6, docs/dev/web-selftest.md),
   # called as a reusable workflow so that Build can list it in `needs` — a job in
@@ -716,13 +722,22 @@ jobs:
   web-selftest:
     name: Web selftest
     needs: [web-selftest-scope]
-    if: needs.web-selftest-scope.outputs.run == 'true'
+    # `selftest` is scope's run-verdict AND the event gate: never on
+    # pull_request, and never on `push` — web-selftest.yml's own push trigger
+    # already runs this exact suite on master (path-filtered), so calling it
+    # here too would double the repo's most expensive job on the same commit
+    # and race it under one concurrency group. merge_group, schedule and
+    # dispatch still call it.
+    if: needs.web-selftest-scope.outputs.selftest == 'true'
     uses: ./.github/workflows/web-selftest.yml
 
   perf:
     name: Performance and visual baselines
     needs: [web-selftest-scope]
-    if: needs.web-selftest-scope.outputs.perf_run == 'true'
+    # `perf` is the scope perf-verdict AND the post-PR event gate — this job has
+    # no standalone workflow, so a master push runs it right here, on every
+    # landing tip the concurrency group leaves standing.
+    if: needs.web-selftest-scope.outputs.perf == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -751,8 +766,11 @@ jobs:
   # forbidden on the shared dev box but is exactly what we want exercised here on
   # a throwaway runner — the launchd paths live in that package and are the point.
   test-macos:
-    name: ${{ inputs.probe && 'Test (macOS) (skipped by probe)' || 'Test (macOS)' }}
-    if: ${{ !inputs.probe }}
+    name: Test (macOS)
+    # Post-PR lanes only, like test-systemd above: the event verdict arrives as
+    # an output, so a probe still skips this through the unmet need.
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.heavy == 'true'
     runs-on: macos-latest
     # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
     # a six-hour default. Sized from the go test budget below: see there.
@@ -829,9 +847,10 @@ jobs:
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
     #
-    # `skipped` is deliberately NOT a failure here: web-selftest and perf skip
-    # whenever the scope job says the PR is outside their watched paths, a normal
-    # answer on most PRs. A skipped *scope* job would be a different matter, but its
+    # `skipped` is deliberately NOT a failure on a pull_request: macOS, systemd,
+    # web-selftest and perf never run there (master and the nightly run them).
+    # Off-PR the step below demands they succeed, so a skip cannot impersonate
+    # a pass on master. A skipped *scope* job would be a different matter, but its
     # only `if:` is the probe skip, and a probe skips Build too. Otherwise it skips
     # only when the run itself is going away.
     #
@@ -850,6 +869,16 @@ jobs:
           # parsed as subtraction, so the dotted form silently yields an empty string.
           echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
           echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }} perf=${{ needs.perf.result }}"
+          exit 1
+
+      # A skipped heavy job is fine on a pull_request (they verify master) but
+      # must never pass for a verdict anywhere else: if the scope job said
+      # "heavy" and a job still ended skipped, something upstream broke.
+      - name: Heavy jobs must have run off-PR
+        if: needs.web-selftest-scope.outputs.heavy == 'true' && (needs.test-macos.result != 'success' || needs.test-systemd.result != 'success' || needs.perf.result != 'success')
+        run: |
+          echo "::error::A heavy job did not succeed on ${{ github.event_name }} — failing Build rather than letting a skip stand in for a pass."
+          echo "test-macos=${{ needs['test-macos'].result }} test-systemd=${{ needs['test-systemd'].result }} perf=${{ needs.perf.result }}"
           exit 1
 
       - uses: actions/checkout@v6
@@ -883,13 +912,19 @@ jobs:
   gate-reconcile:
     name: ${{ inputs.probe && 'Request Auto Gate reconciliation (skipped by probe)' || 'Request Auto Gate reconciliation' }}
     needs: [build]
-    # forks and Dependabot never reach the runner: their tokens are read-only,
-    # so the dispatch would warn for nothing while delaying the workflow_run
-    # wakeup that is their only net. merge_group/workflow_dispatch carry no
-    # pull_request payload, so the clause short-circuits true there. actor is
-    # the trigger of THIS run — a maintainer pushing to a Dependabot branch
-    # gets a writable token and runs the job.
-    if: always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))
+    # AUTO_GATE_ENABLED (repository variable): 'true' turns this dispatch on;
+    # unset or anything else skips it, matching the disabled Auto Gate. It uses
+    # !cancelled() rather than always() so a superseded (cancelled) run ends at
+    # once instead of queueing this job for a runner and holding the pr-<N>
+    # concurrency group against the next push. Build keeps its own always(): that
+    # one only aggregates needs.
+    # Forks and Dependabot have read-only tokens, so the dispatch could never
+    # land: the step below returns early for them rather than the job's `if:`
+    # (keeping event checks out of the condition keeps this workflow admissible
+    # to the gate's workflow_dispatch re-raise scan). actor is the trigger of
+    # THIS run — a maintainer pushing to a Dependabot branch gets a writable
+    # token and runs the job.
+    if: ${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     # The only write permission in this workflow, and only for the dispatch
@@ -901,7 +936,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ACTOR: ${{ github.actor }}
         run: |
+          if [ "$FORK" = "true" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "::notice::Read-only token (fork or Dependabot); the workflow_run subscription remains."
+            exit 0
+          fi
           payload=$(printf \
             '{"event_type":"auto-gate-reconcile","client_payload":{"source_run_id":"%s","source_event":"%s","head_sha":"%s"}}' \
             "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$HEAD_SHA")
