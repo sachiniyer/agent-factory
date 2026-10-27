@@ -147,7 +147,7 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	// --- tab ------------------------------------------------------------------
 	before := len(find(title).Tabs)
 	var tab daemon.CreateTabResponse
-	post("/v1/CreateTab", daemon.CreateTabRequest{Title: title, RepoID: repoID, Kind: "web", URL: "http://127.0.0.1:3000", Name: "dev"}, &tab)
+	post("/v1/CreateTab", daemon.CreateTabRequest{Title: title, RepoID: repoID, Kind: "web", URL: "https://example.com", Name: "dev"}, &tab)
 	if got := len(find(title).Tabs); got != before+1 {
 		t.Fatalf("tab count = %d after CreateTab, want %d", got, before+1)
 	}
