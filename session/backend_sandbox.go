@@ -94,6 +94,11 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
+		// Probe BEFORE the reap: removing the partial workspace frees space and
+		// could mask the very condition being measured (#5382 item 1).
+		if evidence := p.remoteCapacityEvidence(err); evidence != nil {
+			err = errors.Join(err, evidence)
+		}
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
