@@ -208,11 +208,31 @@ func (t *TmuxSession) Start(workDir string) error {
 	// loses its agent-specific environment. Thread the result into command
 	// selection so a failed bootstrap falls back without repeating its timeout.
 	serverErr := EnsureDaemonServer()
-	args, envErr = t.importClientEnvironmentArgs(args, importNames)
+	args, restoreUpdateEnvironment, envErr := t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %w", ErrSessionNotStarted, envErr)
+	}
+	if restoreUpdateEnvironment != nil {
+		// tmux abandons a ;-chained queue at the first failed command, so the
+		// queue's own trailing restore is not guaranteed: any mid-queue failure
+		// would leave the server's update-environment permanently expanded to
+		// the credential import list, and every later launch would re-read the
+		// corrupted value as its baseline. Re-apply the baseline on EVERY exit
+		// path once the expansion is queued — a slightly delayed restore on a
+		// failure rather than never (#5390). Bounded like every tmux command in
+		// this package; best-effort, because a server too wedged to answer has
+		// no healthy session outcome to withhold anyway.
+		defer func() {
+			ctx, cancel := tmuxTimeoutContext()
+			if err := t.runTmuxBounded(ctx, restoreUpdateEnvironment...); err != nil {
+				log.WarningLog.Printf(
+					"could not restore tmux update-environment after %s launch (credential import list may stay expanded): %v",
+					t.sanitizedName, err)
+			}
+			cancel()
+		}()
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
@@ -486,6 +506,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPDialogPartiallyRendered(content) {
 			return true
 		}
+		// The legacy folder-trust dialog is not atomic either: Claude Code
+		// paints its question, then its body, then its options one row at a
+		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
+		// prefix of the dialog — or a complete one whose cursor is not on Yes —
+		// as partial: hold without a key, never report the pane clear.
+		if claudeLegacyTrustDialogOf(content) == claudeLegacyTrustPartial {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
@@ -703,8 +731,13 @@ func reverseVideoURLSubject(line string) bool {
 // co-occur with a dialog-chrome marker only the real modal renders ("Yes, I
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
-// old wording is a self-contained, dialog-specific string and stays matched
-// as-is.
+// old wording ("Do you trust the files in this folder?") is decided by
+// claudeLegacyTrustDialogOf: the question must be a whole row that opens the
+// pane's trailing region, and every row below it must be one the legacy dialog
+// paints, in its order. The phrase alone is the same hazard the MCP branch's
+// footer-is-last rule refuses — af's own source contains the legacy phrase
+// verbatim, so a visible rendering of this file's contents (a diff, a review
+// reply, pasted release notes) carries it too.
 //
 // The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
 // 1. Yes ... Enter to confirm") is anchored on its unique question "do you
@@ -733,9 +766,15 @@ func claudeTrustPromptPresent(content string) bool {
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
-	return reworded ||
-		mcpDialog ||
-		strings.Contains(content, "Do you trust the files in this folder?")
+	// Legacy folder-trust dialog — the question as a whole row, opening a
+	// trailing region that holds only rows the dialog paints, complete, with
+	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
+	// the question verbatim, so the phrase alone must never fire —
+	// "a prose mention of one phrase must never inject Enter into a working
+	// agent."
+	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
+
+	return reworded || mcpDialog || legacy
 }
 
 // RestoreResult says whether RestoreWithResult reattached to the persisted
@@ -833,7 +872,9 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
-	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh)
+	return RestoreReattached, t.reattach(reattachOptions{
+		answered: answered, confirmedFresh: confirmedFresh, refreshAccount: true, baseline: workDir != "",
+	})
 }
 
 // ReattachOnly performs only the live-session rebind half of
@@ -854,17 +895,58 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 // still exists, the monitor simply never fires, and the pane's retained output
 // stays previewable.
 func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
-	return t.reattach(workDir, answered, false)
+	return t.reattach(reattachOptions{answered: answered, refreshAccount: true, baseline: workDir != ""})
 }
 
-// reattach is the live-session rebind shared by restoreWithResult and
-// ReattachOnly. answered is whether the existence probe that routed here
-// answered, and confirmedFresh is restoreWithResult's.
-func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
+// ReattachInert rebinds a session that is still alive and does nothing else:
+// no definitive-absence respawn (there is no directory to spawn into) and no
+// account-environment refresh. It is the load path of a row whose worktree was
+// deleted outside af (#5102), kept only so its live pane stays bound and the
+// row stays archivable. The refresh exists to heal the scope env a later spawn
+// inherits, and nothing will spawn into a deleted worktree; running it anyway
+// is a dozen bounded tmux commands whose transient failure would load the row
+// startup-unknown — excluded from reconciliation and refused by archive, the
+// one remedy the row is being kept for. A confirmed-absent session is reported
+// exactly as RestoreWithResult("") reports it.
+//
+// Its monitor baselines like any reattach of persisted state: the pane predates
+// this process, so its first capture is not new output. A fresh monitor would
+// report it as an update across a mere daemon restart, recording false churn and
+// overwriting a persisted Ready or LimitReached with Running.
+func (t *TmuxSession) ReattachInert() error {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
+		return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+	}
+	return t.reattach(reattachOptions{answered: answered, baseline: true})
+}
+
+// reattachOptions are the choices reattach's callers make explicitly.
+type reattachOptions struct {
+	// answered is whether the existence probe that routed here answered.
+	answered bool
+	// confirmedFresh is restoreWithResult's: Start's own new-session is what
+	// answered the name.
+	confirmedFresh bool
+	// refreshAccount re-derives the pane's account environment; false only for
+	// ReattachInert.
+	refreshAccount bool
+	// baseline is whether this rebinds persisted state, whose first capture
+	// only establishes the monitor's baseline. It used to be inferred from a
+	// non-empty workDir, which is what Restore's callers with persisted state
+	// pass — but ReattachInert reattaches persisted state with no directory to
+	// name (#5102), so the choice is the caller's to state.
+	baseline bool
+}
+
+// reattach is the live-session rebind shared by restoreWithResult,
+// ReattachOnly and ReattachInert.
+func (t *TmuxSession) reattach(opts reattachOptions) error {
+	answered, confirmedFresh := opts.answered, opts.confirmedFresh
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
-	if workDir != "" {
+	if opts.baseline {
 		monitor = newReattachStatusMonitor()
 	}
 	// Bind the fresh monitor to the generation that just answered live: the
@@ -901,7 +983,7 @@ func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) er
 	// would pay the same deadline for the same non-answer — twelve times over —
 	// violating the one-bounded-has-session discipline the generation probe
 	// above and ReattachOnly's doc both promise (Codex on #4473).
-	if !confirmedFresh && answered {
+	if opts.refreshAccount && !confirmedFresh && answered {
 		if err := t.refreshRestoredAccountEnvironment(); err != nil {
 			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 		}

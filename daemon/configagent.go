@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -80,6 +84,36 @@ var configAgentPromptReceiptEscalationTimeout = 30 * time.Second
 // Healthy watchers return the moment they are cancelled, so this only ever trips
 // on the stall it exists for. A var so the regression can run in milliseconds.
 var configAgentReceiptJoinTimeout = 5 * time.Second
+
+// configAgentLateReceiptRecheckDelay anchors the single late receipt re-check
+// (#5471): it fires once, this long AFTER the briefing was delivered — not after
+// the escalation window expired. The rollout record is durable-or-absent by
+// then, so its result finally separates "the receipt was just slow" from "the
+// briefing never became a turn" without extending the attach-path windows. A var
+// keeps the receipt regressions fast.
+var configAgentLateReceiptRecheckDelay = 5 * time.Minute
+
+// configAgentLateReceiptRecheckWindow bounds the late re-check's own poll. At
+// that horizon the receipt is durable-or-absent; the window only absorbs a
+// record Codex is still appending when the scan lands. A var so the regression
+// can run in milliseconds.
+var configAgentLateReceiptRecheckWindow = 5 * time.Second
+
+// configAgentPaneCaptureTimeout bounds the pre-delivery pane capture. The
+// excerpt is a best-effort diagnostic collected synchronously on the spawn
+// path; it must never hold up briefing delivery, so it gets a short budget of
+// its own instead of the full tmuxCommandTimeout a wedged capture-pane would
+// otherwise burn (#5471 review).
+var configAgentPaneCaptureTimeout = 2 * time.Second
+
+// The pane excerpt logged when a briefing receipt stays unconfirmed is bounded
+// twice: in lines and in bytes. The tail is what is kept — a trust, login, or
+// update modal that absorbed Enter (#5471) is the thing rendered at the bottom
+// of the pane when the window expires.
+const (
+	configAgentPaneExcerptMaxLines = 30
+	configAgentPaneExcerptMaxBytes = 4096
+)
 
 type configAgentReceiptWatcher struct {
 	cancel context.CancelFunc
@@ -324,15 +358,79 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	}
 	// Detect and snapshot before launch so Codex cannot create its rollout between
 	// the before-image and tmux start. The receipt path is resolved from the exact
-	// command environment, not the daemon's CODEX_HOME (#2228 review).
+	// command environment, not the daemon's CODEX_HOME (#2228 review), and the
+	// snapshot is bound to the launch working directory: the late re-check waits
+	// five minutes, and a receipt scan that counted EVERY new rollout under
+	// CODEX_HOME would go ambiguous the moment an unrelated Codex session creates
+	// one on a busy box (#5471).
 	agent := tmux.DetectAgentFromCommand(req.Program)
 	var promptReceipt session.ConversationCaptureSnapshot
+	// resumePositiveOnly keeps an unpinned resume's receipt verdict from ever
+	// claiming "never arrived": af does not predict which rollout Codex will
+	// resume into — its selection rules (cwd, source, provider, empty threads,
+	// recency) move between releases — so a briefing is confirmed only from
+	// bytes appended after launch inside the resume pool, and its absence
+	// stays indeterminate (#5486 direction). Only an explicit-id resume that
+	// resolves to and bounds its own file keeps the hard verdict.
+	var resumePositiveOnly bool
+	// isCodexResume additionally suppresses the pane excerpt: a resumed pane
+	// can still show the previous conversation — arbitrary private text a
+	// credential scrubber cannot recognize (#5471 review).
+	var isCodexResume bool
 	if agent == tmux.ProgramCodex && req.Prompt != "" {
 		codexHome, rerr := configAgentCodexReceiptHome(req.Program, home)
 		if rerr != nil {
 			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
 		}
-		promptReceipt = session.BeginConversationCaptureAtCodexHome(codexHome)
+		// The rollout's session_meta records the cwd Codex actually ran with,
+		// which is not always AF home: `env -C /tmp codex` leaves AF home before
+		// exec. The command environment models literal env -C directories and
+		// reports unmodelled chdirs (an arbitrary wrapper, Codex's own -C) as
+		// unknown — correlation binds to the proven directory and stays unbound
+		// rather than wrong when it is not (#5471 review).
+		var launchDir string
+		if launch, lerr := tmux.CommandEnvironmentFromCommand(req.Program, home); lerr == nil && launch.WorkingDirKnown() {
+			launchDir = launch.WorkingDir
+		}
+		promptReceipt = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launchDir)
+		if selector, resume := tmux.CodexResumeSelection(req.Program); resume {
+			isCodexResume = true
+			resumePositiveOnly = true
+			id, _, all, ok := tmux.CodexResumeTarget(selector)
+			switch {
+			case tmux.CodexResumeRunsRemote(req.Program):
+				// A --remote resume writes its rollout on the remote
+				// app-server endpoint, never into the local CODEX_HOME, so
+				// local scanning is disabled entirely: a concurrent local
+				// agent recording the same deterministic briefing in a NEW
+				// local rollout would otherwise confirm a receipt the remote
+				// endpoint may never have received (#5486 review). The zeroed
+				// snapshot sees no local files — new or tracked — and
+				// resumePositiveOnly keeps the unverifiable outcome
+				// indeterminate. Checked before the unmodelled-selector
+				// branch so a remote flag keeps resolving nothing locally
+				// either way.
+				promptReceipt = session.ConversationCaptureSnapshot{}
+			case !ok:
+				// A selector af cannot model could still launch a resumable
+				// session: bound the whole store so post-launch appends can
+				// confirm, and keep the verdict indeterminate.
+				promptReceipt.TrackCodexReceiptPool(true)
+			case id != "":
+				// An explicit SESSION_ID pins the rollout deterministically;
+				// a resolved and bounded path keeps the hard verdict.
+				if path := session.CodexRolloutPathByID(codexHome, id); path != "" &&
+					promptReceipt.TrackCodexReceiptRollout(path) {
+					resumePositiveOnly = false
+				}
+			default:
+				// --last (scoped to the launch directory unless --all) and
+				// the bare picker: every rollout the resume could append to
+				// is bounded at its current size; only bytes appended past
+				// those offsets can confirm.
+				promptReceipt.TrackCodexReceiptPool(all)
+			}
+		}
 	}
 
 	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession
@@ -397,9 +495,32 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// an unknown flag would kill the agent at exec and read as a readiness
 	// timeout.
 	if req.Prompt != "" {
+		// The pane as it stood AT delivery (#5471 review): the modal that can
+		// absorb the briefing's Enter is up NOW, and the same Enter usually
+		// dismisses or redraws it — the trust modal of #2220 reveals a bare
+		// composer on acceptance — so any capture taken after the send would
+		// log the wrong state and mislead triage. It is also necessarily
+		// pre-attach: no caller can be typing into the pane before this spawn
+		// returns. The buffer is held for the receipt watcher and only logged
+		// if the receipt stays unconfirmed.
+		var paneContent string
+		var paneErr error
+		var paneCapturedAt time.Time
+		if agent == tmux.ProgramCodex && !isCodexResume {
+			paneCapturedAt = time.Now()
+			// Best-effort: the excerpt is only diagnostic, so the capture runs
+			// on a short budget and can never stall the send behind a wedged
+			// capture-pane (#5471 review).
+			capCtx, capCancel := context.WithTimeout(ctx, configAgentPaneCaptureTimeout)
+			paneContent, paneErr = ts.CapturePaneContentContext(capCtx)
+			capCancel()
+		}
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
 		}
+		// Anchors both the reported receipt latency and the late re-check: both
+		// are measured from DELIVERY, not from when a poll happened to observe.
+		briefingDeliveredAt := time.Now()
 		// A successful tmux send is not a delivery receipt, so we try to CONFIRM
 		// one. In the #2220 reproduction every load/paste/Enter command succeeded
 		// against Codex's directory-trust modal; Enter merely selected "Yes", Codex
@@ -422,10 +543,24 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 				if ctx.Err() != nil {
 					return fail(fmt.Errorf("config agent: spawn cancelled while awaiting the briefing receipt: %w", err))
 				}
-				if errors.Is(err, session.ErrPromptReceiptNotObserved) {
+				// A rollout whose session_meta is still mid-write when the window
+				// expires is an unconfirmed receipt too (#5471 review): the file
+				// may be this agent's own, moments from being readable, so the
+				// diagnostic watcher continues on it exactly as on absence.
+				if errors.Is(err, session.ErrPromptReceiptNotObserved) || errors.Is(err, session.ErrPromptReceiptUndecidable) {
+					descriptor := "not observed"
+					if errors.Is(err, session.ErrPromptReceiptUndecidable) {
+						descriptor = "still undecidable"
+					}
+					if resumePositiveOnly && errors.Is(err, session.ErrPromptReceiptNotObserved) {
+						// An unpinned resume can only ever confirm — its absence
+						// from the appended ranges is indeterminate, never a
+						// negative (#5486 direction change).
+						descriptor = "indeterminate (the resumed rollout is not pinned to an identifiable file)"
+					}
 					m.info().Printf(
-						"config agent: %s briefing receipt was not observed within %s (%v)",
-						sessionName, configAgentPromptReceiptTimeout, err,
+						"config agent: %s briefing receipt was %s within %s (%v)",
+						sessionName, descriptor, configAgentPromptReceiptTimeout, err,
 					)
 					m.configAgents.watchReceipt(sessionName, func(receiptCtx context.Context) {
 						lateErr := session.WaitForPromptReceipt(
@@ -446,24 +581,126 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 						}
 						if lateErr == nil {
 							m.info().Printf(
-								"config agent: %s briefing receipt confirmed after the initial %s window",
+								"config agent: %s briefing receipt confirmed after the initial %s window (%s after delivery)",
 								sessionName, configAgentPromptReceiptTimeout,
+								time.Since(briefingDeliveredAt).Round(100*time.Millisecond),
 							)
 							return
 						}
-						if errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+						if errors.Is(lateErr, session.ErrPromptReceiptAmbiguous) {
+							// Two rollouts recorded the briefing — a durable,
+							// non-negative answer a later re-check cannot change.
 							m.warn().Printf(
-								"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
+								"config agent: %s briefing receipt is ambiguous %s after delivery: %v",
 								sessionName,
-								configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
+								time.Since(briefingDeliveredAt).Round(100*time.Millisecond),
 								lateErr,
 							)
 							return
 						}
+						if !errors.Is(lateErr, session.ErrPromptReceiptNotObserved) && !errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
+							m.warn().Printf(
+								"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
+								sessionName, configAgentPromptReceiptTimeout, lateErr,
+							)
+							return
+						}
+						descriptor := "not observed"
+						if errors.Is(lateErr, session.ErrPromptReceiptUndecidable) {
+							descriptor = "undecidable"
+						}
+						if resumePositiveOnly && errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+							descriptor = "indeterminate (the resumed rollout is not pinned to an identifiable file)"
+						}
 						m.warn().Printf(
-							"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
-							sessionName, configAgentPromptReceiptTimeout, lateErr,
+							"config agent: %s briefing receipt was still %s after %s (%v); delivery remains unconfirmed",
+							sessionName, descriptor,
+							configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
+							lateErr,
 						)
+						if isCodexResume {
+							m.info().Printf(
+								"config agent: %s pane excerpt suppressed after unconfirmed briefing receipt: the resumed pane may hold the previous conversation",
+								sessionName,
+							)
+						} else {
+							m.logConfigAgentPaneExcerpt(sessionName, paneContent, paneErr, briefingDeliveredAt.Sub(paneCapturedAt))
+						}
+						// One late re-check (#5471): the 5s/35s windows cannot tell
+						// a slow rollout from a briefing that never became a turn,
+						// so at a horizon where the record is durable-or-absent the
+						// rollout is consulted one last time. The wait parks on the
+						// watcher context, so reap and daemon shutdown still unwind
+						// this goroutine instantly.
+						if wait := configAgentLateReceiptRecheckDelay - time.Since(briefingDeliveredAt); wait > 0 {
+							timer := time.NewTimer(wait)
+							select {
+							case <-receiptCtx.Done():
+								timer.Stop()
+								return
+							case <-timer.C:
+							}
+						}
+						if receiptCtx.Err() != nil {
+							return
+						}
+						// Nothing remains to diagnose once the session is gone —
+						// reaped out from under the watcher, or the pane exited on
+						// its own without one. Skip quietly either way, but ONLY
+						// on positive evidence: ProbeSessionStrict keeps a
+						// transient has-session failure from laundering into
+						// "gone" and silently abandoning the verdict (#5471
+						// review).
+						if m.configAgents.session(sessionName) == nil {
+							return
+						}
+						if exists, known, _ := ts.ProbeSessionStrict(); known && !exists {
+							return
+						}
+						finalErr := session.WaitForPromptReceipt(
+							receiptCtx,
+							agent,
+							promptReceipt,
+							req.Prompt,
+							configAgentLateReceiptRecheckWindow,
+						)
+						if receiptCtx.Err() != nil {
+							return
+						}
+						elapsed := time.Since(briefingDeliveredAt).Round(100 * time.Millisecond)
+						switch {
+						case finalErr == nil:
+							m.info().Printf(
+								"config agent: %s briefing receipt observed at the late re-check, %s after delivery",
+								sessionName, elapsed,
+							)
+						case errors.Is(finalErr, session.ErrPromptReceiptNotObserved):
+							if resumePositiveOnly {
+								// The resume target is not pinned to one
+								// rollout, so its absence from the appended
+								// ranges cannot disprove delivery — an
+								// indeterminate result, not never (#5486).
+								m.warn().Printf(
+									"config agent: %s briefing receipt could not be verified; the resumed rollout is not pinned to an identifiable file %s after delivery",
+									sessionName, elapsed,
+								)
+							} else {
+								m.warn().Printf(
+									"config agent: %s briefing receipt never arrived; still unobserved %s after delivery",
+									sessionName, elapsed,
+								)
+							}
+						case errors.Is(finalErr, session.ErrPromptReceiptAmbiguous):
+							m.warn().Printf(
+								"config agent: %s briefing receipt is ambiguous %s after delivery: %v",
+								sessionName, elapsed, finalErr,
+							)
+						default:
+							m.warn().Printf(
+								"config agent: %s late receipt re-check could not determine the outcome: %v",
+								sessionName, finalErr,
+							)
+						}
 					})
 				} else {
 					m.warn().Printf(
@@ -513,4 +750,78 @@ func (m *Manager) ReapConfigAgent(req ReapConfigAgentRequest) error {
 		return fmt.Errorf("config agent: no session name to reap")
 	}
 	return m.configAgents.reap(req.SessionName)
+}
+
+// logConfigAgentPaneExcerpt logs the pre-delivery pane capture taken just
+// before the briefing was sent — a bounded, sanitized excerpt (#5471). It
+// exists to answer the one question the unconfirmed-receipt windows cannot:
+// whether a modal — trust, login, update — absorbed the Enter meant to submit
+// the briefing, because that modal is what was VISIBLE on the pane when the
+// keys landed. The capture precedes both the send and any possible attach, so
+// what reaches the log shows the modal that was actually up rather than the
+// composer its dismissal revealed — and can never contain user input. A
+// capture failure still logs, because a pane that cannot be read at delivery
+// is itself the diagnostic.
+func (m *Manager) logConfigAgentPaneExcerpt(sessionName, content string, captureErr error, capturedBeforeDelivery time.Duration) {
+	if captureErr != nil {
+		m.warn().Printf(
+			"config agent: %s briefing receipt is unconfirmed and the pane could not be captured for diagnostics: %v",
+			sessionName, captureErr,
+		)
+		return
+	}
+	m.info().Printf(
+		"config agent: %s pane excerpt after unconfirmed briefing receipt (captured %s before delivery):\n%s",
+		sessionName, capturedBeforeDelivery.Round(100*time.Millisecond), configAgentPaneExcerpt(content),
+	)
+}
+
+// configAgentPaneExcerpt renders captured pane content safe to write to the
+// daemon log: ANSI sequences stripped (xansi.Strip — the same stripper
+// ui/err.go's sanitizeError and the delivery-witness matching in
+// session/tmux/submit.go use, so no bespoke regex misses an OSC variant),
+// residual C0/C1/DEL controls dropped except the newlines and tabs that ARE the
+// picture, credential shapes removed by the same RedactCredentials policy the
+// log sink itself applies, and the whole thing tail-bounded so a modal drawn at
+// the bottom of the pane is what survives the cut.
+func configAgentPaneExcerpt(content string) string {
+	clean := xansi.Strip(content)
+	clean = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, clean)
+	clean = log.RedactCredentials(clean)
+	if strings.TrimSpace(clean) == "" {
+		return "(empty pane)"
+	}
+	lines := strings.Split(strings.TrimRight(clean, "\n"), "\n")
+	truncated := len(lines) > configAgentPaneExcerptMaxLines
+	if truncated {
+		lines = lines[len(lines)-configAgentPaneExcerptMaxLines:]
+	}
+	tail := strings.Join(lines, "\n")
+	for len(tail) > configAgentPaneExcerptMaxBytes {
+		truncated = true
+		if idx := strings.IndexByte(tail, '\n'); idx >= 0 {
+			// Cut whole lines from the top so the excerpt can never begin
+			// mid-token.
+			tail = tail[idx+1:]
+			continue
+		}
+		// A single line longer than the cap gets a byte cut; land it on a rune
+		// boundary so the log never sees half a UTF-8 sequence.
+		tail = tail[len(tail)-configAgentPaneExcerptMaxBytes:]
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+	}
+	if truncated {
+		return "… (truncated)\n" + tail
+	}
+	return tail
 }

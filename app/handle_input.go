@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -38,6 +39,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -91,6 +95,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if strings.TrimSpace(title) == "" {
 			return m, m.handleNotice(fmt.Errorf("title cannot be empty"))
+		}
+		// The input paths all clamp to the cap, so an overlong title here means
+		// the field was seeded some other way (a restored failed-create draft).
+		// Refusing keeps the field editable and creates nothing — the same
+		// contract the naming-row input keeps (#5481).
+		if runewidth.StringWidth(title) > 32 {
+			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
 		// "root" is reserved for the daemon-managed root agent (#1106). The
 		// daemon's reserveCreate is the authoritative gate; rejecting here
@@ -177,6 +188,51 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// began — re-raising it here would be a second BeginCreate from OpCreating,
 		// an illegal edge the chokepoint rejects (#1350). Set it exactly once.
 		instance.Program = m.pendingProgram
+		// The WIRE value is different from the shown one (#4889 review): a
+		// program the field only DISPLAYS — the config-derived seed the
+		// synchronous refresh left — is submitted as "" so the daemon resolves
+		// default_program at create time, on the daemon's host, against the
+		// session's own repo. Committing the displayed string would freeze a
+		// stale cache into an explicit request.
+		//
+		// Only a choice the user actually made — a picker pick, a launch
+		// --program flag, or a restored failed-create draft — goes out as a
+		// concrete program. A remote target stays implicit the same way — ""
+		// asks the remote daemon to resolve ITS default_program, the only
+		// default a remote create can honor (#4889 review).
+		// A remote form cannot submit "" while its ListPrograms answer is still
+		// in flight: the daemon would resolve a default the field has not yet
+		// shown (#4889 review).
+		if m.remoteDefaultPending {
+			return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
+		}
+		sendProgram := m.sendProgramForCreate()
+		// The account belongs to one agent's registry, so it must travel with
+		// the program it was chosen or preselected for (#4889 review). When the
+		// program goes out implicitly ("" resolves the live default on the
+		// daemon) a stale pairing is possible: an account the daemon PRESELECTED
+		// for the displayed program would be read as explicit for whatever
+		// program the daemon resolves now — refuse-worthy or silently wrong. A
+		// CHOSEN account is a commitment to the displayed program, so
+		// sendProgramForCreate already pins that program explicit; an unchosen
+		// preselect stays implicit alongside the program and lets the daemon
+		// resolve both.
+		sendAccount := m.pendingAccount
+		if sendProgram == "" {
+			sendAccount = ""
+		}
+		// The failed-create draft needs the user's CHOICES beside the wire
+		// values the rules above produced: an account-pinned program and a
+		// deliberate ambient pick are indistinguishable from their wire
+		// encodings once the pending flags clear (#4889 review).
+		//
+		// A launch --program counts as chosen too: programFollowsConfig=false
+		// sends it concretely even though only the picker sets the pending
+		// flag, and a later project switch resets the config-following bit —
+		// restoring such a draft as implicit would swap the launch program
+		// for whatever the moved default is (#4889 review).
+		programChosen := m.pendingProgramChosen || !m.programFollowsConfig
+		accountChosen := m.pendingAccountChosen
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -190,9 +246,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		backend := m.pendingBackend
 		m.pendingBackend = ""
 		m.backendPickerPending = false
-		// And for the ctrl+o account field (#3844), on the loop for the same reason.
-		account := m.pendingAccount
+		// And for the ctrl+o account field (#3844), on the loop for the same
+		// reason — sendAccount already captured its value above.
 		m.pendingAccount = ""
+		m.pendingAccountChosen = false
+		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -207,7 +267,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			req := sessionStartRequest{
 				Title:    instance.Title,
 				RepoPath: instance.Path,
-				Program:  instance.Program,
+				Program:  sendProgram,
 				// The initial prompt typed into the naming form's shift+tab
 				// field (#1936). session_control.go forwards it to the daemon,
 				// which delivers it once the agent is ready — the same path
@@ -225,7 +285,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
 				// before this field existed.
-				Account: account,
+				Account:       sendAccount,
+				ProgramChosen: programChosen,
+				AccountChosen: accountChosen,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -237,17 +299,29 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the daemon reports on the session it created (#3844 constraint 5).
 				// Read off the request rather than the model: by the time this lands
 				// the form has been reset, and a later create may hold a different one.
-				account: account,
+				account: sendAccount,
 			}
 		}
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 	case tea.KeyTab:
-		// Open program selection overlay
-		items := make([]string, len(tmux.SupportedPrograms))
+		// Open program selection overlay. A remote target's catalog is the
+		// DAEMON's — it can list agents this client's tmux.SupportedPrograms
+		// lacks, and a resolved default absent from it must still render as the
+		// selected row rather than collapsing the pick onto index 0 (#4889
+		// review).
+		catalog := tmux.SupportedPrograms
+		if isRemoteTarget() && len(m.remoteProgramCatalog) > 0 {
+			catalog = m.remoteProgramCatalog
+		}
+		items := make([]string, 0, len(catalog)+1)
+		items = append(items, catalog...)
+		if m.pendingProgram != "" && !slices.Contains(items, m.pendingProgram) {
+			items = append(items, m.pendingProgram)
+		}
+		m.programPickerChoices = items
 		selectedIdx := 0
-		for i, p := range tmux.SupportedPrograms {
-			items[i] = p
+		for i, p := range items {
 			if m.pendingProgram == p {
 				selectedIdx = i
 			}
@@ -286,15 +360,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				cleanRunes = append(cleanRunes, r)
 			}
 		}
-		newTitle := instance.Title + string(cleanRunes)
-		// The length cap is user feedback; the SetTitle error below is not (see
-		// the commit site above) — it keeps ERROR severity here too.
-		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
-		}
-		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
-		}
+		return m.appendToNamingTitle(string(cleanRunes))
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
 		if len(runes) == 0 {
@@ -304,13 +370,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 	case tea.KeySpace:
-		newTitle := instance.Title + " "
-		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
-		}
-		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
-		}
+		return m.appendToNamingTitle(" ")
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
 		// (#717) — see the ctrl+c branch above for the full rationale.
@@ -323,6 +383,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
+		m.remoteDefaultPending = false
+		m.remoteProgramCatalog = nil
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -336,11 +399,39 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// appendToNamingTitle appends suffix to the naming field's title, clamping the
+// result to the 32-cell cap. Overflow input is TRUNCATED with a notice saying
+// so rather than refused (#5481): a paste can arrive split across several
+// KeyRunes messages, so refusing each overflowing message still committed the
+// earlier chunks — the field ended holding a silent prefix of what was typed.
+// Clamping instead makes the message match the outcome every time: the field
+// shows exactly the title the session will be created with, and the notice
+// reports that the rest was dropped. Typed input at the cap behaves the same —
+// the extra keystroke is dropped and the notice explains why.
+//
+// The length cap and its notice are user feedback; the SetTitle error is not
+// (see the commit site in handleStateNew) — it keeps ERROR severity here too.
+func (m *home) appendToNamingTitle(suffix string) (tea.Model, tea.Cmd) {
+	instance := m.namingInstance
+	newTitle := instance.Title + suffix
+	truncated := runewidth.StringWidth(newTitle) > 32
+	if truncated {
+		newTitle = runewidth.Truncate(newTitle, 32, "")
+	}
+	if err := instance.SetTitle(newTitle); err != nil {
+		return m, m.handleError(err)
+	}
+	if truncated {
+		return m, m.handleNotice(fmt.Errorf("title is limited to 32 characters; extra input was dropped"))
+	}
+	return m, nil
+}
+
 // startNewInstance creates a new instance and enters stateNew for naming.
 func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.backendPickerPending = false
-	if m.restoreFailedCreate() {
-		return m, m.selectionChanged()
+	if restored, restoreCmd := m.restoreFailedCreate(); restored {
+		return m, tea.Batch(m.selectionChanged(), restoreCmd)
 	}
 	// A session lives in a project, and registry mode has none until the user
 	// selects one (#2477) — so refuse here rather than opening a form that cannot
@@ -356,12 +447,22 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	if m.repoRoot == "" {
 		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
-	m.pendingProgram = m.program
+	// Re-read the live default_program synchronously before seeding the field:
+	// `af config set default_program` applies live (#2480), so the launch-time
+	// cache alone can show a stale agent (#4889). The read is a bounded local
+	// probe — the same class of synchronous config read the project switch and
+	// preflight already run on this goroutine — and a remote target keeps the
+	// launch-time value untouched.
+	m.refreshDefaultProgram()
+	m.pendingProgram = m.defaultProgram()
 	// Every create starts with an empty prompt field and an unchosen backend. The
 	// cancel paths clear both too, but this is the authoritative reset: it also
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
+	m.pendingProgramChosen = false
+	m.remoteDefaultPending = false
+	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
@@ -418,7 +519,18 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// create behaves exactly as it did before this key existed — the daemon applies
 	// the same default either way. What the preselection buys is that the user SEES
 	// it and can change it.
-	return m, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
+	accountFetch := m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
+	if !isRemoteTarget() {
+		return m, accountFetch
+	}
+	// The remote daemon resolves its OWN default_program (#4889 review): the
+	// launch-time local seed displayed above is only a guess at remote state,
+	// and the account preselect just fired against that guess's agent. Asking
+	// ListPrograms corrects the field — and re-fires the account fetch for the
+	// resolved agent — when the daemon's default differs. Submit waits on the
+	// answer so "" cannot resolve a program the user never saw.
+	m.remoteDefaultPending = true
+	return m, tea.Batch(accountFetch, m.fetchRemoteDefaultProgram(instance))
 }
 
 // noActiveProjectNotice is the refusal a create gets with no active project.

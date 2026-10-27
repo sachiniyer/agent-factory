@@ -112,7 +112,10 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -393,7 +396,12 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
-		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
+		// Carry the enumerated row's stable ID: the target list was materialized
+		// before this loop, so a same-title replacement between enumeration and
+		// this dispatch must fail rather than inherit the prompt (#2358's class,
+		// inside one command). A pre-ID record sends "" and the daemon resolves
+		// by title as before.
+		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{ID: t.ID, Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
 		if err != nil {
 			result.Failed++
 			result.Results = append(result.Results, broadcastTarget{

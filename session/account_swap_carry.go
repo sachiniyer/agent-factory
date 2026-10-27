@@ -337,8 +337,12 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
+	files, err := codexRolloutFiles(c.srcHome)
+	if err != nil {
+		return "af could not enumerate the previous account's rollout store"
+	}
 	var newer []string
-	for path := range codexRolloutFiles(c.srcHome) {
+	for path := range files {
 		if path == recordedPath {
 			continue
 		}
@@ -367,7 +371,14 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 // home, or "" when there is none.
 func codexRolloutRelPath(home, id string) (string, string) {
 	var matches []string
-	for path := range codexRolloutFiles(home) {
+	// A store that cannot be enumerated is not "no match": the walk stops at
+	// the first failure, so the map it leaves behind is partial and the one
+	// match it may hold proves nothing about uniqueness (#5471 review).
+	files, err := codexRolloutFiles(home)
+	if err != nil {
+		return "", "af could not enumerate the Codex rollout store"
+	}
+	for path := range files {
 		if strings.EqualFold(codexConversationIDFromPath(path), id) {
 			matches = append(matches, path)
 		}

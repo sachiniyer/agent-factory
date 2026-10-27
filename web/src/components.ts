@@ -47,6 +47,27 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
   return { el, panel, trigger, open, close, dismiss, dispose: close };
 }
 
+/** Opens the panel above its trigger when the space below, inside the nearest
+ * clipping ancestor and the viewport, cannot hold it and the space above is larger. */
+export function placeMenu(trigger: HTMLElement, panel: HTMLElement): void {
+  panel.classList.remove("af-menu-up");
+  const anchor = trigger.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = trigger.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "") continue;
+    const clip = node.getBoundingClientRect();
+    top = Math.max(top, clip.top);
+    bottom = Math.min(bottom, clip.bottom);
+  }
+  const box = panel.getBoundingClientRect();
+  const needed = box.height + Math.max(0, box.top - anchor.bottom);
+  const below = bottom - anchor.bottom;
+  const above = anchor.top - top;
+  if (needed > below && above > below) panel.classList.add("af-menu-up");
+}
+
 /** The app's secondary controls use the same disclosure and Escape/focus model.
  * Desktop displays the same nodes inline; resizing closes any phone disclosure. */
 export function appbarControls(
@@ -54,6 +75,7 @@ export function appbarControls(
   phone = window.matchMedia("(max-width: 768px)"),
   beforeSync: () => void = () => {},
   onDismiss: () => void = () => {},
+  emptyFocus: () => HTMLElement | null = () => null,
 ) {
   const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
@@ -65,17 +87,33 @@ export function appbarControls(
   menu.panel.id = "af-appbar-tools";
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
+  const hasContent = () => Array.from(menu.panel.children).some((child) => !(child as HTMLElement).hidden);
+  const syncTrigger = () => {
+    const empty = !hasContent();
+    const strand = empty && menu.trigger.getAttribute("aria-expanded") === "true";
+    const hadFocus = strand && menu.panel.contains(document.activeElement);
+    if (strand) menu.close();
+    menu.trigger.hidden = !phone.matches || empty;
+    if (hadFocus) emptyFocus()?.focus();
+  };
   const sync = () => {
     beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
-    menu.trigger.hidden = !phone.matches;
+    syncTrigger();
     menu.panel.hidden = phone.matches;
-    if (phone.matches && hadFocus) menu.trigger.focus();
+    if (phone.matches && hadFocus && !menu.trigger.hidden) menu.trigger.focus();
   };
+  // Children move in and out (session-first composition) and toggle `hidden`
+  // (install), so an empty More menu can appear at any time.
+  const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(syncTrigger);
+  observer?.observe(menu.panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
   phone.addEventListener("change", sync);
   sync();
-  return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
+  return {
+    ...menu,
+    dispose: () => { observer?.disconnect(); phone.removeEventListener("change", sync); menu.dispose(); },
+  };
 }
 
 /** Session-first follows selected content, not drawer visibility or transient keyboard ownership. */
@@ -102,7 +140,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -134,11 +172,22 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  // The desktop font-size pair (#5500): terminal text only, beside the other
+  // pane-level controls and hidden at the phone breakpoint (where the keybar
+  // carries the same controls instead). Each press steps the shared device
+  // class's size — every pane in the page refits, which is correct because the
+  // value is per class, not per pane.
+  const fontDecrease = action("A−", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
   return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 

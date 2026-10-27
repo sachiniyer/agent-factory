@@ -272,6 +272,10 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 
 	sanitizeLimitPatterns(config)
 	config.Appearance = NormalizeAppearance(config.Appearance)
+	config.Web.TerminalFontSizePhone = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_phone", config.Web.TerminalFontSizePhone, defaultWebTerminalFontSizePhone, prettyConfigPath)
+	config.Web.TerminalFontSizeDesktop = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_desktop", config.Web.TerminalFontSizeDesktop, defaultWebTerminalFontSizeDesktop, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 	config.DetachKeys = sanitizeDetachKeys(config.DetachKeys, prettyConfigPath)
@@ -335,6 +339,14 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
 	}
 	config.keyOverrides = overrides
+
+	// The missing-claude advice is a property of the MERGED config, not the
+	// probe: DefaultConfig ran it before this file's program_overrides.claude
+	// was decoded, so gating there would tell an operator who already set the
+	// override to set it again (#5588). It runs last so a config that fails
+	// validation — and so never becomes effective — earns no advice. The
+	// no-file load paths make the same call on their in-memory defaults.
+	warnMissingClaudeOverride(config.ProgramOverrides)
 
 	return config, nil
 }

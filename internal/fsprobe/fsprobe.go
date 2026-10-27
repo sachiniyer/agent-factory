@@ -174,17 +174,36 @@ func Write(dir string) error {
 	return err
 }
 
-// Full reports whether dir's filesystem has zero free blocks — the statfs
-// answer for a filesystem the caller cannot write-probe (a root-owned
-// daemon data root the process cannot create files in). Zero free blocks
-// is the same verdict an ENOSPC write would report, derived without write
-// access. The syscall runs inside the same per-dir bounded flight shape as
-// Write: a mount that stops answering metadata calls would otherwise wedge
-// the synchronous error path it informs (#5295 review).
+// Full reports whether dir's filesystem is full for a consumer that can
+// allocate the root-reserved blocks (a rootful dockerd) — the statfs answer
+// for a filesystem the caller cannot write-probe (a root-owned daemon data
+// root the process cannot create files in). "Full" means no allocatable
+// blocks (Bfree == 0 — or, on a filesystem with no root-usable reserve such
+// as btrfs, Bavail == 0) OR an exhausted inode table (Ffree == 0 under real
+// inode accounting — inode exhaustion fails metadata creation with the same
+// ENOSPC); the same verdict an ENOSPC write would report, derived without
+// write access (#5382). The syscall runs inside the same per-dir bounded
+// flight shape as Write: a mount that stops answering metadata calls would
+// otherwise wedge the synchronous error path it informs (#5295 review).
 func Full(dir string) (bool, error) {
 	res, err := runBounded(dir, fullnessFlights, "fullness probe",
 		"the filesystem did not answer the statfs",
-		func() (any, error) { return fsFull(dir) })
+		func() (any, error) { return fsFull(dir, false) })
+	full, _ := res.(bool)
+	return full, err
+}
+
+// FullUnprivileged is Full for a consumer that allocates blocks as an
+// ordinary user — a ROOTLESS dockerd, which cannot touch the filesystem's
+// root-reserved blocks and gets ENOSPC when Bavail hits zero even while
+// Bfree still reports space (#5382). It gets its own per-dir flight
+// registry: a joined flight computes ONE verdict, and the privileged and
+// unprivileged answers legitimately differ on the same filesystem (the
+// reserved-blocks window), so the two probe kinds must never share a result.
+func FullUnprivileged(dir string) (bool, error) {
+	res, err := runBounded(dir, unprivilegedFullnessFlights, "fullness probe",
+		"the filesystem did not answer the statfs",
+		func() (any, error) { return fsFull(dir, true) })
 	full, _ := res.(bool)
 	return full, err
 }
@@ -222,6 +241,7 @@ type flightRegistry struct {
 var writeFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var statFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 var fullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+var unprivilegedFullnessFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
 func runBounded(dir string, flights *flightRegistry, what, detail string,
 	run func() (any, error)) (any, error) {
