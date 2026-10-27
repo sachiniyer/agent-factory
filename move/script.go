@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -73,14 +74,35 @@ func RunScript(ctx context.Context, cmdline string, spec ScriptSpec, h Host) err
 	cmd.Dir = spec.SourceWorktree
 	cmd.Env = append(os.Environ(), ScriptEnv(h)...)
 	cmd.WaitDelay = 5 * time.Second
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	// Own process group, killed whole on cancel/timeout: killing only `sh` would
+	// leave rsync/ssh descendants writing into a sandbox the abort path is
+	// about to reap.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	out := &tailBuffer{max: scriptTailBytes}
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
 		tail := strings.TrimSpace(out.String())
-		if len(tail) > 2000 {
-			tail = "…" + tail[len(tail)-2000:]
-		}
 		return fmt.Errorf("move script failed (the session was not moved): %w: %s", err, tail)
 	}
 	return nil
 }
+
+const scriptTailBytes = 2000
+
+// tailBuffer keeps only the last max bytes written, so a chatty script cannot
+// grow the daemon's memory for the length of the timeout.
+type tailBuffer struct {
+	max int
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.buf) }

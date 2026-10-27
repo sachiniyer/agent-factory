@@ -81,6 +81,9 @@ func TakeSnapshot(ctx context.Context, worktree, branch, sessionKey, dir string)
 	if err != nil {
 		return nil, fmt.Errorf("move snapshot: branch %q not found in %s: %w", branch, worktree, err)
 	}
+	if err := refuseDirtySubmodules(ctx, worktree); err != nil {
+		return nil, err
+	}
 	gitDir, err := git(ctx, worktree, nil, "rev-parse", "--git-dir")
 	if err != nil {
 		return nil, err
@@ -172,4 +175,38 @@ func validSessionKey(k string) bool {
 		}
 	}
 	return true
+}
+
+// refuseDirtySubmodules fails when an initialized submodule has uncommitted or
+// untracked content: the snapshot records only the submodule's commit pointer,
+// so that work would be silently dropped by the move.
+func refuseDirtySubmodules(ctx context.Context, worktree string) error {
+	out, err := git(ctx, worktree, nil, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+	if err != nil {
+		return err
+	}
+	subs, err := git(ctx, worktree, nil, "ls-files", "--stage")
+	if err != nil {
+		return err
+	}
+	gitlinks := map[string]bool{}
+	for _, l := range strings.Split(subs, "\n") {
+		if strings.HasPrefix(l, "160000 ") {
+			if i := strings.IndexByte(l, '\t'); i >= 0 {
+				gitlinks[l[i+1:]] = true
+			}
+		}
+	}
+	if len(gitlinks) == 0 {
+		return nil
+	}
+	for _, l := range strings.Split(out, "\n") {
+		// git() trims the output, so the first line may have lost its leading
+		// status space; split on the first gap rather than a fixed offset.
+		parts := strings.SplitN(strings.TrimSpace(l), " ", 2)
+		if len(parts) == 2 && gitlinks[strings.TrimSpace(parts[1])] {
+			return fmt.Errorf("move snapshot: submodule %q has uncommitted changes that a move cannot carry; commit them inside the submodule first", strings.TrimSpace(parts[1]))
+		}
+	}
+	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -185,4 +186,32 @@ func TestDescribe(t *testing.T) {
 	require.True(t, p.Dirty)
 	require.Equal(t, "./m.sh", p.MoveScript)
 	require.Equal(t, []string{"AF_SSH", "AF_SSH_DEST", "AF_SSH_FULL"}, p.ScriptEnvNames)
+}
+
+func TestScriptKillsDescendantsAndBoundsOutput(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "late")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := RunScript(ctx, `(sleep 1; touch `+marker+`) & wait`, ScriptSpec{SourceWorktree: dir}, Host{})
+	require.Error(t, err)
+	time.Sleep(1500 * time.Millisecond)
+	require.NoFileExists(t, marker, "descendant outlived the aborted script")
+
+	err = RunScript(context.Background(), `yes x | head -c 5000000; exit 1`, ScriptSpec{SourceWorktree: dir}, Host{})
+	require.Error(t, err)
+	require.Less(t, len(err.Error()), 3000)
+}
+
+func TestSnapshotRefusesDirtySubmodule(t *testing.T) {
+	sub := t.TempDir()
+	run(t, sub, "init", "-q", "-b", "main")
+	run(t, sub, "commit", "-q", "--allow-empty", "-m", "s")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q", "-b", "feat")
+	run(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sm")
+	run(t, dir, "commit", "-q", "-m", "add sub")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sm", "x"), []byte("x"), 0o644))
+	_, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.ErrorContains(t, err, "submodule")
 }
