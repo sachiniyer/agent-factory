@@ -16,6 +16,12 @@ import (
 // address while the daemon keeps serving on the previous bound socket, and
 // require_token applies live through a separate channel (per-request, no rebind).
 //
+// Every fixture below seeds allow_unauthenticated_network = true alongside its
+// tokenless posture: since #5137 a tokenless NON-loopback listener without the
+// opt-in is refused (never bound), and the matching `af config set` write is
+// refused too, so the warn-and-serve exposure this file exists to pin only
+// exists under the explicit opt-in.
+//
 // Keying the notice on the requested posture there had two manifestations:
 //
 //   - Case 1 (false positive): a loopback listener (not exposed) moves to a
@@ -90,7 +96,7 @@ func exposureRebindFixture(t *testing.T, tomlBody string, failNextRebind bool) (
 // response. Pre-fix this fired; the fix keys on the serving (loopback) address.
 func TestApplyConfigSuppressesExposureNoticeOnFailedRebindFromLoopback(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = false\n", true)
+		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = false\nallow_unauthenticated_network = true\n", true)
 	require.True(t, config.IsLoopbackListenAddr(oldBound),
 		"anti-vacuous: the still-serving address must be loopback (not exposed)")
 
@@ -130,7 +136,7 @@ func TestApplyConfigSuppressesExposureNoticeOnFailedRebindFromLoopback(t *testin
 // address; the fix keys on the serving bound address.
 func TestApplyConfigExposureNoticeNamesServingAddressOnFailedRebindFromTokenGatedNetwork(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\n", true)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\nallow_unauthenticated_network = true\n", true)
 	require.False(t, config.IsLoopbackListenAddr(oldBound),
 		"anti-vacuous: the start address must be non-loopback so a live require_token flip can expose it")
 
@@ -170,7 +176,7 @@ func TestApplyConfigExposureNoticeNamesServingAddressOnFailedRebindFromTokenGate
 // never bound.
 func TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\n", true)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\nallow_unauthenticated_network = true\n", true)
 	require.False(t, config.IsLoopbackListenAddr(oldBound))
 
 	// Step A: set listen_addr to a different network address — rebind FAILS.
@@ -215,7 +221,7 @@ func TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress(t *testing.T) {
 // listen_addr step. Only the rebind-failure warning fires; no exposure notice.
 func TestApplyConfigExposureNoticePerKeyReverseOrderSuppressesWhenAlreadyExposed(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\n", true)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\nallow_unauthenticated_network = true\n", true)
 	require.False(t, config.IsLoopbackListenAddr(oldBound))
 
 	// Step A: set require_token=false — applies LIVE, exposing the old non-loopback
@@ -251,7 +257,7 @@ func TestApplyConfigExposureNoticePerKeyReverseOrderSuppressesWhenAlreadyExposed
 // notice, naming the newly bound serving address.
 func TestApplyConfigExposureNoticeNamesServingAddressOnSuccessfulRebind(t *testing.T) {
 	server, _ := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = false\n", false)
+		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = false\nallow_unauthenticated_network = true\n", false)
 
 	// Move to a tokenless network bind on an ephemeral port. The rebind SUCCEEDS.
 	setGlobalConfigValue(t, "network.listen_addr", "0.0.0.0:0")
@@ -280,7 +286,7 @@ func TestApplyConfigExposureNoticeNamesServingAddressOnSuccessfulRebind(t *testi
 // bound address — the dialable one.)
 func TestApplyConfigExposureNoticeFiresOnLiveRequireTokenFlipWithoutRebind(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\n", false)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = true\nallow_unauthenticated_network = true\n", false)
 	require.False(t, config.IsLoopbackListenAddr(oldBound))
 
 	// Flip require_token to false; listen_addr is UNCHANGED, so NO rebind.
@@ -309,7 +315,7 @@ func TestApplyConfigExposureNoticeFiresOnLiveRequireTokenFlipWithoutRebind(t *te
 // is continuously exposed. The fix captures the serving address before reconcile.
 func TestApplyConfigExposureNoticeDoesNotResurfaceAfterFailedRebindFromExposed(t *testing.T) {
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n", true)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\nallow_unauthenticated_network = true\n", true)
 	require.False(t, config.IsLoopbackListenAddr(oldBound),
 		"anti-vacuous: the start address must be non-loopback (exposed)")
 
@@ -354,7 +360,7 @@ func TestApplyConfigExposureNoticeDoesNotResurfaceAfterFailedRebindFromExposed(t
 // notice, and the transition into exposure must still surface it once.
 func TestApplyConfigUnrelatedChangeWhileExposedDoesNotResurfaceWithRealListener(t *testing.T) {
 	server, _ := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = true\n", false)
+		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = true\nallow_unauthenticated_network = true\n", false)
 
 	// (1) Transition INTO exposure: move to a tokenless network bind. Rebind SUCCEEDS.
 	setGlobalConfigValue(t, "network.listen_addr", "0.0.0.0:0")
@@ -390,7 +396,7 @@ func TestApplyConfigExposureNoticeFiresWhenAbsentListenerBecomesExposed(t *testi
 	// non-loopback address — the value that pre-fix incorrectly stood in for the
 	// serving address when the listener was absent.
 	server, oldBound := exposureRebindFixture(t,
-		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n", false)
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\nallow_unauthenticated_network = true\n", false)
 	require.False(t, config.IsLoopbackListenAddr(oldBound),
 		"anti-vacuous: the start address must be non-loopback")
 

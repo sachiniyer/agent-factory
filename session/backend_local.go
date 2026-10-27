@@ -262,7 +262,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
+			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command), i.CallbackUnavailable() != "")
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
@@ -351,7 +351,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
+			program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)

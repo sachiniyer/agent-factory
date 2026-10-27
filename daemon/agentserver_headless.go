@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -197,6 +198,11 @@ type AgentServerInfo struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command this host resolved and bound — the daemon sent
+	// the configured name and flags; the executable's absolute path only
+	// exists after the login-shell probe here (#5571 W2.1). The driver records
+	// it as the runtime's launch evidence.
+	Program string `json:"program,omitempty"`
 }
 
 // RunAgentServer builds the single workspace's agent-server, binds the HTTP+token
@@ -233,12 +239,46 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 	branchPrefix := cfg.BranchPrefix
 
+	// An unresolved program is an agent KEY (the internal transports send
+	// --program-resolved for an already-configured command). Configured
+	// program_overrides must apply while the key is still the key —
+	// resolving "claude" to an absolute path first would make
+	// program_overrides.claude unreachable (#5578 review).
+	if !opts.ProgramResolved {
+		program = session.ResolveProgramForPath(opts.RepoPath, program)
+	}
+	// The daemon sends the configured program name and flags, never its own
+	// auto-detected path — this host's filesystem is where the executable must
+	// exist (#5571 W2.1). Resolve it against the login-shell PATH (the spawn
+	// environment — sshd's default PATH or a hook's env — is not the operator's
+	// login PATH) and adopt that PATH so the agent pane inherits it. A program
+	// the host cannot resolve fails the create now rather than producing a
+	// live session whose agent pane exits 127.
+	resolvedProgram, loginPATH, rerr := session.ResolveProgramOnHost(context.Background(), program)
+	if rerr != nil {
+		return fmt.Errorf("af agent-server: %w", rerr)
+	}
+	if loginPATH != "" {
+		if err := os.Setenv("PATH", loginPATH); err != nil {
+			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
+		}
+	}
+
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:                 opts.Title,
-		Path:                  opts.RepoPath,
-		Program:               program,
-		ProgramResolved:       opts.ProgramResolved && opts.Program != "",
+		Title:   opts.Title,
+		Path:    opts.RepoPath,
+		Program: resolvedProgram,
+		// Host resolution above produced the final command; ProgramResolved
+		// keeps its contract — only a caller that flagged --program-resolved
+		// pins it against the sandbox's own program_overrides.
+		ProgramResolved:       opts.ProgramResolved && resolvedProgram != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
+		// The outer daemon hands the callback pair to this process's environment
+		// through the provisioner's env file; a sandbox provisioned WITHOUT one
+		// (mint refused, or remote forwarding off) can never serve an af verb —
+		// say so on the instance so the injected guidance stops teaching them
+		// (#5571 W3.1).
+		CallbackUnavailable: os.Getenv("AF_DAEMON_URL") == "" || os.Getenv("AF_DAEMON_TOKEN") == "",
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
@@ -271,9 +311,10 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 
 	info := AgentServerInfo{
-		Addr:  tcpInfo.Addr,
-		Token: tcpInfo.Token,
-		Title: opts.Title,
+		Addr:    tcpInfo.Addr,
+		Token:   tcpInfo.Token,
+		Title:   opts.Title,
+		Program: resolvedProgram,
 	}
 	// The startup banner is a single JSON line on stdout — the agent-server's only
 	// channel to hand a driver the address+token, since it runs headless with

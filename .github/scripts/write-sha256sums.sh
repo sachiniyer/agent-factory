@@ -10,11 +10,16 @@ if [ "$#" -ne 1 ]; then
 fi
 
 artifact_dir=$1
+# The -static linux archives are the sandbox/ssh host-streaming artifacts
+# (#5571 W2.2): CGO_ENABLED=0 builds that exec on any libc, published next to
+# the dynamic install artifacts install.sh downloads.
 expected_assets="
 agent-factory-darwin-amd64.tar.gz
 agent-factory-darwin-arm64.tar.gz
 agent-factory-linux-amd64.tar.gz
 agent-factory-linux-arm64.tar.gz
+agent-factory-linux-amd64-static.tar.gz
+agent-factory-linux-arm64-static.tar.gz
 "
 
 for asset in $expected_assets; do
@@ -25,8 +30,8 @@ for asset in $expected_assets; do
 done
 
 set -- "$artifact_dir"/agent-factory-*.tar.gz
-if [ "$#" -ne 4 ]; then
-	echo "error: expected exactly 4 release archives in $artifact_dir, found $#" >&2
+if [ "$#" -ne 6 ]; then
+	echo "error: expected exactly 6 release archives in $artifact_dir, found $#" >&2
 	exit 1
 fi
 

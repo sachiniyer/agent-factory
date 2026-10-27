@@ -45,7 +45,7 @@ func TestEverySupportedBackendDeclaresOffBox(t *testing.T) {
 // clones from the durable store and therefore needs the origin URL.
 func TestProvisionsOffBoxMatchesRuntimeShape(t *testing.T) {
 	assert.False(t, BackendLocal.ProvisionsOffBox(), "a local session runs in the worktree it already has")
-	for _, kind := range []BackendKind{BackendDocker, BackendSSH, BackendHook} {
+	for _, kind := range offBoxKinds() {
 		assert.True(t, kind.ProvisionsOffBox(),
 			"%s provisions a workspace off the local filesystem and clones from origin", kind)
 	}
