@@ -141,8 +141,14 @@ type TaskPane struct {
 	unconfirmedIDs        map[string]bool
 	settledDrafts         []string
 	unconfirmedQuitWarned bool
-	deleted               []task.Task
-	hasFocus              bool
+	// crossRepoRetargets names edits that a save retargeted out of the active
+	// project — the task landed in another repo, so the active-scope reload
+	// below drops its row from the pane. draining via
+	// TakeCrossRepoRetargetNotice surfaces where it landed instead of the silent
+	// drop that invites a re-edit (#1836). See task_pane_crossrepo.go.
+	crossRepoRetargets []crossRepoRetarget
+	deleted            []task.Task
+	hasFocus           bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
