@@ -380,16 +380,25 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 				// phantom project that opens a checkout the registration no
 				// longer names (#4888 review).
 				if row.Root != fresh.Root && row.SessionCount > 0 {
-					sessionRow := row
-					sessionRow.RegistryID = ""
-					sessionRow.RegistryRoot = ""
-					sessionRow.RegistryCheckoutID = ""
-					sessionRow.MissingPath = false
-					merged = append(merged, sessionRow)
-					seenRepoIDs[sessionRow.RepoID] = true
-					seenRoots[sessionRow.Root] = true
-					sessionRepoIDs[sessionRow.RepoID] = true
-					sessionRoots[sessionRow.Root] = true
+					// Unless the healthy read claims the old row's root for the
+					// replacement repository — the fresh union may prefer an
+					// active workspace as its Root while its RegistryRoot is
+					// the path this row still squats on, and a stale row kept
+					// there would open the other repo's checkout under the old
+					// name (#4888 review). The fresh row still lands either
+					// way; only the stale session row is withheld.
+					if claimedRepo, claimed := freshRootRepo[row.Root]; !claimed || claimedRepo == row.RepoID {
+						sessionRow := row
+						sessionRow.RegistryID = ""
+						sessionRow.RegistryRoot = ""
+						sessionRow.RegistryCheckoutID = ""
+						sessionRow.MissingPath = false
+						merged = append(merged, sessionRow)
+						seenRepoIDs[sessionRow.RepoID] = true
+						seenRoots[sessionRow.Root] = true
+						sessionRepoIDs[sessionRow.RepoID] = true
+						sessionRoots[sessionRow.Root] = true
+					}
 				}
 				merged = append(merged, fresh)
 				seenRepoIDs[fresh.RepoID] = true
