@@ -90,6 +90,7 @@ type ConfigPane struct {
 	explaining     bool
 	explainKey     string
 	explainLines   []string
+	explainValue   *config.ResolvedValue
 	savedScrollTop int
 
 	// accounts is the Accounts section (#3385): agent identities, rendered below
@@ -176,9 +177,19 @@ func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
 }
 
 func (c *ConfigPane) SetSize(width, height int) {
+	resized := width != c.width
 	c.width = width
 	c.height = height
 	c.sizeEditField()
+	// An open trace was wrapped for the old width: lines emitted wider than
+	// the pane wrap or clamp in the dialog while the scroll window still
+	// budgets against the old count, leaving parts of it unreachable. Keep
+	// the resolved value and rewrap it so the line math stays exact (#4803
+	// review).
+	if resized && c.explaining && c.explainValue != nil {
+		c.explainLines = c.wrappedExplainLines(*c.explainValue)
+		c.scrollTop = min(max(0, len(c.explainLines)-1), c.scrollTop)
+	}
 }
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
@@ -206,6 +217,7 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		c.accounts.statusIsError = false
 		c.explaining = false
 		c.explainLines = nil
+		c.explainValue = nil
 		c.clearStatus()
 		// A pending request is consumed the moment the app opens the assistant, so
 		// one that survives to a close was never taken (the pane was dismissed

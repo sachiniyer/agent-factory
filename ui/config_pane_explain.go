@@ -43,6 +43,7 @@ func (c *ConfigPane) beginExplain() {
 	c.savedScrollTop = c.scrollTop
 	c.scrollTop = 0
 	c.explainKey = entry.Key
+	c.explainValue = value
 	c.explainLines = c.wrappedExplainLines(*value)
 	c.explaining = true
 	c.clearStatus()
@@ -56,6 +57,7 @@ func (c *ConfigPane) handleExplainKey(msg tea.KeyMsg) bool {
 	case "esc", "e", "enter":
 		c.explaining = false
 		c.explainLines = nil
+		c.explainValue = nil
 		c.scrollTop = c.savedScrollTop
 	case "up", "k":
 		c.scrollTop = max(0, c.scrollTop-1)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -174,5 +175,35 @@ func TestConfigPaneClosingDropsAnOpenExplanation(t *testing.T) {
 
 	if c.explaining || len(c.explainLines) != 0 {
 		t.Fatal("closing the overlay must drop the trace — reopening onto a stale one would explain a file that may have changed")
+	}
+}
+
+// A resize with an open trace rewraps the cached lines: the value is kept so
+// SetSize can rebuild explainLines for the new width — the stale-width review
+// finding, where lines emitted wider than the pane clipped behind the window's
+// own line math and left parts of the trace unreachable (#4803 review).
+func TestConfigPaneExplainRewrapsOnResize(t *testing.T) {
+	c := newTestConfigPane(t)
+	c.explain = func(string) (*config.ResolvedValue, error) { return explainFixture(), nil }
+	selectKey(t, c, "default_program")
+	pressKey(c, "e")
+	if !c.explaining {
+		t.Fatal("expected the explain view to open")
+	}
+
+	before := len(c.explainLines)
+	c.SetSize(40, 200)
+
+	widest := 0
+	for _, l := range c.explainLines {
+		if w := lipgloss.Width(l); w > widest {
+			widest = w
+		}
+	}
+	if widest > 38 {
+		t.Fatalf("a rewrapped line exceeds the resized pane's text width: %d > 38", widest)
+	}
+	if len(c.explainLines) <= before {
+		t.Fatalf("a narrower pane must rewrap to MORE lines, got %d -> %d", before, len(c.explainLines))
 	}
 }
