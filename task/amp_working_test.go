@@ -69,15 +69,15 @@ func TestIsWorkingContentAmpReadinessUnaffected(t *testing.T) {
 	}
 }
 
-// TestIsWorkingContentOtherAgents pins the blast radius. Only amp and opencode
-// publish an in-progress indicator this can read, so every OTHER agent must answer
+// TestIsWorkingContentOtherAgents pins the blast radius. Only amp, opencode and
+// claude publish an in-progress indicator this can read, so every OTHER agent must answer
 // false and keep the poll's pane-churn inference exactly as it was — including the
 // "" (non-agent program_overrides, #1131) case.
 //
 // The agents list is therefore the set with genuinely no case in IsWorkingContent.
-// opencode is deliberately absent from it: it grew a case, and the fixture guards
-// below assert that positively rather than leaving its removal from this list
-// looking like an oversight.
+// opencode and claude are deliberately absent from it: they grew cases, and their
+// fixture guards assert that positively rather than leaving their removal from
+// this list looking like an oversight.
 func TestIsWorkingContentOtherAgents(t *testing.T) {
 	ampWorking, err := os.ReadFile("testdata/amp_working_streaming.ansi")
 	if err != nil {
@@ -99,7 +99,7 @@ func TestIsWorkingContentOtherAgents(t *testing.T) {
 	}
 
 	agents := []string{
-		tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, "",
+		tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, "",
 	}
 	for _, agent := range agents {
 		name := agent

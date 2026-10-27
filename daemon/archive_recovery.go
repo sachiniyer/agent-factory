@@ -244,8 +244,11 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 			// path protects nothing, and every claim — kill's and restore's —
 			// wraps the same ENOENT, so refusing here would strand the row
 			// forever (#3278 review). Clear the fence durably and let the
-			// ordinary kill settle the missing path.
-			if settleErr := instance.SettleStalledWorktreeRelocationForAbsentPath(); settleErr == nil {
+			// ordinary kill settle the missing path. The claim above discharges
+			// that same record itself once the path is conclusively absent
+			// (#5102), so "nothing left to settle" is the settled outcome too.
+			settleErr := instance.SettleStalledWorktreeRelocationForAbsentPath()
+			if _, stillFenced := instance.WorktreeRelocationRecovery(); settleErr == nil || !stillFenced {
 				if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
 					return fmt.Errorf(
 						"the stalled identity fence for absent archived session %q was cleared but could not be persisted — retry the kill: %w",
