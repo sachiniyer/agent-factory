@@ -367,7 +367,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	accountScope.TrustedExecutable = proof.TrustedExecutable
 	accountScope.GeneratedArgs = proof.GeneratedArgs
 	filtered := sessionenv.FilterForCommand(
-		os.Environ(), accountScope.Agent, launchProgram, sessionEnvPassthroughForInstance(i))
+		os.Environ(), accountScope.Agent, launchProgram, SessionEnvPassthroughForInstance(i))
 	if _, err := sessionenv.ApplyAccount(filtered, launchProgram, accountScope); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
@@ -817,7 +817,7 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	}
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.Unlock()
-	passthrough := sessionEnvPassthroughForInstance(i)
+	passthrough := SessionEnvPassthroughForInstance(i)
 	for _, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue
