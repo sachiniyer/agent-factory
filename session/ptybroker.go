@@ -317,16 +317,23 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		b.mu.Lock()
 		genBefore := b.resizeGen
 		b.mu.Unlock()
-		if snap, snapErr := b.ch.Snapshot(); snapErr == nil {
-			b.adoptSnapshotSize(snap, genBefore)
-			if snapshotHasRepaintState(snap) {
-				rp := buildRepaintSnapshot(snap)
-				b.mu.Lock()
-				sub.cursor = b.headLocked()
-				sub.pendingRepaint = &rp
-				b.mu.Unlock()
-				sub.wake()
-			}
+		snap, snapErr := b.ch.Snapshot()
+		if snapErr != nil {
+			// With no snapshot there is no repaint source AND no capture to
+			// retry it — a subscription kept here sits blank forever (unlike a
+			// live bring-up, where ring bytes still arrive). Fail like the
+			// non-dead path so the caller can retry.
+			b.remove(sub.id)
+			return nil, snapErr
+		}
+		b.adoptSnapshotSize(snap, genBefore)
+		if snapshotHasRepaintState(snap) {
+			rp := buildRepaintSnapshot(snap)
+			b.mu.Lock()
+			sub.cursor = b.headLocked()
+			sub.pendingRepaint = &rp
+			b.mu.Unlock()
+			sub.wake()
 		}
 		return sub, nil
 	}

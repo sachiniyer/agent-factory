@@ -57,6 +57,23 @@ func TestPTYBrokerDeadPaneServesRepaintOnlyStream(t *testing.T) {
 	}
 }
 
+// A dead pane whose screen cannot be captured cannot be repainted either —
+// and unlike a live bring-up there is no capture feeding bytes the subscribe
+// could fall back on. Keeping that subscription would park a blank pane
+// forever, so the subscribe fails and the caller can retry.
+func TestPTYBrokerDeadPaneSnapshotFailureFailsSubscribe(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		startErr:        fmt.Errorf("pipe-pane: target pane has exited"),
+		paneDead:        true,
+		snapshotErr:     fmt.Errorf("capture-pane buffer: tmux timeout"),
+		snapshotHasSize: true,
+	}
+	br := newPTYBroker(ch)
+	if _, err := br.subscribe(0); err == nil {
+		t.Fatal("a dead pane with no capturable screen must not subscribe")
+	}
+}
+
 // A pane that dies mid-watch — its capture EOFs under the broker — gets the
 // same dead-screen repaint rather than an endless re-dial: the re-dial loop
 // runs the guarded recovery once, releasing the attached subscribers onto the
