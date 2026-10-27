@@ -9,9 +9,15 @@ import (
 
 var Version string
 
-// Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, repo *config.RepoContext) error {
-	h := newHome(ctx, program, repo)
+// Run is the main entrypoint into the application. program is the launch
+// --program flag; empty means new sessions follow the configured
+// default_program, re-read each time one is created (#4889).
+// configuredDefault is launch's already-resolved default_program — repo-scoped
+// when af was launched inside a repo — and seeds the fallback cache a failed
+// re-read keeps, so a transient project-config failure cannot swap the bare
+// global default in for the project's own.
+func Run(ctx context.Context, program, configuredDefault string, repo *config.RepoContext) error {
+	h := newHome(ctx, program, configuredDefault, repo)
 	p := tea.NewProgram(
 		h,
 		tea.WithAltScreen(),
