@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,6 +119,9 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		t.Logf("KNOWN BLOCKER (AR-01, fixed by W3): default-config create is refused: %v", err)
 		ip := nonLoopbackIPv4(t)
 		stopDaemons(t, afBin, home)
+		// The first daemon start migrated config.json to config.toml, which then
+		// wins; drop it so the rewritten JSON is the one that loads.
+		_ = os.Remove(filepath.Join(home, "config.toml"))
 		writeConfig(map[string]any{"listen_addr": ip + ":" + freeTCPPort(t), "require_token": true})
 		h.startDaemon()
 		post("/v1/CreateSession", daemon.CreateSessionRequest{Title: title, RepoPath: repo, Program: "claude"}, &created)
