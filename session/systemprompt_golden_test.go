@@ -145,9 +145,14 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 			want: "no one can help.\n\nCommands print JSON on stdout;",
 		},
 		{
-			// body + "\n\n" + attention: a blank line, a new paragraph.
-			name: "body to attention",
-			want: "no code changes\".\n\nAsking for the user:",
+			// body + "\n\n" + proposals: a blank line, a new paragraph.
+			name: "body to proposals",
+			want: "no code changes\".\n\nProposals: when the user asks",
+		},
+		{
+			// proposals + "\n\n" + attention: a blank line, a new paragraph.
+			name: "proposals to attention",
+			want: "af keeps them outside the worktree.\n\nAsking for the user:",
 		},
 		{
 			// attention + "\n\n" + outro: a blank line, a new paragraph.

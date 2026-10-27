@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
 import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -256,7 +256,7 @@ export interface AppState {
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
-   *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
+   *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
   /** which session states the rail shows (feat: hide archived by default). A pure
@@ -663,18 +663,6 @@ export function tabRealId(tab: { id?: string }): string {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
 
-/** The appbar label for a theme choice (redesign PR1). */
-function themeLabel(choice: ThemeChoice): string {
-  switch (choice) {
-    case "system":
-      return "System";
-    case "light":
-      return "Light";
-    case "dark":
-      return "Dark";
-  }
-}
-
 /**
  * The rail's session order, mirroring the TUI sidebar (ui/sidebar_model.go): live
  * sessions first ordered oldest-created first, the archived group last ordered
@@ -768,7 +756,7 @@ export function loginView(state: AppState, actions: Actions): HTMLElement {
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you log out."),
     form,
   ];
   if (state.loginError) {
@@ -900,8 +888,6 @@ export class AppShell {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   private readonly viewTabs: Map<View, HTMLElement>;
-  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
-  // the active one highlighted in update().
   private readonly phone = window.matchMedia("(max-width: 768px)");
   private readonly header: HTMLElement;
   private readonly viewNav: HTMLElement;
@@ -985,8 +971,6 @@ export class AppShell {
     this.actions.layoutChanged();
   }
   private readonly appControls: ReturnType<typeof appbarControls>;
-  private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
-  private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
   private readonly configPane: ConfigPane;
@@ -1142,27 +1126,6 @@ export class AppShell {
      *  install (a harness) can leave it out. */
     private readonly installEl?: HTMLElement,
   ) {
-    // Disconnect doubles as "forget the saved token": the credential persists across
-    // visits now, so this button is the only way back to the login prompt on a shared
-    // machine or after a rotation. The title says so — the label alone reads as a
-    // transport action, not a logout.
-    const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
-    disconnect.setAttribute("title", "Disconnect and forget the saved token");
-
-    // The theme toggle: a compact Light/Dark/System segmented control. A click routes
-    // through actions.setTheme, which persists the choice and re-themes the terminals.
-    const themeToggle = h("div", { class: "af-theme-toggle" });
-    themeToggle.setAttribute("role", "group");
-    themeToggle.setAttribute("aria-label", "Theme");
-    for (const choice of THEME_CHOICES) {
-      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
-      opt.setAttribute("data-theme-opt", choice);
-      opt.setAttribute("title", `${themeLabel(choice)} theme`);
-      opt.addEventListener("click", () => this.actions.setTheme(choice));
-      this.themeOpts.set(choice, opt);
-      themeToggle.append(opt);
-    }
-
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
@@ -1218,18 +1181,14 @@ export class AppShell {
     // syncPhone reparents and reopens the picker. Separate lists can dispatch
     // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
-      ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
+      ...(this.installEl ? [this.installEl] : []),
     ], this.phone, this.captureNewTabCancelReturn, () => {
       // The phone disclosure owns the carried desktop actions. A user dismissal
       // retires that state, unlike layout and picker-return programmatic closes.
       const slot = this.terminalChrome?.newTabSlot;
       if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
-    });
+    }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
-    disconnect.addEventListener("click", () => {
-      this.appControls.close();
-      this.actions.disconnect();
-    });
 
     const header = h(
       "header",
@@ -1250,7 +1209,7 @@ export class AppShell {
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
-        !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
+        !target.closest(".af-viewnav")) this.appControls.dismiss();
     });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
@@ -1332,6 +1291,8 @@ export class AppShell {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
       },
+      setTheme: (choice: ThemeChoice) => this.actions.setTheme(choice),
+      disconnect: () => this.actions.disconnect(),
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
@@ -1492,16 +1453,6 @@ export class AppShell {
       this.setNav(false);
     }
 
-    // Highlight the active theme option (redesign PR1) when the choice changes.
-    if (this.lastThemeChoice !== state.themeChoice) {
-      this.lastThemeChoice = state.themeChoice;
-      for (const [choice, opt] of this.themeOpts) {
-        const active = choice === state.themeChoice;
-        opt.classList.toggle("af-theme-opt-active", active);
-        opt.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    }
-
     // The tasks pane mirrors the task projection, SCOPED to the selected project
     // (redesign PR2). It re-renders when either the task list or the project scope
     // changes, so switching projects re-scopes the tasks view too.
@@ -1515,7 +1466,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -1684,6 +1635,7 @@ export class AppShell {
     }
     const activeBefore = document.activeElement as HTMLElement | null;
     let restoreChangedFocus: (() => void) | undefined;
+    const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
       s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
@@ -1698,7 +1650,8 @@ export class AppShell {
         const row = sessionRow(s, s.id === state.selectedId,
           id => this.runRailExit(() => this.actions.open(id)),
           target => this.rowActions(target, s.id === state.selectedId), previous);
-        if (wasOpen) this.railMenus.get(key)?.open();
+        const menu = wasOpen ? this.railMenus.get(key) : undefined;
+        if (menu) { menu.open(); reopened.push(menu); }
         if (focusedName) restoreChangedFocus = () =>
           row.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
         return row;
@@ -1714,6 +1667,7 @@ export class AppShell {
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
     orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
@@ -1740,6 +1694,9 @@ export class AppShell {
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("…");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
     menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });

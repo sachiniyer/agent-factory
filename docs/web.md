@@ -31,8 +31,9 @@ after the tour. [Remote daemon access](remote-http-auth.md) is the full setup gu
 The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
 The **project switcher** scopes Sessions and Tasks to one repository and remembers
 that choice across reloads. Its menu shows session and working counts per project.
-**Light · Dark · System** chooses the browser theme; System follows your operating system.
-**Disconnect** forgets the browser's saved daemon token and returns to the login
+Config's **This browser** section holds settings saved only in this browser.
+**Theme** chooses Light, Dark or System; System follows your operating system.
+**Log out** forgets the browser's saved daemon token and returns to the login
 screen. **Install app**, when offered by the browser, opens its installation
 prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-as-an-app).
 
@@ -83,8 +84,8 @@ non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, selecting a terminal gives it the screen: one compact row holds
 **Toggle sessions**, the truncating session title, static Keyboard state and **…**.
-The menu contains project choices, Sessions · Tasks · Config, Light · Dark ·
-System, Disconnect, session actions and tabs. Escape closes it and returns focus.
+The menu contains project choices, Sessions · Tasks · Config, session actions
+and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -244,21 +245,23 @@ Choose **Tasks** in the app bar to manage automations for the selected project.
 <figure markdown>
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks.png#only-light)
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks-dark.png#only-dark)
-<figcaption>Read the next run and last outcome, choose Edit, or open Actions for other operations.</figcaption>
+<figcaption>Read the next run and last outcome, then use the row's icons and switch.</figcaption>
 </figure>
 
 Each row shows its name, cron schedule or watch command, optional target session,
-arming or next-run information, and last-run outcome. A checked square means
-enabled; an empty square means disabled. A health mark can replace the enabled
-tick, with explanatory text in the row.
+arming or next-run information, and last-run outcome. The switch on the right
+shows whether the task is enabled. A health mark at the start of the row flags a
+problem, with explanatory text in the row.
 
 | Control | Action |
 | --- | --- |
-| Actions → Enable · Disable | Turn the task on or off. |
-| Edit | Open the existing task's form to change it. |
-| Actions → Trigger | Run an enabled cron task now; absent for watch and disabled tasks. |
-| Actions → Remove | Delete the task after confirmation. |
+| Switch | Turn the task on or off. |
+| Edit (pencil) | Open the existing task's form to change it. |
+| Trigger (play) | Run an enabled cron task now; greyed out for watch and disabled tasks. |
+| Remove (trash can) | Delete the task after confirmation. |
 | + Add | Open a form to create a task. |
+
+On a phone, Edit, Trigger and Remove move into the row's **…** menu.
 
 In the form, enter **Name**, choose **Project**, and choose a **Trigger**. A
 **Cron schedule** uses a schedule picker with time, interval, or weekday controls
@@ -349,7 +352,7 @@ the token even for a loopback-origin connection.
 When required, the login screen asks for the daemon token. On the host, use
 `af token show`, then paste the value and click **Connect**. The browser stores
 it for that origin and reuses it on reload. A rejected token is forgotten;
-other connection errors keep it for a retry. **Disconnect** clears it.
+other connection errors keep it for a retry. **Log out** in Config clears it.
 
 ### Security notes
 
@@ -360,7 +363,7 @@ it has full control. The daemon warns about this combination but still serves it
 Use an SSH tunnel, private network, or TLS-terminating proxy for remote transport.
 The daemon itself serves plain HTTP.
 
-The token grants full access. Keep it private, use **Disconnect** on shared
+The token grants full access. Keep it private, use **Log out** on shared
 browsers, and use `af token rotate` if it is exposed. Read the
 [remote access security notes](remote-http-auth.md#security-notes) before exposing
 the listener or putting it behind a proxy.
@@ -415,7 +418,7 @@ address does not. Use a TLS-terminating proxy for remote installation; see
 #### What gets installed
 
 The app uses the same daemon and page, with its own icon and standalone window.
-Browser chrome follows **Light · Dark · System**. The service worker caches the
+Browser chrome follows the **Theme** setting. The service worker caches the
 static shell, using the network first, so an unreachable daemon can show the
 app's connection-error screen. It does not cache API requests, event streams,
 terminal streams, or previews. Installing is optional.

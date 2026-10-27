@@ -39,6 +39,9 @@ export const TabKind = {
    *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
    *  lockstep with the Go enum. */
   VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
@@ -260,6 +263,9 @@ export interface TabData {
    *  loopback URL is rendered through the same-origin daemon proxy, an external
    *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
   url?: string;
+  /** The proposal slug of a docs tab (TabKind.Docs); absent for other kinds.
+   *  Mirrors session.TabData.Proposal (session/storage.go). */
+  proposal?: string;
   /** Daemon proxy decision; absent only on older daemon records. */
   web_proxied?: boolean;
 }
@@ -268,7 +274,7 @@ export interface TabData {
  *  repo root the session belongs to, used to group/pick projects. */
 /** One creatable tab kind and whether this session may gain one. */
 export interface TabKindAllowance {
-  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode". */
+  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode", "docs". */
   kind: string;
   allowed: boolean;
   /** The daemon's own refusal text, empty when allowed. Rendered verbatim: it
