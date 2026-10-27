@@ -11902,24 +11902,369 @@ var AccountSelection = class {
   }
 };
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
+    }
+  }
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function formatPaneChurnAge(churn, now) {
+  return formatDuration(now.getTime() - churn.getTime());
+}
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
+}
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+    case Liveness.Lost:
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
+    case Liveness.Dead:
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
+    case Liveness.Archived:
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
+    case Liveness.LimitReached:
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
+}
+function isRootSession(s) {
+  return s.is_root === true;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (s.backend_type === "remote") {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
+  return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
+}
+var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+function callbackUnavailableText(s) {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+function sessionWarningText(s) {
+  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
 // src/backends.ts
 var REPO_DEFAULT = "";
 function backendChoices(catalog) {
   if (catalog === null) {
     return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
+  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices = [
     {
       value: REPO_DEFAULT,
       // "Repo default" with no parenthetical when the daemon reports no default:
       // that is the misconfigured case, where naming a backend would be inventing
       // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
+      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
       // Taken from the daemon, not inferred here. A repo whose declared default is
       // broken resolves to that broken backend and FAILS — it does not quietly run
       // local — so the default is not automatically a safe harbour.
       status: catalog.default_status,
-      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
+      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
     }
   ];
   for (const opt of catalog.backends) {
@@ -11927,7 +12272,7 @@ function backendChoices(catalog) {
       value: opt.name,
       label: opt.label,
       status: opt.status,
-      reason: opt.status === "available" ? "" : opt.reason ?? ""
+      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
     });
   }
   return choices;
@@ -12768,53 +13113,6 @@ function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
   return handle;
 }
 
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4,
-  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
-   *  Mirrors session.TabKindDocs (session/tab.go). */
-  Docs: 5
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
 // src/delete_tab_modal.ts
 function confirmDeleteTabModal(opts) {
   const { handle, body, cancelBtn } = modalChrome({
@@ -12926,294 +13224,6 @@ function restoreShortcutFocus(navigationTarget, rail) {
     }
   }
   document.activeElement?.blur();
-}
-
-// src/time.ts
-function formatDuration(ms) {
-  const age = Math.max(0, ms);
-  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
-  if (age < minute) return "<1m";
-  if (age < hour) return `${Math.floor(age / minute)}m`;
-  if (age < day) return `${Math.floor(age / hour)}h`;
-  return `${Math.floor(age / day)}d`;
-}
-function formatTime(value, now = /* @__PURE__ */ new Date()) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  const delta = date.getTime() - now.getTime();
-  if (Math.abs(delta) < 24 * 60 * 6e4) {
-    const duration = formatDuration(Math.abs(delta));
-    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
-  }
-  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-// src/status.ts
-var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
-  working: "Working",
-  "waiting-limit": "Waiting on a limit",
-  broken: "Broken",
-  archived: "Archived"
-};
-var ROW_KIND_LABELS = {
-  ready: "Ready",
-  working: "Working",
-  lost: "Lost",
-  dead: "Dead",
-  limit: "Limit reached",
-  archived: "Archived"
-};
-var IDLE_REASON_LABELS = {
-  "usage-limit": "usage limit",
-  "process-exited": "process exited",
-  "restore-gave-up": "restore gave up",
-  "restore-waiting-on-environment": "restore waiting on environment",
-  "recreate-pending": "recreate notice pending",
-  "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unknown",
-  "no-pane-change-since-delivery": "no change after delivery",
-  "settled-after-pane-change": "pane changed"
-};
-function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
-  const label = idleReasonLabel(s.idle_reason);
-  if (!label) {
-    return "";
-  }
-  let detail = label;
-  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
-    }
-  }
-  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
-    const { attempts, error } = s.lost_restore_wait;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
-      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
-    }
-  }
-  if (s.last_pane_churn_at) {
-    const churn = new Date(s.last_pane_churn_at);
-    if (!Number.isNaN(churn.getTime())) {
-      const age = `${formatPaneChurnAge(churn, now)} ago`;
-      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
-    }
-  }
-  return detail;
-}
-function idleReasonLabel(reason) {
-  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
-}
-function formatPaneChurnAge(churn, now) {
-  return formatDuration(now.getTime() - churn.getTime());
-}
-var READY_ICON = "circle";
-var DEAD_ICON = "circle";
-var LOST_ICON = "circle-dashed";
-var ARCHIVED_ICON = "archive";
-var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function isWorking(s) {
-  return rowStatus(s).kind === null;
-}
-function isCreating(s) {
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
-}
-function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
-}
-function operatorKind(s) {
-  const displayed = rowKind(s);
-  if (displayed === "working") {
-    return "working";
-  }
-  if (displayed === "archived") {
-    return "archived";
-  }
-  if (displayed === "limit" || s.idle_reason === "usage-limit") {
-    return "waiting-limit";
-  }
-  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
-    return "broken";
-  }
-  return "needs-you";
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
-    case Liveness.Lost:
-      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
-    case Liveness.Dead:
-      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
-    case Liveness.Archived:
-      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
-    case Liveness.LimitReached:
-      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
-}
-function isPendingManualHandoffDeliveryUnconfirmed(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
-}
-function ambiguousHandoffDelivery(status) {
-  return status === "sent-unverified" || status === "could-not-confirm";
-}
-function confirmableHandoffDelivery(status) {
-  return ambiguousHandoffDelivery(status) || status === "delivered";
-}
-function isPendingAgentHandoffDeliveryUnconfirmed(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
-}
-function isPendingAgentHandoffDeliveryConfirmable(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function isPendingManualSwapDeliveryConfirmable(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function canHandoff(s) {
-  return s.can_handoff === true;
-}
-function isRootSession(s) {
-  return s.is_root === true;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const ar = isRootSession(a) ? 0 : 1;
-  const br = isRootSession(b) ? 0 : 1;
-  if (ar !== br) {
-    return ar - br;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (s.backend_type === "remote") {
-    title = "[remote] " + title;
-  }
-  if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  }
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  }
-  if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  const recreate = rootRecreateNote(s);
-  if (recreate) {
-    title = `[${recreate}] ` + title;
-  }
-  if (archiveWarningText(s) !== "") {
-    title = "[archive incomplete] " + title;
-  }
-  if (s.model_change) {
-    title = "[model changed] " + title;
-  }
-  return title;
-}
-function archiveWarningText(s) {
-  return s.archive_warning?.trim() ?? "";
-}
-function rootRecreateNote(s) {
-  switch (s.root_recreate_context) {
-    case "fresh":
-      return "fresh context";
-    case "unknown":
-      return "context unknown";
-    default:
-      return "";
-  }
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
 
 // src/filter.ts
@@ -18190,7 +18200,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -18607,7 +18617,7 @@ var AppShell = class {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -18851,14 +18861,16 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -18882,7 +18894,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }

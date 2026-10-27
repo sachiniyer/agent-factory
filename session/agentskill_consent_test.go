@@ -258,13 +258,13 @@ func TestGlobalAgentSkills_AfOwnedSeamsAreUnaffected(t *testing.T) {
 	agentHome(t)
 	writeAfConfig(t, false)
 
-	if got := injectSystemPrompt("claude", skillTarget{}); !strings.Contains(got, "--plugin-dir") {
+	if got := injectSystemPrompt("claude", skillTarget{}, false); !strings.Contains(got, "--plugin-dir") {
 		t.Errorf("claude's af-owned plugin seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("aider", skillTarget{}); !strings.Contains(got, "--read") {
+	if got := injectSystemPrompt("aider", skillTarget{}, false); !strings.Contains(got, "--read") {
 		t.Errorf("aider's af-owned --read seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("opencode", skillTarget{}); !strings.Contains(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt("opencode", skillTarget{}, false); !strings.Contains(got, "OPENCODE_CONFIG=") {
 		t.Errorf("opencode's af-owned config seam must be unaffected by the global-config gate, got %q", got)
 	}
 }
