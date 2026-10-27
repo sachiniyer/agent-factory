@@ -52,7 +52,7 @@ const BUILD_IF = "always() && !inputs.probe";
 // gate-reconcile adds a fork/Dependabot clause to Build's shape; !inputs.probe
 // still skips it on probes (#5179).
 const GATE_RECONCILE_IF =
-  "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))";
+  "${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}";
 const PROBE_NAME = /^\$\{\{ inputs\.probe && '([^']+)' \|\| '([^']+)' \}\}$/;
 
 /** The name a job reports on a PR run (probe unset). */
@@ -113,7 +113,9 @@ test("no job reports a probe row under a name a PR run uses", () => {
     if (/needs\./.test(job.if || "")) {
       // These skip on ordinary PRs, where GitHub shows an unevaluated name raw,
       // so they must keep a plain one. No gate reads them.
-      assert.doesNotMatch(job.name, /\$\{\{/, `${id} skips on ordinary PRs, so its name must be plain`);
+      // A skipped matrix job never expands, so test-systemd's raw
+      // `Test (systemd, ${{ matrix.os }})` is its plain name there.
+      if (!/\$\{\{ matrix\./.test(job.name)) assert.doesNotMatch(job.name, /\$\{\{/, `${id} skips on ordinary PRs, so its name must be plain`);
       assert.ok(!["Build", "Lint"].includes(job.name), `${id} must not carry a required check's name`);
       continue;
     }
@@ -137,7 +139,7 @@ test("dispatch inputs reach pr.yml only through names, conditions, the group and
     /^ {4}if: \$\{\{ !inputs\.probe \}\}$/,
     /^ {4}if: always\(\) && !inputs\.probe$/,
     // gate-reconcile adds a fork/Dependabot clause to Build's condition shape (#5179).
-    /^ {4}if: always\(\) && !inputs\.probe && \(github\.event_name != 'pull_request' \|\| \(github\.event\.pull_request\.head\.repo\.fork != true && github\.actor != 'dependabot\[bot\]'\)\)$/,
+    /^ {4}if: \$\{\{ !cancelled\(\) && vars\.AUTO_GATE_ENABLED == 'true' && !inputs\.probe \}\}$/,
     /^ {8}if: \$\{\{ !?inputs\.probe \}\}$/,
     /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/,
     /^ {10}PROBE_(PACKAGES|RUN): \$\{\{ inputs\.(packages|run) \}\}$/,
