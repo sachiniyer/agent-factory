@@ -955,6 +955,12 @@ button:disabled,
     display: none;
   }
 }
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+}
 .af-term-action {
   flex: 0 0 auto;
   padding: var(--af-space-1) var(--af-space-2);
@@ -1997,6 +2003,9 @@ button:disabled,
   font-size: var(--af-type-caption);
 }
 @media (max-width: 768px) {
+  .af-term-zoom {
+    display: none;
+  }
   .af-appbar {
     position: relative;
     z-index: var(--af-z-appbar);

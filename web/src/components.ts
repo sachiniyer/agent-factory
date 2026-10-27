@@ -119,7 +119,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
@@ -168,12 +168,23 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link", opts.copyLink);
   copy.title = "Copy link to this session";
+  // The desktop font-size pair (#5500): terminal text only, beside the other
+  // pane-level controls and hidden at the phone breakpoint (where the keybar
+  // carries the same controls instead). Each press steps the shared device
+  // class's size — every pane in the page refits, which is correct because the
+  // value is per class, not per pane.
+  const fontDecrease = action("A−", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
   tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(tabUnavailable, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, retry, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
   return { head, title, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 

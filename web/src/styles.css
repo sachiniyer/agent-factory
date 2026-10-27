@@ -1192,6 +1192,15 @@ button:disabled,
 @container (max-width: 640px) {
   .af-term-new-label { display: none; }
 }
+/* The A−/A+ text-size pair (#5500): same hit area as the copy-link icon button.
+ * These are never toggled by `hidden` — visibility is the phone media rule's
+ * display:none below — so the inline-flex here cannot re-expose a hidden one. */
+.af-term-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+}
 
 .af-term-action {
   flex: 0 0 auto;
@@ -2605,6 +2614,10 @@ button:disabled,
  * so the main pane keeps the full body width whether the drawer is open or shut, and the
  * terminal's own ResizeObserver never sees a width change when it toggles. */
 @media (max-width: 768px) {
+  /* The head's zoom pair gives way to the keybar's own A−/A+ keys at phone
+   * width — one control set per device class, not two stacked (#5500). */
+  .af-term-zoom { display: none; }
+
   /* The decorative brand yields entirely. The remaining controls keep DOM/focus
    * order in the grid: drawer + top-level views, then a wider project row + rare
    * tools. Width allocation is structural rather than whichever flex child happens
