@@ -354,8 +354,11 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
 		if err := call(ctx, req, &resp); err != nil {
 			status := httpStatusForTab(err)
-			if status == http.StatusInternalServerError && IsDaemonAdmissionRetryable(err) {
+			var shaped interface{ HTTPStatus() int }
+			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
+			} else if errors.As(err, &shaped) {
+				status = shaped.HTTPStatus()
 			}
 			writeHTTPError(w, r, status, err)
 			flushHTTPResponse(w)
@@ -494,7 +497,14 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 	}
 	var coded codedError
 	if errors.As(err, &coded) {
-		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
+		env := apiproto.FailureWithCode(err.Error(), coded.APIErrorCode())
+		// An error can carry data the client needs to recover, such as the three
+		// versions of a conflicting proposal save.
+		var withData interface{ EnvelopeData() any }
+		if errors.As(err, &withData) {
+			env.Data = withData.EnvelopeData()
+		}
+		writeHTTPEnvelope(w, r, status, env)
 		return
 	}
 	// A stale stable-id refusal is a bare 404 on the status line — the same

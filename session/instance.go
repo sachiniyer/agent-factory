@@ -56,6 +56,14 @@ type Instance struct {
 	// preventing checkpoints from silently migrating legacy rows (#3358). It is
 	// empty until a fresh instance's first save and is protected by mu.
 	storageRepoID string
+	// repoIdentityPath is the owning repo's canonical identity
+	// (RepoContext.IdentityPath), resolved at create and kept for backends that
+	// own no local worktree — the same value the pending-create row publishes as
+	// Worktree.RepoPath. Path is the operational workspace; the two diverge when
+	// the repo was registered through a bare repository's linked worktree, so
+	// repo-scoped consumers must not re-derive identity from Path. Protected by
+	// mu.
+	repoIdentityPath string
 	// Branch is the branch of the instance.
 	Branch string
 	// liveness and inFlightOp are the two orthogonal axes of session state
@@ -128,6 +136,20 @@ type Instance struct {
 	// to the previous release — which knows only the mission hold — drops the
 	// marker instead of releasing it as a retired mission edge.
 	taskRunTurnGateHeld bool
+	// taskRunFailed records that this session's task run ended failed — its
+	// prompt was PROVEN undelivered on the initial send (#5278). Sticky for
+	// the process's lifetime: a session has exactly one run, and the daemon's
+	// completion edge may have captured taskRunWasActive on a tick that raced
+	// the failed send — this is what tells "the marker cleared" apart from
+	// "the run completed". A restart re-derives the same end from the persisted
+	// verdict at FromInstanceData, so it never needs disk of its own.
+	taskRunFailed bool
+	// taskRunFailedStamp is the one-shot twin of taskRunFailed for the daemon's
+	// status write: set where the run ends failed, consumed once by the poll's
+	// run-end observation so the owning task's last_run_status is stamped
+	// exactly once per process. A restart re-derives the same end from the same
+	// durable verdict, so the re-stamp is idempotent.
+	taskRunFailedStamp bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

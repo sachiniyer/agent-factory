@@ -150,11 +150,13 @@ type Sidebar struct {
 	seenSig    string
 	seenSelSeq uint64
 
-	// treeCollapsed is the title of the display-selected instance whose tab
-	// children the user explicitly collapsed (h/←). Cleared when the selection
-	// moves to a different instance, so every newly selected instance starts
-	// auto-expanded (collapse-by-default applies to non-selected instances).
-	treeCollapsed string
+	// treeCollapsed is the display-selected instance whose tab children the
+	// user explicitly collapsed (h/←). Keyed by pointer so a #765 same-title
+	// kill+recreate swap — which mints a new instance carrying the old title —
+	// is detected and the override cleared; every newly selected instance
+	// starts auto-expanded (collapse-by-default applies to non-selected
+	// instances).
+	treeCollapsed *session.Instance
 
 	// lastCursor* remember the identity of the last instance-section row the
 	// cursor rested on (tab -1 = the instance row itself). The reconcile's #969
@@ -320,19 +322,21 @@ func (s *Sidebar) structureSig() string {
 	// identifies the partition, so it catches both a single archive/restore and
 	// a same-count swap.
 	_, archived := partitionByArchived(s.proj.GetInstances())
-	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
+	return fmt.Sprintf("%d|%s|%d|%t|%p|%v",
 		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
 // the display-selected instance auto-expands (matched by title so a #765
 // same-title swap keeps the subtree open) unless it is transient or the user
-// explicitly collapsed it. Everything else is collapsed — the keep-row-count-
-// manageable default for non-selected instances.
+// explicitly collapsed it. The collapse override is keyed by pointer so a
+// same-title kill+recreate swap drops it — the old session's fold cannot pass
+// through to the replacement. Everything else is collapsed — the keep-row-
+// count-manageable default for non-selected instances.
 func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
 	sel := s.proj.GetSelectedInstance()
 	if sel == nil || inst == nil || sel.Title != inst.Title {
 		return false
 	}
-	return tree.Expandable(inst) && s.treeCollapsed != inst.Title
+	return tree.Expandable(inst) && s.treeCollapsed != inst
 }

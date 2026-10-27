@@ -4,38 +4,45 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
-	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/proposal"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 var proposalSessionFlag string
 
-var errProposalRemote = errors.New("af proposal does not support --daemon-url yet; run it on the daemon host")
+// callProposalRoute sends one proposal route to the targeted daemon: the local
+// one over the control socket (started when needed), or the --daemon-url one
+// over HTTP. A remote target never falls back to the local daemon.
+var callProposalRoute = func(method string, req, resp any) error {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.CallProposal(method, req, resp)
+	}
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return err
+	}
+	defer client.CloseIdleConnections()
+	return client.CallProposal(method, req, resp)
+}
 
-// proposalCaller is who an af proposal command acts for: the project store,
-// and the session when there is one.
+// proposalCaller is who an af proposal command acts for: a session, or a
+// project named by repo id (local daemon) or by path (remote daemon).
 type proposalCaller struct {
-	store     *proposal.Store
-	repoID    string
 	sessionID string
-	title     string
+	repoID    string
+	repoPath  string
 }
 
-func (c proposalCaller) committer() proposal.Committer {
-	if c.sessionID == "" {
-		return proposal.Committer{Author: proposal.AuthorExternal}
+func (c proposalCaller) author() proposal.Author {
+	if c.sessionID != "" {
+		return proposal.AuthorAgent
 	}
-	return proposal.Committer{Author: proposal.AuthorAgent, SessionID: c.sessionID}
-}
-
-func proposalPreflight() error {
-	if apiclient.IsRemoteTarget() {
-		return errProposalRemote
-	}
-	return nil
+	return proposal.AuthorExternal
 }
 
 // proposalSessionFromFlagOrSelf resolves --session, or else the calling
@@ -44,7 +51,14 @@ func proposalPreflight() error {
 // pane never falls back to an external commit.
 func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, err error) {
 	if proposalSessionFlag != "" {
-		repoID, err := resolveRepoID()
+		if apiclient.IsRemoteTarget() {
+			data, err := remoteProposalSession(proposalSessionFlag)
+			if err != nil {
+				return nil, false, err
+			}
+			return data, true, nil
+		}
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return nil, false, err
 		}
@@ -64,28 +78,53 @@ func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, er
 	return data, true, nil
 }
 
+// remoteProposalSession finds a session on a remote daemon by title. There
+// --repo is a path on the daemon host, so it narrows the match by the project
+// root the daemon reports and is never resolved on this machine. A relative or
+// ~ path cannot be compared here, so it is refused rather than dropped.
+func remoteProposalSession(title string) (*session.InstanceData, error) {
+	if repoFlag == "" {
+		data, _, err := getSessionByTitle(title)
+		return data, err
+	}
+	if !filepath.IsAbs(repoFlag) {
+		return nil, fmt.Errorf("--repo %q must be an absolute path on the daemon host at %s to scope --session %q", repoFlag, apiclient.RemoteTargetURL(), title)
+	}
+	all, _, _, err := snapshotRead(daemon.SnapshotRequest{})
+	if err != nil {
+		return nil, err
+	}
+	want := filepath.Clean(repoFlag)
+	var matches []session.InstanceData
+	for i := range all {
+		root := sessionRepoRoot(&all[i])
+		if all[i].Title == title && root != "" && pathutil.IsAtOrInside(want, filepath.Clean(root)) {
+			matches = append(matches, all[i])
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("session %q %w in project %s on the daemon at %s", title, errTitleNotFound, repoFlag, apiclient.RemoteTargetURL())
+	}
+	if paths := session.DedupeSorted(repoPathsOf(matches)); len(paths) > 1 {
+		return nil, session.AmbiguousTitleError(title, paths)
+	}
+	return &matches[0], nil
+}
+
 func callerForSession(data *session.InstanceData) (*proposalCaller, error) {
 	if data.ID == "" {
 		return nil, fmt.Errorf("session %q has no stable id; af proposal needs a session created by a newer af", data.Title)
 	}
-	repoID := sessionRepoID(data)
-	if repoID == "" {
-		return nil, fmt.Errorf("cannot resolve the project of session %q", data.Title)
-	}
-	if repoFlag != "" {
+	if repoFlag != "" && !apiclient.IsRemoteTarget() {
 		repo, err := repoFromFlag()
 		if err != nil {
 			return nil, err
 		}
-		if repo.ID != repoID {
+		if id := sessionRepoID(data); id != "" && repo.ID != id {
 			return nil, fmt.Errorf("session %q belongs to project %s, not to --repo %s", data.Title, sessionRepoRoot(data), repoFlag)
 		}
 	}
-	store, err := proposal.Open(repoID)
-	if err != nil {
-		return nil, err
-	}
-	return &proposalCaller{store: store, repoID: repoID, sessionID: data.ID, title: data.Title}, nil
+	return &proposalCaller{sessionID: data.ID}, nil
 }
 
 // requireProposalSession resolves the session for a verb that needs one.
@@ -114,46 +153,36 @@ func optionalProposalSession() (*proposalCaller, error) {
 }
 
 // proposalProject resolves the project by the shared contract: --repo, then
-// the current directory's project.
+// the current directory's project. Against a remote daemon --repo is a path on
+// that host and the current directory names nothing there, so without --repo
+// the calling session gives the project.
 func proposalProject() (*proposalCaller, error) {
-	var repo *config.RepoContext
-	var err error
-	if repoFlag != "" {
-		repo, err = repoFromFlag()
-	} else {
-		repo, err = optionalCurrentRepo()
+	if apiclient.IsRemoteTarget() {
+		if repoFlag != "" {
+			return &proposalCaller{repoPath: repoFlag}, nil
+		}
+		data, found, err := proposalSessionFromFlagOrSelf()
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return callerForSession(data)
+		}
+		return nil, fmt.Errorf("--repo is required with --daemon-url: pass --repo <path on the daemon host at %s>, or run inside an af session", apiclient.RemoteTargetURL())
 	}
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return nil, err
+		}
+		return &proposalCaller{repoID: repo.ID}, nil
+	}
+	repo, err := optionalCurrentRepo()
 	if err != nil {
 		return nil, err
 	}
 	if repo == nil {
 		return nil, errors.New("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project")
 	}
-	store, err := proposal.Open(repo.ID)
-	if err != nil {
-		return nil, err
-	}
-	return &proposalCaller{store: store, repoID: repo.ID}, nil
-}
-
-// sessionTitles maps session IDs of project repoID to titles. Unknown IDs map
-// to themselves, so a stale attachment still shows.
-func sessionTitles(repoID string, ids []string) []string {
-	byID := map[string]string{}
-	if instances, err := loadRepoInstanceData(repoID); err == nil {
-		for _, in := range instances {
-			if in.ID != "" {
-				byID[in.ID] = in.Title
-			}
-		}
-	}
-	titles := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if t, ok := byID[id]; ok {
-			titles = append(titles, t)
-		} else {
-			titles = append(titles, id)
-		}
-	}
-	return titles
+	return &proposalCaller{repoID: repo.ID}, nil
 }

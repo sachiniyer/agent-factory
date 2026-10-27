@@ -105,10 +105,18 @@ func taskPaneWithEnabledTask(t *testing.T) (*home, taskPaneSaveSurface) {
 	pane.SetTasks([]task.Task{{ID: "task-2324", Name: "task", Enabled: true}})
 	pane.SetFocus(true)
 
-	// saveContentPaneState's production reload resolves the current Git repo.
-	// A fresh non-repo directory makes that final read fail deterministically,
-	// after the daemon update seam has reported its independent outcome.
+	// saveContentPaneState's production reload uses the active scope
+	// (m.repoRoot/m.repoID — the same identity the snapshot poll uses), so a
+	// non-git cwd can no longer inject a read failure. Give the home a non-empty
+	// active scope (so LoadTasksForKnownRepo does not short-circuit to nil) and
+	// point the tasks-file resolver at a synthetic error so the reload fails
+	// deterministically, after the daemon update seam reports its own outcome.
+	h.repoRoot = "/test/repo"
+	h.repoID = "test-repo-2324"
 	t.Chdir(t.TempDir())
+	t.Cleanup(task.SetTasksPathFnForTest(func() (string, error) {
+		return "", fmt.Errorf("simulated tasks.json read failure")
+	}))
 	return h, pane
 }
 

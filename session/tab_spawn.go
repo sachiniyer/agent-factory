@@ -650,6 +650,40 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	return tab, nil
 }
 
+// AddDocsTab appends a TabKindDocs tab for proposal slug and returns it. Like a
+// web tab it is metadata only, so the append under the write lock is the whole
+// operation. The name is requestedName when non-empty, otherwise "docs", made
+// unique within the instance. The caller checks that the proposal exists.
+func (i *Instance) AddDocsTab(slug, requestedName string) (*Tab, error) {
+	base := docsTabName
+	if n := sanitizeTabName(requestedName); n != "" {
+		base = n
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+		return nil, spawnErr
+	}
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindDocs); err != nil {
+		return nil, err
+	}
+	if len(i.Tabs) == 0 || i.Tabs[0] == nil || i.Tabs[0].Kind != TabKindAgent {
+		return nil, fmt.Errorf("cannot add a docs tab before the session's agent tab is ready")
+	}
+	tab := newDocsTab(slug)
+	tab.Name = uniqueTabName(i.Tabs, base)
+	for _, t := range i.Tabs {
+		if t != nil && t.Kind == TabKindDocs && t.Proposal == slug {
+			tab.PushMode = t.PushMode
+			break
+		}
+	}
+	i.Tabs = append(i.Tabs, tab)
+	i.touchLocked()
+	return tab, nil
+}
+
 // processTabExitWatch is how long tab-create watches a new process tab's
 // command, once it has started, for a failure at once such as a mistyped name
 // (exit 127). A command still running at the end of it is reported as started.
@@ -700,4 +734,23 @@ func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) err
 		msg += fmt.Sprintf("\n(its finished tmux session %s could not be removed: %v)", ts.SanitizedName(), err)
 	}
 	return fmt.Errorf("failed to start process tab: %s", msg)
+}
+
+// SetDocsTabsPushMode sets the push mode of every docs tab for proposal slug
+// and returns how many tabs it changed or already had that mode.
+func (i *Instance) SetDocsTabsPushMode(slug, mode string) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	n := 0
+	for idx, tab := range i.Tabs {
+		if tab == nil || tab.Kind != TabKindDocs || tab.Proposal != slug {
+			continue
+		}
+		n++
+		if tab.PushMode != mode {
+			i.replaceTabFieldLocked(idx, func(c *Tab) { c.PushMode = mode })
+			i.touchLocked()
+		}
+	}
+	return n
 }
