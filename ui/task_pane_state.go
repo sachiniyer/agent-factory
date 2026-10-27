@@ -137,6 +137,14 @@ func (s *TaskPane) ResetTasks(tasks []task.Task) {
 	s.deleted = nil
 	s.editing = false
 	s.tasks = nil
+	// crossRepoRetargets is project-relative: it names where a save landed out
+	// of the project this pane was showing. A ResetTasks is a project switch
+	// (the pane is reloaded for a different scope), so a retarget the previous
+	// scope raised no longer describes the active project — and if the switch
+	// is to the retarget's destination project, the row re-appears, making the
+	// stale "no longer appears in this project's list" notice wrong. Drop it
+	// with the rest of the held state so the next poll cannot surface it (#1836).
+	s.crossRepoRetargets = nil
 	s.SetTasks(tasks)
 }
 
