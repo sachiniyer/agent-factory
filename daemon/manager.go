@@ -129,21 +129,34 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
-	// skippedRepos names repos whose instances.json was corrupted or unreadable
-	// and dropped at daemon startup (#603, #4783), seeded by restoreInstances and
-	// trimmed by the polling refresh — only once it re-reads a repo successfully
-	// — without ever adding one that fails mid-life. The Snapshot RPC reads it to carry the drop to
-	// clients instead of silently serving a partial list as complete (#730's
-	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
-	// m.mu.
+	// skippedRepos names repos whose instances.json was corrupted/unreadable,
+	// or parsed but whose rows failed to load, and dropped at daemon startup
+	// (#603, #4783, #4998 follow-up), seeded by restoreInstances and trimmed by
+	// the polling refresh — only once it re-reads a repo AND re-materializes its
+	// rows — without ever adding one that fails mid-life. The startup orphan
+	// sweep reads it to defer the destructive docker pass until the
+	// protected-slug set is complete. The Snapshot RPC carries the
+	// corrupted/unreadable drop to clients instead of silently serving a partial
+	// list as complete (#730 extended to the wire surface #1029 PR 2), EXCEPT a
+	// fresh startup rows-failure, which startupRowsFailedRepos withholds. Guarded by m.mu.
 	skippedRepos []SkippedRepo
+	// startupRowsFailedRepos names repos whose instances.json PARSED at startup
+	// but whose rows failed to load. The sweep deferral still arms from
+	// skippedRepos, but the Snapshot RPC withholds these from the wire
+	// SkippedRepos so list/get/whoami serve the loadable rows plus a log warning
+	// instead of refusing — matching master, which never seeded a fresh startup
+	// rows-failure (the refusal names a count, not a session; restore/kill
+	// resolve titles against the in-memory set, which excludes the unloadable
+	// row). A previously-skipped repo is NOT in this set, so its rows-failed
+	// rewrite still surfaces on the wire (see seedStartupRowsFailedRepos).
+	startupRowsFailedRepos map[string]bool
 	// deferredOrphanSweepArmed is set at startup when the orphan-container sweep
 	// was deferred because skippedRepos was non-empty — the daemon's session view
-	// is known-incomplete, so the sweep's protected-slug set cannot distinguish a
-	// skipped repo's live container from a genuine orphan. The poll loop runs the
-	// deferred sweep once the skip set drains to empty (every skipped repo's
-	// instances.json parsed), by which point the protected set is complete again.
-	// Guarded by m.mu.
+	// is known-incomplete (a corrupted/unreadable file OR a parses-but-unloadable
+	// one), so the sweep's protected-slug set cannot distinguish a skipped repo's
+	// live container from a genuine orphan. The poll loop runs the deferred sweep
+	// once the skip set drains to empty, by which point the protected set is
+	// complete again. Guarded by m.mu.
 	deferredOrphanSweepArmed bool
 	// deferredOrphanSweepInFlight tracks whether the deferred orphan sweep
 	// worker is currently running, so the poll loop does not launch a second
@@ -885,11 +898,16 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
-	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
-	// instances.json was corrupted and dropped at startup. A full restart always
-	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
-	// recomputes the set from scratch (#603 closed over the wire).
+	// Seed the startup-time skip set so the startup orphan sweep can defer the
+	// destructive docker pass for repos whose instances.json was
+	// corrupted/unreadable, or parsed but whose rows failed to load (their live
+	// containers are absent from the protected-slug set). The Snapshot RPC
+	// carries the corrupted/unreadable drops but withholds a fresh startup
+	// rows-failure (seedStartupRowsFailedRepos) so list/get/whoami serve the
+	// loadable rows plus a log warning, not a refusal with no working title. A
+	// restart recomputes the set from scratch (#603; #4998 follow-up).
 	m.skippedRepos = skipped
+	m.seedStartupRowsFailedRepos(skipped)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	// Re-park every on_complete obligation the previous generation left durable
 	// on its rows (#4162): the completion edge cannot re-fire, so without this a
