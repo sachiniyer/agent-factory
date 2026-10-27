@@ -42,4 +42,8 @@ func (m *Manager) forgetSessionRuntimeStateLocked(repoID string, instance *sessi
 	// entry orphans exactly like aliveObservations. Clearing on settlement is the
 	// common path; this is the one it cannot reach.
 	delete(m.handoffRetryDue, key)
+	// Same shape again (#5102): a worktree-missing write the poll still owes is
+	// retried from here, and a kill that lands before the retry succeeds would
+	// otherwise leave its entry for the daemon's lifetime.
+	delete(m.worktreeMissingUndurable, key)
 }

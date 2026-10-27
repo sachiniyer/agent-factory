@@ -27,17 +27,18 @@ func TestInjectSystemPrompt_LegacyClaudePath(t *testing.T) {
 	}
 }
 
-// Companion to the Claude case: legacy Codex paths resolve to the codex agent, so
-// they now get the codex FILE seam (skills folder, #1043 retired) — the launch
-// command is left UNCHANGED and no developer_instructions blob is injected.
+// Companion to the Claude case: legacy Codex paths resolve to the codex agent,
+// so they get the codex FILE seam (skills folder, #1043 retired — no
+// developer_instructions blob) plus the startup update check suppression flag
+// every af-owned codex launch carries (#5238).
 func TestInjectSystemPrompt_LegacyCodexPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
 	result := injectSystemPrompt("/usr/local/bin/codex", skillTarget{})
 
-	if result != "/usr/local/bin/codex" {
-		t.Errorf("expected legacy codex path unchanged (file seam), got %q", result)
+	if result != "/usr/local/bin/codex -c check_for_update_on_startup=false" {
+		t.Errorf("expected legacy codex path with the update-check suppression appended, got %q", result)
 	}
 	if strings.Contains(result, "developer_instructions=") {
 		t.Errorf("developer_instructions must no longer be injected, got %q", result)
