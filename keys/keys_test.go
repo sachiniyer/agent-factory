@@ -303,7 +303,7 @@ func TestValidateOverridesErrors(t *testing.T) {
 		wantErr   string
 	}{
 		{"unknown action", map[string][]string{"warp": {"z"}}, "unknown action"},
-		{"empty key list", map[string][]string{"quit": {}}, "no keys"},
+		{"unknown action with empty key list", map[string][]string{"warp": {}}, "unknown action"},
 		{"invalid key string", map[string][]string{"quit": {"space bar"}}, "not a valid key"},
 		{"reserved enter", map[string][]string{"quit": {"enter"}}, "reserved"},
 		{"reserved tab-jump digit", map[string][]string{"quit": {"3"}}, "reserved"},
@@ -334,6 +334,37 @@ func TestValidateOverridesErrors(t *testing.T) {
 	}
 	if err := ValidateOverrides(map[string][]string{"pane_prev": {"h"}, "pane_next": {"l"}}); err != nil {
 		t.Fatalf("pane switch keys may share tree-horizontal keys by context, got: %v", err)
+	}
+
+	// An empty key list for a KNOWN action is the explicit "disable this action"
+	// state: the action is overridden with no keys, so buildMaps suppresses its
+	// defaults and it dispatches on nothing. This is how the loader's dead-shift-rune
+	// warn-and-skip preserves the disabled state of an action whose every binding
+	// was a dead shift+<rune> spec, instead of silently restoring its defaults on
+	// upgrade. An empty list for an UNKNOWN action is still rejected (the unknown
+	// action check fires before the key list is inspected).
+	if err := ValidateOverrides(map[string][]string{"quit": {}}); err != nil {
+		t.Fatalf("an empty key list for a known action must be valid (disable the action), got: %v", err)
+	}
+	built, err := buildMaps(map[string][]string{"quit": {}})
+	if err != nil {
+		t.Fatalf("buildMaps with an empty key list for a known action must not error, got: %v", err)
+	}
+	if _, ok := built.strings["q"]; ok {
+		t.Fatal("the default q must be suppressed when quit is overridden with no keys; the action is disabled")
+	}
+	if binding, ok := built.bindings[KeyQuit]; !ok || len(binding.Keys()) != 0 {
+		t.Fatalf("quit binding must have no keys when overridden with an empty list, got %v", binding)
+	}
+	for _, info := range built.infos {
+		if info.Action == "quit" {
+			if !info.Rebound {
+				t.Fatal("quit must be marked as rebound when overridden with an empty list")
+			}
+			if len(info.Keys) != 0 {
+				t.Fatalf("quit effective keys must be empty when overridden with an empty list, got %v", info.Keys)
+			}
+		}
 	}
 }
 
@@ -393,7 +424,11 @@ func TestNormalizeKeySpec(t *testing.T) {
 			t.Fatalf("normalizeKeySpec(%q) = _, false, want _, true", s)
 		}
 	}
-	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "ctrl+enter", "\t"}
+	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "ctrl+enter", "\t",
+		// shift+<rune> (and its ctrl/alt variants) is unreachable: Bubble Tea's
+		// Key has no Shift field, so Shift+A is emitted as "A", never "shift+a"
+		// (#4040). The named-key emit-ability guard does not cover runes.
+		"shift+a", "ctrl+shift+a", "alt+shift+a", "alt+ctrl+shift+a", "shift+0", "shift+å"}
 	for _, s := range invalid {
 		if _, ok := normalizeKeySpec(s); ok {
 			t.Fatalf("normalizeKeySpec(%q) = _, true, want _, false", s)
@@ -475,6 +510,15 @@ func TestRebindableActionsSortedAndComplete(t *testing.T) {
 			t.Fatalf("action %q must not be rebindable", a)
 		}
 	}
+	// The empty quoted action name is legal TOML but is not a rebindable
+	// action — fixed specs carry configKey == "" — so IsRebindableAction must
+	// read it as unknown. Otherwise discardDeadShiftRuneOverrides treats the
+	// empty name as a known action, deletes its only (dead) binding, and the
+	// malformed entry loads instead of surfacing keys.ValidateOverrides'
+	// unknown-action error.
+	if IsRebindableAction("") {
+		t.Fatal(`IsRebindableAction("") must be false; the empty action name is not rebindable (fixed specs carry configKey == "")`)
+	}
 }
 
 // Audit every named key against real Bubble Tea v1 Key.String values. Alt is
@@ -510,6 +554,130 @@ func TestNamedKeySpecsMatchBubbleTea(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestRuneSpecsMatchBubbleTea is the rune counterpart to TestNamedKeySpecsMatchBubbleTea.
+// It cross-checks every rune×modifier combination against the KeyMsg Bubble Tea's
+// input parser actually emits. The #4040 emit-ability guard in normalizeKeySpec was
+// gated on namedKeys, so shift+<rune> (and its ctrl/alt variants) slipped through and
+// installed bindings under a spelling Bubble Tea cannot emit (Shift+A -> "A", never
+// "shift+a"). This test pins both halves: dead shift combos are rejected, and the
+// reachable combos the fix must preserve still match the live key string.
+func TestRuneSpecsMatchBubbleTea(t *testing.T) {
+	// A representative rune set: lowercase and uppercase letters, a digit, a
+	// symbol, and a multi-byte rune. These are the most common binding targets.
+	runes := []string{"a", "z", "A", "0", "/", "?", "å"}
+
+	shiftModifiers := []string{"shift+", "ctrl+shift+", "alt+shift+", "alt+ctrl+shift+"}
+
+	// 1. Every shift+-prefixed rune spec must be rejected at validation: Bubble
+	//    Tea has no Shift field, so the shifted rune is written verbatim and the
+	//    "shift+" spelling can never appear in a Key.String() for a rune.
+	for _, r := range runes {
+		for _, m := range shiftModifiers {
+			spec := m + r
+			got, ok := normalizeKeySpec(spec)
+			if ok {
+				t.Errorf("normalizeKeySpec(%q) = (%q, true); want (_, false): Bubble Tea cannot emit shift on a plain rune (#4040)", spec, got)
+			}
+			if err := ValidateOverrides(map[string][]string{"new": {spec}}); err == nil {
+				t.Errorf("ValidateOverrides accepted dead binding %q; want a validation error", spec)
+			}
+		}
+	}
+
+	// 2. space is a named key that is remapped to " "/"@" before the rebuild, so
+	//    its shift combos are rejected by the named-key guard (which runs before
+	//    the space special-case). Lock that in so a future change to
+	//    namedKeyModifiersSupported cannot reopen the shift+<space> hole the
+	//    recommended fix flagged.
+	for _, m := range shiftModifiers {
+		spec := m + "space"
+		if got, ok := normalizeKeySpec(spec); ok {
+			t.Errorf("normalizeKeySpec(%q) = (%q, true); want (_, false): shift+space is unreachable (Space has no shift spelling)", spec, got)
+		}
+	}
+
+	// 3. For the canonical letter case, prove each rejected spec really is dead
+	//    by construction: the physically-pressed key emits a different string.
+	dead := []struct {
+		spec string
+		msg  tea.KeyMsg
+	}{
+		{"shift+a", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}}},
+		{"ctrl+shift+a", tea.KeyMsg{Type: tea.KeyCtrlA}},
+		{"alt+shift+a", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}, Alt: true}},
+		{"alt+ctrl+shift+a", tea.KeyMsg{Type: tea.KeyCtrlA, Alt: true}},
+	}
+	for _, c := range dead {
+		emitted := c.msg.String()
+		if emitted == c.spec {
+			t.Fatalf("Bubble Tea emits %q for the keycombo meant by %q; if it ever emits the shift+ spelling the reject policy must be revisited", emitted, c.spec)
+		}
+		if _, ok := normalizeKeySpec(c.spec); ok {
+			t.Fatalf("normalizeKeySpec(%q) accepted; want rejected (dead binding)", c.spec)
+		}
+	}
+
+	// 4. The fix must not over-reject: reachable rune combos Bubble Tea CAN emit
+	//    remain accepted, and their normalized form equals the live key string.
+	//    (ctrl+i / ctrl+m / ctrl+[ are avoided — their control codes map to
+	//    friendly names "tab"/"enter"/"esc", a separate, pre-existing matter.)
+	reachable := []struct {
+		spec string
+		msg  tea.KeyMsg
+	}{
+		{"a", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}},
+		{"alt+x", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}, Alt: true}},
+		{"ctrl+a", tea.KeyMsg{Type: tea.KeyCtrlA}},
+		{"alt+ctrl+a", tea.KeyMsg{Type: tea.KeyCtrlA, Alt: true}},
+		{"å", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'å'}}},
+		{"alt+å", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'å'}, Alt: true}},
+	}
+	for _, c := range reachable {
+		got, ok := normalizeKeySpec(c.spec)
+		if !ok {
+			t.Fatalf("normalizeKeySpec(%q) = _, false; want (_, true): the shift fix must not reject reachable rune combos", c.spec)
+		}
+		if emitted := c.msg.String(); got != emitted {
+			t.Fatalf("normalizeKeySpec(%q) = %q; Bubble Tea emits %q — a reachable binding must match the live key string", c.spec, got, emitted)
+		}
+	}
+}
+
+// TestApplyOverridesRejectsShiftRuneDeadBinding is the end-to-end guard: before
+// the fix, ApplyOverrides({"quit": ["shift+a"]}) returned nil and installed the
+// binding under the unreachable "shift+a" while the live Shift+A key ("A") went
+// unbound. After the fix, the override is rejected at load and nothing is
+// installed — the failure mode PR #4046/#4040 was written to prevent.
+func TestApplyOverridesRejectsShiftRuneDeadBinding(t *testing.T) {
+	resetAfter(t)
+	for _, spec := range []string{"shift+a", "ctrl+shift+a", "alt+shift+a", "alt+ctrl+shift+a"} {
+		if err := ApplyOverrides(map[string][]string{"quit": {spec}}); err == nil {
+			t.Fatalf("ApplyOverrides(quit=%q) must be rejected; got nil", spec)
+		}
+	}
+	// None of the dead spellings may be installed; the live Shift+A key ("A")
+	// must remain free of a quit binding.
+	for _, dead := range []string{"shift+a", "ctrl+shift+a", "alt+shift+a", "alt+ctrl+shift+a"} {
+		if _, bound := GlobalKeyStringsMap[dead]; bound {
+			t.Fatalf("dead binding %q was installed into the dispatch map; expected rejection", dead)
+		}
+	}
+	if _, bound := GlobalKeyStringsMap["A"]; bound {
+		t.Fatalf(`the live Shift+A key "A" must not be bound to quit via a shift+<rune> override`)
+	}
+	// A reachable rune override on the same action still loads and dispatches
+	// on the live key, proving the fix only narrowed the dead path.
+	if err := ApplyOverrides(map[string][]string{"quit": {"Q"}}); err != nil {
+		t.Fatalf("ApplyOverrides(quit=Q) should still succeed: %v", err)
+	}
+	if got := GlobalKeyStringsMap["Q"]; got != KeyQuit {
+		t.Fatalf("Q should dispatch KeyQuit, got %v", got)
+	}
+	if _, still := GlobalKeyStringsMap["q"]; still {
+		t.Fatalf("override replaces the default; q must be unbound")
 	}
 }
 

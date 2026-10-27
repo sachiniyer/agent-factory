@@ -124,7 +124,8 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 	return vscodeAccountScope{
 		account: account,
 		environ: func() ([]string, error) {
-			environ, err := vscodeAccountEnvironment(agent, account)
+			environ, err := vscodeAccountEnvironment(
+				agent, account, session.SessionEnvPassthroughForInstance(instance))
 			if err != nil {
 				// Both wrapped: the sentinel is what the pane renderer matches on, and
 				// the cause is what tells the operator which command to run. The tab
@@ -139,6 +140,18 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 // vscodeAccountEnvironment injects the account's credential root and subtracts
 // every other identity-bearing name — the same two halves ApplyAccount performs
 // for the agent pane, through the environment-only door a sibling pane uses.
+//
+// The BASE is the pane's default-deny allowlist, not the daemon's whole
+// environment. ApplyAccountEnvironment's contract scopes an ALREADY-FILTERED
+// environment: its subtraction covers only the SELECTED agent's names, so fed
+// the unfiltered vscodeChildEnv it left every other agent's ambient credentials
+// in place — an OPENAI_API_KEY the daemon inherited reached a claude-scoped
+// editor, its extension host, and every integrated terminal (#4311).
+// FilterForCommand is the allowlist the pane itself runs; extras is the
+// session's merged session_env_passthrough so the operator's declared names
+// behave here exactly as they do in the pane. vscodeChildEnv still runs FIRST:
+// the tmux ancestry markers it removes (AF_SESSION/AF_HOME/AF_SESSION_GEN) are
+// allowlist names the filter would otherwise keep.
 //
 // The COMMAND is empty, and that is a statement of fact rather than a skipped
 // check. ValidateAccountEnvironmentCommand exists because a sibling pane's
@@ -155,7 +168,7 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 // code into an integrated terminal. That closes the half of the terminal problem
 // af controls. The other half — a startup file already on disk — is the one the
 // file comment above says af cannot prove.
-func vscodeAccountEnvironment(agent, account string) ([]string, error) {
+func vscodeAccountEnvironment(agent, account string, extras []string) ([]string, error) {
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("locate registered accounts: %w", err)
@@ -170,7 +183,8 @@ func vscodeAccountEnvironment(agent, account string) ([]string, error) {
 	if strings.TrimSpace(scope.Dir) == "" {
 		return nil, fmt.Errorf("account %q for %s resolved to no credential directory", account, agent)
 	}
-	return sessionenv.ApplyAccountEnvironment(vscodeChildEnv(), "", scope)
+	filtered := sessionenv.FilterForCommand(vscodeChildEnv(), agent, "", extras)
+	return sessionenv.ApplyAccountEnvironment(filtered, "", scope)
 }
 
 // vscodeChildEnv builds the editor's environment from the daemon's, with the tmux
@@ -212,10 +226,14 @@ func vscodeAccountEnvironment(agent, account string) ([]string, error) {
 // silently change how that agent behaves, or try to exec a program literally
 // named "true" as the operator's browser. A tmux pane is already protected from
 // this by sessionenv's subtractive, default-deny allowlist, which passes neither
-// name unless the operator lists it in session_env_passthrough. The editor's
-// environment never goes through that allowlist — it is the daemon's own
-// environ minus this list — so for the editor the same property has to be
-// written down rather than inherited.
+// name unless the operator lists it in session_env_passthrough. An
+// account-scoped editor now goes through the same allowlist before the account
+// is applied (vscodeAccountEnvironment, #4311) — and this scrub still runs
+// ahead of the filter, because the tmux ancestry markers are allowlist names it
+// would otherwise keep. The UNSCOPED editor's environment is still the daemon's
+// own environ minus this list and never sees the allowlist — by design, since
+// no credential boundary has been claimed for it — so for it the property has
+// to be written down rather than inherited.
 //
 // Only what breaks the spawn is scrubbed. The git-askpass family
 // (VSCODE_GIT_ASKPASS_*, VSCODE_GIT_IPC_HANDLE, GIT_ASKPASS) also inherits stale
