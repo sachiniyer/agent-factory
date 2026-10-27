@@ -122,11 +122,10 @@ that are not committed come only from agents.
 
 ## Transport
 
-- **Step 1** reads and writes the local disk directly, in the same way that
-  other `config`-backed commands do. With `--daemon-url`, a command fails
-  with an error that says remote daemons are not supported yet.
-- **Step 2** adds daemon HTTP routes. The Docs tab and remote CLIs use them.
-  The CLI moves to these routes, and the disk code moves into the daemon.
+- **Step 1** read and wrote the local disk directly.
+- **Step 2** moves the store behind daemon HTTP routes (see `api.md`). The CLI
+  and the Docs tab both use them, so `--daemon-url` works. The daemon is the
+  only process that writes the store.
 
 ## Three-way merge (step 2)
 
@@ -141,10 +140,19 @@ If `HEAD` changed that file since that commit, the daemon runs
 
 ## File watching (step 2)
 
-The daemon watches each open proposal with fsnotify. When an agent writes a
-file, the daemon sends a `proposal.changed` event on the existing events
-WebSocket, so open tabs reload clean buffers immediately. For a buffer that has
-edits, the tab merges on its next save.
+The daemon checks the watched proposals in its existing poll loop. A proposal
+is watched when a session is attached to it or has a Docs tab for it. For each
+watched proposal, the daemon reads the folder and compares the mtime and size
+of each doc with the last values it saw. A change publishes a
+`proposal.changed` event on the existing events WebSocket, so open tabs reload
+clean buffers immediately. For a buffer that has edits, the tab merges on its
+next save.
+
+- This uses no new dependency. A stat of a few files on each tick costs less
+  than fsnotify, which needs a watch for each folder and its own goroutine.
+- The check does not commit. The next read, save, `changes` or `checkpoint`
+  snapshots the change as before.
+- The list of attachments is read again only when the attach refs change.
 
 ## Push (step 3)
 

@@ -61,7 +61,7 @@ func TestSymlinkedSlugIsNotWrittenThrough(t *testing.T) {
 	if _, _, err := s.Write("evil", "readme", "pwned\n", agent(sessA)); err == nil {
 		t.Fatal("Write succeeded through a symlinked slug")
 	}
-	if _, err := s.AddDoc("evil", "notes", agent(sessA)); err == nil {
+	if _, _, err := s.AddDoc("evil", "notes", agent(sessA)); err == nil {
 		t.Fatal("AddDoc succeeded through a symlinked slug")
 	}
 	if data, _ := os.ReadFile(readme); string(data) != "orig\n" {
