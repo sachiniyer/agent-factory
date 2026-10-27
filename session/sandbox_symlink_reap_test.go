@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,8 +87,8 @@ func pidAlive(pid int) bool {
 // a REAL symlink on the local filesystem so the POSIX `pwd -P` mechanism is
 // exercised rather than asserted.
 func TestResolveSessionDirSymlinksResolvesASymlinkedPath(t *testing.T) {
-	realRoot := t.TempDir()
-	linkRoot := filepath.Join(t.TempDir(), "linked-home")
+	realRoot := testguard.CanonicalTempDir(t)
+	linkRoot := filepath.Join(testguard.CanonicalTempDir(t), "linked-home")
 	require.NoError(t, os.Symlink(realRoot, linkRoot))
 	sessionDir := filepath.Join(linkRoot, ".af-sessions", "abc")
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
@@ -107,7 +108,7 @@ func TestResolveSessionDirSymlinksResolvesASymlinkedPath(t *testing.T) {
 // A non-symlinked path resolves to itself, so the resolution is a no-op for the
 // common case (including the CI sshd image, whose /root is a real directory).
 func TestResolveSessionDirSymlinksIsANoOpOnARealPath(t *testing.T) {
-	sessionDir := t.TempDir()
+	sessionDir := testguard.CanonicalTempDir(t)
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
 
 	p := &sandboxProvisioner{runCommandFn: localRunCommandFn()}
@@ -147,7 +148,7 @@ func TestResolveSessionDirSymlinksLeavesPathUnchangedOnEmptyOutput(t *testing.T)
 // fix produces), the identity-kill script signals the running process whose argv[0]
 // was set by os.Executable() to that same resolved path.
 func TestRemotePIDIdentityKillScriptMatchesResolvedArgvZeroAndKills(t *testing.T) {
-	resolvedAfPath := filepath.Join(t.TempDir(), "session", "af")
+	resolvedAfPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
 	require.NoError(t, os.MkdirAll(filepath.Dir(resolvedAfPath), 0o755))
 
 	proc := startAgentServerLikeProcess(t, resolvedAfPath)
@@ -169,12 +170,12 @@ func TestRemotePIDIdentityKillScriptMatchesResolvedArgvZeroAndKills(t *testing.T
 // survives — the mismatch that orphaned the agent-server. The kill subshell exits 0
 // (the "PID is now someone else's" branch) without ever signalling the process.
 func TestRemotePIDIdentityKillScriptMismatchOnUnresolvedArgvZeroSkipsKill(t *testing.T) {
-	realRoot := t.TempDir()
+	realRoot := testguard.CanonicalTempDir(t)
 	resolvedAfPath := filepath.Join(realRoot, "session", "af")
 	require.NoError(t, os.MkdirAll(filepath.Dir(resolvedAfPath), 0o755))
 	// A symlinked spelling of the same path: what mktemp would have printed and what
 	// the buggy reaper used as `expected`.
-	linkRoot := filepath.Join(t.TempDir(), "linked-home")
+	linkRoot := filepath.Join(testguard.CanonicalTempDir(t), "linked-home")
 	require.NoError(t, os.Symlink(realRoot, linkRoot))
 	unresolvedAfPath := filepath.Join(linkRoot, "session", "af")
 
@@ -200,7 +201,7 @@ func TestRemotePIDIdentityKillScriptMismatchOnUnresolvedArgvZeroSkipsKill(t *tes
 // the directory, and prints the sentinel — against a live process whose argv[0]
 // is the resolved path. This is the end-to-end proof the fix is wired.
 func TestSandboxReapScriptKillsAndRemovesUsingResolvedSessionDir(t *testing.T) {
-	resolvedDir := t.TempDir()
+	resolvedDir := testguard.CanonicalTempDir(t)
 	resolvedAfPath := filepath.Join(resolvedDir, "af")
 	require.NoError(t, os.WriteFile(resolvedAfPath, []byte("dummy"), 0o755))
 
@@ -230,14 +231,14 @@ func TestSandboxReapScriptKillsAndRemovesUsingResolvedSessionDir(t *testing.T) {
 // sentinel (so reap would latch success) while the agent-server process stays alive —
 // the orphan. This test documents the pre-fix behavior the fix eliminates.
 func TestSandboxReapScriptWithUnresolvedSessionDirOrphansTheProcess(t *testing.T) {
-	realRoot := t.TempDir()
+	realRoot := testguard.CanonicalTempDir(t)
 	resolvedDir := filepath.Join(realRoot, ".af-sessions", "s")
 	require.NoError(t, os.MkdirAll(resolvedDir, 0o755))
 	resolvedAfPath := filepath.Join(resolvedDir, "af")
 	require.NoError(t, os.WriteFile(resolvedAfPath, []byte("dummy"), 0o755))
 	// The symlink spelling — what mktemp printed before the fix and what the buggy
 	// reaper persisted as `expected`.
-	linkRoot := filepath.Join(t.TempDir(), "linked-home")
+	linkRoot := filepath.Join(testguard.CanonicalTempDir(t), "linked-home")
 	require.NoError(t, os.Symlink(realRoot, linkRoot))
 	unresolvedDir := filepath.Join(linkRoot, ".af-sessions", "s")
 
