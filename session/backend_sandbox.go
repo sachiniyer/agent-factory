@@ -276,8 +276,18 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 // buildRunCommand composes the child. Split out so the WaitDelay rule below is
 // exercised by a test against the real constructor rather than a restatement of
 // it.
+// remoteShScript wraps a provisioning or reap script as an explicit POSIX
+// `sh -c` invocation. ssh hands its command argument to the remote account's
+// LOGIN shell, so a bare script is parsed by fish or csh when that is what the
+// account uses — and every `&&`, `$(...)`, `$!` and `mktemp -d "$HOME/..."` in
+// these scripts is POSIX. The wrapper is a single-quoted word, which fish and
+// POSIX shells both read the same way (#5571 W2.9).
+func remoteShScript(script string) string {
+	return "sh -c " + shellQuote(script)
+}
+
 func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string, stdin io.Reader) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", script)
+	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", remoteShScript(script))
 	cmd.Stdin = stdin
 	// Its own process group, so the deadline tears down the whole tree rather
 	// than the `sh` alone. exec.CommandContext's default Cancel kills only the
