@@ -268,8 +268,16 @@ func killTunnel(t *tunnelChild) {
 		return
 	}
 	if t.cmd != nil && t.cmd.Process != nil {
-		if err := syscall.Kill(-t.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			_ = t.cmd.Process.Kill()
+		select {
+		case <-t.done:
+			// The reaper already Wait()ed this generation: its PID is released
+			// and may now belong to an unrelated process. Signalling the group
+			// number anyway could SIGKILL a stranger, so a reaped child is
+			// joined, never signalled.
+		default:
+			if err := syscall.Kill(-t.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				_ = t.cmd.Process.Kill()
+			}
 		}
 		select {
 		case <-t.done:

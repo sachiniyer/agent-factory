@@ -498,12 +498,13 @@ func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.
 			c.reseedRemoteSeqLocked(conn, msg.Frame.Seq)
 			c.mu.Unlock()
 		case agentproto.OpPTYOut:
-			if _, werr := pw.Write(msg.Frame.Data); werr != nil {
+			n, werr := pw.Write(msg.Frame.Data)
+			c.mu.Lock()
+			c.advanceRemoteSeqLocked(conn, uint64(n))
+			c.mu.Unlock()
+			if werr != nil {
 				return
 			}
-			c.mu.Lock()
-			c.advanceRemoteSeqLocked(conn, uint64(len(msg.Frame.Data)))
-			c.mu.Unlock()
 		}
 	}
 }
@@ -535,6 +536,16 @@ func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, d
 		c.remoteSeq += delta
 	}
 }
+
+// ReplaysHistory reports that this channel's captures restore contiguous
+// retained output on every re-dial (?since=remoteSeq, which the remote clamps
+// to its retained base). A restarted capture therefore re-delivers the missing
+// window as ordinary bytes, so a subscriber whose ring cursor still covers that
+// window needs no recovery repaint — the repaint's screen already reflects the
+// replayed output and would be followed by the same bytes again (#5571 W1.2).
+// The tmux channel has no replay: its respawns produce a fresh pane and the
+// repaint is every subscriber's re-baseline.
+func (c *remoteClientlessChannel) ReplaysHistory() bool { return true }
 
 // StopCapture cancels the read loop and closes the WS, so the broker's read side
 // (the pipe) returns EOF. Idempotent.

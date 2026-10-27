@@ -419,8 +419,19 @@ func (b *ptyBroker) redialLoop() {
 // subscriber re-read that state.
 func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot) {
 	b.mu.Lock()
+	// A replay-capable channel (remote ?since) re-delivers the outage window as
+	// ordinary ring bytes, so a subscriber whose cursor still sits inside the
+	// ring consumes that history as PTYData — installing the repaint would show
+	// the screen those very bytes already produced and then replay them on top
+	// of it. Only a subscriber evicted behind the discard's new base still
+	// needs the repaint: it can never see the replayed window. On a fresh-pane
+	// channel (tmux respawn) nothing replays, so the repaint stays universal.
+	replays := false
+	if rc, ok := b.ch.(interface{ ReplaysHistory() bool }); ok {
+		replays = rc.ReplaysHistory()
+	}
 	for _, s := range armed {
-		if rp != nil && len(rp.data) > 0 {
+		if rp != nil && len(rp.data) > 0 && !(replays && s.cursor >= b.base) {
 			s.pendingRepaint = rp
 		}
 		s.repaintArmed = false
