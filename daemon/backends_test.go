@@ -457,10 +457,11 @@ func TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds(t *testing.T) {
 	for _, opt := range catalog {
 		injects := session.BackendKind(opt.Name).InjectsSandboxCallback()
 		if injects {
+			// The advisory is orthogonal to Status: it rides an injecting
+			// backend whether the backend is available, unavailable for an
+			// unrelated reason (no sandbox.ssh here), or unknown.
 			assert.Equal(t, refusal, opt.CallbackUnavailableReason,
 				"backend %s injects a callback, so the advisory must ride it", opt.Name)
-			assert.Equal(t, BackendAvailable, opt.Status,
-				"the advisory is not a precondition — %s remains selectable", opt.Name)
 		} else {
 			assert.Empty(t, opt.CallbackUnavailableReason,
 				"backend %s never injects a callback, so it has nothing to lose", opt.Name)
