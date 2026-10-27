@@ -90,7 +90,7 @@ func TestDetectAgentFromCommand(t *testing.T) {
 //
 // Scope: this is NOT a universal invariant. DetectAgentExecutable and
 // AgentNamespaceForCommand are independent implementations — the gate parses with
-// its own splitShellTokens and resolves the executable via baseCommand, the
+// its own SplitShellTokens and resolves the executable via baseCommand, the
 // namespace surface parses with mvdan.cc/sh and filepath.Base — and they diverge
 // on spellings outside this corpus (e.g. "codex >output", "codex 2>/dev/null",
 // "codex --model $MODEL", and "env env codex" all classify as codex at the gate

@@ -62,6 +62,35 @@ type bannerJSON struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command the host resolved and bound (#5571 W2.1). Older
+	// agent-servers omit it; callers fall back to the wire program.
+	Program string `json:"program,omitempty"`
+}
+
+// remoteProcAlive / remoteProcDead / remoteProcStarting are the liveness lines
+// a banner poll appends after the banner read, so one remote exec answers both
+// "has the banner arrived" and "is the process that writes it still alive"
+// (#5571 W2.1). "starting" covers the window before a pidfile exists.
+const (
+	remoteProcAlive    = "__af_proc_alive__"
+	remoteProcDead     = "__af_proc_dead__"
+	remoteProcStarting = "__af_proc_starting__"
+)
+
+// splitRemoteLiveness strips the trailing liveness marker a banner-poll script
+// appends, returning the banner text and the marker ("" when none arrived).
+// The marker is always the last line; anything above it is the cat output.
+func splitRemoteLiveness(out string) (body, liveness string) {
+	text := strings.TrimRight(out, "\n")
+	for _, marker := range []string{remoteProcAlive, remoteProcDead, remoteProcStarting} {
+		if idx := strings.LastIndex(text, "\n"+marker); idx >= 0 && idx+len(marker)+1 == len(text) {
+			return text[:idx], marker
+		}
+		if text == marker {
+			return "", marker
+		}
+	}
+	return text, ""
 }
 
 // makeSessionDir creates a fresh per-session dir under the remote home with
@@ -242,15 +271,34 @@ func (w *sandboxWorkspace) agentName() string {
 // listener and printed its {addr,token} JSON line, or times out — pulling the
 // agent-server's stderr log into the error on timeout so a start failure is
 // self-diagnosing.
+//
+// Each poll is ONE remote command that also probes the spawned process with
+// kill -0 (#5571 W2.1): an agent-server that exited — a program the host's
+// login PATH does not have, a crashed start — fails create in seconds instead
+// of outliving the banner timeout. The spawned process's parent exited at
+// spawn, so a dead agent-server is reaped by init and kill -0 answers ESRCH —
+// no zombie can masquerade as alive.
 func (w *sandboxWorkspace) readBanner(pollTimeout, pollInterval, stepTimeout time.Duration) (bannerJSON, error) {
 	deadline := time.Now().Add(pollTimeout)
+	poll := "cat " + shellQuote(w.BannerPath()) + " 2>/dev/null"
+	if w.RemotePID != "" {
+		// RemotePID is a positivePID-validated number — the only value ever
+		// interpolated into the script.
+		poll += fmt.Sprintf("; kill -0 %s 2>/dev/null && echo %s || echo %s", w.RemotePID, remoteProcAlive, remoteProcDead)
+	}
 	for {
-		out, err := w.shell.Run(stepTimeout, "cat "+shellQuote(w.BannerPath()), nil, false)
+		out, err := w.shell.Run(stepTimeout, poll, nil, false)
+		body, liveness := splitRemoteLiveness(string(out))
 		if err == nil {
 			var b bannerJSON
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
+			if jErr := json.Unmarshal([]byte(strings.TrimSpace(body)), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		}
+		if liveness == remoteProcDead {
+			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)
+			return bannerJSON{}, fmt.Errorf("af agent-server (pid %s) exited before reporting a startup banner; remote log:\n%s",
+				w.RemotePID, strings.TrimSpace(string(logOut)))
 		}
 		if time.Now().After(deadline) {
 			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)

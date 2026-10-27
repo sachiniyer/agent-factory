@@ -53,7 +53,7 @@ import (
 // prior session exists or are left unchanged when af cannot identify a safe
 // provider resume command.
 func resumeProgram(program string) string {
-	tokens, ends := splitShellTokens(program)
+	tokens, ends := SplitShellTokens(program)
 	agentIdx, agent := findAgentToken(tokens)
 	if agentIdx < 0 {
 		return program
@@ -236,7 +236,7 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 	if id == "" {
 		return program, false
 	}
-	tokens, ends := splitShellTokens(program)
+	tokens, ends := SplitShellTokens(program)
 	agentIdx, agent := findAgentToken(tokens)
 	if agentIdx < 0 || agent == "" || recordedAgent != agent {
 		return program, false
@@ -277,7 +277,7 @@ func ClaudeProgramWithSessionID(program, sessionID string) (string, bool) {
 	if strings.TrimSpace(sessionID) == "" {
 		return program, false
 	}
-	tokens, _ := splitShellTokens(program)
+	tokens, _ := SplitShellTokens(program)
 	agentIdx, agent := findAgentToken(tokens)
 	if agent != ProgramClaude {
 		return program, false
@@ -295,7 +295,7 @@ func ClaudeProgramWithSessionID(program, sessionID string) (string, bool) {
 // unrelated conversation. The returned words are suitable for a refusal that
 // names exactly what the operator must remove.
 func ConversationSelectorArgs(program string) []string {
-	tokens, _ := splitShellTokens(program)
+	tokens, _ := SplitShellTokens(program)
 	agentIdx, agent := findAgentToken(tokens)
 	if agentIdx < 0 {
 		return nil
@@ -475,7 +475,7 @@ func claudeConversationSelectorArgs(args []string) []string {
 // only when filepath.Base equals a SupportedPrograms entry verbatim — a path
 // like /opt/claude-wrapper/run never matches on substring.
 func DetectAgentFromCommand(command string) string {
-	tokens, _ := splitShellTokens(command)
+	tokens, _ := SplitShellTokens(command)
 	_, agent := findAgentToken(tokens)
 	return agent
 }
@@ -492,7 +492,7 @@ func DetectAgentFromCommand(command string) string {
 // like "/opt/claude --model opus" and "CLAUDE_CONFIG_DIR=… claude" are still
 // accepted.
 func DetectAgentExecutable(command string) string {
-	tokens, _ := splitShellTokens(command)
+	tokens, _ := SplitShellTokens(command)
 	for i := 0; i < len(tokens); {
 		tok := tokens[i]
 		if _, _, assignment := shellAssignment(tok); assignment {
@@ -693,7 +693,7 @@ func isShortResumeWithAttachedValue(tok string) bool {
 	return strings.HasPrefix(tok, "-r") && len(tok) > 2 && tok[2] != '='
 }
 
-// splitShellTokens tokenizes a shell-style command string, respecting single
+// SplitShellTokens tokenizes a shell-style command string, respecting single
 // quotes (no escapes), double quotes (with \" and \\ escapes), and backslash
 // escapes outside quotes. Adjacent runs concatenate into a single token (e.g.
 // 'foo'bar -> "foobar"). Unclosed quotes consume to end of input.
@@ -703,7 +703,7 @@ func isShortResumeWithAttachedValue(tok string) bool {
 // rewrite uses these offsets to splice text into the original string
 // without round-tripping through a join step that would defensively quote
 // shell metacharacters (#640).
-func splitShellTokens(s string) (tokens []string, ends []int) {
+func SplitShellTokens(s string) (tokens []string, ends []int) {
 	var cur strings.Builder
 	inToken := false
 	i := 0

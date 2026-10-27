@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -101,8 +102,10 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
-			if len(args) >= 4 && args[2] == "cat" && args[3] == dockerBannerPath {
-				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}`), nil
+			// readBanner polls via `sh -c 'cat <banner>; kill -0 <pid> && …'` —
+			// the banner JSON plus the alive marker is a live server's answer.
+			if joined := strings.Join(args, " "); strings.Contains(joined, "cat "+dockerBannerPath) {
+				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}` + "\n" + remoteProcAlive + "\n"), nil
 			}
 			return nil, nil
 		default:

@@ -81,6 +81,10 @@ const (
 	// runtime polls the file for it because `docker exec -d` detaches the process.
 	dockerBannerPath = "/tmp/af-agent-server.json"
 	dockerLogPath    = "/tmp/af-agent-server.log"
+	// dockerPidPath captures the agent-server's in-container PID, written by
+	// the startAgentServer wrapper so readBanner can tell "still starting"
+	// from "died before printing the banner" (#5571 W2.1).
+	dockerPidPath = "/tmp/af-agent-server.pid"
 	// dockerSessionLabel tags every managed container so orphans can be swept with
 	// `docker ps -aq -f label=af.session` (documented in docs/backends.md). The
 	// runtime reaps by container ID; the label is for operators.
@@ -177,6 +181,8 @@ type dockerBanner struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command the host resolved and bound (#5571 W2.1).
+	Program string `json:"program,omitempty"`
 }
 
 // dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Declared
@@ -260,7 +266,12 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		image:   image,
 		runArgs: runArgs,
 		afBin:   afBin,
-		program: resolvedProgram,
+		// The wire program is the configured name and flags — never af's
+		// auto-detected daemon path, which the container's filesystem does
+		// not have. The in-container agent-server resolves it on the host's
+		// login PATH (#5571). resolvedProgram stays host-side: it is the
+		// value the account boundary above validated.
+		program: remoteProgramForHost(cfg, spec.Program),
 		homeID:  homeID,
 	}
 	// docker_mount_agent_credentials is a GLOBAL-only operator grant (config.Config,
@@ -333,6 +344,10 @@ type dockerProvisioner struct {
 	credentialMounts []string
 	afBin            string
 	program          string
+	// hostProgram is the program the container actually resolved and bound,
+	// reported back in the startup banner (#5571 W2.1). Empty until the banner
+	// arrives; remoteAgentBackend falls back to the wire program without it.
+	hostProgram string
 	// homeID is the AF home (config.GetConfigDir()) stamped into the af.home
 	// container label so the orphan sweeper can scope to this daemon's home
 	// (#2194). Empty when the home cannot be resolved — the label is then omitted
@@ -411,6 +426,13 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, err
 	}
+	// The banner's program is the command the HOST resolved and bound — the
+	// true runtime evidence (#5108); the wire value is only its pre-resolution
+	// form, kept as the fallback for a banner from an older agent-server.
+	p.hostProgram = banner.Program
+	if p.hostProgram == "" {
+		p.hostProgram = p.program
+	}
 	hostPort, err := p.publishedPort()
 	if err != nil {
 		return ProvisionResult{}, err
@@ -425,9 +447,10 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	return ProvisionResult{
 		Backend: &dockerBackend{
 			// The command the in-container agent-server was bound to launch
-			// (#5108) — recorded as runtime evidence when the launch RPC
+			// (#5108) — the host-resolved value reported back in the banner
+			// (#5571 W2.1) — recorded as runtime evidence when the launch RPC
 			// returns.
-			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
 			containerID:        p.containerID,
 			provisioner:        p,
 			cleanup: &DockerRuntimeCleanupData{
@@ -676,6 +699,11 @@ func (p *dockerProvisioner) startAgentServer() error {
 		return err
 	}
 	filteredInner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
+	// Record the server's in-container PID so readBanner can distinguish a slow
+	// start from a dead one (#5571 W2.1). The trailing `wait` keeps this exec's
+	// sh alive as the server's parent, so an exited server is reaped immediately
+	// — a zombie would keep answering kill -0 and read alive forever.
+	filteredInner = fmt.Sprintf("{ %s & echo $! >%s; wait; }", filteredInner, dockerPidPath)
 
 	// -d: detach. The agent-server keeps running in the container after this exec
 	// client returns; we read its banner from the file below.
@@ -722,16 +750,34 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 // whose real cause is a permission denied on the banner file.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	deadline := time.Now().Add(dockerBannerPollTimeout)
+	// One exec per poll: cat the banner, then report the server's liveness so a
+	// process that died before printing its banner fails fast rather than
+	// outwaiting the timeout (#5571 W2.1). A missing pidfile is still
+	// "starting" — startAgentServer writes it in the same instant as the spawn,
+	// and the first poll can legitimately outrun it.
+	pollScript := fmt.Sprintf(
+		"cat %s 2>/dev/null; if [ -f %s ]; then kill -0 \"$(cat %s)\" 2>/dev/null && echo %s || echo %s; else echo %s; fi",
+		dockerBannerPath, dockerPidPath, dockerPidPath,
+		remoteProcAlive, remoteProcDead, remoteProcStarting)
 	for {
 		args := []string{"exec"}
 		args = append(args, p.sessionExecOptions()...)
-		args = append(args, p.containerID, "cat", dockerBannerPath)
+		args = append(args, p.containerID, "sh", "-c", pollScript)
 		out, err := p.docker(dockerShortStepTimeout, args...)
+		body, liveness := splitRemoteLiveness(string(out))
 		if err == nil {
 			var b dockerBanner
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
+			if jErr := json.Unmarshal([]byte(strings.TrimSpace(body)), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		}
+		if liveness == remoteProcDead {
+			logArgs := []string{"exec"}
+			logArgs = append(logArgs, p.sessionExecOptions()...)
+			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
+			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
+			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server exited before reporting a startup banner; container log:\n%s",
+				strings.TrimSpace(string(logOut)))
 		}
 		if time.Now().After(deadline) {
 			logArgs := []string{"exec"}
