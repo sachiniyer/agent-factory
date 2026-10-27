@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -24,8 +25,8 @@ import (
 //	host = "box1.tailnet.ts.net"
 //	user = "dev"
 //	port = 2222
-//	identity_file = "~/.ssh/af_box1"
-//	workspace_root = "~/af-work"
+//	identity_file = "/home/dev/.ssh/af_box1"
+//	workspace_root = "/home/dev/af-work"
 type HostConfig struct {
 	// Host is the ssh destination: a hostname, tailnet name or IP address. It is
 	// required. It never carries a user or port — those are the fields below — and
@@ -43,10 +44,10 @@ type HostConfig struct {
 	WorkspaceRoot string `json:"workspace_root,omitempty" toml:"workspace_root,omitempty"`
 }
 
-const maxHostNameLen = 63
+const maxHostNameLen = 62 // after the first character
 
 var (
-	hostNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+	hostNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	// Hostnames, tailnet names, IPv4 and bracket-free IPv6 literals.
 	hostAddrRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 	sshUserRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
@@ -57,8 +58,8 @@ func ValidateHostName(name string) error {
 	if name == "" {
 		return fmt.Errorf("host name must not be empty")
 	}
-	if len(name) > maxHostNameLen || !hostNameRE.MatchString(name) {
-		return fmt.Errorf("host name %q must be 1-%d characters of letters, digits, '_' or '-', starting with a letter or digit", name, maxHostNameLen)
+	if !hostNameRE.MatchString(name) {
+		return fmt.Errorf("host name %q must be 1-%d characters of lowercase letters, digits or '-', starting with a letter or digit", name, maxHostNameLen+1)
 	}
 	return nil
 }
@@ -83,11 +84,14 @@ func ValidateHostEntry(name string, entry HostConfig) error {
 		return fmt.Errorf("hosts.%s.port must be between 1 and 65535 (or omitted for 22), got %d", name, entry.Port)
 	}
 	for field, v := range map[string]string{"identity_file": entry.IdentityFile, "workspace_root": entry.WorkspaceRoot} {
-		if strings.ContainsAny(v, "\x00\r\n") {
+		if v == "" {
+			continue
+		}
+		if strings.ContainsFunc(v, unicode.IsControl) {
 			return fmt.Errorf("hosts.%s.%s must not contain control characters", name, field)
 		}
-		if strings.HasPrefix(v, "-") {
-			return fmt.Errorf("hosts.%s.%s %q must not start with '-'", name, field, v)
+		if !strings.HasPrefix(v, "/") {
+			return fmt.Errorf("hosts.%s.%s %q must be an absolute path (starting with '/'; '~' is not expanded)", name, field, v)
 		}
 	}
 	return nil

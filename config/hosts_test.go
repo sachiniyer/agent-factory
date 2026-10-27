@@ -9,28 +9,38 @@ import (
 )
 
 func TestValidateHostEntry(t *testing.T) {
-	ok := HostConfig{Host: "box1.tailnet.ts.net", User: "dev", Port: 2222, IdentityFile: "~/.ssh/k", WorkspaceRoot: "~/w"}
+	ok := HostConfig{Host: "box1.tailnet.ts.net", User: "dev", Port: 2222, IdentityFile: "/home/dev/.ssh/k", WorkspaceRoot: "/srv/w"}
 	require.NoError(t, ValidateHostEntry("box1", ok))
-	require.NoError(t, ValidateHostEntry("b_2-x", HostConfig{Host: "10.0.0.1"}))
+	require.NoError(t, ValidateHostEntry("b-2x", HostConfig{Host: "10.0.0.1"}))
 
 	bad := map[string]struct {
 		name  string
 		entry HostConfig
 		want  string
 	}{
-		"empty name":    {"", HostConfig{Host: "h"}, "must not be empty"},
-		"dotted name":   {"a.b", HostConfig{Host: "h"}, "host name"},
-		"dash name":     {"-x", HostConfig{Host: "h"}, "host name"},
-		"missing host":  {"a", HostConfig{}, "host is required"},
-		"option host":   {"a", HostConfig{Host: "-oProxyCommand=x"}, "hostname or IP"},
-		"user@ host":    {"a", HostConfig{Host: "me@h"}, "hostname or IP"},
-		"space host":    {"a", HostConfig{Host: "h h"}, "hostname or IP"},
-		"option user":   {"a", HostConfig{Host: "h", User: "-l"}, "login name"},
-		"port range":    {"a", HostConfig{Host: "h", Port: 70000}, "port"},
-		"negative port": {"a", HostConfig{Host: "h", Port: -1}, "port"},
-		"dash identity": {"a", HostConfig{Host: "h", IdentityFile: "-i"}, "'-'"},
-		"newline root":  {"a", HostConfig{Host: "h", WorkspaceRoot: "x\ny"}, "control"},
-		"too long name": {strings.Repeat("a", 64), HostConfig{Host: "h"}, "host name"},
+		"upper name":      {"Box", HostConfig{Host: "h"}, "host name"},
+		"underscore name": {"a_b", HostConfig{Host: "h"}, "host name"},
+		"tab host":        {"a", HostConfig{Host: "h\tx"}, "hostname or IP"},
+		"space user":      {"a", HostConfig{Host: "h", User: "a b"}, "login name"},
+		"ctl user":        {"a", HostConfig{Host: "h", User: "a\x01"}, "login name"},
+		"rel identity":    {"a", HostConfig{Host: "h", IdentityFile: "k"}, "absolute"},
+		"tilde identity":  {"a", HostConfig{Host: "h", IdentityFile: "~/k"}, "absolute"},
+		"rel root":        {"a", HostConfig{Host: "h", WorkspaceRoot: "w"}, "absolute"},
+		"ctl identity":    {"a", HostConfig{Host: "h", IdentityFile: "/k\x07"}, "control"},
+		"proxy host":      {"a", HostConfig{Host: "-oProxyCommand=touch /tmp/x"}, "hostname or IP"},
+		"empty name":      {"", HostConfig{Host: "h"}, "must not be empty"},
+		"dotted name":     {"a.b", HostConfig{Host: "h"}, "host name"},
+		"dash name":       {"-x", HostConfig{Host: "h"}, "host name"},
+		"missing host":    {"a", HostConfig{}, "host is required"},
+		"option host":     {"a", HostConfig{Host: "-oProxyCommand=x"}, "hostname or IP"},
+		"user@ host":      {"a", HostConfig{Host: "me@h"}, "hostname or IP"},
+		"space host":      {"a", HostConfig{Host: "h h"}, "hostname or IP"},
+		"option user":     {"a", HostConfig{Host: "h", User: "-l"}, "login name"},
+		"port range":      {"a", HostConfig{Host: "h", Port: 70000}, "port"},
+		"negative port":   {"a", HostConfig{Host: "h", Port: -1}, "port"},
+		"dash identity":   {"a", HostConfig{Host: "h", IdentityFile: "-i"}, "absolute"},
+		"newline root":    {"a", HostConfig{Host: "h", WorkspaceRoot: "/x\ny"}, "control"},
+		"too long name":   {strings.Repeat("a", 64), HostConfig{Host: "h"}, "host name"},
 	}
 	for label, tc := range bad {
 		t.Run(label, func(t *testing.T) {
