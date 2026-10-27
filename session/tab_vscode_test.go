@@ -145,5 +145,5 @@ func TestParseTabKindName(t *testing.T) {
 	_, ok = ParseTabKindName("nope")
 	assert.False(t, ok)
 
-	assert.Equal(t, []string{"shell", "vscode", "web"}, TabKindNameList(), "sorted, for stable help text and error messages")
+	assert.Equal(t, []string{"docs", "shell", "vscode", "web"}, TabKindNameList(), "sorted, for stable help text and error messages")
 }

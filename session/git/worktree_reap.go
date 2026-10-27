@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -88,7 +89,29 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	if len(procs) == 0 {
 		return
 	}
-	proctree.KillEscalating(procs, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+	// A teardown requester can register AFTER the set above was built — a
+	// teardown still in its grace wait when the requester's own destructive
+	// RPC reaches its handler. Re-check the registry before each signal tier
+	// so a late-tracked requester is spared too (Codex on #5186). Requesters
+	// already tracked at selection were logged by the selector; seed them here
+	// so the mid-reap notice fires only for genuine late registrations.
+	exemptedMidReap := make(map[int]bool)
+	for _, p := range procs {
+		if teardownreq.Is(p) {
+			exemptedMidReap[p.PID] = true
+		}
+	}
+	proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if !teardownreq.Is(p) {
+			return false
+		}
+		if !exemptedMidReap[p.PID] {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) registered while this reap was already waiting; "+
+				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
+		}
+		return true
+	}, teardownreq.SignalUnlessTracked, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
 		// Every tier stays a WARNING here, and the outcome is deliberately unused
 		// (#2765). This reaper does not run on the requested-teardown side of that
 		// split: it fires only when a process is STILL WRITING into a worktree
@@ -141,6 +164,33 @@ func worktreeWriterProcessesMatching(
 	// af's own short-lived clients inherit the self-matching daemon's cwd, so
 	// selecting them would kill the daemon's in-flight tmux commands for
 	// unrelated sessions.
+	// A tracked teardown requester (#5182) — the process that asked for this
+	// teardown, identified by kernel peer credentials and still blocked on its
+	// reply — is alive inside the worktree for the best possible reason:
+	// killing it kills the caller before the answer it asked for can arrive.
+	// Unlike the infrastructure exclusions it exempts ONLY its own identity —
+	// a requester that spawned a writer which later chdir'd out of the
+	// worktree is still the ancestor keeping that writer reachable, and that
+	// child is this session's to reap. So the requester stays in the candidate
+	// set but is spared only while its registration holds — the per-signal
+	// recheck in KillEscalatingExcept — and traversal continues INTO its
+	// subtree exactly as the original matcher intends (Codex on #5186).
+	requestersSeen := make(map[int]bool)
+	isRequester := func(pid int) bool {
+		p, ok := snap[pid]
+		if !ok || !teardownreq.Is(p) {
+			return false
+		}
+		if !requestersSeen[pid] {
+			// Logged once per requester per pass — the same pid can be
+			// evaluated twice (once as a root, once inside another matcher's
+			// subtree).
+			requestersSeen[pid] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
+				"sparing it while its registration holds (#5182)", p.PID, p.Comm)
+		}
+		return true
+	}
 	protectedInfrastructure := func(pid int) bool {
 		return pid == selfPID || isTmuxProcess(pid)
 	}
@@ -178,6 +228,15 @@ func worktreeWriterProcessesMatching(
 			if protectedInfrastructure(p.PID) {
 				pruned[p.PID] = true
 				continue
+			}
+			if isRequester(p.PID) {
+				// The requester stays IN the kill set — a registration that
+				// lapses mid-reap must let the next signal tier reconsider it
+				// rather than escaping the teardown permanently (Codex on
+				// #5186) — while KillEscalatingExcept's per-signal recheck
+				// spares it only while tracked. Its children are walked
+				// regardless: the writer it spawned stays a writer — not
+				// marking pruned keeps the walk reaching them.
 			}
 			add(p)
 		}

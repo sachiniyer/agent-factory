@@ -232,3 +232,357 @@ func TestCheckAndHandleTrustPrompt_CodexUpdateDoesNotRepeatConfirmation(t *testi
 	require.False(t, session.CheckAndHandleTrustPrompt(),
 		"a positively visible composer releases the confirmed picker state")
 }
+
+// TestEnsureCodexUpdateCheckDisabled is the shared-helper contract both launch
+// paths depend on (#5238): injectSystemPrompt for ordinary sessions and the
+// config-agent spawn both route codex's launch command through here so its
+// startup update picker never renders — and so the two can never drift on how
+// it is suppressed (the #729/#2097/#2416 class, same as the devin helper this
+// mirrors).
+//
+// The cases mirror what TestInjectSystemPrompt_Codex already pins for the
+// session path, asserted here against the function itself so the config-agent
+// path is covered by the same contract rather than a copy of it.
+func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
+	const arg = "-c " + codexUpdateCheckConfigKey + "=false"
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"bare codex gets the flag", "codex", "codex " + arg},
+		{
+			"abs-path codex gets the flag",
+			"/home/u/.local/bin/codex",
+			"/home/u/.local/bin/codex " + arg,
+		},
+		{
+			// The flag lands right after the executable — codex's global -c
+			// position — so it is an option for every command shape, not
+			// stranded at the tail (#5238 review).
+			"existing flags keep the flag in the global position",
+			"codex --model gpt-5 --full-auto",
+			"codex " + arg + " --model gpt-5 --full-auto",
+		},
+		{
+			// The flag precedes an existing resume subcommand; codex parses
+			// global -c before any subcommand (0.163.0). af's own restore
+			// splice lands `resume --last` behind the flag, in this same
+			// global position (#5238 review).
+			"a restore's resume --last keeps the flag global",
+			"codex resume --last",
+			"codex " + arg + " resume --last",
+		},
+		{
+			"a recorded conversation resume keeps the flag global",
+			"codex resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+			"codex " + arg + " resume 0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+		},
+		{
+			"codex exec keeps its own -c scope",
+			"codex exec --json",
+			"codex " + arg + " exec --json",
+		},
+		// Wrappers the account boundary and findAgentToken both model: the
+		// flag belongs to codex's argv, so it lands after the codex operand —
+		// an append would hand it to the wrapper or strand it after `--`
+		// (#5238 review).
+		{
+			"an exec wrapper carries the flag on codex's argv",
+			"exec codex",
+			"exec codex " + arg,
+		},
+		{
+			// Trailing codex args are the shape that proves the position: an
+			// append would leave the flag at the command's tail instead of
+			// codex's own option position.
+			"an exec wrapper's flags keep the flag on codex's argv",
+			"exec codex --full-auto",
+			"exec codex " + arg + " --full-auto",
+		},
+		{
+			"an env wrapper carries the flag on codex's argv",
+			"env codex",
+			"env codex " + arg,
+		},
+		{
+			"an env assignment wrapper carries the flag on codex's argv",
+			"env FOO=1 codex",
+			"env FOO=1 codex " + arg,
+		},
+		{
+			"an env assignment wrapper's flags keep the flag on codex's argv",
+			"env FOO=1 codex --full-auto",
+			"env FOO=1 codex " + arg + " --full-auto",
+		},
+		// Only the wrapper grammar af models — assignments, a bare `exec`, an
+		// `env` invocation — places the executable. Any other first word IS
+		// the executable, so a later token that names codex is an argument of
+		// a program af cannot prove is codex: splicing `-c` there hands the
+		// flag to an arbitrary binary that may reject the launch (#5238
+		// review). Those commands stay untouched — the update check runs and
+		// af answers the picker, exactly as master does.
+		{
+			"a codex argument is not the executable",
+			"my-chat --persona codex",
+			"my-chat --persona codex",
+		},
+		{
+			"a relative-path wrapper's codex argument is not the executable",
+			"./collect codex",
+			"./collect codex",
+		},
+		{
+			"an unmodeled wrapper's codex operand is not the executable",
+			"sudo codex",
+			"sudo codex",
+		},
+		{
+			// ionice's `-c` is its scheduling-class option, not codex's —
+			// and ionice is not a wrapper af models, so the command is left
+			// alone entirely.
+			"an unmodeled wrapper's own -c changes nothing",
+			"ionice -c 3 codex",
+			"ionice -c 3 codex",
+		},
+		{
+			"an unmodeled wrapper's -c operand naming the key changes nothing",
+			"ionice -c check_for_update_on_startup=x codex",
+			"ionice -c check_for_update_on_startup=x codex",
+		},
+		{
+			// `exec --` is the separator dash cannot run (#3557) — the
+			// boundary refuses it and so does the locator.
+			"the non-portable exec separator is not modeled",
+			"exec -- codex",
+			"exec -- codex",
+		},
+		{
+			// After `exec`, the next word is the program exec will run —
+			// assignment-looking text is its NAME, not an environment pair.
+			"exec's operand is the executable even when it looks assigned",
+			"exec FOO=1 codex",
+			"exec FOO=1 codex",
+		},
+		{
+			// env's command operand is the executable — `my-chat` here —
+			// and `codex` is just its argument.
+			"env's operand is the executable, not its codex argument",
+			"env my-chat codex",
+			"env my-chat codex",
+		},
+		{
+			// A path-qualified env is a FILE named env, not the GNU
+			// wrapper the account boundary models — the same boundary
+			// grammar that decides injection must not read it as env
+			// (#5238 review).
+			"a path-qualified env is not the modeled env wrapper",
+			"./env codex",
+			"./env codex",
+		},
+		{
+			"an absolute env path is not the modeled env wrapper",
+			"/tmp/env codex",
+			"/tmp/env codex",
+		},
+		{
+			// Same for exec: the builtin only exists as a bare word; a
+			// file named exec is an ordinary program.
+			"a path-qualified exec is not the builtin",
+			"./exec codex",
+			"./exec codex",
+		},
+		{
+			"an absolute exec path is not the builtin",
+			"/tmp/exec codex",
+			"/tmp/exec codex",
+		},
+		{
+			// A QUOTED `=` word is not an assignment — the shell runs a
+			// program literally named `FOO=bar` and `codex` is its
+			// argument. splitShellTokens strips the quotes, so the raw
+			// source decides (#5238 review).
+			"a quoted name=value word is the executable, not an assignment",
+			`"FOO=bar" codex`,
+			`"FOO=bar" codex`,
+		},
+		{
+			"a single-quoted name=value word is the executable, not an assignment",
+			`'FOO=bar' codex`,
+			`'FOO=bar' codex`,
+		},
+		{
+			"an escaped = is not an assignment operator",
+			`FOO\=bar codex`,
+			`FOO\=bar codex`,
+		},
+		{
+			// Quoting the VALUE keeps the word an assignment — the name=
+			// prefix is literal in the raw source.
+			"a quoted assignment value still prefixes the executable",
+			`FOO="a b" codex`,
+			`FOO="a b" codex ` + arg,
+		},
+		{
+			"a single-quoted assignment value still prefixes the executable",
+			`FOO='a b' codex`,
+			`FOO='a b' codex ` + arg,
+		},
+		{
+			"an assignment prefix still reaches the modeled executable",
+			"FOO=1 exec codex",
+			"FOO=1 exec codex " + arg,
+		},
+		// End-of-options: a `--` makes the rest a positional prompt. The flag
+		// must land before it or clap reads it as prompt text and rejects the
+		// launch (#5238 review) — and post-`--` operands are not an override.
+		{
+			"an option terminator keeps the flag in option position",
+			"codex -- '-review this'",
+			"codex " + arg + " -- '-review this'",
+		},
+		{
+			"the key after -- is prompt text, not an override",
+			"codex -- -c check_for_update_on_startup=true",
+			"codex " + arg + " -- -c check_for_update_on_startup=true",
+		},
+		// A command already carrying the key — either value — is left alone,
+		// so a user's explicit choice wins: that is the opt-back-in.
+		{
+			"an explicit false is left alone",
+			"codex -c check_for_update_on_startup=false",
+			"codex -c check_for_update_on_startup=false",
+		},
+		{
+			"an explicit true wins",
+			"codex -c check_for_update_on_startup=true",
+			"codex -c check_for_update_on_startup=true",
+		},
+		{
+			"the key inside a quoted -c value wins",
+			`codex -c 'check_for_update_on_startup = true'`,
+			`codex -c 'check_for_update_on_startup = true'`,
+		},
+		{
+			"a --config assignment is left alone",
+			"codex --config check_for_update_on_startup=true",
+			"codex --config check_for_update_on_startup=true",
+		},
+		{
+			"a --config=key assignment is left alone",
+			"codex --config=check_for_update_on_startup=true",
+			"codex --config=check_for_update_on_startup=true",
+		},
+		{
+			"a glued -ckey assignment is left alone",
+			"codex -ccheck_for_update_on_startup=false",
+			"codex -ccheck_for_update_on_startup=false",
+		},
+		{
+			"a -c=key assignment is left alone",
+			"codex -c=check_for_update_on_startup=false",
+			"codex -c=check_for_update_on_startup=false",
+		},
+		// The key's NAME appearing anywhere else proves nothing: an env
+		// assignment's value, another key's operand, or a script name that
+		// happens to contain it are not the operator choosing this override —
+		// a substring match would leave these launchable commands exposed to
+		// the picker (#5238 review).
+		{
+			"the key inside another -c operand is not the override",
+			"codex -c model=check_for_update_on_startup",
+			"codex " + arg + " -c model=check_for_update_on_startup",
+		},
+		{
+			"the key inside an env assignment is not the override",
+			"CODEX_HOME=/tmp/check_for_update_on_startup codex",
+			"CODEX_HOME=/tmp/check_for_update_on_startup codex " + arg,
+		},
+		{
+			"the key inside another --config operand is not the override",
+			"codex --config sandbox_mode=check_for_update_on_startup",
+			"codex " + arg + " --config sandbox_mode=check_for_update_on_startup",
+		},
+		{
+			"a dangling -c at the end still gets the flag",
+			"codex --model gpt-5 -c",
+			"codex " + arg + " --model gpt-5 -c",
+		},
+		// A program_overrides entry can point "codex" at another binary
+		// (#1116/#1131); appending a codex flag would make that binary exit on
+		// an unknown argument.
+		{"a non-codex command is unchanged", "bash", "bash"},
+		{"a claude command is unchanged", "claude --dangerously-skip-permissions", "claude --dangerously-skip-permissions"},
+		{"empty is unchanged", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EnsureCodexUpdateCheckDisabled(tt.command); got != tt.want {
+				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			// Whatever the path, the key must never end up in codex's own
+			// OPTION position twice — a second -c carrying it is the override
+			// ambiguity the conditional exists to prevent. Count only tokens
+			// after the executable and before any `--`: a wrapper's operand or
+			// prompt text may legitimately spell the key without being the
+			// option being duplicated.
+			got := EnsureCodexUpdateCheckDisabled(tt.command)
+			gotTokens, _ := splitShellTokens(got)
+			gotIdx, _ := findAgentToken(gotTokens)
+			seen := 0
+			for _, tok := range gotTokens[gotIdx+1:] {
+				if tok == "--" {
+					break
+				}
+				seen += strings.Count(tok, codexUpdateCheckConfigKey+"=")
+			}
+			if seen > 1 {
+				t.Errorf("EnsureCodexUpdateCheckDisabled(%q) = %q carries %q more than once in option position", tt.command, got, codexUpdateCheckConfigKey)
+			}
+		})
+	}
+}
+
+// `-c check_for_update_on_startup=true` is the documented opt-back-in (#5238
+// review): codex runs its startup check because the operator asked for it —
+// and a picker that renders still gets af's ordinary dismissal, the same
+// Down-then-Enter on Skip master sends for a launch the flag never touched.
+// Holding the modal open for a human would spin DismissTrustPrompt to its
+// attempt budget and fail the launch, and a config agent has nobody to
+// answer it anyway (#5238 review).
+func TestCheckAndHandleTrustPrompt_CodexUpdateOptedInStillAnswersSkip(t *testing.T) {
+	for _, program := range []string{
+		"codex -c check_for_update_on_startup=true",
+		"codex -ccheck_for_update_on_startup=true",
+		"codex -c=check_for_update_on_startup=true",
+		"codex --config check_for_update_on_startup=true",
+		"codex --config=check_for_update_on_startup=true",
+	} {
+		t.Run(program, func(t *testing.T) {
+			session, commands := runTrustPromptSequence(t, program,
+				codexCurrentUpdatePicker, codexCurrentUpdatePickerSkipSelected)
+
+			require.True(t, session.CheckAndHandleTrustPrompt())
+			require.Equal(t, []string{
+				"tmux send-keys -t =af_trust: Down",
+				"tmux send-keys -t =af_trust: Enter",
+			}, sentKeystrokes(*commands),
+				"an opted-in picker is answered like any other: Down to Skip, Enter — never held for a human")
+		})
+	}
+}
+
+// `=false` is the operator's explicit choice too, and a picker that renders
+// anyway gets the same fallback navigation — the program's words change what
+// codex does, never what af's dismisser does.
+func TestCheckAndHandleTrustPrompt_CodexUpdateExplicitFalseStillAnswersSkip(t *testing.T) {
+	session, commands := runTrustPromptSequence(t, "codex -c check_for_update_on_startup=false",
+		codexCurrentUpdatePicker, codexCurrentUpdatePickerSkipSelected)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands),
+		"the fallback dismisser navigates a rendered picker regardless of the command's -c words")
+}

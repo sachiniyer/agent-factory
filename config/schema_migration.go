@@ -257,12 +257,12 @@ func migrateSchemaBytesFullPlan(raw []byte, plan SchemaMigrationPlan) ([]byte, S
 //
 // This is the most dangerous unbounded flock in the tree, because of WHERE it is
 // called from rather than what it does: the daemon reaches it on every instance
-// refresh (refreshDaemonInstances -> MigrateAllRepoInstancesForDaemonLoad) while
-// holding the manager's global lock, and a session kill reaches that refresh
-// before it has done anything else. Parking here therefore does not stall one
-// migration — it freezes the whole daemon, including the RPC that would report
-// the problem and the shutdown that would clear it (#1917: a wedged daemon also
-// failed to exit on SIGTERM and had to be SIGKILLed).
+// refresh (refreshDaemonInstances -> the per-repo file cache's migrateAndExtract
+// cold path) while holding the manager's global lock, and a session kill reaches
+// that refresh before it has done anything else. Parking here therefore does not
+// stall one migration — it freezes the whole daemon, including the RPC that would
+// report the problem and the shutdown that would clear it (#1917: a wedged daemon
+// also failed to exit on SIGTERM and had to be SIGKILLed).
 //
 // The lock is held across a read + in-place migrate + atomic write of one small
 // file, so a wait beyond this budget means a peer is wedged, not slow.

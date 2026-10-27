@@ -425,7 +425,7 @@ func TestControlArchiveHookFailurePublishesCommittedArchiveAndReturnsWarning(t *
 	server := &controlServer{manager: manager}
 
 	var resp ArchiveSessionResponse
-	err := server.ArchiveSession(ArchiveSessionRequest{ID: inst.ID, Title: "worker", RepoID: repoID}, &resp)
+	err := server.ArchiveSession(&ArchiveSessionRequest{ID: inst.ID, Title: "worker", RepoID: repoID}, &resp)
 	require.NoError(t, err, "a nonfatal hook warning must remain a successful control response")
 	assert.True(t, resp.OK)
 	assert.NotEmpty(t, resp.ArchivedPath)

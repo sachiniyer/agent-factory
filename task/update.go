@@ -8,6 +8,9 @@ package task
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -274,7 +277,40 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				}
 				merged = update.apply(existing)
 				if update.ProjectPath != nil {
-					merged.RepoID = rebindRepoID
+					// A patch that rebinds the task overwrites RepoID with the freshly
+					// re-resolved id (rebindRepoID). The exception is a same-path
+					// reassertion whose re-resolution is empty: the path stopped
+					// resolving (its .git died, or the recorded leaf was a sibling
+					// worktree or subdirectory whose owning repo is no longer reachable
+					// by an ancestor walk), so overwriting with "" would erase the binding
+					// apply already preserved from existing and strand the task from its
+					// own project's scope the moment that path was reasserted — the exact
+					// harm RepoID exists to prevent (see Task.RepoID's PURPOSE). The
+					// recompute itself stays: a legacy row whose retained RepoID is "" is
+					// still filled in by a same-path patch that DOES resolve.
+					//
+					// sameProjectPathReassertion recognizes the same path across the
+					// equivalent spellings a remote caller can reassert without the
+					// daemon normalizing project_path (a trailing separator or a "."
+					// leaf). It compares filesystem-resolved paths when both sides
+					// still resolve — by filesystem identity (os.SameFile), not the
+					// resolved spelling, so a case-variant reassertion on a
+					// case-insensitive volume (/Users/me/Repo vs /Users/me/repo) is
+					// recognized as the same path rather than read as a rebind — so
+					// a symlink-divergent spelling that cleans lexically equal — e.g.
+					// base/link/../task, where base/link points elsewhere, cleans to
+					// base/task but resolves to a different directory — is read as a
+					// real rebind rather than a same-path reassertion. It falls back
+					// to lexical Clean only for a path the filesystem can no longer
+					// resolve (the dead-path case this protection exists for), where
+					// EvalSymlinks fails and a genuine rebind cannot be proven either
+					// — and only when neither spelling has a ".." segment, since ".."
+					// can cross a symlink Clean cannot see against a dead path on
+					// either side, so it is treated as a rebind (the conservative
+					// outcome) rather than risk retaining a stale RepoID.
+					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
+						merged.RepoID = rebindRepoID
+					}
 				}
 				if err := merged.ValidateTrigger(); err != nil {
 					return err
@@ -336,10 +372,59 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				if CanonicalTargetSession(existing.TargetSession) == CanonicalTargetSession(merged.TargetSession) && existing.TargetSession != merged.TargetSession {
 					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"target_session"}, nowFn())
 				}
+				// Store clear-repairs of fields the freshly-loaded row was ALREADY too
+				// misshapen to carry — a stale max_concurrent_runs on a non-watch task,
+				// or a non-keep on_complete alongside a target_session. Every in-process
+				// writer runs ValidateTrigger, so these rows reach disk only via a
+				// hand-edit of tasks.json; apply's clearInapplicableCap /
+				// clearInapplicableOnComplete silently repair them on the next write,
+				// and that repair fires even when the caller's patch never touched the
+				// field (update.MaxConcurrentRuns / update.OnComplete == nil). Attributing the
+				// cleared field to the caller's actor — the default, via changedFields'
+				// raw/canonical diff — would claim a surface moved a field it never did.
+				//
+				// The decisive test is whether the field was ALREADY inapplicable on
+				// the freshly-loaded record. A valid row the caller retargets still has
+				// capApplies()/onCompleteApplies() == true, so the clear there is a
+				// consequence of the caller's trigger change and stays attributed to
+				// the caller (see TestUpdateTaskClearsStaleCapForNonCLIWriters and
+				// TestRepro_GenuineRetargetCapClearAttributedToCaller). A hand-edited row
+				// already has it false, so the clear is purely the store's repair and
+				// is recorded under the store's own actor — the same class of
+				// store-initiated change as the repo_id backfill and the byte
+				// canonicalizations above. Those carves cover only canonical-equivalent
+				// changes ("Archive"→"archive"); a clear-repair like kill→keep changes
+				// the canonical value, so it falls through them and is handled here.
+				//
+				// The update.MaxConcurrentRuns / update.OnComplete == nil gate is what separates
+				// a store repair from a caller who explicitly cleared the field: an
+				// explicit clear patches the field, skips these blocks, and stays the
+				// caller's change in auditUpdate — so the trail never misses a write
+				// that actually happened.
+				//
+				// callerBefore is the existing record with a store-repaired field
+				// aligned to its post-repair value, so changedFields (called by
+				// auditUpdate below) does NOT also list that field under the caller's
+				// actor. This is the same exclusion the canonical-to-canonical diff in
+				// changedFields achieves for the byte-canonicalization carves above:
+				// there canonical-equality makes the diff see no change, and here the
+				// alignment does. The caller's entry then names only the fields the
+				// caller actually moved.
+				callerBefore := existing
+				if update.MaxConcurrentRuns == nil && existing.MaxConcurrentRuns > 0 && !existing.capApplies() &&
+					merged.MaxConcurrentRuns != existing.MaxConcurrentRuns {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"max_concurrent_runs"}, nowFn())
+					callerBefore.MaxConcurrentRuns = merged.MaxConcurrentRuns
+				}
+				if update.OnComplete == nil && existing.SessionLifecycle() != OnCompleteKeep && !existing.onCompleteApplies() &&
+					merged.OnComplete != existing.OnComplete {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"on_complete"}, nowFn())
+					callerBefore.OnComplete = merged.OnComplete
+				}
 				// Diffed against the record just loaded under this lock, and
 				// stamped before the write — so the trail records the change that
 				// actually landed, at the instant it landed.
-				auditUpdate(&existing, &merged, actor, nowFn())
+				auditUpdate(&callerBefore, &merged, actor, nowFn())
 				tasks[i] = merged
 				row = i
 				found = true
@@ -368,4 +453,104 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 		return Task{}, lockErr
 	}
 	return merged, nil
+}
+
+// sameProjectPathReassertion reports whether patched is the same recorded path
+// the task is already bound to, so an otherwise-empty re-resolution does not
+// erase the retained RepoID. See UpdateTaskChecked for the stranding this
+// prevents.
+//
+// The comparison respects filesystem semantics where it can: lexical Clean
+// alone misreads a symlink-divergent spelling as the same path — base/link/../task
+// cleans to base/task while base/link resolves elsewhere, so the two are
+// physically distinct. Evaluate symlinks on both sides when the filesystem can
+// answer, and compare the two by filesystem identity (os.SameFile) rather than
+// by the resolved spelling: on a case-insensitive, case-preserving volume (the
+// common macOS and Windows layout) EvalSymlinks preserves the input spelling,
+// so /Users/me/Repo and /Users/me/repo both resolve yet spell differently, and
+// a string compare would read the reassertion as a rebind and clear the
+// retained RepoID over a path that never moved. Fall back to lexical Clean only
+// for a form the filesystem cannot resolve (a path that has since been
+// removed, the dead-path case this comparison protects), where EvalSymlinks
+// fails and a genuine rebind cannot be proven either. The fallback is
+// restricted to cases where neither spelling has a ".." segment: ".." can
+// cross a symlink to a directory Clean cannot reach, so against a dead path on
+// either side the cleaned compare would read a real rebind as same-path and
+// retain a stale RepoID; a ".." in either spelling is treated as a rebind
+// instead (the conservative outcome).
+func sameProjectPathReassertion(recorded, patched string) bool {
+	if recorded == patched {
+		return true
+	}
+	// EvalSymlinks is the physical, kernel-traversal resolver here, not a
+	// lexical one — Go's walk resolves each symlink component before applying
+	// the next "..", so base/link/../task with base/link -> other/child resolves
+	// to other/task, NOT to the lexically cleaned base/task. A symlink-divergent
+	// ".." rebind is therefore detected and re-resolved (RepoID cleared) rather
+	// than retained — pinned by TestAudit_SymlinkDivergentRebindIsDetectedNotRetained.
+	// The lexical ".." guard belongs only in the dead-path fallback below, where
+	// EvalSymlinks cannot answer and a ".." could cross a symlink Clean cannot
+	// see; rejecting ".." HERE would instead strand the up-and-back equivalent
+	// spelling <dir>/../<leaf>, which a directory that still lives resolves back
+	// to itself — pinned by TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling.
+	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
+	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
+	if errPatched == nil && errRecorded == nil {
+		// Compare by filesystem identity, not resolved spelling. On a
+		// case-insensitive, case-preserving volume (the common macOS and
+		// Windows layout) EvalSymlinks preserves the input spelling, so a
+		// reassertion of the SAME directory with only a change in casing —
+		// recorded /Users/me/Repo versus patched /Users/me/repo — succeeds on
+		// both calls yet compares unequal as a string, reading as a rebind
+		// and clearing the retained RepoID over a path that never moved.
+		// os.SameFile compares the underlying file (device + inode), so the
+		// case-variant spellings of one directory are recognized as a
+		// same-path reassertion. It is a strict superset of the resolved
+		// string compare: the only pairs that share an inode but resolve to
+		// different spellings are the same directory reached another way (a
+		// bind mount of the same inode), which is also not a rebind. A Stat
+		// failure here is a TOCTOU removal between EvalSymlinks and Stat;
+		// fall back to the resolved-string compare rather than guess.
+		statPatched, errP := os.Stat(patched)
+		if errP == nil {
+			if statRecorded, errR := os.Stat(recorded); errR == nil {
+				return os.SameFile(statPatched, statRecorded)
+			}
+		}
+		return resolvedPatched == resolvedRecorded
+	}
+	// Lexical Clean is only a safe fallback for spellings that cannot cross a
+	// symlink. A ".." segment resolves physically somewhere Clean cannot see —
+	// base/link/../task cleans to base/task but, with base/link pointing at
+	// other/child, resolves to other/task — so when either spelling has a ".."
+	// and the other side is a path the filesystem can no longer answer
+	// (EvalSymlinks failed, the dead-recorded or dead-patched case) the cleaned
+	// compare would read a real rebind as a same-path reassertion and retain a
+	// now-stale RepoID. Fall back only when neither spelling has a ".." segment
+	// (a trailing "/" or "." leaf is safe to clean); otherwise treat the patch
+	// as a rebind and let the caller re-resolve, the conservative outcome.
+	if hasDotDotSegment(patched) || hasDotDotSegment(recorded) {
+		return false
+	}
+	return filepath.Clean(patched) == filepath.Clean(recorded)
+}
+
+// hasDotDotSegment reports whether path contains a ".." path segment after
+// trimming a trailing separator. Such a segment can resolve through a symlink
+// to a directory filepath.Clean does not reach, so the lexical compare is
+// unsafe as a same-path test against a path the filesystem can no longer answer
+// for; a trailing "/" or "." leaf never crosses a symlink and is left to the
+// Clean compare. Both the recorded and patched spellings are checked, since a
+// ".." in either can cross a symlink the cleaned compare would misread.
+func hasDotDotSegment(path string) bool {
+	trimmed := strings.TrimRight(path, string(filepath.Separator))
+	if trimmed == "" {
+		return false
+	}
+	for _, seg := range strings.Split(trimmed, string(filepath.Separator)) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }

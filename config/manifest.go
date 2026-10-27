@@ -297,14 +297,20 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "branch_prefix",
-		Type:       "string",
-		Default:    "your username, followed by a slash",
-		Purpose:    "Prefix for the git branch each new session creates.",
-		Tier:       TierAdvanced,
-		Settable:   true,
+		Key:      "branch_prefix",
+		Type:     "string",
+		Default:  "your username, followed by a slash",
+		Purpose:  "Prefix for the git branch each new session creates · global-only for now — a per-project value is accepted and stored but ignored.",
+		Tier:     TierAdvanced,
+		Settable: true,
+		// Sources still admits the personal layer so a project-scoped value
+		// remains writable and existing personal files keep loading, but
+		// Precedence is global-only: the daemon names branches from its frozen
+		// startup prefix, so a personal value can never win until #4539 lands
+		// the real feature. annotateProjectBranchPrefix relabels the stored
+		// candidate in the trace, and the set/load warnings say the same.
 		Sources:    sourceGlobalPersonal,
-		Precedence: precedenceGlobalPersonal,
+		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
@@ -525,6 +531,18 @@ var configManifest = []ManifestEntry{
 		Sources:    sourceGlobalPersonal,
 		Precedence: precedenceGlobalPersonal,
 		Merge:      MergeTableByField,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "web",
+		Type:       "table",
+		Default:    `{"terminal_font_size_desktop":13,"terminal_font_size_phone":6.5}`,
+		Purpose:    "Terminal text size in the browser client · one size for the phone-width breakpoint and one for desktop · the terminal's A−/A+ controls step and save the class in use.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
 	{

@@ -61,6 +61,13 @@ func (r *Report) Pass(section, name, detail string) {
 	r.AddCheck(section, name, StatusPass, detail, "", false)
 }
 
+// Info adds a non-actionable observation row: context that is visible in the
+// report but is neither a verdict nor a problem — e.g. a healthy component
+// whose state is unknown by design and cannot be compared.
+func (r *Report) Info(section, name, detail string) {
+	r.AddCheck(section, name, StatusInfo, detail, "", false)
+}
+
 func (r *Report) Warn(section, name, detail, remediation string, problem bool) {
 	r.AddCheck(section, name, StatusWarn, detail, remediation, problem)
 }
@@ -110,7 +117,7 @@ func renderStatus(s CheckStatus, color bool) string {
 	theme := ui.CurrentTheme()
 	var c lipgloss.TerminalColor
 	switch s {
-	case StatusPass, StatusFixed, StatusWarn:
+	case StatusPass, StatusFixed, StatusWarn, StatusInfo:
 		// Generic diagnostics are not session liveness.
 		c = theme.Ink
 	case StatusFail:
@@ -326,6 +333,9 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 func strongestDeclaredSeverity(findings []Finding) CheckStatus {
 	strongest := CheckStatus("")
 	for _, f := range findings {
+		if f.Fixed {
+			continue
+		}
 		switch f.Severity {
 		case StatusFail:
 			return StatusFail
@@ -707,6 +717,9 @@ func summaryLine(r *Report, rows []renderRow, fixMode bool) string {
 	}
 	if counts[StatusFixed] > 0 {
 		breakdown = append(breakdown, fmt.Sprintf("%d FIXED", counts[StatusFixed]))
+	}
+	if counts[StatusInfo] > 0 {
+		breakdown = append(breakdown, fmt.Sprintf("%d INFO", counts[StatusInfo]))
 	}
 
 	unresolved := r.UnresolvedCount()

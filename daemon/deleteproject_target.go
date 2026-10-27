@@ -18,6 +18,36 @@ import (
 // of taskTargetMu (#3361), and every refusal it can reach is a refusal that has
 // changed nothing. deleteproject.go executes the target this produces.
 
+// normalizeDeleteProjectRequestRepoPath enforces DeleteProjectRequest's
+// absolute-path contract at the RPC boundary — the same guard RegisterProject
+// and RebindProject apply to their path field (#4821, 6616c129). The daemon
+// has no access to the caller's working directory, so a relative RepoPath would
+// be resolved against the daemon's OWN cwd by normalizeDeleteProjectPath
+// (config.RepoFromPath runs git -C <relative>): an unrelated checkout for an
+// ad-hoc daemon, / under systemd — and silently delete whatever project it
+// landed on. Refusing here, before the manager is reached, is the only
+// boundary that covers the path-only request form (RepoID empty, RepoPath
+// relative), which the both-selector cross-check in resolveDeleteProjectTarget
+// cannot reach because there is no supplied id to cross-check against.
+//
+// config.ResolveDaemonHostPath trims, expands ~ against the daemon host, and
+// refuses a result that is still not absolute. The normalized value is written
+// back so what was checked is what is deleted — checking a trimmed copy while
+// passing the raw one re-opens the hole this closes (#4789 round 7). A RepoID-
+// only request (no RepoPath sent, the root derived from the registry) is left
+// untouched: no path is resolved, so the boundary has nothing to refuse.
+func normalizeDeleteProjectRequestRepoPath(req *DeleteProjectRequest) error {
+	if req.RepoPath == "" {
+		return nil
+	}
+	normalized, err := config.ResolveDaemonHostPath(req.RepoPath)
+	if err != nil {
+		return fmt.Errorf("delete %w", err)
+	}
+	req.RepoPath = normalized
+	return nil
+}
+
 // normalizeDeleteProjectPath resolves a delete's path selector to the root and
 // identity it addresses.
 //
