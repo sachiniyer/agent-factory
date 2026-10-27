@@ -14787,10 +14787,10 @@ var SplitView = class {
     if (pane) {
       pane.status = status;
     }
+    this.report();
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
-    this.report();
   }
   onPaneFocus(leafId, focused) {
     if (focused) {
