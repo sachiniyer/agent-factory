@@ -334,6 +334,10 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	if primary == "" {
 		return RelocationClaim{}, fmt.Errorf("cannot claim an empty worktree path")
 	}
+	// An identity-unknown stall over a path that is now conclusively absent
+	// guards nothing; discharge it so this claim gives the plain record-free
+	// ENOENT every caller already routes, instead of the same unknown forever.
+	g.settleAbsentIdentityUnknownStallLocked()
 	recovery := g.relocationRecovery
 	if recovery == nil {
 		identity, err := boundedRelocationPathIdentity(primary)
@@ -498,12 +502,12 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		}
 		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 			return RelocationClaim{}, errors.Join(fmt.Errorf(
-				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %v)",
+				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 				primary, primaryErr, recovery.AlternatePath, alternateFailure,
 			), ErrRelocateStateUnknown)
 		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
-			"cannot resolve interrupted relocation: neither candidate was established (%s: %v; %s: %v)",
+			"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %w)",
 			primary, primaryFailure, recovery.AlternatePath, alternateFailure,
 		), ErrRelocateStateUnknown)
 	}
@@ -892,7 +896,7 @@ func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, set
 			g.recordStaleClaimLocked(claim)
 		}
 		return errors.Join(fmt.Errorf(
-			"worktree path %s changed after identity resolution: %v", claim.Path, err,
+			"worktree path %s changed after identity resolution: %w", claim.Path, err,
 		), ErrRelocateStateUnknown)
 	}
 	if !claim.identity.same(identity) {
@@ -978,4 +982,7 @@ func (g *GitWorktree) checkpointRelocationPublication(
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
+	// A proof about the previous location says nothing about this one.
+	g.adoptedWorktree = nil
+	g.absentStallSettled = false
 }
