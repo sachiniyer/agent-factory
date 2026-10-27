@@ -195,6 +195,73 @@ func TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached(t *testing.T) {
 		"uncommitted work committed on a detached HEAD must survive on the session branch")
 }
 
+// TestSnapshotAndPushBranch_ProbesWorktreeFilesystem pins the two #5295-review
+// invariants together: the push path probes the worktree itself — the
+// destination filesystem git writes hit, including when the worktree is a
+// mount point and its parent sits on another filesystem — AND no
+// .af-add-probe-* debris may linger in the tracked tree, where a later
+// archive retry's `git add -A` would stage it as user content. The probe's
+// unlink-before-write is what makes inside-tree probing safe.
+func TestSnapshotAndPushBranch_ProbesWorktreeFilesystem(t *testing.T) {
+	sandboxHome(t)
+	gw, _ := pushTestRepo(t, "root/probe")
+	wt := gw.GetWorktreePath()
+
+	// Force the push to fail so annotateGitWriteError runs: repoint origin at
+	// a path that does not exist.
+	runGit(t, gw.GetRepoPath(), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	var probed []string
+	old := writeSpaceProbe
+	writeSpaceProbe = func(dir string) error {
+		probed = append(probed, dir)
+		return nil
+	}
+	defer func() { writeSpaceProbe = old }()
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err, "push to a dead origin must fail")
+
+	assert.Contains(t, probed, wt,
+		"the destination filesystem itself must be probed — a mount-point worktree's parent answers for a different filesystem")
+	matches, _ := filepath.Glob(filepath.Join(wt, ".af-add-probe-*"))
+	assert.Empty(t, matches, "no probe debris inside the tracked worktree")
+}
+
+// TestSnapshotAndPushBranch_UnprovenProbeNameIsUserContent pins the
+// two-sided debris contract (#5295 review): an .af-add-probe-* file the
+// sweep cannot prove it created — here, ANY file, since this process
+// abandoned none — is treated as user content end to end: it is NOT
+// deleted, and it IS included in the archive snapshot like any other
+// file. Excluding probe-shaped names from `add` would silently drop a
+// user file whose only sin is its name; a committed stray is a cosmetic
+// wart, data loss is not.
+func TestSnapshotAndPushBranch_UnprovenProbeNameIsUserContent(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/debris")
+	wt := gw.GetWorktreePath()
+
+	// An unproven probe-named file — the shape CreateTemp emits, content a
+	// user could plausibly have. Also real user work.
+	debris := filepath.Join(wt, ".af-add-probe-123456")
+	require.NoError(t, os.WriteFile(debris, []byte("looks like probe debris, is not"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "real.txt"), []byte("work"), 0o600))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	// Snapshotted as user content: the commit carries both files.
+	tree := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/debris")
+	assert.Contains(t, tree, "real.txt")
+	assert.Contains(t, tree, ".af-add-probe-123456",
+		"an unproven probe-named file is user content — the snapshot must keep it")
+
+	// And never deleted by the sweep.
+	data, rerr := os.ReadFile(debris)
+	require.NoError(t, rerr, "unproven probe-named file must survive the sweep")
+	assert.Equal(t, "looks like probe debris, is not", string(data))
+}
+
 // TestSnapshotAndPushBranch_RejectsExternalWorktree pins that an in-place/external
 // worktree (the user's own tree) is never pushed by the archive primitive.
 func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {

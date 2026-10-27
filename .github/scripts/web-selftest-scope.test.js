@@ -229,6 +229,10 @@ test("every job in pr.yml is listed in Build's needs", () => {
   assert.notEqual(needs, null, "pr.yml's build job has no inline `needs: [...]` list");
   for (const id of jobIds(yaml)) {
     if (id === "build") continue;
+    // Deliberate exemption (#5179): gate-reconcile needs Build, not the reverse
+    // — it runs AFTER the required checks resolve so a dropped workflow_run
+    // event cannot strand their state, and a red dispatch must not block a PR.
+    if (id === "gate-reconcile") continue;
     assert.ok(needs.includes(id), `pr.yml job "${id}" is not in Build's needs, so it gates nothing`);
   }
 });
