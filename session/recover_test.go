@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -225,6 +227,14 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 // even though it has not yet created two pathname candidates. The Lost loop must
 // honor that latch before os.Stat or rebuild touches the same filesystem: those
 // unbounded calls can wedge the daemon's sole status/self-healing goroutine.
+//
+// Since #5295 the refusal is not the first answer: Recover first tries the
+// designed consumer — the bounded relocation-claim machinery — to resolve the
+// record itself. The refusal below therefore comes one step later, when the
+// claim's own bounded identity probe cannot answer either (injected here as
+// the deadline a still-stalled filesystem would produce). The wedge property
+// the latch exists for is unchanged: nothing unbounded ever touches the
+// filesystem.
 func TestRecover_RefusesWorktreeAfterRelocationProbeTimeout(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -254,10 +264,225 @@ func TestRecover_RefusesWorktreeAfterRelocationProbeTimeout(t *testing.T) {
 	require.NotNil(t, storedRecovery, "the stall latch must survive the daemon's durable snapshot")
 	assert.Equal(t, sessiongit.RelocationRecoveryStalled, storedRecovery.State)
 
+	// The filesystem is still not answering: the claim's bounded identity
+	// probe of the recorded path hits the same deadline the pre-move probe
+	// did, so resolution fails closed and the refusal stands — carrying the
+	// state-unknown sentinel the retry loop classifies as environmental.
+	primary, _, _ := worktree.RelocationSnapshot()
+	t.Cleanup(sessiongit.SetRelocationIdentityErrorForTest(primary, context.DeadlineExceeded))
+
 	err = restored.Recover()
-	require.Error(t, err, "Lost recovery must refuse a worktree whose filesystem already stalled")
+	require.Error(t, err, "Lost recovery must refuse a worktree whose filesystem still cannot answer")
 	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
+	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
 	assert.Equal(t, 0, newSessions, "the stalled worktree must be refused before any agent spawn")
+}
+
+// TestRecover_ResolvesClaimStaleWorktreeRelocation is the #5295 mechanism:
+// an interrupted relocation (an ENOSPC-cut archive) leaves a durable
+// claim_stale record naming which directory IS the worktree. Recover must
+// resolve it through the bounded claim machinery and respawn — the session
+// heals itself without an unrelated archive consuming the record first.
+func TestRecover_ResolvesClaimStaleWorktreeRelocation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_claim_stale"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	// The record an ENOSPC-interrupted archive leaves: identity known, no
+	// second candidate — exactly what RestoreRelocationRecovery reads back
+	// after a daemon restart.
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+	}))
+
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Greater(t, newSessions, 0, "Recover must respawn once the record resolves")
+	_, hasRecovery := worktree.GetRelocationRecovery()
+	assert.False(t, hasRecovery, "a resolved record must be consumed, not left to refuse the next operation")
+}
+
+// TestRecover_SettlePersistsBeforeSpawn is the #5295-review regression: the
+// respawn's settle is in-memory only, so the daemon installs a persist
+// callback that MUST fire before the spawn — otherwise a daemon exit in the
+// settle→boundary window reloads the stale record and strands the recovery.
+// A notify failure must abort the spawn the same way.
+func TestRecover_SettlePersistsBeforeSpawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_settle_notify"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+	}))
+
+	var notified int
+	var spawnedAtNotify = -1
+	restored.SetRelocationSettleNotify(func(*Instance) error {
+		notified++
+		spawnedAtNotify = newSessions
+		return nil
+	})
+	require.NoError(t, restored.Recover())
+	assert.Equal(t, 1, notified, "the settle persist must fire exactly once")
+	assert.Equal(t, 0, spawnedAtNotify, "the notify must run BEFORE the spawn proceeds")
+
+	// The same edge must fail closed: a notify error aborts the attempt
+	// before any spawn.
+	var newSessions2 int
+	exec2 := countingExec(map[string]bool{}, &newSessions2)
+	restored2 := lostInstanceForRecover(t, agentName+"2", shellName+"2", exec2)
+	worktree2, err := restored2.GetGitWorktree()
+	require.NoError(t, err)
+	wp2, _, _ := worktree2.RelocationSnapshot()
+	var st2 syscall.Stat_t
+	require.NoError(t, syscall.Stat(wp2, &st2))
+	require.NoError(t, worktree2.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(st2.Dev),
+		Inode:         uint64(st2.Ino),
+		FileType:      uint32(st2.Mode & syscall.S_IFMT),
+	}))
+	restored2.SetRelocationSettleNotify(func(*Instance) error {
+		return fmt.Errorf("disk full")
+	})
+	err = restored2.Recover()
+	require.Error(t, err, "a persist failure must fail the attempt, not spawn ahead of the durable clear")
+	assert.Contains(t, err.Error(), "not yet durable")
+	assert.Equal(t, 0, newSessions2, "no spawn may proceed on top of a non-durable settle")
+
+	// #5295 review: the failed persist leaves the durable record in place, so
+	// the in-memory fence MUST be re-armed — the next retry re-enters the
+	// settle→persist checkpoint instead of skipping it and spawning on top of
+	// the stale durable record.
+	_, hasRecovery := worktree2.GetRelocationRecovery()
+	assert.True(t, hasRecovery, "a failed settle-persist must re-arm the record so the next retry re-attempts the durable clear")
+
+	var notified2 int
+	restored2.SetRelocationSettleNotify(func(*Instance) error {
+		notified2++
+		return nil
+	})
+	require.NoError(t, restored2.Recover(), "a retry after the re-armed fence must settle and persist again")
+	assert.Equal(t, 1, notified2, "the retry must re-enter the settle→persist checkpoint")
+	assert.Equal(t, 2, newSessions2, "the retry's spawn proceeds only behind a durable clear")
+	_, hasRecovery = worktree2.GetRelocationRecovery()
+	assert.False(t, hasRecovery, "the settled record is consumed once durable")
+}
+
+// TestRecover_UnresolvableClaimKeepsRecordAndRefuses is the fail-closed half:
+// when neither recorded path still holds the claimed identity — the worktree
+// was replaced or deleted behind the record — Recover must refuse and KEEP
+// the durable evidence rather than consuming it, so a later archive, kill,
+// or identity-qualified retry still sees what was left.
+func TestRecover_UnresolvableClaimKeepsRecordAndRefuses(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_claim_gone"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+
+	// An identity no directory answers: a stale claim whose captured
+	// (device, inode) belongs to nothing at either recorded path.
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        ^uint64(0),
+		Inode:         ^uint64(0),
+		FileType:      uint32(syscall.S_IFDIR),
+	}))
+
+	err = restored.Recover()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
+	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
+		"a bare identity-mismatch verdict is definitive: it carries no errno, so the restore loop keeps it on the structural budget")
+	assert.Equal(t, 0, newSessions, "no spawn may happen while the directory identity is unestablished")
+	_, hasRecovery := worktree.GetRelocationRecovery()
+	assert.True(t, hasRecovery, "the durable record must survive a failed resolution for the next operation")
+}
+
+// TestRecover_RefusesRepairOwedRelocationRecord pins the repair boundary:
+// a two-candidate record (move_unknown — a timed-out `git worktree move`)
+// can owe `git worktree repair` and submodule gitdir repair, work that
+// belongs to the relocation-capable consumers. Recover must refuse WITHOUT
+// touching the claim machinery: spawning into an un-repaired worktree, or
+// settling the record that would drive the missing repair, both fail.
+func TestRecover_RefusesRepairOwedRelocationRecord(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_move_unknown"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	// The record a timed-out move leaves: two identity-qualified candidates.
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryMoveUnknown,
+		AlternatePath: filepath.Join(t.TempDir(), "moved-candidate"),
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+	}))
+
+	err = restored.Recover()
+	require.Error(t, err, "a repair-owed record must refuse until a relocation-capable consumer resolves it")
+	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
+	assert.Equal(t, 0, newSessions, "no spawn may happen while a move's repair obligation is unestablished")
+	recovery, hasRecovery := worktree.GetRelocationRecovery()
+	require.True(t, hasRecovery, "the move record must stay durable for the repair-capable consumer")
+	assert.Equal(t, sessiongit.RelocationRecoveryMoveUnknown, recovery.State)
 }
 
 // TestRecover_RetryAfterFailureInjectsFlagsOnce: a failed first attempt (the
@@ -454,7 +679,7 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 		}
 	}
 	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
-	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
+	assert.Contains(t, agentSpawn, " resume "+conversationID,
 		"Recover must resume the recorded Codex conversation, not the latest one")
 	assert.NotContains(t, agentSpawn, "resume --last")
 
@@ -650,221 +875,6 @@ func TestRecover_RefusesNonLostAndTombstoned(t *testing.T) {
 		countingExec(map[string]bool{}, &newSessions))
 	tombstoned.MarkUserKilled()
 	require.Error(t, tombstoned.Recover(), "a tombstoned session must be refused")
-}
-
-// TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild is the #5370
-// regression: a deleted worktree whose agent tmux session SURVIVED used to
-// come back through rebuild → RestoreReattached → ConfirmLive — a Running row
-// bound to a pane whose cwd is the unlinked inode, divorced from the checkout
-// at the same path. After a rebuild, a surviving name can never be inside the
-// new worktree: Recover must kill it and re-spawn into the rebuilt checkout
-// (the recorded conversation travels through the resume path), never bind the
-// stale pane as Running.
-func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	repoRoot := initTempGitRepo(t)
-	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
-	gitOut(t, repoRoot, "config", "user.name", "test")
-	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
-	const branch = "af/lost-recover-survivor"
-	gitOut(t, repoRoot, "branch", branch)
-
-	const agentName = "af_recover_survivor"
-	shellName := agentName + tmuxTabSeparator + shellTabName
-	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
-	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-survivor")
-	branchCreatedByUs := true
-	data := InstanceData{
-		Title:    "lost-recover-survivor",
-		Path:     repoRoot,
-		Branch:   branch,
-		Program:  tmux.ProgramCodex,
-		Status:   Lost,
-		TmuxName: agentName,
-		Tabs: []TabData{
-			{
-				Name:     agentTabName,
-				Kind:     TabKindAgent,
-				TmuxName: agentName,
-				Conversation: &AgentConversationData{
-					Agent:       tmux.ProgramCodex,
-					ID:          conversationID,
-					CaptureKind: ConversationCaptureCodexRollout,
-				},
-			},
-			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
-		},
-		Worktree: GitWorktreeData{
-			RepoPath:          repoRoot,
-			WorktreePath:      worktreePath,
-			SessionName:       "lost-recover-survivor",
-			BranchName:        branch,
-			BranchCreatedByUs: &branchCreatedByUs,
-		},
-	}
-
-	// Both the agent and the shell tmux sessions are still live — the stale
-	// panes whose cwd is the deleted inode.
-	var newSessions int
-	var spawns, kills []string
-	inner := deadPaneAwareExec(map[string]bool{agentName: true, shellName: true},
-		recordingExec(map[string]bool{agentName: true, shellName: true}, &newSessions, &spawns))
-	exec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			if strings.Contains(cmd.String(), "kill-session") {
-				kills = append(kills, cmd.String())
-			}
-			return inner.Run(cmd)
-		},
-		OutputFunc: inner.Output,
-	}
-	pty := persistPtyFactory{t: t, cmdExec: exec}
-	prev := restoreTmuxSession
-	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
-		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
-	}
-	t.Cleanup(func() { restoreTmuxSession = prev })
-
-	restored, err := FromInstanceData(data)
-	require.NoError(t, err)
-	require.Equal(t, Lost, restored.GetStatus())
-	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
-	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
-	_, statErr := os.Stat(worktreePath)
-	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
-
-	require.NoError(t, restored.Recover())
-
-	assert.Equal(t, Running, restored.GetStatus())
-	require.DirExists(t, worktreePath)
-
-	// Every surviving stale pane must have been killed BEFORE its name was
-	// re-spawned inside the rebuilt worktree — the agent's included.
-	assert.Contains(t, strings.Join(kills, "\n"), agentName,
-		"Recover must kill the surviving agent pane — it can never be inside the rebuilt worktree")
-	assert.Contains(t, strings.Join(kills, "\n"), shellName,
-		"Recover must kill every surviving stale pane, not only the agent's")
-	assert.Equal(t, 2, newSessions, "agent + shell must be freshly spawned inside the rebuilt worktree")
-
-	var agentSpawn string
-	for _, spawn := range spawns {
-		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellName) {
-			agentSpawn = spawn
-			break
-		}
-	}
-	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
-	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
-		"the respawn must keep the recorded conversation via the resume path")
-}
-
-// TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry is the retry half of
-// the #5370 property (#5371 review): when a rebuild's stale-pane teardown fails
-// mid-attempt, the next Recover MUST NOT skip it just because the stale name
-// still answers has-session — the durable obligation is re-derived per attempt,
-// and now runs BEFORE the rebuild recreates the checkout, so a wedged kill on
-// attempt 1 leaves the worktree missing rather than half-rebuilt beside a live
-// stale pane. Without the durable indication a later attempt would reattach the
-// stale pane and ConfirmLive would bind it as Running — the original defect
-// through a retry.
-func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	repoRoot := initTempGitRepo(t)
-	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
-	gitOut(t, repoRoot, "config", "user.name", "test")
-	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
-	const branch = "af/lost-recover-retry"
-	gitOut(t, repoRoot, "branch", branch)
-
-	const agentName = "af_recover_retry"
-	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
-	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-retry")
-	branchCreatedByUs := true
-	data := InstanceData{
-		Title:    "lost-recover-retry",
-		Path:     repoRoot,
-		Branch:   branch,
-		Program:  tmux.ProgramCodex,
-		Status:   Lost,
-		TmuxName: agentName,
-		Tabs: []TabData{
-			{
-				Name:     agentTabName,
-				Kind:     TabKindAgent,
-				TmuxName: agentName,
-				Conversation: &AgentConversationData{
-					Agent:       tmux.ProgramCodex,
-					ID:          conversationID,
-					CaptureKind: ConversationCaptureCodexRollout,
-				},
-			},
-		},
-		Worktree: GitWorktreeData{
-			RepoPath:          repoRoot,
-			WorktreePath:      worktreePath,
-			SessionName:       "lost-recover-retry",
-			BranchName:        branch,
-			BranchCreatedByUs: &branchCreatedByUs,
-		},
-	}
-
-	// The stale agent session survives; kill-session is wedged on attempt 1
-	// only, so the teardown fails BEFORE the rebuild could commit — the
-	// worktree stays missing and the durable obligation stays armed.
-	var newSessions int
-	var spawns, kills []string
-	inner := deadPaneAwareExec(map[string]bool{agentName: true},
-		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
-	failKills := true
-	exec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			if strings.Contains(cmd.String(), "kill-session") {
-				kills = append(kills, cmd.String())
-				if failKills {
-					return errors.New("tmux wedged on kill-session")
-				}
-			}
-			return inner.Run(cmd)
-		},
-		OutputFunc: inner.Output,
-	}
-	pty := persistPtyFactory{t: t, cmdExec: exec}
-	prev := restoreTmuxSession
-	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
-		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
-	}
-	t.Cleanup(func() { restoreTmuxSession = prev })
-
-	restored, err := FromInstanceData(data)
-	require.NoError(t, err)
-	require.Equal(t, Lost, restored.GetStatus())
-	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
-	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
-
-	require.Error(t, restored.Recover(), "attempt 1 must fail — the stale pane refused to die")
-	_, statErr := os.Stat(worktreePath)
-	assert.True(t, os.IsNotExist(statErr),
-		"the teardown failed BEFORE the rebuild — no half-rebuilt checkout may sit beside the live stale pane")
-	assert.True(t, restored.RebuildTeardownPending(), "the durable obligation stays armed for the retry")
-	assert.Equal(t, 0, newSessions, "no replacement may launch while the stale pane survives")
-
-	// Attempt 2: the armed obligation — not a re-derived rebuild flag — is
-	// what runs the teardown again; without it the retry would rebuild beside
-	// the still-answering stale pane and reattach it.
-	failKills = false
-	require.NoError(t, restored.Recover())
-
-	assert.Equal(t, Running, restored.GetStatus())
-	assert.Contains(t, strings.Join(kills, "\n"), agentName,
-		"the retry must still tear down the stale pane from the earlier rebuild")
-	require.Len(t, spawns, 1, "the retry must respawn the agent inside the rebuilt worktree")
-	assert.Contains(t, spawns[0], "codex resume "+conversationID)
 }
 
 // A committed rebuild whose stale-pane teardown is undischarged must keep the

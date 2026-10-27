@@ -74,7 +74,7 @@ func finishRecoverTabFailure(
 	setupErr := fmt.Errorf("recover: restore tabs for session %q: %w", title, err)
 	if restoreResult == tmux.RestoreRespawned {
 		if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-			setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+			setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 		}
 	}
 	return markRecoverRebuilt(rebuilt, setupErr)
@@ -115,7 +115,7 @@ func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err e
 		return err
 	}
 	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-		return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+		return fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 	}
 	return err
 }
@@ -126,7 +126,7 @@ func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) e
 	}
 	for _, session := range sessions {
 		if _, err := session.CloseAndWaitForPaneExit(); err != nil {
-			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %v)", setupErr, err)
+			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %w)", setupErr, err)
 		}
 	}
 	return setupErr

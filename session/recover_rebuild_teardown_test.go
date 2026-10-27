@@ -864,3 +864,218 @@ func TestRebuildTeardownPending_FencesPromptAndInput(t *testing.T) {
 	require.NoError(t, inst.SetRebuildTeardownPending(false))
 	require.NoError(t, inst.refuseInputWhileRebuildTeardownPending())
 }
+
+// TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild is the #5370
+// regression: a deleted worktree whose agent tmux session SURVIVED used to
+// come back through rebuild → RestoreReattached → ConfirmLive — a Running row
+// bound to a pane whose cwd is the unlinked inode, divorced from the checkout
+// at the same path. After a rebuild, a surviving name can never be inside the
+// new worktree: Recover must kill it and re-spawn into the rebuilt checkout
+// (the recorded conversation travels through the resume path), never bind the
+// stale pane as Running.
+func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-survivor"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_survivor"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-survivor")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-survivor",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-survivor",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	// Both the agent and the shell tmux sessions are still live — the stale
+	// panes whose cwd is the deleted inode.
+	var newSessions int
+	var spawns, kills []string
+	inner := deadPaneAwareExec(map[string]bool{agentName: true, shellName: true},
+		recordingExec(map[string]bool{agentName: true, shellName: true}, &newSessions, &spawns))
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				kills = append(kills, cmd.String())
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+	_, statErr := os.Stat(worktreePath)
+	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
+
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	require.DirExists(t, worktreePath)
+
+	// Every surviving stale pane must have been killed BEFORE its name was
+	// re-spawned inside the rebuilt worktree — the agent's included.
+	assert.Contains(t, strings.Join(kills, "\n"), agentName,
+		"Recover must kill the surviving agent pane — it can never be inside the rebuilt worktree")
+	assert.Contains(t, strings.Join(kills, "\n"), shellName,
+		"Recover must kill every surviving stale pane, not only the agent's")
+	assert.Equal(t, 2, newSessions, "agent + shell must be freshly spawned inside the rebuilt worktree")
+
+	var agentSpawn string
+	for _, spawn := range spawns {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellName) {
+			agentSpawn = spawn
+			break
+		}
+	}
+	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
+	assert.Contains(t, agentSpawn, " resume "+conversationID,
+		"the respawn must keep the recorded conversation via the resume path")
+}
+
+// TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry is the retry half of
+// the #5370 property (#5371 review): when a rebuild's stale-pane teardown fails
+// mid-attempt, the next Recover MUST NOT skip it just because the stale name
+// still answers has-session — the durable obligation is re-derived per attempt,
+// and now runs BEFORE the rebuild recreates the checkout, so a wedged kill on
+// attempt 1 leaves the worktree missing rather than half-rebuilt beside a live
+// stale pane. Without the durable indication a later attempt would reattach the
+// stale pane and ConfirmLive would bind it as Running — the original defect
+// through a retry.
+func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-retry"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_retry"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-retry")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-retry",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-retry",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	// The stale agent session survives; kill-session is wedged on attempt 1
+	// only, so the teardown fails BEFORE the rebuild could commit — the
+	// worktree stays missing and the durable obligation stays armed.
+	var newSessions int
+	var spawns, kills []string
+	inner := deadPaneAwareExec(map[string]bool{agentName: true},
+		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+	failKills := true
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				kills = append(kills, cmd.String())
+				if failKills {
+					return errors.New("tmux wedged on kill-session")
+				}
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+
+	require.Error(t, restored.Recover(), "attempt 1 must fail — the stale pane refused to die")
+	_, statErr := os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(statErr),
+		"the teardown failed BEFORE the rebuild — no half-rebuilt checkout may sit beside the live stale pane")
+	assert.True(t, restored.RebuildTeardownPending(), "the durable obligation stays armed for the retry")
+	assert.Equal(t, 0, newSessions, "no replacement may launch while the stale pane survives")
+
+	// Attempt 2: the armed obligation — not a re-derived rebuild flag — is
+	// what runs the teardown again; without it the retry would rebuild beside
+	// the still-answering stale pane and reattach it.
+	failKills = false
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Contains(t, strings.Join(kills, "\n"), agentName,
+		"the retry must still tear down the stale pane from the earlier rebuild")
+	require.Len(t, spawns, 1, "the retry must respawn the agent inside the rebuilt worktree")
+	assert.Contains(t, spawns[0], " resume "+conversationID)
+}
