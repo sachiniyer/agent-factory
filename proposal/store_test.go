@@ -349,11 +349,11 @@ func TestDetach(t *testing.T) {
 func TestWriteAndAddDoc(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA, "goals")
-	file, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal})
+	file, _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal})
 	if err != nil || file != "risks.md" {
 		t.Fatalf("AddDoc = %q, %v", file, err)
 	}
-	if _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal}); err == nil {
+	if _, _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal}); err == nil {
 		t.Fatal("adding an existing doc must fail")
 	}
 	if _, commit, err := s.Write("p", "risks.md", "new text\n", Committer{Author: AuthorExternal}); err != nil || commit == "" {
@@ -453,5 +453,12 @@ func TestCreateRemovesFolderOnFailure(t *testing.T) {
 	}
 	if status, _ := s.git(nil, "status", "--porcelain"); status != "" {
 		t.Fatalf("a failed create left changes:\n%s", status)
+	}
+}
+
+func TestRulesExplainPushedEdits(t *testing.T) {
+	r := Rules("p", "/x/p")
+	if !strings.Contains(r, `arrive as a prompt that starts with "Proposal p:"`) || !strings.Contains(r, `you do not need to run "af proposal changes" first`) {
+		t.Fatalf("rule 2 must explain pushed edits:\n%s", r)
 	}
 }
