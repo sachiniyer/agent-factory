@@ -1,0 +1,1 @@
+bash: line 1: ./leg.sh: No such file or directory

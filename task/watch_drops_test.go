@@ -15,6 +15,7 @@ func TestIsTerminalWatcherStatus(t *testing.T) {
 		want   bool
 	}{
 		{"stopped", true},
+		{"errored", true}, // legacy pre-#797 form — the TUI still renders it
 		{"errored: exit status 1: boom", true},
 		{"errored: not armed — target session is archived", true},
 		{"", false},

@@ -206,7 +206,7 @@ func TestSidebarTreeCollapseSurvivesDownFromInstanceRow(t *testing.T) {
 	// h/← from instance 0's own row folds its tab children in place.
 	s.CollapseSection()
 	require.Equal(t, 0, tabRowCount(s))
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	sel := s.GetSelection()
 	require.False(t, sel.IsTab, "collapse leaves the cursor on the instance row")
 
@@ -245,7 +245,7 @@ func TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab(t *testing.T) {
 	s.proj.SetActiveTab(1)
 	require.Equal(t, 1, s.proj.ActiveTab(), "active tab is the terminal tab before collapse")
 	s.CollapseSection()
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.Equal(t, 0, tabRowCount(s))
 	require.False(t, s.GetSelection().IsTab, "collapse leaves the cursor on the instance row")
 
@@ -254,7 +254,7 @@ func TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab(t *testing.T) {
 	s.Down()
 	assert.False(t, s.GetSelection().IsTab, "cursor does not dive into folded tabs")
 	assert.Equal(t, 0, s.GetSelection().ItemIndex, "cursor stays on the folded instance row")
-	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives a Down with no next instance")
+	assert.Same(t, s.proj.GetInstances()[0], s.treeCollapsed, "explicit collapse survives a Down with no next instance")
 	assert.Equal(t, 1, s.proj.ActiveTab(), "active tab preserved when Down is a no-op")
 }
 
@@ -267,12 +267,12 @@ func TestSidebarTreeCollapseClearsOnCrossInstanceSelect(t *testing.T) {
 	s := newTreeSidebar(t, 3)
 	s.SetSelectedInstance(0)
 	s.CollapseSection()
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.Equal(t, 0, tabRowCount(s))
 
 	s.SetSelectedInstance(1) // different instance
 	assert.Equal(t, 1, s.GetSelection().ItemIndex)
-	assert.Equal(t, "", s.treeCollapsed, "cleared — a different instance is selected")
+	assert.Nil(t, s.treeCollapsed, "cleared — a different instance is selected")
 	assert.Equal(t, 2, tabRowCount(s), "new instance auto-expands")
 }
 
@@ -296,14 +296,14 @@ func TestSidebarTreeCollapseDownFromHeaderSelectsTab(t *testing.T) {
 	// h/← from instance 0's row folds its tab children in place.
 	s.CollapseSection()
 	require.Equal(t, 0, tabRowCount(s))
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.False(t, s.GetSelection().IsTab, "cursor on the instance row")
 
 	// A second h/← jumps to the Instances header and folds the section; the
 	// store's sticky selection and treeCollapsed both still name t-00.
 	s.CollapseSection()
 	require.True(t, s.GetSelection().IsHeader, "cursor moved to the Instances header")
-	require.Equal(t, "t-00", s.treeCollapsed, "sticky collapse survives the header jump")
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed, "sticky collapse survives the header jump")
 
 	// Down must NOT be consumed: it clears the override, expands the section
 	// and lands on the first tab of the formerly sticky instance.
@@ -312,7 +312,7 @@ func TestSidebarTreeCollapseDownFromHeaderSelectsTab(t *testing.T) {
 	assert.True(t, sel.IsTab, "Down from the header selects a tab row, not a no-op")
 	assert.Equal(t, 0, sel.ItemIndex, "lands on instance 0's first tab")
 	assert.Equal(t, 0, sel.TabIndex)
-	assert.Equal(t, "", s.treeCollapsed, "the same-instance override is cleared")
+	assert.Nil(t, s.treeCollapsed, "the same-instance override is cleared")
 	assert.Equal(t, 2, tabRowCount(s), "instance 0 re-expanded so the tab row is visible")
 }
 
@@ -326,7 +326,7 @@ func TestSidebarTreeCollapseDownLandsOnNextInstance(t *testing.T) {
 	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
 	s.SetSelectedInstance(0)
 	s.CollapseSection()
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.False(t, s.GetSelection().IsTab, "cursor on the folded instance row")
 
 	// Down lands on the next instance row and selects it; the folded one
@@ -339,7 +339,7 @@ func TestSidebarTreeCollapseDownLandsOnNextInstance(t *testing.T) {
 	assert.False(t, sel.IsTab, "cursor rests on the instance row, not a tab")
 	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
 		"the folded instance stays collapsed")
-	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
+	assert.Nil(t, s.treeCollapsed, "the override clears once the selection moves on")
 	assert.Equal(t, 2, tabRowCount(s), "the next instance auto-expands")
 
 	// A second Down proceeds normally into the now-selected instance's tabs —
@@ -381,7 +381,7 @@ func TestSidebarTreeCollapseDownSkipsRootSeparator(t *testing.T) {
 	// h/← folds the root in place; the cursor stays on its row and the tab
 	// children disappear. The IsRootSep hairline is still emitted below it.
 	s.CollapseSection()
-	require.Equal(t, "root", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.Equal(t, 0, tabRowCount(s))
 	require.False(t, s.GetSelection().IsTab, "cursor on the folded root row")
 
@@ -395,7 +395,7 @@ func TestSidebarTreeCollapseDownSkipsRootSeparator(t *testing.T) {
 	assert.Equal(t, "alpha", s.GetSelectedInstance().Title, "Down selects the next real instance")
 	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
 		"the folded root does not re-expand")
-	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
+	assert.Nil(t, s.treeCollapsed, "the override clears once the selection moves on")
 }
 
 // TestSidebarTreeCollapseDownSkipsInFlightInstance pins the P2 inline Codex
@@ -420,7 +420,7 @@ func TestSidebarTreeCollapseDownSkipsInFlightInstance(t *testing.T) {
 
 	// h/← folds instance 0 in place.
 	s.CollapseSection()
-	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Same(t, s.proj.GetInstances()[0], s.treeCollapsed)
 	require.False(t, s.GetSelection().IsTab, "cursor on the folded instance row")
 
 	// Down must skip the in-flight t-01 row and land on the next expandable
@@ -432,7 +432,7 @@ func TestSidebarTreeCollapseDownSkipsInFlightInstance(t *testing.T) {
 	assert.Equal(t, "t-02", s.GetSelectedInstance().Title, "Down selects the next expandable instance")
 	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
 		"the folded instance stays collapsed")
-	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
+	assert.Nil(t, s.treeCollapsed, "the override clears once the selection moves on")
 }
 
 // TestSidebarTreeTabCursorDrivesActiveTab pins the selection tab dimension:
@@ -600,6 +600,37 @@ func TestSidebarTreeSwapPreservesTabSelection(t *testing.T) {
 	assert.Equal(t, 0, sel.TabIndex)
 	assert.Equal(t, 2, tabRowCount(s), "same-title swap keeps the subtree expanded")
 	assert.Same(t, rebuilt, s.GetSelectedInstance())
+}
+
+// TestSidebarTreeSwapClearsCollapse pins the #765 same-title kill+recreate
+// swap with an active explicit collapse: the old session's treeCollapsed
+// override (keyed by pointer) must NOT pass through to the replacement. The
+// replacement starts auto-expanded (▾ marker, tab rows visible) rather than
+// folded, matching the treeCollapsed contract that every newly selected
+// instance starts auto-expanded.
+func TestSidebarTreeSwapClearsCollapse(t *testing.T) {
+	s := newTreeSidebar(t, 1)
+	s.SetSize(40, 24)
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s))
+
+	s.CollapseSection() // user collapses the subtree
+	require.Equal(t, 0, tabRowCount(s))
+	require.NotNil(t, s.treeCollapsed)
+
+	// #765 kill+recreate: same title, different instance pointer.
+	inst := s.proj.GetInstances()[0]
+	rebuilt, err := session.NewInstance(session.InstanceOptions{
+		Title: inst.Title, Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	addAgentShellTabs(rebuilt)
+	require.True(t, s.proj.ReplaceInstance(inst, rebuilt)) // re-points p.selected to rebuilt
+	s.syncFromStore()
+
+	assert.Nil(t, s.treeCollapsed, "stale collapse should be cleared after same-title swap")
+	assert.True(t, s.instanceExpanded(rebuilt), "replacement should be auto-expanded")
+	assert.Equal(t, 2, tabRowCount(s), "replacement tab subtree should be visible")
 }
 
 // TestSidebarTreeTransientRowsCollapse pins the tree treatment of transient

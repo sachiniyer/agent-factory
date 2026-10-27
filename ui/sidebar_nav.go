@@ -32,11 +32,12 @@ func (s *Sidebar) syncFromStore() {
 	// Archiving re-homes that row into the flat Archived folder, where the
 	// override no longer folds anything — it only suppresses the ▾ marker the
 	// header fallback keys on, leaving an adoptable row that looks unselected
-	// (#4755 review). Clear the dead override on the transition.
-	if s.treeCollapsed != "" {
+	// (#4755 review). Clear the dead override on the transition; the
+	// pointer-keyed check also drops it across a #765 same-title swap.
+	if s.treeCollapsed != nil {
 		if sel := s.proj.GetSelectedInstance(); sel == nil ||
-			sel.Title != s.treeCollapsed || sel.ShownArchived() {
-			s.treeCollapsed = ""
+			sel != s.treeCollapsed || sel.ShownArchived() {
+			s.treeCollapsed = nil
 			s.rebuildVisibleItems()
 		}
 	}
@@ -192,7 +193,7 @@ func (s *Sidebar) pushSelection() {
 	}
 	s.lastCursorTitle = inst.Title
 	if prev != inst {
-		s.treeCollapsed = ""
+		s.treeCollapsed = nil
 		s.rebuildPreservingCursor()
 	}
 }
@@ -444,7 +445,7 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 	// only on a normal dive into its (expanded) tabs. From a header or archived
 	// cursor the target tab must be revealed and selected normally. In both
 	// cases clearing the explicit-collapse override is the right thing.
-	s.treeCollapsed = ""
+	s.treeCollapsed = nil
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
 			s.sections[i].Expanded = true
@@ -514,8 +515,8 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 	} else if sel.Kind == SectionInstances && !sel.IsTab {
 		if dir > 0 {
 			instances := s.proj.GetInstances()
-			if s.treeCollapsed != "" && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
-				s.treeCollapsed == instances[sel.ItemIndex].Title {
+			if s.treeCollapsed != nil && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
+				s.treeCollapsed == instances[sel.ItemIndex] {
 				if s.moveCursorToNextInstanceRow() {
 					return true
 				}
@@ -653,8 +654,8 @@ func (s *Sidebar) ExpandSection() {
 	s.syncFromStore()
 	sel := s.rawSelection()
 	if sel.Kind == SectionInstances && !sel.IsHeader && !sel.IsTab {
-		if s.treeCollapsed != "" {
-			s.treeCollapsed = ""
+		if s.treeCollapsed != nil {
+			s.treeCollapsed = nil
 			s.rebuildPreservingCursor()
 		}
 		s.afterCursorMove()
@@ -686,7 +687,7 @@ func (s *Sidebar) CollapseSection() {
 		if sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) {
 			inst := instances[sel.ItemIndex]
 			if s.instanceExpanded(inst) {
-				s.treeCollapsed = inst.Title
+				s.treeCollapsed = inst
 				if sel.IsTab {
 					// Fold to the parent: the cursor lands on the instance row.
 					s.rebuildVisibleItems()
@@ -1043,9 +1044,9 @@ func (s *Sidebar) ToggleInstanceTree(title string) {
 		return
 	}
 	if wasExpanded {
-		s.treeCollapsed = title
+		s.treeCollapsed = instances[instIdx]
 	} else {
-		s.treeCollapsed = ""
+		s.treeCollapsed = nil
 	}
 	s.rebuildVisibleItems()
 	s.moveCursorToInstanceRow(instIdx)
