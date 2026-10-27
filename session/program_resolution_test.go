@@ -260,7 +260,7 @@ func TestResolveLaunchProgram_TrustsUnquotedSpellingOfDetectedClaude(t *testing.
 	// And the pairing the account boundary actually consumes: with trust the
 	// executable and af's flag are provenance, so the generated-args check can
 	// admit the launch.
-	proof := accountLaunchProof(resolution.command, resolution.command+" --session-id x", resolution.trustBase)
+	proof := accountLaunchProof(resolution.command, resolution.command+" --session-id x", resolution.trustBase, nil, "")
 	require.Equal(t, claudePath, proof.TrustedExecutable,
 		"trust must reach the proof, or the scoped launch still refuses af's own flag")
 	require.Contains(t, proof.GeneratedArgs, config.DetectedClaudePermissionsFlag)
