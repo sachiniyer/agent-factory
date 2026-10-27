@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, findRedMasterRun, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
+const { isTruncated, ACK_RE, selectMergeable, hasUnansweredP1, checksGreen, touchesWorkflows, findRedMasterRun, filesQuery, WORKFLOW_SKIP_REASON, mergeAll } = require('./auto-merge.js');
 
 const run = (name, conclusion = 'SUCCESS', status = 'COMPLETED') => ({ __typename: 'CheckRun', name, status, conclusion });
 const green = [run('Build'), run('Lint'), run('Test', 'FAILURE')];
@@ -137,4 +137,30 @@ test('mergeAll merges nothing while master Build/Lint is red, and says which run
   github_runs.runs = [mr('build.yml', 'success', 100), mr('build.yml', 'failure', 99)];
   await mergeAll({ github, core, context: { repo: { owner: 'o', repo: 'r' } } });
   assert.deepEqual(github.merged, [1, 2]);
+});
+
+test('ack marker must START the reply: UNRESOLVED / NOT ACCEPTED do not clear a P1 (#5676)', () => {
+  const threads = (...nodes) => ({ reviewThreads: { pageInfo: { hasNextPage: false }, nodes } });
+  for (const body of ['UNRESOLVED', 'NOT ACCEPTED', 'this is not RESOLVED yet', 'unresolved: RESOLVED?', 'ACCEPTEDLY']) {
+    assert.equal(hasUnansweredP1(pr(threads(p1([body])))), true, body);
+  }
+  for (const body of ['RESOLVED in abc', 'ACCEPTED: fine', '  RESOLVED', '**ACCEPTED** by design', '[gate-ack] ok']) {
+    assert.equal(hasUnansweredP1(pr(threads(p1([body])))), false, body);
+  }
+  assert.ok(ACK_RE.test('RESOLVED'));
+});
+
+test('truncated labels or contexts fail closed (#5678)', () => {
+  assert.equal(isTruncated({ pageInfo: { hasNextPage: true }, nodes: [] }), true);
+  assert.equal(isTruncated({ totalCount: 101, nodes: new Array(100).fill({}) }), true);
+  assert.equal(isTruncated({ totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [{}, {}] }), false);
+  assert.equal(isTruncated(undefined), false);
+  // labels: a hold label may sit beyond the page
+  assert.ok(reason(pr({ labels: { pageInfo: { hasNextPage: true }, nodes: [] } })));
+  // contexts: Build/Lint green in the first 100 but more exist (a failing duplicate may be hidden)
+  const ctx = (extra) => ({ commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: green, ...extra } } } }] } });
+  assert.equal(checksGreen(pr(ctx({ pageInfo: { hasNextPage: true } }))), false);
+  assert.equal(checksGreen(pr(ctx({ totalCount: 150 }))), false);
+  assert.equal(checksGreen(pr(ctx({ totalCount: 3, pageInfo: { hasNextPage: false } }))), true);
+  assert.equal(reason(pr()), null);
 });
