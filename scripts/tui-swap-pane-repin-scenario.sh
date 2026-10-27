@@ -88,7 +88,7 @@ selected_name() {
     af_capture | grep -oE '▾[[:space:]]+[^[:space:]●○◌]+' | head -1 | sed 's/▾[[:space:]]*//'
 }
 
-run_leg() { # <leg> <binary>
+run_leg_once() { # <leg> <binary>
     local leg="$1" bin="$2"
     export AF_DRIVER_BIN="$2"
 
@@ -133,6 +133,7 @@ claude = "bash"'
     # reconcileSnapshot sees same-title/different-CreatedAt (a SWAP) rather than
     # a remove-then-add. So run them back-to-back with no wait between (any wait
     # lets a poll fire that removes the corpse first, surfacing as an add).
+    LOG_MARK="$(wc -l <"$AGENT_FACTORY_HOME/agent-factory.log" 2>/dev/null || echo 0)"
     (cd "$AF_DRIVER_REPO" && "$bin" sessions kill dup) >/dev/null 2>&1 \
         || { _af_fail "$leg: af sessions kill dup failed"; return 1; }
     (cd "$AF_DRIVER_REPO" && "$bin" sessions create dup) >/dev/null 2>&1 \
@@ -148,6 +149,57 @@ claude = "bash"'
     printf '%s\t%s\t%s\n' "swap-panerepin" "$sel" "$tab" >>"$EVID/$leg-results.tsv"
     _af_log "$leg/swap-panerepin -> selected='$sel' active_tab='$tab'"
     return 0
+}
+
+# run_leg retries run_leg_once, but ONLY to absorb the setup race behind #5620.
+# The replacement's tabs are created by separate `af` invocations after the
+# create, so a 750ms snapshot poll can land between them and swap in a PARTIAL
+# roster ([agent, b], "a" not yet created). That correctly closes the pane on
+# "a" and lands on "b", the sibling in the vacated slot (#5298) — a different
+# timeline from the equivalent-tab-by-name path this scenario exercises (#5620:
+# it passed on #5308's own head by timing luck). The partial-roster timeline
+# itself is pinned by TestSwapSameTitle_PartialRosterThenTabArrives in app/.
+#
+# An attempt is discarded only on evidence that the race happened in it:
+#  - branch leg: the TUI logs the roster it observed at swap time ("same-title
+#    swap of "dup": replacement roster [...]"). A missing line (the corpse was
+#    removed and re-added instead of swapped) or a roster other than the full
+#    [agent,b,a] is the race. A FULL roster that lands anywhere but "a" is a
+#    real re-pin defect and fails the scenario at once — no retry.
+#  - control leg (pre-fix binary, no roster log): the bug lands on the agent tab;
+#    the partial-roster race lands on "b". "Agent" is accepted, "b"/blank is
+#    discarded as the race, and "a" (impossible from a partial roster) means the
+#    control did not reproduce — CONTROL-INCONCLUSIVE at once.
+# Every discarded attempt is printed with its reason; three discards fail.
+run_leg() { # <leg> <binary>
+    local leg="$1" bin="$2" attempt tab roster
+    for attempt in 1 2 3; do
+        rm -f "$EVID/$leg-results.tsv"
+        run_leg_once "$leg" "$bin" || return 1
+        tab="$(awk -F'\t' '{print $3}' "$EVID/$leg-results.tsv")"
+        if [ "$leg" = master ]; then
+            case "$tab" in
+                Agent) return 0 ;;
+                a) echo "CONTROL-INCONCLUSIVE: master landed on 'a' — no drift reproduced"; exit 3 ;;
+            esac
+            _af_log "master: attempt $attempt DISCARDED — landed on '${tab:-?}', the partial-roster signature, not the bug's agent landing; retrying"
+            continue
+        fi
+        roster="$(tail -n +$((LOG_MARK + 1)) "$AGENT_FACTORY_HOME/agent-factory.log" 2>/dev/null \
+            | grep -F 'same-title swap of "dup"' | tail -1 || true)"
+        if [ -z "$roster" ]; then
+            _af_log "branch: attempt $attempt DISCARDED — no same-title swap logged (corpse removed and re-added); retrying"
+        elif ! printf '%s' "$roster" | grep -Eq 'replacement roster \[[^],]+,b,a\]$'; then
+            _af_log "branch: attempt $attempt DISCARDED — swap observed a partial roster: ${roster#*replacement roster }; retrying"
+        elif [ "$tab" = a ]; then
+            return 0
+        else
+            _af_fail "branch: swap observed the full roster (${roster#*replacement roster }) but the active tab is '${tab:-?}', not 'a' — real re-pin defect, not the setup race"
+            exit 1
+        fi
+    done
+    _af_fail "$leg: all 3 attempts hit the partial-roster setup race; no verdict"
+    exit 1
 }
 
 run_leg master "$HOME/bin/af.master"

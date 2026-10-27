@@ -137,7 +137,7 @@ func TestPrepareAgentSwap_DoesNotWriteIntoTheTargetAgentsAccount(t *testing.T) {
 	target := resolveSkillTarget(scoped, "gemini")
 	require.True(t, target.unresolved, "the handoff target's account namespace is not this session's")
 
-	injectSystemPrompt("gemini", target)
+	injectSystemPrompt("gemini", target, false)
 	require.NoFileExists(t, geminiSkillPathUnder(geminiDir),
 		"a handoff that will be refused must not mutate the target agent's account directory")
 	require.NoFileExists(t, geminiSkillPathUnder(ambient),
@@ -273,8 +273,8 @@ func TestInjectSystemPrompt_WritesTheGuidanceWhereAScopedSessionReads(t *testing
 			t.Setenv(tc.envVar, ambient)
 			dir := registerAccount(t, tc.accounts, "work")
 
-			program := injectSystemPrompt(tc.agent,
-				resolveSkillTarget(&Instance{Program: tc.agent, Account: "work"}, tc.agent))
+			program := injectSystemPrompt(tc.agent, resolveSkillTarget(&Instance{Program: tc.agent, Account: "work"}, tc.agent), false)
+
 			require.Equal(t, tc.program, program,
 				"the skill is placed through the filesystem; the command gains no skill rewrite")
 
@@ -286,7 +286,7 @@ func TestInjectSystemPrompt_WritesTheGuidanceWhereAScopedSessionReads(t *testing
 
 			// The unscoped control still writes where it always did, so the fix is a
 			// redirection for scoped sessions rather than a change of default.
-			injectSystemPrompt(tc.agent, skillTarget{})
+			injectSystemPrompt(tc.agent, skillTarget{}, false)
 			require.FileExists(t, tc.skillAt(ambient),
 				"an unscoped session's guidance still belongs in the daemon's config root")
 		})
@@ -302,8 +302,7 @@ func TestInjectSystemPrompt_WritesNothingWhenTheAccountIsUnresolvable(t *testing
 	ambient := t.TempDir()
 	t.Setenv("GEMINI_CLI_HOME", ambient)
 
-	program := injectSystemPrompt("gemini",
-		resolveSkillTarget(&Instance{Program: "gemini", Account: "no-such-account"}, "gemini"))
+	program := injectSystemPrompt("gemini", resolveSkillTarget(&Instance{Program: "gemini", Account: "no-such-account"}, "gemini"), false)
 
 	require.Equal(t, "gemini", program, "an unplaceable skill must not break the launch")
 	require.NoFileExists(t, geminiSkillPathUnder(ambient),

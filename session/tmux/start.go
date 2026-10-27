@@ -117,10 +117,27 @@ func (t *TmuxSession) Start(workDir string) error {
 	// the one seam every af spawn — create, restore, respawn, tab — passes
 	// through. The name is already proved absent above and nothing has run
 	// new-session, so a refusal here can leave no pane behind.
+	//
+	// The stat must be bounded, not a raw os.Stat: workDir is not confined to
+	// af's home — sibling worktrees live beside the user's repo, `--here`
+	// launches in the user's own checkout, and restore re-uses persisted paths
+	// verbatim, so the path can sit on an existing-but-wedged bind/NFS/FUSE
+	// mount whose stat blocks in an uninterruptible D state. An unbounded
+	// stat here would wedge the daemon's synchronous create handler (and any
+	// lock held under it) forever instead of entering environmental backoff
+	// (#5295 review). statSocketDir runs the lookup inside fsprobe.Stat's 2s
+	// flight and returns the typed ErrProbeTimedOut + context.DeadlineExceeded
+	// pair on non-answer, which the lost-restore environmental classifier
+	// reads as the bounded environmental class — the same discipline
+	// tmuxSocketFilesystemDir and the worktree-add probe already keep.
 	if workDir != "" {
-		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+		st, err := statSocketDir(workDir)
+		if err != nil || st == nil || !st.IsDir() {
 			// Not just "missing": an unreadable or un-stat-able directory is
-			// equally unverifiable, and either verdict refuses the spawn.
+			// equally unverifiable, and either verdict refuses the spawn. A
+			// bounded non-answer (ErrProbeTimedOut: context.DeadlineExceeded)
+			// is joined into the chain so the lost-restore classifier routes
+			// the session to environmental backoff instead of hanging.
 			if err == nil {
 				err = fmt.Errorf("not a directory")
 			}
@@ -511,7 +528,18 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		// callers before the program rewrite happens.) The live-session
 		// reattach branch below is unaffected: a live pane is not re-launched
 		// into anything.
-		if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+		//
+		// The stat is routed through statSocketDir (fsprobe.Stat) for the
+		// same reason Start's gate is: this branch runs on the daemon's
+		// synchronous restore poll, and a persisted worktree path can sit on
+		// an existing-but-wedged mount whose unbounded stat would block the
+		// poll (and the locks it holds) forever instead of entering
+		// environmental backoff (#5295 review). The bounded non-answer's
+		// ErrProbeTimedOut + context.DeadlineExceeded pair is joined into the
+		// ErrSpawnDirMissing chain so the classifier routes the session to
+		// capped environmental backoff rather than hanging.
+		st, err := statSocketDir(workDir)
+		if err != nil || st == nil || !st.IsDir() {
 			if err == nil {
 				err = fmt.Errorf("not a directory")
 			}
