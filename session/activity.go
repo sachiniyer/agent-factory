@@ -210,6 +210,15 @@ type LifecycleView struct {
 	// runtime together with the genuinely stale names (#5371 review). The retry
 	// owners (recover/restore/limit-resume) are exempt by construction.
 	RebuildTeardownPending bool
+	// HandoffDeliveryStatus is the verdict on PendingHandoffMission's delivery, so
+	// Activity() can mirror LoadedActivity's verdict-aware gate. A known ambiguous
+	// verdict (PromptCouldNotConfirm/PromptSentUnverified) deliberately loads WITHOUT
+	// the replacement fence and releases its slot — recovery will not resolve it
+	// automatically, so holding it would wedge max_concurrent_runs until an operator
+	// acts. Only a fence-requiring verdict (PromptNotDelivered/PromptDelivered) or an
+	// UNRECOGNIZED future verdict re-raises the mission on the live view, exactly as
+	// handoffCouldHoldSlot gates the raw-record path.
+	HandoffDeliveryStatus PromptDeliveryStatus
 	// StartupStateUnknown is the retained-create fence: the launch may have
 	// succeeded under an identity af could not confirm, so no runtime or workspace
 	// action may infer ordinary LiveReady semantics from this view.
@@ -257,6 +266,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		PendingAccountSwap:     i.pendingAccountSwap != nil,
 		PendingHandoffMission:  i.pendingHandoffMission != "",
 		RebuildTeardownPending: i.rebuildTeardownPending,
+		HandoffDeliveryStatus:  i.handoffDeliveryStatus,
 		StartupStateUnknown:    i.startupStateUnknown,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
@@ -287,6 +297,25 @@ func (v LifecycleView) Activity() Activity {
 	}
 	if v.PendingAccountSwap {
 		data.PendingAccountSwap = &AccountSwapData{}
+	}
+	if v.PendingHandoffMission {
+		// Mirror LoadedActivity's handoffCouldHoldSlot gate (activity.go): a
+		// known ambiguous verdict (PromptCouldNotConfirm/PromptSentUnverified,
+		// or the missing evidence a legacy record loads as PromptCouldNotConfirm)
+		// deliberately loads WITHOUT the replacement fence, because recovery will
+		// not resolve it automatically — the operator owns the confirm-or-retry.
+		// Raising the mission here for those verdicts would wedge the #1892 cap on
+		// a run that reached LiveReady or an unrecoverable lost state after an
+		// ambiguous delivery. Re-raise the mission only for the verdicts that
+		// still own an in-flight obligation the daemon resolves itself
+		// (PromptNotDelivered/PromptDelivered) or an UNRECOGNIZED future verdict
+		// that may stand for one, exactly as the raw-record path does. The
+		// mission-non-empty guard is the outer if; handoffCouldHoldSlot repeats it
+		// for its other (raw-record) caller.
+		if pendingHandoffMissionNeedsFence(v.HandoffDeliveryStatus) ||
+			(v.HandoffDeliveryStatus != "" && !v.HandoffDeliveryStatus.Valid()) {
+			data.PendingHandoffMission = "pending"
+		}
 	}
 	activity, _ := ClassifyActivity(data)
 	return activity
@@ -330,8 +359,11 @@ func (v LifecycleView) Activity() Activity {
 // replay) and PromptDelivered (crash-window settle). An ambiguous verdict
 // (PromptCouldNotConfirm, PromptSentUnverified, or the missing evidence a legacy
 // record carries) loads WITHOUT the fence, so the loaded form has InFlightOp=OpNone.
-// LifecycleView.Activity() reaches the terminal verdict for such a row by omitting
-// PendingHandoffMission from the InstanceData it builds; LoadedActivity does the
+// LifecycleView.Activity() mirrors that gate: it re-raises PendingHandoffMission on
+// the InstanceData it builds only for a fence-requiring or UNRECOGNIZED verdict
+// (handoffCouldHoldSlot), so a live session that reached LiveReady or an
+// unrecoverable lost state after an ambiguous delivery releases its slot instead of
+// wedging the cap on a mission no automatic edge will clear. LoadedActivity does the
 // same for a raw record that never materialized, so a sandbox LiveLost ghost with
 // an ambiguous handoff releases its slot instead of wedging the cap forever. An
 // UNRECOGNIZED future verdict a newer release wrote is not the known ambiguous

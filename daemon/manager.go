@@ -570,13 +570,13 @@ type Manager struct {
 	// Immutable after construction; the hub is internally synchronized.
 	events *eventsHub
 
-	// vscode owns the daemon-spawned VS Code editors backing TabKindVSCode tabs
-	// (one code-server per session, see vscode_server.go). On the Manager because
-	// an editor's lifetime is a SESSION's lifetime — kill/archive/close-tab stop
-	// it, and the webtab proxy resolves a vscode tab's target through it.
-	// Immutable after construction; the supervisor carries its own mutex, so
-	// spawning (seconds) never touches m.mu.
+	// vscode owns the daemon-spawned VS Code editors behind TabKindVSCode tabs, one
+	// code-server per session (vscode_server.go): kill/archive/close-tab stop it and
+	// the webtab proxy resolves a vscode tab's target through it. Immutable after
+	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// proposals runs the proposal routes and the poll-time doc scan.
+	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.

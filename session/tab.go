@@ -52,6 +52,10 @@ const webTabName = "web"
 // TabLabel).
 const vscodeTabName = "vscode"
 
+// docsTabName is the default canonical name of a proposal Docs tab ('docs',
+// then 'docs-2', … on collision).
+const docsTabName = "docs"
+
 // processTabName is the fallback canonical name of a CLI-spawned Process tab —
 // used when neither --name nor the command's first word yields a usable token
 // (see processTabBaseName). It is also the kind's wire spelling in `kind_name`;
@@ -119,6 +123,10 @@ const (
 	// the web UI's + New tab flow — never a TUI hotkey. The target is ALWAYS the
 	// session's worktree, so unlike a web tab it takes no --url/--port.
 	TabKindVSCode
+	// TabKindDocs is a proposal's Docs tab: the web UI's markdown editor for the
+	// proposal named by Tab.Proposal. It has no tmux PTY and no URL, and the TUI
+	// shows a placeholder, because the editor is web only.
+	TabKindDocs
 )
 
 // HasTmux reports whether a tab of this kind owns a tmux PTY session — i.e.
@@ -138,7 +146,7 @@ const (
 // doesn't show) rather than materializing a terminal tab with no PTY behind it.
 func (k TabKind) HasTmux() bool {
 	switch k {
-	case TabKindWeb, TabKindVSCode:
+	case TabKindWeb, TabKindVSCode, TabKindDocs:
 		return false
 	default:
 		return true
@@ -178,7 +186,7 @@ const (
 // not have fails later and further from the cause.
 func TabKindRequires(kind TabKind) TabKindNeed {
 	switch kind {
-	case TabKindWeb:
+	case TabKindWeb, TabKindDocs:
 		return TabNeedsMetadataOnly
 	case TabKindVSCode:
 		return TabNeedsLocalWorktreeRead
@@ -272,6 +280,11 @@ type Tab struct {
 	// reverse-proxies, or an external absolute URL the web UI iframes directly.
 	// Empty for every other kind.
 	URL string
+	// Proposal is the slug a TabKindDocs tab edits. Empty for every other kind.
+	Proposal string
+	// PushMode is a TabKindDocs tab's proposal push mode, "auto" or "manual".
+	// Empty means auto.
+	PushMode string
 	// Conversation is the provider-specific id that resumes this tab's agent
 	// conversation exactly. Empty means recovery falls back to the provider's
 	// existing latest-session behavior.
@@ -361,6 +374,12 @@ func newVSCodeTab() *Tab {
 	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
 }
 
+// newDocsTab returns a TabKindDocs tab for proposal slug. The caller sets a
+// unique name.
+func newDocsTab(slug string) *Tab {
+	return &Tab{ID: newTabID(), Name: docsTabName, Kind: TabKindDocs, Proposal: slug}
+}
+
 // tabKindVocabulary is the canonical TabKind ↔ name table, in enum order. It is
 // the SINGLE source of truth for those words: `tabs[].kind_name`
 // (session/state_names.go), `tab_kinds[].kind`, the `--kind` flag, and
@@ -384,6 +403,7 @@ var tabKindVocabulary = []struct {
 	{TabKindProcess, processTabName, false},
 	{TabKindWeb, webTabName, true},
 	{TabKindVSCode, vscodeTabName, true},
+	{TabKindDocs, docsTabName, true},
 }
 
 var tabKindNameByKind = func() map[TabKind]string {
@@ -449,7 +469,7 @@ func TabKindNameList() []string {
 // incompatible record degrades to a plain shell tab rather than an agent tab.
 func tabKindForData(k TabKind) TabKind {
 	switch k {
-	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb, TabKindVSCode:
+	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb, TabKindVSCode, TabKindDocs:
 		return k
 	default:
 		return TabKindShell
@@ -494,6 +514,11 @@ func TabLabel(t *Tab) string {
 			return t.Name
 		}
 		return "VS Code"
+	case TabKindDocs:
+		if t.Name != "" && t.Name != docsTabName {
+			return t.Name
+		}
+		return "Docs"
 	default:
 		if t.Name != "" {
 			return t.Name
@@ -704,7 +729,7 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 			// no id and must be addressable by a stable one from this load forward.
 			id = newTabID()
 		}
-		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL})
+		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode})
 		i.touchLocked()
 	}
 }

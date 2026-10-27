@@ -439,3 +439,95 @@ func TestLegacyLaunchClearsInheritedSessionMarkers(t *testing.T) {
 		}
 	}
 }
+
+// TestStartRestoresUpdateEnvironmentAfterFailedLaunch covers #5390's primary
+// property: once the expansion is queued, EVERY Start exit path re-applies the
+// baseline. The in-queue restore dies with the queue on a mid-queue failure —
+// tmux abandons a ;-chained queue at the first failed command — so the restore
+// must also run as its own bounded command after the launch attempt ends.
+func TestStartRestoresUpdateEnvironmentAfterFailedLaunch(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+
+	var restores []string
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for idx, arg := range c.Args {
+				if arg == "update-environment" && idx+1 < len(c.Args) {
+					restores = append(restores, c.Args[idx+1])
+				}
+			}
+			if len(c.Args) >= 2 && c.Args[1] == "set-option" {
+				return nil
+			}
+			return errors.New("session not found")
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
+				return []byte("DISPLAY SSH_AUTH_SOCK\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	session := NewTmuxSessionWithDeps("restore-on-failure", "codex", pty, execu)
+	if err := session.Start(t.TempDir()); err == nil {
+		t.Fatal("Start unexpectedly succeeded after the capture factory stopped it")
+	}
+	if !slices.Contains(restores, "DISPLAY SSH_AUTH_SOCK") {
+		t.Fatalf("failed launch never re-applied the prior update-environment outside the queue: %q", restores)
+	}
+}
+
+// TestStartHealsCredentialNamesLeftInUpdateEnvironment covers the other half
+// of #5390: a server an older build already left expanded cannot recover its
+// true pre-expansion value, but af never intends credential import names to
+// persist — the restore baseline drops them instead of re-persisting the leak.
+func TestStartHealsCredentialNamesLeftInUpdateEnvironment(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+
+	var restores []string
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for idx, arg := range c.Args {
+				if arg == "update-environment" && idx+1 < len(c.Args) {
+					restores = append(restores, c.Args[idx+1])
+				}
+			}
+			if len(c.Args) >= 2 && c.Args[1] == "set-option" {
+				return nil
+			}
+			return errors.New("session not found")
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
+				// An older build left the option expanded to a claude
+				// session's credential import list.
+				return []byte("ANTHROPIC_API_KEY DISPLAY OPENAI_API_KEY SSH_AUTH_SOCK\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	session := NewTmuxSessionWithDeps("heal-expanded", "codex", pty, execu)
+	_ = session.Start(t.TempDir())
+
+	const want = "DISPLAY SSH_AUTH_SOCK"
+	if len(restores) == 0 {
+		t.Fatal("failed launch never re-applied update-environment")
+	}
+	for _, got := range restores {
+		if got != want {
+			t.Fatalf("restored update-environment %q kept credential names; want %q", got, want)
+		}
+	}
+	// The queue's own trailing restore targets the same healed baseline.
+	var tail string
+	for idx, arg := range pty.cmd.Args {
+		if arg == "update-environment" && idx+1 < len(pty.cmd.Args) {
+			tail = pty.cmd.Args[idx+1]
+		}
+	}
+	if tail != want {
+		t.Fatalf("queue tail restore = %q, want %q", tail, want)
+	}
+}

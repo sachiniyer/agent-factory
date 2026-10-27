@@ -222,10 +222,59 @@ func (d InstanceData) ForStorage() InstanceData {
 		d.RuntimeCleanup = nil
 		d.KilledWithoutLiveRuntime = false
 	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
-		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. Kill intent and an unknown teardown outcome are the two durable
-		// retention boundaries.
-		d.RuntimeCleanup = nil
+		// Cleanup credentials/identities have no reason to live in ordinary LOCAL
+		// session records — a local reaped-worktree path proves nothing extra, and
+		// the field is operator-private. Kill intent and an unknown teardown
+		// outcome are the two durable retention boundaries there.
+		//
+		// Sandbox backends (docker/ssh/hook) are the exception, added retroactively:
+		// their off-box runtime SURVIVES a daemon restart, but the ordinary-
+		// snapshot reload produces an INERT backend whose runtimeTeardown is nil —
+		// a shape indistinguishable in memory from a row that never owed a reap.
+		// Without the persisted handle, that reload cannot rebuild a real
+		// teardown, a kill committed against it would stage the
+		// KilledWithoutLiveRuntime marker from that handle absence alone (an
+		// unearned vouch that "nothing was owed"), and the record delete would
+		// orphan a still-live remote workspace with no remaining pointer.
+		// Persist the staged handle here so a restart can restore it and the kill
+		// can reap for real; the marker is then staged only when a backend
+		// positively owes nothing (see toInstanceDataLocked). The field stays
+		// subject to bugreport redaction; tombstoned rows already carried it,
+		// this widens the on-disk set to ordinary sandbox rows.
+		if isSandboxBackendType(d.BackendType) {
+			// A fresh snapshot staged the private field; publish it. A reloaded
+			// row carries only the public RuntimeCleanup (the private field is
+			// lost on JSON unmarshal), so the runtimeCleanup!=nil guard only
+			// fires on a fresh snapshot; the reloaded public field is preserved
+			// untouched the same way the tombstone default case does.
+			if d.runtimeCleanup != nil {
+				// Fence the previous release's read of this row. Before this
+				// release, ForStorage cleared RuntimeCleanup on the ordinary
+				// branch and FromInstanceData rebuilt a teardown only for a
+				// UserKilled tombstone or an unknown-cleanup row. A binary rolled
+				// back to that release would therefore load this ordinary sandbox
+				// row inert (no handle to rebuild) and either erase the handle on
+				// its next checkpoint or stage KilledWithoutLiveRuntime from the
+				// nil teardown on a kill — the orphan this PR reaps. Publish the
+				// handle under a projected RuntimeCleanupStateUnknown=true so the
+				// previous release's FromInstanceData rebuilds the teardown and
+				// its ForStorage default branch preserves the handle on reload,
+				// and save the real false in OriginalRuntimeCleanupStateUnknown so
+				// a current reader restores it (RestoreRuntimeCleanupRollbackFence)
+				// and treats the row as the ordinary session it is. The previous
+				// release ignores the additive field and keeps the projected value,
+				// which is the safe direction: its default branch is the retention
+				// path this handle already rode on UserKilled/unknown rows.
+				if d.OriginalRuntimeCleanupStateUnknown == nil {
+					original := false
+					d.OriginalRuntimeCleanupStateUnknown = &original
+				}
+				d.RuntimeCleanupStateUnknown = true
+				d.RuntimeCleanup = d.runtimeCleanup.clone()
+			}
+		} else {
+			d.RuntimeCleanup = nil
+		}
 		d.KilledWithoutLiveRuntime = false
 	default:
 		// A kill tombstone or an unknown-cleanup retention row. Publish the staged
