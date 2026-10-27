@@ -176,6 +176,12 @@ nav:
       - Lifecycle testing: dev/lifecycle-testing.md
       - Release notes: dev/release-notes.md
       - Daemon memory: dev/daemon-memory.md
+      - Proposal mode:
+          - Goals: dev/proposals/proposal-mode/goals.md
+          - Technical design: dev/proposals/proposal-mode/technical.md
+          - API design: dev/proposals/proposal-mode/api.md
+          - UI design: dev/proposals/proposal-mode/ui.md
+          - Future: dev/proposals/proposal-mode/future.md
       - Design notes:
           - Interface design: design/interface-design.md
           - Interface style guide: design/style-guide.md
