@@ -249,7 +249,7 @@ func scopedInstance(t *testing.T, m *tmuxModel, account string, tabs ...TabData)
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
-	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", filepath.Join(t.TempDir(), "wt"), "scope",
+	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", existingDir(t, filepath.Join(t.TempDir(), "wt")), "scope",
 		"scope-branch", "", false, true)
 	require.NoError(t, err)
 	inst := &Instance{

@@ -78,6 +78,9 @@ func TestSessionEnvFlagsEmptyWhenUnsupported(t *testing.T) {
 func TestStartInjectsEnvMarkers(t *testing.T) {
 	forceNewSessionEnvMarkers(t, true)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv(envMarkerTestguardRun, "test-run-1")
