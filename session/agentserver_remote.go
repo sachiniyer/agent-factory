@@ -427,6 +427,14 @@ type remoteClientlessChannel struct {
 
 var _ clientlessChannel = (*remoteClientlessChannel)(nil)
 
+// PaneDead is always false here: a dead REMOTE pane is the remote daemon's
+// business — its own broker serves the repaint-only stream, which reaches this
+// channel as ordinary upstream bytes (#5330). Nothing local ever needs the
+// verdict this method answers for.
+func (c *remoteClientlessChannel) PaneDead() bool {
+	return false
+}
+
 func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
 	return &remoteClientlessChannel{rc: rc, tab: tab}
 }

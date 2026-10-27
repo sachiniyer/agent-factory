@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 
+	xansi "github.com/charmbracelet/x/ansi"
+
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -142,6 +144,59 @@ func buildRepaintSnapshot(snap PaneSnapshot) repaintSnapshot {
 		modes:    snap.Modes,
 		hasModes: snap.HasModes,
 	}
+}
+
+// paneDeadMarker is the line tmux draws on a held dead pane's last row
+// (remain-on-exit-format's default: "Pane is dead (status N, <time>)"). Only
+// the prefix is synthesized — matching the text every check for the marker
+// already makes (FinishedPaneOutput).
+const paneDeadMarker = "Pane is dead"
+
+// deadPaneScreen shapes a held dead pane's full-buffer capture into the screen
+// the repaint should paint (#5330): the bottom-anchored tail of the buffer —
+// at most paneH lines — with the marker guaranteed as the last line.
+//
+// tmux draws that marker itself only after collecting the pane's root
+// (server_destroy_pane): scroll up one row, draw on the last row. On the
+// shapes where it never collected — the Ubuntu lost-SIGCHLD case (#4682), or a
+// pane still dying when the capture ran — the buffer keeps the raw pre-death
+// screen, so the same draw is synthesized here: pad a short buffer to put the
+// marker on the last row tmux would have used, append it, then take the tail.
+// The tail slice is the same bottom-anchor the real draw produces: a buffer
+// longer than the pane shows its last paneH rows.
+func deadPaneScreen(capture string, paneH int) []byte {
+	lines := strings.Split(strings.TrimSuffix(capture, "\n"), "\n")
+	if paneH <= 0 {
+		paneH = len(lines)
+	}
+	if !deadPaneMarkerPresent(lines) {
+		// The marker owns the LAST row, so the pad reserves it: a short buffer
+		// fills to paneH-1 rows and the marker lands on the row tmux's own draw
+		// uses. A buffer at paneH already needs no pad — the append takes it to
+		// paneH+1 and the tail slice below drops the top row, which is exactly
+		// the scroll the real draw performs.
+		for len(lines) < paneH-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, paneDeadMarker)
+	}
+	if len(lines) > paneH {
+		lines = lines[len(lines)-paneH:]
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// deadPaneMarkerPresent reports whether the captured rows already carry tmux's
+// dead-pane marker — drawn left-aligned, so a stripped row's leading text is
+// the check. A row of output that happens to open with the same words counts
+// as the marker: the user sees the line either way.
+func deadPaneMarkerPresent(lines []string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(xansi.Strip(strings.TrimSpace(line)), paneDeadMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotHasRepaintState keeps authoritative metadata from disappearing merely

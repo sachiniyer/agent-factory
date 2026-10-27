@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // tailBuffer is a small bounded ring of one script run's most recent output
@@ -61,18 +63,38 @@ func (b *tailBuffer) lastLine() string {
 	return b.lines[len(b.lines)-1]
 }
 
-// failureSummary builds the status the crash-loop breaker persists:
-// "errored: <exit error>: <newest buffered line>", capped at
-// watcherStatusSummaryMax. The "errored" prefix is what the TUI keys the
-// supervision state off (ui.watchTaskStatus), so it must come first. The
-// newest tail line carries the diagnostic: a Python traceback's oldest line is
-// always "Traceback (most recent call last):" and a Node stack's is the
-// "Error:" header, while the actual failure is the last (#5441).
-func failureSummary(runErr error, tail *tailBuffer) string {
-	summary := "errored: " + runErr.Error()
+// giveUpSummary builds the status the crash-loop breaker persists:
+// "errored: gave up after N failures in W (last: <exit>): <newest buffered
+// line>", capped at watcherStatusSummaryMax. The "errored" prefix is what the
+// TUI keys the supervision state off (ui.watchTaskStatus), so it must come
+// first, and the give-up is stated before the run's own outcome so a dead
+// watch reads as dead in af tasks list/get (#5329). The newest tail line
+// carries the diagnostic — a Python traceback's oldest line is always
+// "Traceback (most recent call last):" and a Node stack's is the "Error:"
+// header (#5441) — so when the cap bites, the "(last: …)" segment gives
+// ground first and the diagnostic line is the last thing cut.
+func giveUpSummary(runErr error, tail *tailBuffer, failures int, window time.Duration) string {
+	lead := fmt.Sprintf("errored: gave up after %d failures in %s", failures, window)
+	diag := ""
 	if last := tail.lastLine(); last != "" {
-		summary += ": " + last
+		diag = ": " + last
 	}
+	errText := runErr.Error()
+	budget := watcherStatusSummaryMax - len(lead) - len(diag) - len(" (last: )")
+	switch {
+	case len(errText) <= budget:
+	case budget > len("…"):
+		errText = truncateRunes(errText, budget-len("…")) + "…"
+	case budget > 0:
+		errText = truncateRunes(errText, budget)
+	default:
+		errText = ""
+	}
+	errSeg := ""
+	if errText != "" {
+		errSeg = " (last: " + errText + ")"
+	}
+	summary := lead + errSeg + diag
 	if len(summary) > watcherStatusSummaryMax {
 		summary = truncateRunes(summary, watcherStatusSummaryMax) + "…"
 	}
