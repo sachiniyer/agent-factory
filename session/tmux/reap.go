@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -140,7 +141,14 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || panePID <= 1 {
+		if err != nil {
+			// The parse error carries the case-specific text: a dead pane
+			// missing its @af_pane_pid stamp fails closed with an actionable
+			// message (#5319), where a flat "invalid pane pid" would hide it.
+			captureErrs = append(captureErrs, fmt.Errorf("%w in list-panes output", err))
+			continue
+		}
+		if panePID <= 1 {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
@@ -559,7 +567,15 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 // slot with a process identity. A current snapshot or marker scan must replace
 // an older entry when the same PID now carries another StartID; otherwise the
 // stale identity would be rejected later while the replacement escaped review.
+//
+// A tracked teardown requester (#5182) is never admitted to the orphan cohort:
+// it is blocked on this teardown's reply, not a leak, and it cannot exit until
+// the reply is sent — admitting it would only stall every grace pass and then
+// report the caller it was built to spare.
 func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process) []proctree.Process {
+	if isTeardownRequester(process) {
+		return candidates
+	}
 	if index, exists := byPID[process.PID]; exists {
 		if candidates[index].StartID != process.StartID {
 			candidates[index] = process
@@ -640,7 +656,36 @@ var (
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
 func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
-	return proctree.KillEscalating(procs, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+	// A tracked teardown requester stays IN the candidate set — the reaper's
+	// per-signal recheck spares it only while the registry still reports it
+	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
+	// instead of escaping this teardown permanently (Codex on #5186). It is
+	// never waited on (blocked on this teardown's reply, it cannot exit inside
+	// the window) and never signalled while registered; the orphan-sweep
+	// ingestion also refuses it (addOrReplaceOrphanCandidate).
+	exemptedMidReap := make(map[int]bool)
+	for _, p := range procs {
+		if isTeardownRequester(p) {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
+				"excluding it from signalling (#5182)", p.PID, p.Comm)
+		}
+	}
+	// And it can be registered AFTER the capture — a teardown still in its
+	// grace wait when this process's own destructive RPC finally reaches its
+	// handler (Codex on #5186). The exempt predicate is re-run before every
+	// signal tier so a late-tracked requester is still spared.
+	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if !isTeardownRequester(p) {
+			return false
+		}
+		if !exemptedMidReap[p.PID] {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) registered while this reap was already waiting; "+
+				"excluding it from signalling (#5182)", p.PID, p.Comm)
+		}
+		return true
+	}, teardownreq.SignalUnlessTracked, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
 }
