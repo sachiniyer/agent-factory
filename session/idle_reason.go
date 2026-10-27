@@ -462,6 +462,29 @@ func (i *Instance) InterruptTaskRunIfRuntimeReplaced() bool {
 	return true
 }
 
+// InterruptTaskRunForRestoreBoundary ends a still-in-flight task run as
+// interrupted at a restore's ConfirmLive boundary — BEFORE the daemon's
+// settlement persist — when the runtime being confirmed is a replacement and
+// the fence it confirms is OpRestoring (#4222 review). The op scope keeps a
+// limit-resume's OpRespawning boundary out: that path replays the prompt, so
+// its run is alive by design. Landing the end inside the boundary write is
+// what makes it durable through a daemon exit between that settlement and the
+// post-recovery persist — a restart would otherwise reattach to the
+// replacement's own verified identity and let its first idle edge complete
+// the run for on_complete. Reports whether a run was ended; the one-shot
+// stamp flag is armed either way, so the post-recovery settlement records the
+// outcome exactly once.
+func (i *Instance) InterruptTaskRunForRestoreBoundary() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || !i.agentRuntimeReplaced || i.inFlightOp != OpRestoring {
+		return false
+	}
+	i.endTaskRunInterruptedLocked()
+	i.taskRunInterruptedStamp = true
+	return true
+}
+
 // TaskRunInterrupted reports whether this session's task run ended interrupted
 // by a runtime replacement (#4222) rather than on an agent-idle completion
 // edge. Sticky for the process's lifetime — used by the daemon's completion

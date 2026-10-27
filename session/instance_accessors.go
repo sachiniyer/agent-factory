@@ -540,6 +540,34 @@ func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession
 	return true
 }
 
+// reattachRuntimeVerified reports whether the pane standing behind the reused
+// tmux name PROVES it is still the launch af recorded: the pane root's
+// (pid, start-time) identity answers and matches the record. A missing
+// identity record, a failed probe, and a different process are all unverified
+// — only a positive match returns true.
+//
+// The verdict is deliberately separate from
+// clearRuntimeProgramForUnverifiedReattach's return: that reports whether
+// durable state CHANGED, so a row already carrying no claim — a legacy record,
+// or evidence an earlier unverified reattach cleared before its own recovery
+// failed — answers false even though nothing was verified. The Lost-restore
+// path consults this verdict for the task-run question (#4222): a pane that
+// appears while the session was believed dead and cannot prove it is the
+// prompted agent is treated as a replacement. The load path does not use it —
+// a tmux name surviving a routine daemon restart is the expected same-runtime
+// case, so there only a recorded claim that fails verification marks a
+// replacement (backend_local.go).
+func (i *Instance) reattachRuntimeVerified(ts *tmux.TmuxSession) bool {
+	i.mu.RLock()
+	pid, startID := i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid <= 0 || ts == nil {
+		return false
+	}
+	same, err := ts.PaneRootProcessMatches(pid, startID)
+	return err == nil && same
+}
+
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {

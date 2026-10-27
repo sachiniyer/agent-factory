@@ -309,10 +309,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// Restore established only that the persisted tmux name exists. The pane
 		// root's recorded (pid, start-time) identity decides whether it still
 		// names the launch AF recorded — a match keeps the claim, anything else
-		// retires it. An unverified reattach also counts as replacement for the
-		// task-run question (#4222): a pane that cannot prove it is the prompted
-		// agent cannot have its idle edge reported as a finished run.
-		i.markAgentRuntimeReplaced(i.clearRuntimeProgramForUnverifiedReattach(ts))
+		// retires it. The verification verdict is what answers the task-run
+		// question (#4222): a pane that cannot prove it is the prompted agent
+		// cannot have its idle edge reported as a finished run — including when
+		// there was no claim left to retire (legacy record, or evidence an
+		// earlier unverified reattach cleared before its recovery failed), so
+		// the verdict must not be read off whether the clear had work to do.
+		i.markAgentRuntimeReplaced(!i.reattachRuntimeVerified(ts))
+		i.clearRuntimeProgramForUnverifiedReattach(ts)
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

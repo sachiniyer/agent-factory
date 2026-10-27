@@ -346,7 +346,7 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// settlement site that every restore route crosses. The run ended without
 	// completing, so on_complete does not apply and the session is kept.
 	if instance.ConsumeTaskRunInterrupted() {
-		stampTaskRunInterrupted(instance)
+		stampTaskRunInterrupted(instance, m.taskRunPeerSnapshot())
 	}
 }
 

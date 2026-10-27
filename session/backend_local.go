@@ -314,6 +314,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// probe retires the claim. A reattach that retires the claim could not
 			// prove it kept the prompted process, so it counts as replacement for
 			// the task-run question too (#4222).
+			//
+			// This is deliberately claim-gated where the Lost-restore path is not
+			// (backend_local_respawn.go marks ANY unverified reattach replaced): a
+			// tmux name that survived a routine daemon restart is the EXPECTED
+			// same-runtime case, so a row carrying no recorded identity — a legacy
+			// record — has nothing to distrust and stays a pure reattach. Only a
+			// recorded claim that fails verification says the pane under the af
+			// name is not the launch af made.
 			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
 				i.markLoadRuntimeReplaced()
 				i.markAgentRuntimeReplaced(true)

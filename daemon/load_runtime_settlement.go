@@ -12,6 +12,12 @@ import (
 // loudly tracked metadata gap.
 func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []settleOwedEntry {
 	var owed []settleOwedEntry
+	// The loaded map is not yet installed — build the peer view for
+	// stampTaskRunInterrupted's newer-run guard from it directly (#4222).
+	peers := make([]*session.Instance, 0, len(instances))
+	for _, peer := range instances {
+		peers = append(peers, peer)
+	}
 	for key, instance := range instances {
 		if !instance.ConsumeLoadRuntimeReplacement() {
 			continue
@@ -24,7 +30,7 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 		// this path, so the daemon drives the same end the restore carve-out
 		// performs in session/transition.go.
 		if instance.InterruptTaskRunIfRuntimeReplaced() {
-			stampTaskRunInterrupted(instance)
+			stampTaskRunInterrupted(instance, peers)
 		}
 		if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
 			log.WarningLog.Printf("load-time runtime replacement for %q could not persist its timestamp and idle evidence; the daemon will retry: %v", instance.Title, err)

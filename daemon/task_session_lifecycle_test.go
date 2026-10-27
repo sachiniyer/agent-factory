@@ -268,6 +268,81 @@ func TestTaskSessionLifecycle_InterruptedRunStampsAbortedAndKeepsTheSession(t *t
 	assert.Nil(t, inst.OwedOnComplete(), "no teardown obligation may be filed for an interrupted run")
 }
 
+// TestTaskSessionLifecycle_InterruptIsDurableAtTheLiveBoundary pins the crash
+// window the transition carve-out alone could not cover (#4222 review): if the
+// daemon exited after the replacement's ConfirmLive but before the
+// post-recovery persist, a reload would find task_run_active=true under a
+// replaced runtime and let the fresh pane's first idle edge complete the
+// interrupted run. prepareRuntimeReplacement settles the interrupt into the
+// SAME write that retires predecessor evidence, so the record on disk already
+// reports the run ended.
+func TestTaskSessionLifecycle_InterruptIsDurableAtTheLiveBoundary(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-int", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-int")
+
+	// Lost mid-run, restore fence up, respawn verdict stamped — the state the
+	// backend is in when it invokes its fenced live boundary.
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+	inst.MarkAgentRuntimeReplacedForTest(true)
+
+	key := daemonInstanceKey(repoID, "nightly")
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
+
+	require.False(t, inst.TaskRunActive(),
+		"the run ends at the boundary itself, not at the post-recovery persist")
+	require.True(t, inst.TaskRunInterrupted())
+	rec := recordFor(t, repoID, "nightly")
+	require.NotNil(t, rec)
+	assert.False(t, rec.TaskRunActive,
+		"the boundary settlement persists the ended run — a crash here must not reload it in flight")
+}
+
+// TestStampTaskRunInterrupted_YieldsToANewerRun is the multi-fire guard
+// (#4222 review): last_run_status is task-wide, so a stale session's interrupt
+// must not overwrite the status of a run a later fire already spawned for the
+// same task. Two proofs say the newer run owns it — a pending fire marker
+// naming the newer session, and once the marker discharges, the newer session
+// still registered for the task.
+func TestStampTaskRunInterrupted_YieldsToANewerRun(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-2runs", repoPath)
+	stale := registerTaskSpawnedSession(t, manager, repoID, repoPath, "old-run", "task-2runs")
+
+	// A second fire already spawned its session for the same task.
+	newer, err := session.NewInstance(session.InstanceOptions{
+		Title: "new-run", Path: repoPath, Program: "claude", TaskID: "task-2runs",
+	})
+	require.NoError(t, err)
+	newer.CreatedAt = stale.CreatedAt.Add(time.Hour)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "new-run")] = newer
+	manager.mu.Unlock()
+
+	// The in-flight occurrence's marker names the newer session.
+	seedPendingFire(t, taskFireMarker{
+		TaskID: "task-2runs", IntendedAt: time.Now(), InstanceID: newer.ID,
+	})
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, "", lastRunStatus(t, "task-2runs"),
+		"a marker naming another session means that run — not this interrupt — owns the status")
+
+	// Marker discharged; the registered newer session still owns it.
+	clearTaskFire("task-2runs")
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, "", lastRunStatus(t, "task-2runs"),
+		"a newer registered session means the task's status already belongs to a later run")
+
+	// With the newer session gone the stale run is the task's last again —
+	// the stamp lands.
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, "new-run"))
+	manager.mu.Unlock()
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, taskStatusAbortedRuntimeReplaced, lastRunStatus(t, "task-2runs"))
+}
+
 // TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete is the
 // issue's report end to end (#5219): a task session whose prompt was attempted
 // but whose agent has not visibly reacted settles idle on the first quiet
