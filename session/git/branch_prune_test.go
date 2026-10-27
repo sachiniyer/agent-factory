@@ -179,6 +179,21 @@ func TestLocalBranchExists_DeterminateVersusUnknown(t *testing.T) {
 	}
 }
 
+// TestLocalBranchExists_IgnoresAmbientGitDir pins the repository-selector
+// sanitization (#5136 Codex round 12): a GIT_DIR inherited by the daemon —
+// a process launched inside a hook, say — must not redirect the probe at a
+// foreign repository that coincidentally holds the branch name, fabricating
+// a recovery handle the real origin does not have.
+func TestLocalBranchExists_IgnoresAmbientGitDir(t *testing.T) {
+	foreign := branchRepo(t, "af-shared")
+	root := branchRepo(t, "af-target")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	exists, err := LocalBranchExists(root, "af-shared")
+	require.NoError(t, err)
+	assert.False(t, exists, "the ambient GIT_DIR repo holds af-shared; the probed repo must be the answer")
+}
+
 // TestDeleteLocalBranch_UnreadableLooseRefIsErrorNotAbsence closes the hole the
 // PR review caught: git itself folds an EACCES on a LOOSE ref file into the
 // same silent exit 1 as "no such ref" (git 2.43; git ≥2.45 grew
@@ -362,4 +377,45 @@ func TestDeleteLocalBranch_LinkedWorktreeExistingBranchIsDeleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assert.False(t, refExists(t, main, "af-normal"))
+}
+
+// refExistsSanitized probes the repo at root with the repository-selector
+// environment filtered out, so a GIT_DIR set by an enclosing t.Setenv does not
+// redirect the verification probe at a different repo. branch_prune_test.go's
+// refExists inherits the ambient environment, which is exactly the redirect
+// the threat model exists to filter out, so it cannot say which repo a
+// sanitized command actually touched.
+func refExistsSanitized(t *testing.T, root, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", root, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	return cmd.Run() == nil
+}
+
+// TestDeleteLocalBranch_IgnoresAmbientGitDir pins the DESTRUCTIVE half of the
+// repository-selector threat model (#5136). LocalBranchExists sanitizes its
+// probe's environment so an ambient GIT_DIR cannot redirect existence at a
+// foreign repository, but the `git branch -D` it gates historically set no
+// cmd.Env and inherited the ambient environment, so the probe verified the
+// intended repo while the delete executed against the foreign one the ambient
+// GIT_DIR selected. The function still reported (true, nil), so `af reset`
+// force-deleted a same-named branch AF never created in the foreign repo, left
+// the intended AF branch untouched, and erased the session records that named
+// it — permanently orphaning the branch the reset was supposed to delete. The
+// delete MUST run under the same sanitized environment the probe produced its
+// verdict under, so a "deleted" answer corresponds to the intended branch
+// actually being gone.
+func TestDeleteLocalBranch_IgnoresAmbientGitDir(t *testing.T) {
+	foreign := branchRepo(t, "af-shared")
+	root := branchRepo(t, "af-shared")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	deleted, err := DeleteLocalBranch(root, "af-shared")
+	require.NoError(t, err)
+	assert.True(t, deleted, "the branch the probe verified in the probed repo must be reported deleted")
+
+	assert.False(t, refExistsSanitized(t, root, "af-shared"),
+		"the intended repo's branch — the one LocalBranchExists verified — must be the one deleted")
+	assert.True(t, refExistsSanitized(t, foreign, "af-shared"),
+		"the foreign repo's same-named branch must never be deleted through an ambient GIT_DIR redirect")
 }
