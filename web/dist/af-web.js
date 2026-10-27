@@ -6647,11 +6647,11 @@ async function restoreSession(id, title, token2, expectedDaemonBootId) {
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
@@ -7734,7 +7734,10 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 }
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
@@ -7848,7 +7851,8 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
+    const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7861,9 +7865,16 @@ var ConfigPane = class {
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
-      this.el.querySelector(
+      const restored = this.el.querySelector(
         `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
-      )?.focus({ preventScroll: true });
+      );
+      restored?.focus({ preventScroll: true });
+      if (restored instanceof HTMLInputElement && restored.type === "text" && focusedConfigTextCaret?.start != null) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
+        );
+      }
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -16638,6 +16649,9 @@ function renderLogin(root2, state, actions2) {
   const input = root2.querySelector("#af-token");
   if (input) input.value = draft;
 }
+function clearLoginDraft(root2) {
+  loginDrafts.set(root2, "");
+}
 function loginView(state, actions2) {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({
@@ -18942,6 +18956,7 @@ async function fetchRegisteredProjects(tok) {
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;

@@ -379,7 +379,24 @@ type InstanceData struct {
 	// stage the live handle in the private field below until ForStorage reaches a
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
-	runtimeCleanup *RuntimeCleanupData
+	// OriginalRuntimeCleanupStateUnknown is a storage-only rollback fence for the
+	// ordinary-sandbox RuntimeCleanup projection ForStorage writes so a binary
+	// rolled back to the immediately preceding release does not load the row inert
+	// and orphan its off-box runtime. That release's FromInstanceData only
+	// restores a cleanup handle for a UserKilled tombstone or an unknown-cleanup
+	// row, and its ForStorage clears RuntimeCleanup on the ordinary branch — so a
+	// handle this release persists on an ordinary sandbox row would be erased on
+	// the next checkpoint or staged as a nothing-owed kill. ForStorage therefore
+	// publishes the handle on a row the previous release already treats as a
+	// retention row (RuntimeCleanupStateUnknown=true), and carries the real false
+	// here so a current reader restores it before interpreting the row. A previous
+	// release ignores this additive field and keeps the projected value, which is
+	// the safe direction: its FromInstanceData rebuilds the teardown and its
+	// ForStorage default branch preserves the handle on reload. A current reader
+	// removes it via RestoreRuntimeCleanupRollbackFence before any decision; the
+	// private staging field below is never serialized.
+	OriginalRuntimeCleanupStateUnknown *bool `json:"original_runtime_cleanup_state_unknown,omitempty"`
+	runtimeCleanup                     *RuntimeCleanupData
 	// KilledWithoutLiveRuntime is the inert-at-kill admission marker for a
 	// sandbox kill tombstone (docker/ssh/hook/remote) whose commit found no live
 	// off-box runtime to reap: the kill ran against an inert rebuild (nil
@@ -470,6 +487,25 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 	return d
 }
 
+// RestoreRuntimeCleanupRollbackFence removes the ordinary-sandbox projection
+// ForStorage writes so a current reader interprets the row as the ordinary
+// session it is, not the retention row a previous release needs to see. The
+// previous release's FromInstanceData only rebuilds a teardown for a UserKilled
+// tombstone or an unknown-cleanup row, so ForStorage publishes an ordinary
+// sandbox row's RuntimeCleanup under a projected RuntimeCleanupStateUnknown=true
+// and saves the real false here. A current reader restores the real value before
+// deciding whether the row is unknown-cleanup or ordinary; a rolled-back reader
+// ignores this additive field and treats the projected row as a retention row,
+// rebuilding and preserving the handle instead of orphaning the runtime.
+func (d InstanceData) RestoreRuntimeCleanupRollbackFence() InstanceData {
+	if d.OriginalRuntimeCleanupStateUnknown == nil {
+		return d
+	}
+	d.RuntimeCleanupStateUnknown = *d.OriginalRuntimeCleanupStateUnknown
+	d.OriginalRuntimeCleanupStateUnknown = nil
+	return d
+}
+
 // ForClientRead converts a storage row into the same bounded shape emitted by a
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
@@ -486,6 +522,9 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	// Mirror FromInstanceData's fence order so a disk-fallback client does not
+	// see the projected RuntimeCleanupStateUnknown a previous release needs.
+	d = d.RestoreRuntimeCleanupRollbackFence()
 	restored, err := d.RestoreRelocationRecoveryOriginals()
 	if err == nil {
 		d = restored
@@ -494,6 +533,15 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	// ForStorage persists RuntimeCleanup on ordinary sandbox rows so a daemon
+	// restart can rebuild the off-box teardown handle, but that handle is
+	// operator-private (a container id, an ssh host/identity-file path, a hook
+	// delete command). The live-daemon snapshot never publishes it — ToInstanceData
+	// stages it only in the private field ForStorage consumes — so a disk-fallback
+	// client reading instances.json directly must not either: scrub it here so the
+	// daemonless `sessions list`/`get` path exposes the same shape the live path
+	// does, not the cleanup identity an ordinary row now carries on disk.
+	d.RuntimeCleanup = nil
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}

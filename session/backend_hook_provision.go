@@ -155,7 +155,13 @@ func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string
 func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord) string {
 	parts := []string{
 		"ssh",
-		"-o", "UserKnownHostsFile=" + shellQuote(knownHostsPath),
+		// Two-layer quoting, same discipline as ssh_command.go (see sshConfigQuote):
+		// this command runs through the shared `sh -c '<sshCmd> "$@"'` wrapper, so
+		// shellQuote alone is consumed by the outer shell before ssh sees the value,
+		// and ssh re-splits a bare UserKnownHostsFile value on whitespace. An AF
+		// home containing a space (the hook store lives under AF home) would
+		// otherwise never be the file hookProvisionKnownHosts just wrote.
+		"-o", shellQuote("UserKnownHostsFile=" + sshConfigQuote(knownHostsPath)),
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
 		// operator's matching Host block could hand OpenSSH a different key and
@@ -480,16 +486,34 @@ func (p *hookProvisioner) runProvisionCmd() (*hookProvisionRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("provision_cmd failed (%s): %w%s", p.hooks.ProvisionCmd, err, hookOutputSuffix(out.Combined()))
 	}
-	// provision_cmd has EXITED successfully. Everything after this — cloning,
-	// streaming the binary, starting the server — can take minutes, and a pgid the
-	// kernel has reclaimed may be reissued to an unrelated process in that window.
-	// So the group id is spent here: a later failure must never SIGKILL a group
-	// this script no longer owns. (A failure of provision_cmd ITSELF still
-	// quiesces, because the id is still live at that point.)
-	p.launchPgid = 0
-
+	// provision_cmd has EXITED 0. The stdout contract is parsed next, and the
+	// spend of the group id is deferred to the success branch below for a reason
+	// tied to the parse's own timing.
+	//
+	// Everything AFTER the parse — cloning, streaming the binary, starting the
+	// server — can take minutes, and a pgid the kernel has reclaimed may be
+	// reissued to an unrelated process in that window. So the group id is spent
+	// before that phase begins: a later transport failure must never SIGKILL a
+	// group this script no longer owns.
+	//
+	// But the PARSE ITSELF returns within milliseconds of the script exiting, so
+	// the pgid is maximally fresh on every stdout-contract-violation branch —
+	// exactly the freshness quiesceLaunchGroup requires ("only on the failure of
+	// a launch that has just returned"). A provision_cmd that exits 0 with
+	// unparseable stdout while a backgrounded child is still provisioning must
+	// let provisionHostOrReap quiesce that child before delete_cmd runs, or the
+	// orphan finishes creating the resource after a reap that reported success
+	// on a slug it could not find — the silent-orphan harm quiesceLaunchGroup's
+	// own comment says it exists to prevent (#2440/#1955). Spending the id before
+	// the parse would leave that quiesce a no-op on every parse-failure return.
+	//
+	// The launch path keeps the pgid set through its own stdout parse for the
+	// same reason (see launch in backend_hook_backend.go); this matches it.
 	record, sawJSON, violation := parseHookProvisionRecord(string(out.Stdout))
 	if record != nil {
+		// Success: spend the pgid before the minutes-long transport phase begins,
+		// so a later failure there can never signal a recycled group.
+		p.launchPgid = 0
 		return record, nil
 	}
 	if violation != nil {

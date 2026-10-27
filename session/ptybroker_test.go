@@ -73,6 +73,10 @@ type fakeClientlessChannel struct {
 	// the pane keeps producing the whole time; the hook is how a test drives output
 	// into that window (the #1975 recovery-flicker race).
 	snapshotHook func()
+	// paneDead is what PaneDead reports — set by a test to make the broker take
+	// the held-dead-pane path (#5330): subscribe serves a repaint-only stream
+	// instead of failing, and recovery/re-dial stops treating it as an outage.
+	paneDead bool
 }
 
 // parkedCaptureChannel models a capture whose teardown has signaled its reader
@@ -113,6 +117,7 @@ func (c *parkedCaptureChannel) StopCapture() error {
 func (*parkedCaptureChannel) SendRaw([]byte) error            { return nil }
 func (*parkedCaptureChannel) Resize(uint16, uint16) error     { return nil }
 func (*parkedCaptureChannel) Snapshot() (PaneSnapshot, error) { return PaneSnapshot{}, nil }
+func (*parkedCaptureChannel) PaneDead() bool                  { return false }
 
 func (r *parkedCaptureReader) Read([]byte) (int, error) {
 	r.readOnce.Do(func() { close(r.readEntered) })
@@ -176,6 +181,12 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 	defer f.mu.Unlock()
 	f.resizes = append(f.resizes, [2]uint16{rows, cols})
 	return f.resizeErr
+}
+
+func (f *fakeClientlessChannel) PaneDead() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paneDead
 }
 
 func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {

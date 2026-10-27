@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -306,4 +307,96 @@ func TestReprovisionRemote_RetryAfterRevalidationDegradationReapsFirst(t *testin
 	assert.NotNil(t, i.remoteClient, "the settled retry must bind a live replacement")
 	assert.Empty(t, i.callbackUnavailable, "a healthy reprovision clears the recorded reason")
 	assert.False(t, i.runtimeCleanupStateUnknown)
+}
+
+// TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle is the
+// regression for the second review finding on ed3f86f that the maintainer ruled
+// belongs in this PR (#5559 comment). Before this change ordinary sandbox rows
+// never persisted RuntimeCleanup, so a retained-but-discharged cleanup identity
+// could not reach disk. This PR persists the handle on ordinary sandbox rows so
+// a restart can rebuild it — which means a confirmed reap that leaves the old
+// backend in place (a re-provision that fails before binding its replacement,
+// here the mint) would otherwise carry the discharged handle to the next
+// checkpoint, and a restart would rebuild a teardown for a runtime af already
+// reaped and act on a resource it no longer owns.
+//
+// Property the fix must satisfy (from the review): once a reap is confirmed, no
+// later checkpoint persists that runtime's cleanup identity, and the in-flight-
+// archive rule at storage_checkpoint.go (no manufactured unknown-cleanup boundary
+// after teardown) still holds. resetRemoteRuntime clears the backend's immutable
+// cleanup identity under i.mu when the reap is confirmed, so the staged handle
+// is nil and no unknown flag is set; the reloaded row carries nothing to rebuild.
+func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.T) {
+	// A confirmed reap: the old teardown returns nil (a known, completed outcome).
+	// The sandbox backend carries a cleanup identity the confirmed reap must
+	// discharge; a docker backend does not inject a sandbox callback, so its mint
+	// never fails and it cannot reach the rebind-failure window this test drives.
+	oldBackend := &sandboxBackend{
+		cleanup: &SandboxRuntimeCleanupData{
+			SSHCommand: "ssh -o User='ci' sandbox.example.test",
+			SessionDir: "/srv/af/reaped.1234",
+			RemotePID:  cleanupFixtureAltPID,
+		},
+	}
+	teardowns := 0
+	i := &Instance{
+		Title:   "s",
+		Path:    t.TempDir(),
+		Branch:  "root/s",
+		backend: oldBackend,
+		runtimeTeardown: func() error {
+			teardowns++
+			return nil // confirmed reap
+		},
+	}
+	// A credential whose Mint fails is the rebind failure: the old runtime is
+	// reaped (confirmed), then reprovisionRemote returns before binding a
+	// replacement, leaving the old (now-discharged) backend in place.
+	i.SetSandboxCredentials(&fakeCreds{mintErr: errors.New("the minter is offline")})
+	rt := &orderedReprovisionRuntime{
+		res: ProvisionResult{Backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
+			SSHCommand: "ssh -o User='ci' sandbox.example.test",
+			SessionDir: "/srv/af/fresh.1234",
+		}}},
+	}
+	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
+	defer restoreRuntime()
+
+	err := i.reprovisionRemote()
+	require.ErrorContains(t, err, "callback credential could not be re-issued")
+	assert.Equal(t, 1, teardowns, "the confirmed reap must run before the rebind fails")
+
+	i.mu.RLock()
+	backend := i.backend
+	teardown := i.runtimeTeardown
+	i.mu.RUnlock()
+	// The rebind failure leaves the old backend in place, but the confirmed reap
+	// discharged its runtime: the teardown handle is gone and the backend's
+	// immutable cleanup identity is cleared, so the next checkpoint stages no
+	// handle for a runtime af already reaped.
+	assert.Same(t, oldBackend, backend, "the rebind failure left the old backend in place; a replacement was never bound")
+	assert.Nil(t, teardown, "the confirmed reap cleared the in-memory teardown handle")
+	if provider, ok := backend.(runtimeCleanupProvider); ok {
+		assert.Nil(t, provider.runtimeCleanupData(), "the confirmed reap cleared the backend's discharged cleanup identity; a later checkpoint must not persist it")
+	}
+
+	// The next checkpoint publishes no RuntimeCleanup for the reaped runtime and
+	// does not manufacture an unknown-cleanup boundary (storage_checkpoint.go
+	// gates that on a live cleanup handle, which the confirmed reap discharged).
+	stored := i.ToInstanceData().ForStorage()
+	assert.Nil(t, stored.RuntimeCleanup, "the checkpoint persisted the reaped runtime's cleanup identity; a restart would rebuild a teardown for a runtime af already reaped")
+	assert.False(t, stored.RuntimeCleanupStateUnknown, "the checkpoint manufactured an unknown-cleanup boundary for a confirmed reap; the in-flight-archive rule must not fire without a live handle")
+	assert.False(t, stored.KilledWithoutLiveRuntime, "an ordinary row staged the nothing-owed marker; the marker is a tombstone property")
+
+	// The restart carries no rebuildable handle for the reaped runtime: the
+	// reloaded row loads inert, with no RuntimeCleanup and no rebuilt teardown.
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err, "marshal discharged-cleanup checkpoint")
+	var reloaded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &reloaded), "unmarshal discharged-cleanup checkpoint")
+	reloaded = reloaded.ForStorage()
+	assert.Nil(t, reloaded.RuntimeCleanup, "the reloaded row still carries a cleanup handle for the reaped runtime")
+	restored, err := FromInstanceData(reloaded)
+	require.NoError(t, err, "restore the reloaded row")
+	assert.Nil(t, restored.runtimeTeardown, "the reloaded row rebuilt a teardown handle for a runtime af already reaped")
 }
