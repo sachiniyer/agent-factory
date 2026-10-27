@@ -6647,11 +6647,11 @@ async function restoreSession(id, title, token2, expectedDaemonBootId) {
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
