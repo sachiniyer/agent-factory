@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // aliasOutputRegex extracts the command value from a shell alias-probe line.
@@ -58,7 +59,21 @@ type claudeProbeResult struct {
 var (
 	claudeProbeMu    sync.Mutex
 	claudeProbeCache = map[string]*claudeProbeResult{}
+	// missingClaudeWarned dedupes warnMissingClaudeOverride to one emission
+	// per probe environment, keyed on the same SHELL/PATH/HOME triple as the
+	// probe cache: a changed environment is a fresh answer worth a fresh
+	// notice.
+	missingClaudeWarned sync.Map
 )
+
+// claudeProbeEnvKey is the cache and warning-dedup key for everything derived
+// from a claude probe: the resolution is a pure function of SHELL, PATH, and
+// HOME (HOME selects the rc file that can define a claude alias), so any
+// caller — or test — that changes those vars gets a fresh probe under a new
+// key.
+func claudeProbeEnvKey() string {
+	return os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+}
 
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
 // It checks in the following order:
@@ -77,12 +92,14 @@ var (
 // pure function of SHELL, PATH, and HOME (HOME selects the rc file that can
 // define a claude alias), so caching on that triple collapses the four probes
 // into one while staying correct: any caller — or test — that changes those
-// vars gets a fresh probe under a new key. When a real probe does not find the
-// optional binary, this cache-miss path emits one actionable warning; callers
-// of the cached error do not repeat it (#3999). The per-key Once also coalesces
-// concurrent first callers so they cannot duplicate the probe or its warning.
+// vars gets a fresh probe under a new key. The per-key Once also coalesces
+// concurrent first callers so they cannot duplicate the probe. A failed probe
+// no longer warns here: whether the missing-claude advice applies depends on
+// the effective program_overrides.claude, which exists only after the
+// operator's file is merged over the probed defaults — warnMissingClaudeOverride
+// owns that decision (#5588; the probe-side dedup it replaces was #3999).
 func GetClaudeCommand() (string, error) {
-	key := os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+	key := claudeProbeEnvKey()
 	claudeProbeMu.Lock()
 	cached, ok := claudeProbeCache[key]
 	if !ok {
@@ -93,11 +110,30 @@ func GetClaudeCommand() (string, error) {
 
 	cached.once.Do(func() {
 		cached.path, cached.err = probeClaudeCommand()
-		if cached.err != nil {
-			log.WarningLog.Print(missingClaudeWarning)
-		}
 	})
 	return cached.path, cached.err
+}
+
+// warnMissingClaudeOverride emits missingClaudeWarning when the probe found no
+// claude command AND overrides does not already point program_overrides.claude
+// at a program — the case where advising "set program_overrides.claude" would
+// tell the operator to do something they already did (#5588). The probe cannot
+// gate the advice itself: DefaultConfig runs it before the operator's file is
+// decoded, so a configured override is invisible at probe time. The sites that
+// resolve an effective config call here instead — validateConfig for the parsed
+// files, and the no-file load paths for their in-memory defaults. Deduped to
+// once per probe environment, on the #3999 precedent.
+func warnMissingClaudeOverride(overrides map[string]string) {
+	if overrides[tmux.ProgramClaude] != "" {
+		return
+	}
+	if _, err := GetClaudeCommand(); err == nil {
+		return
+	}
+	if _, seen := missingClaudeWarned.LoadOrStore(claudeProbeEnvKey(), struct{}{}); seen {
+		return
+	}
+	log.WarningLog.Print(missingClaudeWarning)
 }
 
 // shellQuoteDetectedCommand quotes the filesystem-backed executable at the

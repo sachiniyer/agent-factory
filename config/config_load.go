@@ -247,10 +247,15 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		jsonExists := fileExists(configPath)
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				cfg := DefaultConfig()
+				// Diagnostics agree with startup: the stub resolves to these
+				// same in-memory defaults via emptyConfigStubLoad, which owes
+				// the missing-claude advice validateConfig owns (#5588).
+				warnMissingClaudeOverride(cfg.ProgramOverrides)
 				return ReadOnlyConfigLoad{
 					Path:      tomlPath,
 					EmptyStub: true,
-					Config:    DefaultConfig(),
+					Config:    cfg,
 				}, nil
 			}
 		}
@@ -281,10 +286,12 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		// state af accepts and runs past (#4483 review — diagnostics must agree
 		// with startup or they diagnose a file af does not have).
 		if len(data) == 0 {
+			cfg := DefaultConfig()
+			warnMissingClaudeOverride(cfg.ProgramOverrides)
 			return ReadOnlyConfigLoad{
 				Path:      configPath,
 				EmptyStub: true,
-				Config:    DefaultConfig(),
+				Config:    cfg,
 			}, nil
 		}
 		cfg, parseErr := parseLoadedConfigJSON(data, prettyConfigPath, configPath)
@@ -315,8 +322,11 @@ func emptyConfigStubLoad(prettyPath string) (*Config, error) {
 	cfg.source.builtIn = snapshotConfig(cfg)
 	// The same probed-shell-value notice materializeDefaultConfig gives the
 	// defaults it writes: the values being returned are identical, so the
-	// alias-carrying-`exec --` case is reported here too (#3566 parity).
+	// alias-carrying-`exec --` case is reported here too (#3566 parity). The
+	// missing-claude advice validateConfig owns is owed here for the same
+	// reason: these defaults carry no configured override to gate it (#5588).
 	warnGlobalShellValues(cfg, prettyPath)
+	warnMissingClaudeOverride(cfg.ProgramOverrides)
 	return cfg, nil
 }
 
@@ -595,8 +605,11 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	// would otherwise say nothing about a probed claude alias carrying `exec --`
 	// (#3566 review). Everything here came from the defaults, so the value also
 	// matches af's probe and the warning carries its "check that alias too" note
-	// alongside the path of the file it is about to create.
+	// alongside the path of the file it is about to create. The missing-claude
+	// advice is owed for the same reason — these defaults have a claude override
+	// only when the probe found one (#5588).
 	warnGlobalShellValues(defaultCfg, prettyTomlPath)
+	warnMissingClaudeOverride(defaultCfg.ProgramOverrides)
 	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)

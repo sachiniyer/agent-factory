@@ -259,6 +259,13 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		warnGlobalShellValues(config, prettyConfigPath)
 	}
 
+	// The missing-claude advice is a property of the MERGED config, not the
+	// probe: DefaultConfig ran it before this file's program_overrides.claude
+	// was decoded, so gating there would tell an operator who already set the
+	// override to set it again (#5588). The no-file load paths make the same
+	// call on their in-memory defaults.
+	warnMissingClaudeOverride(config.ProgramOverrides)
+
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(config.SessionEnvPassthrough)
 	if err != nil {
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
