@@ -1,11 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	stdlog "log"
 	"os"
 	"strings"
 	"testing"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,6 +73,37 @@ func TestLoadAllRepoInstancesReportingSkipsStaysNilWhenNothingIsSkipped(t *testi
 	_, ids, err := LoadAllRepoInstancesReportingSkips()
 	require.NoError(t, err)
 	require.Nil(t, ids)
+}
+
+// TestLoadAllRepoInstancesReportingSkipDetailsSilentWritesNoLog pins the
+// read-path contract (#5136 Codex round 12): the Silent form must not touch
+// WarningLog — inside the daemon that logger appends to agent-factory.log,
+// which is still an AF-home write attributable to a read.
+func TestLoadAllRepoInstancesReportingSkipDetailsSilentWritesNoLog(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	require.NoError(t, SaveRepoInstances("blocked", json.RawMessage("[]")))
+	blocked, err := RepoInstancesPath("blocked")
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(blocked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o600) })
+	if _, err := os.ReadFile(blocked); err == nil {
+		require.NoError(t, os.Remove(blocked))
+		require.NoError(t, os.Mkdir(blocked, 0o755))
+	}
+	_, readErr := os.ReadFile(blocked)
+	require.Error(t, readErr, "fixture did not take")
+	require.False(t, os.IsNotExist(readErr), "fixture must produce a READ error, not a missing file")
+
+	var buf bytes.Buffer
+	orig := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&buf, "", 0)
+	t.Cleanup(func() { aflog.WarningLog = orig })
+
+	_, skips, err := LoadAllRepoInstancesReportingSkipDetailsSilent()
+	require.NoError(t, err)
+	require.Len(t, skips, 1)
+	require.Equal(t, "blocked", skips[0].RepoID)
+	require.Empty(t, buf.String(), "silent enumeration must not touch the daemon log")
 }
 
 // TestRepoInstancesSkipRemedyDoesNotSuggestDeletingNewerState is a data-loss
