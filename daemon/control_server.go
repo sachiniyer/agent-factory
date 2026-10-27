@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -414,6 +415,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the
