@@ -116,12 +116,12 @@ func TestFindInstanceDataByTitleRefusesUnscopedWhenARepoIsUnreadable(t *testing.
 // them from quietly becoming live bugs later.
 //
 // Every daemon path that reaches those helpers goes through findSession ->
-// refreshLocked -> refreshDaemonInstances, which calls
-// MigrateAllRepoInstancesForDaemonLoad FIRST — and that already refuses hard on
-// a per-repo file it cannot read. So today the daemon never resolves a title
-// while a record is unreadable; it errors earlier, naming the file. If that gate
-// is ever relaxed to skip unreadable repos the way the loader does, this test
-// goes red and the helpers behind it are already correct.
+// refreshLocked -> refreshDaemonInstances, which runs the per-repo file cache
+// (config.RepoInstancesFileCache.LoadAll) FIRST — and its loadRepoFile already
+// refuses hard on a per-repo file it cannot read. So today the daemon never
+// resolves a title while a record is unreadable; it errors earlier, naming the
+// file. If that gate is ever relaxed to skip unreadable repos the way the loader
+// does, this test goes red and the helpers behind it are already correct.
 func TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)

@@ -221,13 +221,19 @@ func (p *launchingPane) refuses(now time.Time) bool {
 	return false
 }
 
-// paneFieldsBlank expands every pane field to nothing, as tmux does for a
-// missing target; paneFieldsRunning is a running pane with no pid to hand out.
+// paneFieldsBlank expands every pane field the way tmux does for a missing
+// target: pane-sourced fields stay empty, but the start-command equality still
+// evaluates — empty == empty answers 1 (measured on tmux 3.8: `||||||1`).
+// paneFieldsRunning is a running pane with no pid to hand out.
 var (
 	paneFieldsBlank = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "",
-		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "")
+		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
+		"#{@af_pane_pid}", "", "#{@af_pane_deaths}", "", "#{pane_tty}", "",
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1")
 	paneFieldsRunning = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "0",
-		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "")
+		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
+		"#{@af_pane_pid}", "", "#{@af_pane_deaths}", "0", "#{pane_tty}", "/dev/pts/0",
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1")
 )
 
 func (m *tmuxModel) session(name, program string) *tmux.TmuxSession {
@@ -243,7 +249,7 @@ func scopedInstance(t *testing.T, m *tmuxModel, account string, tabs ...TabData)
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
-	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", filepath.Join(t.TempDir(), "wt"), "scope",
+	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", existingDir(t, filepath.Join(t.TempDir(), "wt")), "scope",
 		"scope-branch", "", false, true)
 	require.NoError(t, err)
 	inst := &Instance{

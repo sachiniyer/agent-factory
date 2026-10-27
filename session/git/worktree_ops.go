@@ -46,6 +46,7 @@ func (g *GitWorktree) Setup() error {
 	if setupErr != nil {
 		return setupErr
 	}
+	g.markWorktreePlaced()
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
 	g.hooksDone = g.runHooks()
 	return nil
@@ -83,6 +84,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return err
 	}
 	g.branchCreatedByUs = branchCreatedByUs
+	g.markWorktreePlaced()
 	g.startHooks()
 	return nil
 }
@@ -128,11 +130,13 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err))
 	}
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
+	g.markWorktreePlaced()
 	g.startHooks()
 	return nil
 }
@@ -364,7 +368,8 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
-		return fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err))
 	}
 
 	// Resolve the base commit SHA so diffs and other operations have a reference point.
@@ -450,7 +455,8 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// Create a new worktree from the base commit.
 	// This starts the worktree with a clean slate without inheriting uncommitted changes.
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err))
 	}
 
 	return nil
@@ -658,6 +664,10 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	if g.repoPath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
+	// Same discharge the relocation claim performs: an identity-unknown stall
+	// whose path is conclusively gone fences nothing, and refusing on it below
+	// would make a live row unkillable for good (#5102).
+	g.SettleAbsentIdentityUnknownStall()
 	worktreePath, recovery, hasRecovery := g.RelocationSnapshot()
 	if worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
