@@ -476,10 +476,12 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 		return fmt.Errorf("start clientless pty capture: %w", err)
 	}
 	done := make(chan struct{})
+	quit := make(chan struct{})
 	b.mu.Lock()
 	b.capturing = true
 	b.captureStarted = time.Now()
 	b.stopCapture = func() {
+		close(quit) // ends this capture's pane-death watcher
 		if err := b.ch.StopCapture(); err != nil {
 			// A stop that is RELEASING an already-dead capture is expected to fail
 			// to close cleanly: remoteClientlessChannel does
@@ -507,6 +509,7 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	}
 	b.mu.Unlock()
 	go b.readLoop(r, done)
+	go b.watchPaneDeath(quit)
 	return nil
 }
 
