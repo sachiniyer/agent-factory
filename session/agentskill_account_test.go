@@ -114,7 +114,7 @@ func TestResolveSkillTarget_DistinguishesUnscopedFromUnresolvable(t *testing.T) 
 // codex/work. Comparing the enum instead would leave the redirected session
 // permanently skill-less, and a stale pin is the case that must still refuse.
 func TestResolveSkillTarget_UsesThePinnedAccountNamespace(t *testing.T) {
-	agentHome(t)
+	home := agentHome(t)
 	grantGlobalAgentSkills(t)
 	dir := registerAccount(t, "codex", "work")
 
@@ -122,7 +122,7 @@ func TestResolveSkillTarget_UsesThePinnedAccountNamespace(t *testing.T) {
 	// codex — the skill resolves under the pin's registry.
 	redirected := resolveSkillTarget(
 		&Instance{Program: "aider", Account: "work", accountAgent: "codex"}, "codex")
-	require.Equal(t, skillTarget{root: dir}, redirected,
+	require.Equal(t, skillTarget{root: dir, legacy: filepath.Join(home, ".codex")}, redirected,
 		"the pin's namespace, not the enum, is the skill's account registry")
 
 	// A pin that disagrees with the command being launched still refuses: the
@@ -139,12 +139,12 @@ func TestResolveSkillTarget_UsesThePinnedAccountNamespace(t *testing.T) {
 // codex/work, and the frozen launch command is codex — so the skill target must
 // resolve there rather than comparing codex against the requested enum.
 func TestResolveSkillTargetForAccount_RedirectedSwapResolvesTheSelectedNamespace(t *testing.T) {
-	agentHome(t)
+	home := agentHome(t)
 	grantGlobalAgentSkills(t)
 	dir := registerAccount(t, "codex", "work")
 
 	target := resolveSkillTargetForAccount("codex", "codex", "work", "")
-	require.Equal(t, skillTarget{root: dir}, target,
+	require.Equal(t, skillTarget{root: dir, legacy: filepath.Join(home, ".codex")}, target,
 		"a redirect-selected account still receives the af skill")
 
 	// And the guard it replaces: a namespace that is not the launch's agent

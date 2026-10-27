@@ -203,6 +203,27 @@ func TestLaunchPlans_GeminiSkillRootFollowsTheCommand(t *testing.T) {
 	}
 }
 
+// The launch's root and the legacy daemon root anchor a relative inherited
+// value at DIFFERENT directories: the launch resolves it where the pane starts
+// (the session worktree), while the legacy target is where every earlier af
+// resolved the same value — this process's cwd. Anchoring the legacy target at
+// the worktree would send the declined-consent cleanup into a directory af
+// never wrote to and leave the real pre-#4501 copy behind.
+func TestResolveSkillTarget_LegacyDaemonRootAnchorsAtTheDaemonCwd(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	t.Setenv("CODEX_HOME", "relative-daemon-root")
+
+	inst := skillTestInstance(t, "codex", "")
+	target := resolveSkillTarget(inst, "codex")
+	require.Equal(t, filepath.Join(inst.GetWorktreePath(), "relative-daemon-root"), target.root,
+		"the launch resolves the inherited relative root where the pane starts")
+	require.Equal(t, filepath.Join(cwd, "relative-daemon-root"), target.legacy,
+		"the legacy target is where an earlier af resolved the same inherited value: the daemon's cwd")
+}
+
 // A command that sets the variable to something af cannot read leaves af unable
 // to say where the agent will look. That is the account path's "unresolved"
 // answer, and it has the same consequence: write nothing, anywhere — not the

@@ -520,8 +520,10 @@ func resolveSkillTargetForAccount(program, accountNamespace, name, workDir strin
 	// The daemon's own root: where a bare launch of this agent reads, and where
 	// every earlier af placed this launch's skill. It is only ever cleaned, so a
 	// failure to resolve it (an empty result) leaves nothing to clean rather than
-	// a path to guess.
-	daemonRoot, _ := tmux.ConfigRootFromCommand(agent, agent, workDir)
+	// a path to guess. A relative inherited value resolves against this process's
+	// cwd — the anchor every earlier write used — never the session's worktree.
+	daemonCwd, _ := os.Getwd()
+	daemonRoot, _ := tmux.ConfigRootFromCommand(agent, agent, daemonCwd)
 
 	name = strings.TrimSpace(name)
 	if name == "" {
