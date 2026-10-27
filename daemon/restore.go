@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -316,13 +317,19 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.info().Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
+		instance.ClearLostRestoreWait()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
 		m.clearRemoteLoss(stateKey)
-		m.mu.Lock()
-		delete(m.lostRestoreStates, stateKey)
-		m.mu.Unlock()
+		// The manual off-ramp clears the whole in-memory episode on EVERY
+		// successful manual path: this probe-alive heal returns before the
+		// armRestoreConfirmation call that would reset it for the spawn path,
+		// so a stale window cannot outlive the operator's intervention and trip
+		// the bound on the next automatic cycle (#5238 review), and a pending
+		// automatic arm cannot charge the healed runtime's answers to the old
+		// episode (#5436).
+		m.clearLostRestoreEpisode(stateKey)
 		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
 			failure := fmt.Errorf(
 				"session %q was confirmed alive, but its healed state could not be written to disk: %w",
@@ -417,6 +424,21 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
+			// The failure is the session's newest evidence even though it is an
+			// operator's, not the episode's. A structural one — rejected auth, an
+			// empty branch — means the row must stop claiming the environment,
+			// the same clear the automatic arm applies when its own failure goes
+			// structural; an environmental one leaves the armed wait's claim
+			// intact. Same call-site deadline rule as the automatic arm: the
+			// only deadline this push produces is the remote transport's
+			// (#5295 review).
+			class := lostRestoreEnvironmentalClass(err)
+			if class == lostRestoreEnvNone && errors.Is(err, context.DeadlineExceeded) {
+				class = lostRestoreEnvDeadline
+			}
+			if class == lostRestoreEnvNone {
+				m.clearLostRestoreWaitDurable(repoID, instance)
+			}
 			return "", err
 		}
 		// The push landed: reset the push-failure episode budget so that a later
@@ -435,6 +457,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// instead of re-entering RuntimeActionRecoverLost, which still requires OpNone
 	// and would now refuse its own operation's fence. ConfirmLive clears the fence
 	// on success; the deferred EndRecoverFence above lowers it on failure.
+	// Same settle-persist contract as the automatic loop: a respawn that
+	// settles a relocation record persists the cleared state before the spawn
+	// proceeds, so a daemon exit cannot strand the recovery on a stale
+	// record (#5295 review).
+	instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
@@ -513,7 +542,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(repoID, instance)
+	m.armRestoreConfirmation(repoID, instance, lostRestoreManual)
 	if settleErr != nil {
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",

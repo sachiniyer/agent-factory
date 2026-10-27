@@ -27,8 +27,10 @@ const RepoConfigFileName = "config.json"
 // See docs/remote-hooks.md for the copy-pasteable launch_cmd recipe.
 type RemoteHooks struct {
 	// LaunchCmd provisions the remote workspace and echoes the af agent-server
-	// endpoint JSON (see the type doc). Invoked with --name/--repo/--branch and
-	// an optional --program flag (see docs/remote-hooks.md).
+	// endpoint JSON (see the type doc). Invoked with --name/--title/--repo,
+	// plus --branch on restore, --program/--program-resolved when the resolved
+	// program is set, and one --session-env per session_env_passthrough name
+	// (see docs/remote-hooks.md).
 	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
 	// ProvisionCmd is the ssh-host alternative to LaunchCmd (#2847): it makes a
 	// machine and prints {host, host_key, [user], [port]} — no agent-server, no

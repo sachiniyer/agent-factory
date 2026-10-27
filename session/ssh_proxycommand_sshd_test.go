@@ -112,7 +112,7 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 	payload := strings.Repeat("af-binary-stand-in-0123456789\n", 40000)
 	dst := filepath.Join(t.TempDir(), "streamed")
 	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "stream"}, pinnedCmd, "", "")
-	out, err := p.Run(60*time.Second, "cat > "+shellQuoteSandbox(dst)+" && wc -c < "+shellQuoteSandbox(dst),
+	out, err := p.Run(60*time.Second, "cat > "+shellQuote(dst)+" && wc -c < "+shellQuote(dst),
 		strings.NewReader(payload), false)
 	require.NoError(t, err, "ssh said:\n%s", out)
 	assert.Equal(t, strconv.Itoa(len(payload)), strings.TrimSpace(string(out)),
@@ -135,11 +135,11 @@ func hostKeyAliasPinnedCommand(t *testing.T, cfg config.SSHConfig, posture, dial
 	if port == 0 {
 		port = sshDefaultPort
 	}
-	suffix := " " + shellQuoteSandbox(host)
+	suffix := " " + shellQuote(host)
 	require.True(t, strings.HasSuffix(base, suffix))
 	return strings.TrimSuffix(base, suffix) +
-		" -o HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)) +
-		" " + shellQuoteSandbox(dialAddr)
+		" -o HostKeyAlias=" + shellQuote(knownHostsLookupName(host, port)) +
+		" " + shellQuote(dialAddr)
 }
 
 // runOverTransport runs one command through the production transport — the same

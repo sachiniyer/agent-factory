@@ -285,11 +285,13 @@ func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
 	// Reach the composed command without starting it: the flag must be present
 	// in what startTunnel builds.
 	assert.Contains(t, p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "ExitOnForwardFailure=yes")
-	// And the production path must actually carry it.
-	src, err := os.ReadFile("backend_sandbox.go")
+	// And the production path must actually carry it. Since #5564 the tunnel
+	// child is built by spawnTunnel in sandbox_tunnel.go (one command text for
+	// the lifeline and direct spawn shapes alike), so that is the file pinned.
+	src, err := os.ReadFile("sandbox_tunnel.go")
 	require.NoError(t, err)
 	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes -N -L`,
-		"startTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
+		"spawnTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
 			"leaving the probe to succeed against whoever won the port")
 }
 
@@ -501,7 +503,7 @@ func stubSSHStraggler(t *testing.T, printCmd string) string {
 	body := "#!/usr/bin/env bash\n" +
 		printCmd + "\n" +
 		"sleep 30 &\n" +
-		"echo $! > " + shSingleQuoteExec(pidFile) + "\n" +
+		"echo $! > " + shellQuote(pidFile) + "\n" +
 		"exit 0\n"
 	path := filepath.Join(dir, "ssh")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))

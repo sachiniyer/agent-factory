@@ -27,7 +27,7 @@ func assertInRepoConfigFields(t *testing.T, cfg *InRepoConfig, raw []byte) {
 	require.NotNil(t, cfg)
 	assert.NotEmpty(t, raw)
 	assert.Equal(t, "aider", cfg.DefaultProgram)
-	assert.Equal(t, "/opt/codex --fast", cfg.ProgramOverrides["codex"])
+	assert.Equal(t, "codex --fast", cfg.ProgramOverrides["codex"])
 	assert.Equal(t, []string{"npm install"}, cfg.PostWorktreeCommands)
 	require.NotNil(t, cfg.RemoteHooks)
 	assert.Equal(t, "l", cfg.RemoteHooks.LaunchCmd)
@@ -50,7 +50,7 @@ func TestLoadInRepoConfigFields(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeInRepoConfig(t, repoRoot, `{
 		"default_program": "aider",
-		"program_overrides": {"codex": "/opt/codex --fast"},
+		"program_overrides": {"codex": "codex --fast"},
 		"post_worktree_commands": ["npm install"],
 		"remote_hooks": {"launch_cmd": "l", "list_cmd": "ls", "attach_cmd": "a", "delete_cmd": "d"}
 	}`)

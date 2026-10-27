@@ -42,8 +42,19 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // deciding; the raw projected value would short-circuit here and release a row
 // whose materialized form holds (its pending transaction is still in flight), so
 // the sandbox arm must let LoadedActivity restore the fence first. The raw guards
-// below apply only to non-sandbox rows, whose materialized form does not rewrite
-// liveness or restore a fence that changes whether the run is in flight.
+// below apply to non-sandbox rows. ForStorage projects StartupStateUnknown=true
+// onto a local row mid-account-swap too — the projection has no backend gate
+// (projectPendingAccountSwapForPreviousRelease) — and ClassifyActivity checks
+// PendingAccountSwap BEFORE StartupStateUnknown regardless of backend type, so
+// the materialized form of a local row mid-swap is ActivityPending and HOLDS the
+// slot. The local arm mirrors that precedence: the PendingAccountSwap term below
+// holds a mid-swap row before the projected StartupStateUnknown guard, or a local
+// ghost that fails to materialize while a swap is in flight would slip past the cap
+// — and the undercount never self-corrects, because refreshDaemonInstances rebuilds
+// ghostTaskRuns from scratch on every call and re-evaluates this arm against the
+// same on-disk row. The local backend is the only one that can commit an account
+// swap (SupportsAutomaticAccountSwap gates on backend.Type() == "local"), so this
+// is the one raw arm the term is needed on.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if item.TaskID == "" || !item.TaskRunActive {
 		return false
@@ -51,7 +62,7 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if session.IsSandboxBackendType(item.BackendType) {
 		return !releasesLostSandboxGhost(item)
 	}
-	return !item.StartupStateUnknown && !item.UserKilled &&
+	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 
@@ -98,11 +109,11 @@ var persistLegacyInstanceID = persistInstanceData
 
 // refreshRepoFileCache is the daemon's per-repo instances.json cache (#5169).
 // It fuses what used to be two full passes over every file on every poll tick
-// — the MigrateAllRepoInstancesForDaemonLoad sweep and the
-// LoadAllRepoInstancesReportingMissing read — into a stat-gated load: a file
-// whose signature is unchanged since it was last parsed is served from cache
-// without being read, validated, normalized, or migrated at all, so a
-// steady-state tick is O(number of repo files), not O(total records).
+// — the standalone in-place migration sweep (now the cache's migrateAndExtract
+// cold path) and the LoadAllRepoInstancesReportingMissing read — into a
+// stat-gated load: a file whose signature is unchanged since it was last parsed
+// is served from cache without being read, validated, normalized, or migrated
+// at all, so a steady-state tick is O(number of repo files), not O(total records).
 var refreshRepoFileCache = config.NewRepoInstancesFileCache()
 
 // loadAllRepoInstancesForRefresh is the loader refreshDaemonInstances reads
@@ -112,8 +123,8 @@ var refreshRepoFileCache = config.NewRepoInstancesFileCache()
 // corrupt" and clear a startup-skipped repo from the skip set — serving a
 // truncated snapshot as complete again (#4783). A package-level variable so a
 // test can stage a read failure the file system cannot stage deterministically:
-// a persistently unreadable file already aborts the refresh in the migrator,
-// so the reachable shape is a file that reads there and fails here. It also
+// a persistently unreadable file already aborts the refresh in the file cache's
+// loadRepoFile, so the reachable shape is a file that reads there and fails here. It also
 // reports repos whose instances.json is missing, which load as "[]" but were
 // not read, so they must not count as re-read either — and the per-repo file
 // signatures, which is what refreshRowOutcomes keys its parse-outcome cache on.

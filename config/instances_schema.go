@@ -46,45 +46,21 @@ func NewInstancesSchemaMigrationPlan(path string) SchemaMigrationPlan {
 	}
 }
 
-// MigrateRepoInstancesForDaemonLoad upgrades one repo's instances.json in
-// place. It is intended for daemon-owned load paths; read-only callers should
-// use LoadRepoInstances, which tolerates both array-root and envelope formats
-// without writing.
-func MigrateRepoInstancesForDaemonLoad(repoID string) (SchemaMigrationResult, error) {
-	path, err := repoInstancesPath(repoID)
-	if err != nil {
-		return SchemaMigrationResult{}, err
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return SchemaMigrationResult{}, nil
-		}
-		return SchemaMigrationResult{}, fmt.Errorf("failed to read repo instances: %w", err)
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return SchemaMigrationResult{}, nil
-	}
-	_, result, err := LoadAndMigrateSchemaFile(NewInstancesSchemaMigrationPlan(path))
-	return result, err
-}
-
 // repoInstanceIDsForDaemonLoad lists the repo-scoped subdirectories under the
-// instances directory. It is the single walk shared by the daemon-load migrator
-// (MigrateAllRepoInstancesForDaemonLoad) and the upgrade manifest
-// (RepoInstancesMigrateOnLoadPaths) so the two can never enumerate a different
-// set. A missing instances directory is not an error: a daemon with no per-repo
-// state has nothing to migrate.
+// instances directory. It is the walk the upgrade manifest
+// (RepoInstancesMigrateOnLoadPaths) enumerates, so the manifest snapshots every
+// per-repo instances.json. A missing instances directory is not an error: a
+// daemon with no per-repo state has nothing to snapshot.
 //
 // A subdirectory whose name is not a valid repoID is skipped here, the same way
 // a non-directory entry already is. repoInstancesPath validates the id before
-// touching the filesystem, so feeding an unvalidated name to either consumer
-// fails at that pre-condition — a failure that is neither corrupted content nor
-// a write failure and so aborts the whole sweep under both callers. Skipping at
-// the walk keeps that class from blocking daemon startup while preserving the
-// hard-refuse posture for real repos with read/write/newer-schema problems. This
-// matches LoadAllRepoInstancesReportingMissing, which already logs and
-// continues on the identical case (state.go).
+// touching the filesystem, so feeding an unvalidated name to the manifest's
+// resolve step fails at that pre-condition — a failure that is neither corrupted
+// content nor a write failure. Skipping at the walk keeps that class from
+// blocking the manifest while preserving the hard-refuse posture for real repos
+// with read/write/newer-schema problems. This matches
+// LoadAllRepoInstancesReportingMissing, which already logs and continues on the
+// identical case (state.go).
 func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
@@ -111,45 +87,13 @@ func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	return ids, nil
 }
 
-// MigrateAllRepoInstancesForDaemonLoad upgrades every readable per-repo
-// instances.json before daemon restore/refresh reads it. Corrupted legacy files
-// keep the existing skip-and-warn behavior; newer schema versions and write
-// failures are returned so the daemon never overwrites a file it cannot safely
-// understand or migrate.
-func MigrateAllRepoInstancesForDaemonLoad() error {
-	ids, err := repoInstanceIDsForDaemonLoad()
-	if err != nil {
-		return err
-	}
-	for _, repoID := range ids {
-		if _, err := MigrateRepoInstancesForDaemonLoad(repoID); err != nil {
-			var newer *UnsupportedSchemaVersionError
-			switch {
-			case errors.As(err, &newer):
-				return fmt.Errorf("failed to migrate instances for repo %s: %w", repoID, err)
-			case errors.Is(err, errInstancesSchemaContent):
-				// Preserve the daemon's existing corruption posture: a malformed
-				// repo file is skipped and named, not allowed to abort every other
-				// repo's restore. The later LoadAllRepoInstances path will log the
-				// same repo if it still cannot decode.
-				continue
-			default:
-				return fmt.Errorf("failed to migrate instances for repo %s: %w", repoID, err)
-			}
-		}
-	}
-	return nil
-}
-
 // RepoInstancesMigrateOnLoadPaths returns the absolute path of every per-repo
-// instances.json that MigrateAllRepoInstancesForDaemonLoad rewrites in place at
-// daemon load. It walks the SAME repo set as that migrator, so the upgrade
-// transaction manifest (#2212 R3) snapshots exactly the files a candidate would
-// migrate on boot — letting a binary-only rollback to the previous daemon restore
-// state in a schema it can still read, instead of stranding it on a vN+1 file it
-// cannot parse. Errors propagate rather than skip: an incomplete manifest silently
-// under-protects the rollback, which is the failure mode this whole path exists to
-// prevent.
+// instances.json under the instances directory. The upgrade transaction manifest
+// (#2212 R3) snapshots exactly these files — letting a binary-only rollback to
+// the previous daemon restore state in a schema it can still read, instead of
+// stranding it on a vN+1 file it cannot parse. Errors propagate rather than
+// skip: an incomplete manifest silently under-protects the rollback, which is
+// the failure mode this whole path exists to prevent.
 func RepoInstancesMigrateOnLoadPaths() ([]string, error) {
 	ids, err := repoInstanceIDsForDaemonLoad()
 	if err != nil {

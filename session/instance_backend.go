@@ -455,51 +455,6 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	return i.handoffStorageCheckpoint(), nil
 }
 
-// ArchiveTeardown tears down every tab's tmux session for an archive AND
-// relocates the worktree to dest in one operation (#1028) — the tmux half of
-// Kill, but it PRESERVES the record and MOVES the worktree instead of deleting
-// it. It routes through the shared teardownTabs core in the archive mode, so the
-// #802 "wait for every pane to exit before touching the worktree" ordering is
-// shared code with Kill rather than the duplicated prose it was when the move
-// lived in a separate daemon step (#1195 Phase 2b). It is deliberately
-// best-effort for tmux (a stuck session only logs, mirroring Kill) and:
-//   - keeps the AGENT tab's tmux binding (its session name) so a failed archive
-//     can re-spawn it in place via the Lost-restore loop;
-//   - drops the shell/process tabs entirely — their tmux sessions were just torn
-//     down, so only the agent session is brought back for them (Sachin's #1028
-//     requirement);
-//   - KEEPS the web tabs (#1809): a web tab has no tmux session and no process —
-//     it is just a URL — so nothing was torn down and it round-trips through the
-//     archived record to render again on un-archive;
-//   - leaves gitWorktree and started untouched, so the daemon caller controls
-//     the final state (started=false + Archived on success; Lost on a failed
-//     move — returned here — where started stays true so the loop re-spawns the
-//     agent).
-//
-// Returns the worktree-move error (nil on success). Local instances only —
-// remote sessions have no local tmux/worktree and the daemon rejects archiving
-// them before reaching here.
-func (i *Instance) ArchiveTeardown(dest string) error {
-	_, err := i.ArchiveTeardownWithHook(dest, nil)
-	return err
-}
-
-// ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
-// callback at the only safe cleanup point: every pane has been confirmed dead,
-// but the worktree still occupies its live path. A callback failure is returned
-// separately from the relocation result and never prevents the move.
-func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
-	claim, err := i.ClaimWorktreeRelocationForRetry()
-	if err != nil {
-		return nil, err
-	}
-	// false: neither this exported wrapper nor ArchiveTeardown has a production
-	// caller that holds the daemon's archive op-lock (#3413) — only
-	// daemon/archive.go's own direct ArchiveTeardownWithClaim call does, and it
-	// passes true explicitly. See closeTabForDestructiveTeardown.
-	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove, false)
-}
-
 // ArchiveTeardownWithClaim carries the source claim obtained before teardown to
 // the hook and move use boundaries. Each boundary revalidates it independently.
 //
@@ -683,16 +638,122 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
-	oldBranch := gw.GetBranchName()
-	if newBranch != "" && newBranch != oldBranch {
-		if err := gw.RenameBranch(newBranch); err != nil {
-			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
-		}
-	}
+	// Retire any worktree-missing probe that is out while this rename runs
+	// (#5102). The move below empties the recorded path, so a probe whose lstat
+	// lands inside it reads ENOENT for af's own move. When the title reuse that
+	// called this cannot persist, it calls back in to move the worktree home, and
+	// that ABA leaves the gw pointer, the recorded path and OpNone matching the
+	// probe's snapshot again over a directory that is present — and a rename moves
+	// neither lifecycle axis, so nothing else bumps the epoch the probe's
+	// re-qualification compares. Without this bump that stale absence is accepted
+	// and stamps a sticky Missing=true on a live archive. One bump per call is
+	// enough: i.mu is held for the whole body, so a probe re-qualifies either
+	// before this starts (and its lstat preceded the move) or after it ends (and
+	// sees the epoch moved). It is bumped before the first step that can touch
+	// the worktree rather than after a successful move, because a move that fails
+	// partway still had the path empty for a while.
+	i.stateEpoch++
+	i.touchLocked()
+	// Decide how the record follows the rename BEFORE renaming the branch, so a
+	// refusal leaves the branch and any checkout of it exactly as they were.
+	//
 	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
 	// updates gw's stored worktree path — all under i.mu here, matching how
 	// ToInstanceData reads the worktree path under i.mu.RLock.
-	if err := gw.MoveWorktree(dest); err != nil {
+	//
+	// An archived row whose worktree was deleted outside af has no bytes to move,
+	// and MoveWorktree would fail ENOENT — blocking reuse of its own title forever
+	// (#5102). Re-aim the record at the new title-keyed path instead, so its
+	// basename keeps claiming the renamed title exactly as a moved archive's does;
+	// restore then rebuilds there from the kept branch. Only a conclusive Absent
+	// takes this route: Unknown falls through to the move, which refuses on its
+	// own terms rather than letting a guess discard a worktree that may exist.
+	//
+	// Absent is also what a user's own `git worktree move` of the archive looks
+	// like from the recorded path, and that checkout is intact where git now
+	// registers the branch. Re-aiming the record (and renaming the branch under
+	// it) would orphan it, and restore would later refuse it as a foreign
+	// placement. So the repoint is taken only when git has the branch live
+	// nowhere; a live checkout, or a listing that cannot be read, refuses.
+	//
+	// And a row already flagged worktree-missing recorded that the directory af
+	// tracked is gone, so whatever answers at the path now is unverified by
+	// default: moving it would carry a stranger's bytes under the renamed title.
+	// Same invariant as archive's sticky-flag guard, and the same one way out
+	// (#5102): a directory git proves is the session's own checkout — the user
+	// put the archive back where it was recorded — is claimed, verified against
+	// that claim and moved with it, and the flag clears once it has landed.
+	// Without that, the refusal's own advice ("move it back and retry") never
+	// terminated. Anything else — a path that is not conclusively present, or a
+	// directory the proof does not hold for — refuses, and a consumed record
+	// goes back to the fence it came from.
+	var relocate func(string) error = gw.MoveWorktree
+	var unverified func()
+	presence := gw.ProbeWorktreePresence()
+	if i.worktreeMissing && presence != git.WorktreePresenceAbsent {
+		refusal := fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the path is not conclusively absent now, so whatever is there is unverified — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), gw.GetWorktreePath())
+		if presence != git.WorktreePresencePresent {
+			return refusal
+		}
+		claim, err := gw.ClaimRelocationSource()
+		if err != nil {
+			return fmt.Errorf("%w: %w", refusal, err)
+		}
+		if err := gw.VerifyClaimedWorktree(claim); err != nil {
+			gw.ReturnClaimUnverified(claim)
+			return fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the directory there now is not one git proves is the session's checkout (%v) — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), err, gw.GetWorktreePath())
+		}
+		unverified = func() { gw.ReturnClaimUnverified(claim) }
+		relocate = func(dest string) error {
+			if err := gw.MoveWorktreeWithClaim(dest, claim); err != nil {
+				return err
+			}
+			// The proven directory now sits at dest under the claim's identity:
+			// af placed it, which is the one thing that clears the flag.
+			i.worktreeMissing = false
+			i.worktreeMissingReason = ""
+			i.touchLocked()
+			return nil
+		}
+	}
+	if presence == git.WorktreePresenceAbsent {
+		moved, live, err := liveBranchCheckout(gw)
+		if err != nil {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w", i.Title, gw.GetWorktreePath(), err)
+		}
+		if live {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s and retry, or remove it with 'git worktree remove' and retry", i.Title, moved, gw.GetWorktreePath())
+		}
+		relocate = func(dest string) error {
+			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
+				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
+			}
+			// The repoint is af recording a deletion it just proved, so it stamps
+			// the flag itself rather than leaving it to a poll that may never run
+			// first. The directory can vanish between polls; unstamped, the row
+			// would name a fresh path nothing has ever held, and the probe at that
+			// path answers about whatever appears there next — a later directory
+			// at dest would read Present, the sticky flag would never set, and a
+			// restore would move an unrelated directory in as the session's
+			// worktree. The reason names dest, the path the record now points at,
+			// so the fence follows the pointer; a row that was already flagged has
+			// its reason re-aimed for the same reason (#5102).
+			i.worktreeMissing = true
+			i.worktreeMissingReason = WorktreeMissingRepointedReason(dest)
+			i.touchLocked()
+			return nil
+		}
+	}
+	oldBranch := gw.GetBranchName()
+	if newBranch != "" && newBranch != oldBranch {
+		if err := gw.RenameBranch(newBranch); err != nil {
+			if unverified != nil {
+				unverified()
+			}
+			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
+		}
+	}
+	if err := relocate(dest); err != nil {
 		if newBranch != "" && newBranch != oldBranch {
 			// Best-effort: the move already failed, so this is recovery, and a
 			// second failure must not mask the first. It is reported with it —

@@ -53,13 +53,30 @@ const legacyGuardNoop = "#!/bin/sh\nexit 0\n"
 var pluginCommands = map[string]string{
 	"af.md": "---\n" +
 		"allowed-tools: Bash(af:*)\n" +
-		"description: " + AfSkillDescription + "\n" +
+		"description: " + afSkillDescriptionInside + "\n" +
 		"argument-hint: [request]\n" +
 		"---\n" +
 		"\n" +
 		afUsageReference + "\n" +
 		"\n" +
 		"User request (may be empty): $ARGUMENTS\n",
+}
+
+// afProposalSkillName names the model-invoked proposal skill. Claude loads a
+// slash command body only when the request matches its description, so the
+// proposal entry point needs its own skill with a proposal-shaped trigger.
+const afProposalSkillName = "proposal"
+
+// pluginSkills maps a skill directory under skills/ to its SKILL.md. Like
+// pluginCommands, ensurePluginDir writes every entry and prunes undeclared ones.
+var pluginSkills = map[string]string{
+	afProposalSkillName: "---\n" +
+		"name: " + afProposalSkillName + "\n" +
+		"description: " + afProposalTrigger + ". Starts or attaches an Agent Factory (af) proposal instead of writing docs into the repository.\n" +
+		"allowed-tools: Bash(af:*)\n" +
+		"---\n" +
+		"\n" +
+		afUsageProposalsInside + "\n",
 }
 
 // ensurePluginDir creates the plugin directory with its manifest and slash
@@ -139,5 +156,45 @@ func ensurePluginDir() (string, error) {
 		}
 	}
 
+	if err := syncPluginSkills(filepath.Join(pluginDir, "skills")); err != nil {
+		return "", err
+	}
+
 	return pluginDir, nil
+}
+
+// syncPluginSkills writes every pluginSkills entry under skillsDir and prunes
+// skill directories no longer declared. A pruned directory loses only its
+// SKILL.md and is then removed only if empty, so nothing else in it is deleted.
+func syncPluginSkills(skillsDir string) error {
+	if err := config.MkdirAllUnderAFHome(skillsDir, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, ok := pluginSkills[entry.Name()]; ok {
+			continue
+		}
+		dir := filepath.Join(skillsDir, entry.Name())
+		if err := config.RemoveFileRefusingLink(filepath.Join(dir, "SKILL.md")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(dir)
+	}
+	for name, content := range pluginSkills {
+		dir := filepath.Join(skillsDir, name)
+		if err := config.MkdirAllUnderAFHome(dir, 0755); err != nil {
+			return err
+		}
+		if err := config.AtomicWriteFileRefusingLink(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -16,7 +16,9 @@ for (const theme of ["light", "dark"] as const) {
       await route.fulfill({ json: body });
     });
     await page.goto("/");
-    await page.getByRole("button", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
+    await page.locator('.af-viewtab[data-view="config"]').click();
+    await page.locator(".af-theme-select").selectOption(theme);
+    await page.locator('.af-viewtab[data-view="sessions"]').click();
     const row = page.locator(".af-row").first();
     await row.hover();
     await row.getByRole("button", { name: /^Actions for / }).click();
