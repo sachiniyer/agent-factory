@@ -665,7 +665,9 @@ button:disabled,
 .af-rail {
   width: calc(var(--af-space-3) * 20);
   flex: 0 0 calc(var(--af-space-3) * 20);
-  border-right: 0;
+  /* Transparent at rest so the keyboard-focus ring frames the rows instead of
+   * painting over their edges. */
+  border: calc(var(--af-space-1) / 2) solid transparent;
   background: var(--af-surface);
   display: flex;
   flex-direction: column;
@@ -690,8 +692,7 @@ button:disabled,
  * mode is legible. The rail also brightens the selected row's edge in nav mode, to
  * show which row Enter will attach. */
 .af-kb-rail .af-rail {
-  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) / -2);
+  border-color: var(--af-accent);
 }
 
 .af-kb-terminal .af-main-term {
@@ -1151,7 +1152,7 @@ button:disabled,
 .af-row-selected::before {
   content: "";
   position: absolute;
-  inset: var(--af-space-2) auto var(--af-space-2) 0;
+  inset: 0 auto 0 0;
   width: calc(var(--af-space-1) / 2);
   background: var(--af-accent);
 }
@@ -1383,6 +1384,7 @@ button:disabled,
   background: var(--af-surface-raised);
   color: var(--af-ink);
 }
+.af-term-menu.af-menu-up { top: auto; bottom: calc(100% + var(--af-space-2)); }
 .af-term-menu[hidden], .af-term-keyboard[hidden] { display: none; }
 .af-term-new-slot, .af-term-new-slot .af-tab-new-wrap, .af-term-menu button { width: 100%; }
 .af-term-menu button { text-align: left; }
@@ -3528,6 +3530,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-modal-card { display: flex; flex-direction: column; }
 .af-modal-form { min-height: 0; overflow: hidden; }
 .af-modal-body { min-height: 0; overflow-y: auto; }
+/* Both clip, so give the focus ring (width + offset) room inside them. */
+.af-modal-form, .af-modal-body { padding: var(--af-space-1); margin: calc(-1 * var(--af-space-1)); }
 .af-modal-title, .af-modal-foot, .af-modal-error { flex-shrink: 0; }
 .af-login-form input { background: var(--af-surface-raised); min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
 @media (max-width: 768px) {

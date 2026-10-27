@@ -158,6 +158,10 @@ const (
 	EventTaskCreated     EventType = "task.created"
 	EventTaskUpdated     EventType = "task.updated"
 	EventTaskRemoved     EventType = "task.removed"
+	// EventProposalChanged signals that a doc of a watched proposal changed. Its
+	// Data is a marshaled proposal.Change; Commit is null for an edit seen on
+	// disk that is not committed yet.
+	EventProposalChanged EventType = "proposal.changed"
 )
 
 // Event is one message on the events plane. Data carries the same projection the
