@@ -223,6 +223,10 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
 			"codex's global options to the subcommand slot (#5238)",
 	}},
+	"proposal/git.go:gitConfigArgs": {{
+		class: notAShell,
+		note:  "`git -c <key>=<value>` — git's config flag, paired with the fixed literals of gitFixedConfig",
+	}},
 }
 
 func TestShellSites_EveryShellSiteIsClassified(t *testing.T) {

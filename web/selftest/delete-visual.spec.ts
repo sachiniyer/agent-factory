@@ -3,7 +3,9 @@ import { test, expect } from "@playwright/test";
 for (const theme of ["light", "dark"]) {
   test(`session deletion has destructive confirmation in ${theme}`, async ({ page }, info) => {
     await page.goto("/");
-    await page.getByRole("button", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
+    await page.locator('.af-viewtab[data-view="config"]').click();
+    await page.locator(".af-theme-select").selectOption(theme);
+    await page.locator('.af-viewtab[data-view="sessions"]').click();
     await expect(page.locator("html")).toHaveAttribute("data-af-theme", theme);
     const row = page.locator(".af-row").first();
     await row.hover();
