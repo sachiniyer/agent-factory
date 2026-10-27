@@ -242,16 +242,17 @@ only needs the workspace tooling:
   busybox and coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
-  binary is the **daemon's own executable**, and release builds are a plain
-  `go build` (cgo on) on `ubuntu-latest` — i.e. **dynamically linked against
-  glibc**. So your base must be **glibc, and its glibc must be ≥ the daemon
-  build's** (`ubuntu-latest` is glibc 2.39 today): `debian:trixie`/`ubuntu:24.04`
-  work, `debian:bookworm` (2.36) is too old, and a musl base (alpine) will not run
-  the binary at all. If you rebuild the daemon on a newer-glibc distro, rebuild the
-  image on a matching-or-newer base. (A **static** `af`, `CGO_ENABLED=0`, would run
-  on any base including alpine — but that is not how release builds are produced;
-  the integration test force-builds a static `af` precisely so it can use an alpine
-  test image.)
+  binary is the **daemon's own executable**, and the release artifacts
+  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-latest` —
+  i.e. **dynamically linked against glibc**. So your base must be **glibc, and
+  its glibc must be ≥ the daemon build's** (`ubuntu-latest` is glibc 2.39
+  today): `debian:trixie`/`ubuntu:24.04` work, `debian:bookworm` (2.36) is too
+  old, and a musl base (alpine) will not run the binary at all. If you rebuild
+  the daemon on a newer-glibc distro, rebuild the image on a matching-or-newer
+  base. (Docker keeps this daemon-binary copy on purpose. The sandbox/ssh
+  transports instead stream `agent-factory-linux-<arch>-static.tar.gz` — a
+  CGO_ENABLED=0 release artifact that execs on ANY libc, alpine included —
+  so only docker's image needs this glibc rule.)
 
 The container's internal agent-server port is `8000`; avoid binding it in your
 image.

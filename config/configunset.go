@@ -242,6 +242,17 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	if drift := configRewriteDrift(before, resulting, canonicalKey, SchemaVersionField); drift != "" {
 		return nil, ConfigDigest{}, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", canonicalKey, prettyPath, drift)
 	}
+	// The #5137 refusal the set path enforces applies here too: unsetting
+	// network.require_token can leave exactly the posture the daemon refuses
+	// to bind, so the same resulting-config judgment runs before the file is
+	// written. Unsetting network.listen_addr falls back to the loopback
+	// default and is always safe — and unsetting
+	// network.allow_unauthenticated_network is the opt-in REVOCATION, which
+	// must land so the listener can be retired (see listenerWriteRefusal for
+	// why that key is exempt).
+	if refusal := listenerWriteRefusal(canonicalKey, resulting); refusal != "" {
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: %s", refusal)
+	}
 	if err := locked.write([]byte(updated), 0o644); err != nil {
 		return nil, ConfigDigest{}, err
 	}

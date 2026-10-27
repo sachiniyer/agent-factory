@@ -736,6 +736,28 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await configInput.fill(savedValue);
   await expect(save).toBeDisabled();
   await expect(save).toHaveCSS("border-width", "1px");
+  // One row's provenance trace open (#4803): the same key the dirty beat just
+  // edited, expanded through its key-name trigger — the closed affordance adds
+  // no row height, so only the open trace takes space in the frame. Assert that
+  // directly: the trigger's own box must be exactly one text line — a button
+  // keeps control metrics (the shared touch-target min-height) unless the CSS
+  // resets them, and the row it sits in then grows ~22px even while closed.
+  const closedRow = page.locator('.af-config-row[data-key="vscode_server_binary"]');
+  const explainTrigger = closedRow.locator(".af-config-explain-trigger");
+  const triggerBox = await explainTrigger.boundingBox();
+  const triggerLineHeight = await explainTrigger.evaluate(
+    (el) => Number.parseFloat(getComputedStyle(el).lineHeight));
+  expect(triggerBox!.height).toBeLessThanOrEqual(triggerLineHeight + 1);
+  const closedBox = await closedRow.boundingBox();
+  expect(closedBox!.height).toBeGreaterThanOrEqual(50);
+  expect(closedBox!.height).toBeLessThanOrEqual(84);
+  await explainTrigger.click();
+  const explainPanel = page.locator(".af-config-explain");
+  await expect(explainPanel.locator(".af-config-explain-cand").first()).toBeVisible();
+  await explainPanel.scrollIntoViewIfNeeded();
+  await shot("config-explain");
+  await explainTrigger.click();
+  await expect(page.locator(".af-config-explain")).toHaveCount(0);
   await page.locator(".af-account-disclosure summary").click();
   await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
   await page.getByLabel("New claude account name", { exact: true }).fill("team");

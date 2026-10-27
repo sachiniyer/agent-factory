@@ -35,6 +35,20 @@ import (
 // them.
 const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
+// afUsageReferenceCallbackless replaces afUsageReference for an instance that
+// has NO af callback — a sandbox session whose credential could not be minted
+// or delivered (#5571 W3.1). Teaching af verbs there is worse than omitting
+// them: every command fails on its own and the agent spends turns discovering
+// it. The variant keeps the inside framing (the agent IS an af instance — that
+// fact stays true) and says plainly that af is unreachable from here, so it
+// does its work and reports instead of trying the CLI. The shared file seams
+// (codex/gemini/amp/devin SKILL.md) keep the full doc until W3.3's
+// capability-generated guidance; only the per-instance seams (claude
+// --plugin-dir, aider --read) carry this text.
+const afUsageReferenceCallbackless = `You are an AI coding agent running inside Agent Factory (af): a tool that runs many AI coding agents at once, each isolated in its own git worktree — you are one of them.
+
+The af CLI is NOT reachable from this session: af could not deliver a callback credential to this sandbox, so af commands run here cannot reach the daemon and will fail. Do not run af commands — do not try to open tabs, dispatch work, or query the daemon. Do your work in this worktree and report plainly what you did and anything you could not do; the user reads your output directly.`
+
 // AfPluginUsageReference is afUsageReference reframed for an agent that is NOT
 // running inside af: the same body and the same command reference, but an
 // opening that introduces af as a separate CLI the agent drives (and that this
@@ -229,10 +243,16 @@ func shellQuote(s string) string {
 // agents that DISCOVER it from a config root, places it where the launch will
 // actually look: target carries the account boundary's config root for a scoped
 // session, and the zero value means unscoped (#3645).
-func injectSystemPrompt(resolved string, target skillTarget) string {
+//
+// callbackUnavailable swaps the guidance on the PER-INSTANCE seams (claude's
+// --plugin-dir, aider's --read) for the callbackless variant — a session with
+// no af callback must not be taught af verbs it cannot use (#5571 W3.1). The
+// shared config-root seams keep the full doc until W3.3's capability-generated
+// guidance; they are opted into globally rather than per session anyway.
+func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable bool) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
-		pluginDir, err := ensurePluginDir()
+		pluginDir, err := ensurePluginDir(callbackUnavailable)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return resolved
@@ -294,7 +314,7 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		// skills folder. A write failure (or a non-af file at our path) yields an
 		// empty path, in which case we must NOT append --read pointing at a file
 		// we do not own — return the launch command unchanged.
-		path, err := ensureAiderReadFile()
+		path, err := ensureAiderReadFile(callbackUnavailable)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up aider af skill, af guidance unavailable to aider: %v", err)
 			return resolved
