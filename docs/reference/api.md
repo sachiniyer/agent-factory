@@ -61,6 +61,9 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/WriteProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `author` | Replace a proposal doc and commit it as the given author, with no merge. |
 | `POST` | `/v1/PullProposalChanges` | `session_id` | Return the edits to the session's proposal that it has not seen, then move its cursor. |
 | `POST` | `/v1/CheckpointProposal` | `session_id` | Commit the session's edits to its proposal as its own and move its cursor past them. |
+| `POST` | `/v1/SetProposalPushMode` | `session_id`, `mode` | Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status. |
+| `POST` | `/v1/HoldProposalPush` | `session_id` | Hold the session's pending proposal push until the next human save, and return its push status. |
+| `POST` | `/v1/SendProposalChanges` | `session_id` | Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status. |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |

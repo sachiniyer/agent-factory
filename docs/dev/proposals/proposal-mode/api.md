@@ -16,6 +16,8 @@ All commands print JSON, the same as the other `af` commands.
 | `af proposal checkpoint` | yes | Commits this session's edits and moves its cursor. |
 | `af proposal cat <slug> <doc>` | no | Prints a doc. This is for agents that cannot read the host disk. |
 | `af proposal write <slug> <doc>` | no | Replaces a doc with stdin and commits as `agent` when there is a session, or as `external` when there is no session. |
+| `af proposal push-mode auto\|manual` | yes | Sets this session's push mode (see Push) and prints the push status. |
+| `af proposal send` | yes | Sends this session its unsent edits now and prints the push status. |
 
 Common flags: `--repo <path>`, and `--session <title>` for the commands that
 need a session.
@@ -37,6 +39,9 @@ path filled in:
 
 1. The docs are at `<path>`. Edit them with your normal file tools.
 2. Before you edit, run `af proposal changes` and read what the user changed.
+   The user's edits can also arrive as a prompt that starts with
+   `Proposal <slug>:` (see Push). That prompt holds the edits, so after it the
+   agent does not need to run `af proposal changes` first.
 3. After each round of edits, run `af proposal checkpoint`.
 4. Put questions for the user in `> [!question]` callouts, in the doc they
    belong to. Then stop and tell the user.
@@ -219,12 +224,127 @@ the existing events socket (`GET /v1/events`):
 
 ## Push (step 3)
 
-```
-POST /v1/SendProposalChanges      send changes now (the Send now button)
-POST /v1/SetProposalPushMode      {mode: "auto"|"manual"}
+The daemon sends the agent its unseen edits as a prompt, so the agent does not
+have to pull them. Push works for each session that is attached to a proposal
+and has a Docs tab for it.
+
+### Routes
+
+| Route | Request | Reply `data` |
+|---|---|---|
+| `POST /v1/SetProposalPushMode` | `session_id`, `mode` | `push status` |
+| `POST /v1/HoldProposalPush` | `session_id` | `push status` |
+| `POST /v1/SendProposalChanges` | `session_id` | `push status` |
+
+- `mode` is `"auto"` or `"manual"`. It is stored on the session's Docs tabs
+  for its proposal (`tabs[].push_mode`), so it stays after a daemon restart.
+  A tab with no `push_mode` is `auto`.
+- `HoldProposalPush` holds the pending push. The next human save releases the
+  hold and starts the 10 s wait again.
+- `SendProposalChanges` is **Send now**. It works in both modes. When the
+  agent is `Ready`, the daemon sends before it replies, and the reply has
+  `state: "sent"`. When the agent is busy, the send waits for the next poll
+  tick where the agent is `Ready`, and the reply has
+  `state: "waiting_agent"`. With nothing to send, the reply has `unsent: 0`
+  and nothing is sent. A failed delivery is an error.
+- Every route fails when the session is not attached to a proposal.
+
+### Push status
+
+```jsonc
+{"session_id": "8f0c…", "slug": "auth-rework",
+ "mode": "auto",
+ "state": "countdown",
+ "due_at": "2026-10-20T22:41:24.000Z",
+ "due_in_ms": 6000,
+ "unsent": 2}
 ```
 
-These names are not final.
+| `state` | Meaning |
+|---|---|
+| `idle` | Nothing is pending: no unsent edits, or edits that no human save started a push for, or manual mode. |
+| `countdown` | Auto mode. The push sends at `due_at`, 10 s after the last human save, if the agent is `Ready` then. |
+| `waiting_agent` | A push is due (or **Send now** was clicked), but the agent is not `Ready`, a TUI is attached full-screen, or the last delivery is not confirmed yet. |
+| `held` | The user clicked **Hold**. |
+| `sent` | The last push was delivered and nothing is unsent. |
+
+- `due_at` is an RFC 3339 UTC time in `countdown` and `waiting_agent` in auto
+  mode, else `null`. It is the daemon's clock.
+- `due_in_ms` is the number of milliseconds from the moment the daemon built
+  this status to `due_at`, and `0` when `due_at` has passed. It is `null` when
+  `due_at` is `null`. **Clients count down from `due_in_ms` at the time they
+  receive the status, not from `due_at`**, because the client clock can be
+  different from the daemon clock. `due_at` is for display and logs only.
+- `unsent` counts the commits that `changes` would show the session now. Edits
+  on disk that are not committed yet do not count.
+- `GetProposal` with `session_id` returns `"push": <push status>` for that
+  session when it is attached to the slug, else `"push": null`.
+
+### Event
+
+Each change of a session's push status publishes:
+
+```json
+{"type": "proposal.push",
+ "data": {"session_id": "8f0c…", "slug": "auth-rework", "mode": "auto",
+          "state": "waiting_agent", "due_at": "2026-10-20T22:41:24.000Z",
+          "due_in_ms": 0, "unsent": 2}}
+```
+
+The countdown does not publish an event each second. The tab counts down
+from `due_in_ms` itself, starting when it receives the event.
+
+### When the daemon sends
+
+On each poll tick, for each session in auto mode, the daemon sends when all of
+these are true:
+
+1. A human save (`SaveProposalDoc`) of the proposal was 10 s ago or more.
+   Every session attached to the proposal with a Docs tab records that save.
+2. The session's liveness is `Ready`.
+3. `unsent` is more than 0.
+4. The push is not held.
+5. No TUI is attached full-screen to the session, so a push does not submit
+   what the user is typing in the pane.
+6. No earlier push to the session is unconfirmed. A delivery is unconfirmed
+   while it runs, and after it returns `sent-unverified` or
+   `could-not-confirm` until the daemon sees the agent busy, or for at most
+   60 s.
+
+Edits with no human save after them (for example, from another agent) do not
+start an auto push. They go with the next push, or the agent pulls them.
+
+A send runs the same code as `PullProposalChanges`, so the cursor moves as a
+pull moves it. Then the daemon delivers the prompt through the same path as
+`af sessions send-prompt`. When the delivery provably did not happen, the
+daemon puts the cursor back, and the push tries again after 10 s.
+
+### Prompt
+
+```
+Proposal auth-rework: the user edited api.md, goals.md.
+<the patches of each edit, oldest first>
+Apply these edits to your understanding, answer new [!question] replies, do the [!todo] callouts the user added, then run af proposal checkpoint.
+```
+
+The first line names who made the edits: the user, another agent, or an
+editor outside af. When the edits come from more than one of them, each patch
+starts with a line such as `[edit by another agent]`, so a peer agent's
+callout does not read as the user's.
+
+When the patches are more than 8 KB, the prompt has no patches. The middle
+line tells the agent to read the changed files at the proposal path, because
+`af proposal changes` will not show these edits again. When more than one
+kind of editor made the edits, the prompt then names the files each editor
+changed and tells the agent to ask the user before it does a `[!todo]` it
+cannot attribute.
+
+### CLI
+
+`af proposal push-mode auto|manual` calls `SetProposalPushMode`, and
+`af proposal send` calls `SendProposalChanges`. Both need a session. Hold has
+no CLI verb: it only means something to the Docs tab whose save started the
+countdown, and the next save releases it.
 
 ## Tab kind (step 2)
 
