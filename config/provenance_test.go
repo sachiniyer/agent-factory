@@ -213,17 +213,20 @@ default_program = "claude"
 codex = "/global/codex"
 aider = "/global/aider"
 `)
+	// In-repo program_overrides entries may not spell absolute executables
+	// (#5265 review: a checked-in file is not trusted provenance for a file
+	// outside it), so the shared-file leaves use relative spellings here.
 	writeInRepoTomlConfig(t, repoRoot, `
 [program_overrides]
-codex = "/repo/codex"
-gemini = "/repo/gemini"
+codex = "repo/codex"
+gemini = "repo/gemini"
 `)
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	assert.Equal(t, "/repo/codex", resolved.ProgramOverrides["codex"])
+	assert.Equal(t, "repo/codex", resolved.ProgramOverrides["codex"])
 	assert.Equal(t, "/global/aider", resolved.ProgramOverrides["aider"])
-	assert.Equal(t, "/repo/gemini", resolved.ProgramOverrides["gemini"])
+	assert.Equal(t, "repo/gemini", resolved.ProgramOverrides["gemini"])
 
 	value := requireResolvedValue(t, resolved, "program_overrides")
 	assert.Nil(t, value.Winner, "a merged map must not claim one source won the whole value")
@@ -235,7 +238,7 @@ gemini = "/repo/gemini"
 
 	leaf, ok := resolved.ResolvedValuePath("program_overrides.codex")
 	require.True(t, ok)
-	assert.Equal(t, "/repo/codex", leaf.Value)
+	assert.Equal(t, "repo/codex", leaf.Value)
 	require.NotNil(t, leaf.Winner)
 	assert.Equal(t, SourceRepoShared.String(), leaf.Winner.Layer)
 	assert.Equal(t, "shadowed", candidateForLayer(t, leaf, SourceGlobal).Result)
@@ -436,7 +439,9 @@ default_program = "claude"
 [program_overrides]
 codex = "/global/codex"
 `)
-	writeInRepoTomlConfig(t, repoRoot, "[program_overrides]\ncodex = \"/repo/codex\"\n")
+	// Relative spelling: in-repo program_overrides may not name absolute
+	// executables (#5265 review).
+	writeInRepoTomlConfig(t, repoRoot, "[program_overrides]\ncodex = \"repo/codex\"\n")
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)

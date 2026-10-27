@@ -63,10 +63,24 @@ type HealthStatus struct {
 	AutostartUnit bool
 	// PIDFilePID is the PID recorded in daemon.pid, 0 when absent/unreadable.
 	PIDFilePID int
-	// PIDVerified reports whether PIDFilePID is a live process whose
-	// cmdline identifies an agent-factory daemon (the #1004 guard against
-	// recycled PIDs).
+	// PIDVerified reports whether PIDFilePID is a live agent-factory daemon
+	// proven to serve THIS home — the same classifyDaemonHome home binding
+	// StopDaemon requires before signaling (#4795). Cmdline liveness alone is
+	// not enough: a stale daemon.pid whose number the kernel recycled onto
+	// ANOTHER home's `af --daemon` would otherwise be reported as this home's
+	// verified daemon, and downstream hints would name a foreign daemon for
+	// the kill (#5188).
 	PIDVerified bool
+	// PIDUnverifiable reports that PIDFilePID names a live agent-factory
+	// daemon whose home classifyDaemonHome could NOT bind — it proved
+	// neither ours nor foreign (an unreadable process frame or environ,
+	// e.g. macOS, where a peer's environment cannot be inspected at all).
+	// It is not verification: no consumer may name this pid in a kill hint
+	// or claim it as this home's daemon. But it is just as much not
+	// absence: an inconclusive binding must not be reported as a stale pid
+	// file to remove, or as "no daemon running" — a live af daemon stands
+	// behind it either way (#5188).
+	PIDUnverifiable bool
 	// BinaryDeleted reports whether the verified daemon process is
 	// executing a binary that has since been deleted or replaced on disk
 	// (/proc/<pid>/exe ends in " (deleted)") — i.e. an install happened and
@@ -100,18 +114,33 @@ func Health() HealthStatus {
 
 	pidPath, err := daemonPIDFilePath()
 	if err == nil {
-		if data, err := os.ReadFile(pidPath); err == nil {
+		// Same descriptor-validated read as the teardown paths: a FIFO or
+		// device swapped in for daemon.pid would otherwise hang every
+		// Health caller (status, doctor, upgrade) in the open.
+		if data, ok := readManagedFileNoFollow(pidPath, daemonPIDFileMaxBytes); ok {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
 				h.PIDFilePID = pid
 			}
 		}
 	}
-	if h.PIDFilePID > 0 && pidLooksAlive(h.PIDFilePID) && isAgentFactoryDaemon(h.PIDFilePID) {
-		h.PIDVerified = true
-		// Linux-only freshness probe; on other platforms Readlink fails and
-		// the field stays false.
-		if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", h.PIDFilePID)); err == nil {
-			h.BinaryDeleted = strings.HasSuffix(target, " (deleted)")
+	if h.PIDFilePID > 0 {
+		// Keep the three-way verdict: a proven-foreign or dead pid is stale
+		// for this home; a live pid whose home binding is merely
+		// inconclusive is NEITHER verified nor stale — collapsing
+		// daemonUnverifiable into "unverified" would let status, doctor,
+		// and upgrade treat a live af daemon (possibly this home's own,
+		// just unreadable — the normal shape on macOS) as absent and
+		// suggest deleting the only handle that names it.
+		switch classifyDaemonHome(h.PIDFilePID) {
+		case daemonOurs:
+			h.PIDVerified = true
+			// Linux-only freshness probe; on other platforms Readlink
+			// fails and the field stays false.
+			if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", h.PIDFilePID)); err == nil {
+				h.BinaryDeleted = strings.HasSuffix(target, " (deleted)")
+			}
+		case daemonUnverifiable:
+			h.PIDUnverifiable = true
 		}
 	}
 	return h

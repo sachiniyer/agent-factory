@@ -82,6 +82,11 @@ type Capabilities struct {
 // Each refusal names the requirement that is actually unmet, because a user told
 // "not supported on this backend" cannot tell that from a kind that could work.
 func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
+	// A docs tab edits a proposal in the daemon's own store, so where the
+	// workspace runs does not matter.
+	if kind == TabKindDocs {
+		return nil
+	}
 	switch TabKindRequires(kind) {
 	case TabNeedsMetadataOnly:
 		// A web tab spawns nothing and reads nothing, so the KIND needs nothing

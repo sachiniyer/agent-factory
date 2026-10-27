@@ -25,13 +25,28 @@ import (
 // is absent a new [section] block is appended. section == "" targets the root
 // block.
 func setTOMLScalar(content, section, leaf, encoded string) string {
+	return setTOMLScalarWithLeadingComments(content, section, leaf, encoded, nil)
+}
+
+// setTOMLScalarWithLeadingComments is setTOMLScalar for a caller carrying the
+// key's comment block in from elsewhere: comments is placed verbatim (and in
+// order) directly above the new leaf line when the key is INSERTED. It is
+// ignored on the update path — rewriting an existing line touches only that
+// line's bytes, and `af config migrate` never reaches it carrying comments:
+// a leaf that already exists in the destination takes the redundant-spelling
+// branch instead (#4872).
+func setTOMLScalarWithLeadingComments(content, section, leaf, encoded string, comments []string) string {
 	newLine := leaf + " = " + encoded
+	insertion := newLine
+	if len(comments) > 0 {
+		insertion = strings.Join(append(append([]string{}, comments...), newLine), "\n")
+	}
 
 	if strings.TrimSpace(content) == "" {
 		if section == "" {
-			return newLine + "\n"
+			return insertion + "\n"
 		}
-		return "[" + section + "]\n" + newLine + "\n"
+		return "[" + section + "]\n" + insertion + "\n"
 	}
 
 	hadTrailingNewline := strings.HasSuffix(content, "\n")
@@ -162,23 +177,23 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 	case section == "":
 		switch {
 		case lastContentIdxInTarget != -1:
-			insertAt(lastContentIdxInTarget+1, newLine)
+			insertAt(lastContentIdxInTarget+1, insertion)
 		case firstHeaderIdx != -1:
-			insertAt(firstHeaderIdx, newLine)
+			insertAt(firstHeaderIdx, insertion)
 		default:
-			ls = append(ls, newLine)
+			ls = append(ls, insertion)
 		}
 	case targetHeaderIdx == -1:
 		// Section absent: append a fresh block, separated by one blank line.
 		if len(ls) > 0 && ls[len(ls)-1] != "" {
 			ls = append(ls, "")
 		}
-		ls = append(ls, "["+section+"]", newLine)
+		ls = append(ls, "["+section+"]", insertion)
 	default:
 		if lastContentIdxInTarget != -1 {
-			insertAt(lastContentIdxInTarget+1, newLine)
+			insertAt(lastContentIdxInTarget+1, insertion)
 		} else {
-			insertAt(targetHeaderIdx+1, newLine)
+			insertAt(targetHeaderIdx+1, insertion)
 		}
 	}
 	return rebuild()
@@ -270,8 +285,34 @@ func insertTOMLDottedLeaf(content, section, leaf, encoded string) string {
 // absent key leaves content untouched and reports false. An emptied [section]
 // header is left in place (a present-but-empty table resolves to no leaves).
 func deleteTOMLScalar(content, section, leaf string) (string, bool) {
+	updated, _, _, removed := deleteTOMLScalarRange(content, section, leaf, false)
+	return updated, removed
+}
+
+// deleteTOMLScalarForMove removes the [section] leaf like deleteTOMLScalar,
+// but instead of preserving the key's own comments at the delete site it
+// hands them back so the caller can move them with the key — `af config
+// migrate`'s requirement (#4872). Anything left at the site reads as a note
+// about whatever line the delete exposes next, and worse: emitted comments
+// land as a `#` line directly above the NEXT key, which then carries them as
+// its own leading block. Three classes are returned separately:
+//
+//   - comments: the contiguous leading comment block, then any comments the
+//     assignment carried INSIDE a multiline value — all for placement above
+//     the moved line. A comment a blank line away is NOT the key's (the same
+//     association rule #4865 gives a moved table) and stays behind.
+//   - trailing: a single-line scalar's own trailing comment, including the
+//     whitespace that preceded it, for reattachment to the moved line's
+//     value — the inline position is part of the note.
+func deleteTOMLScalarForMove(content, section, leaf string) (updated string, comments []string, trailing string, removed bool) {
+	return deleteTOMLScalarRange(content, section, leaf, true)
+}
+
+// deleteTOMLScalarRange is the shared body: forMove additionally lifts the
+// key's comment associations out rather than preserving them at the site.
+func deleteTOMLScalarRange(content, section, leaf string, forMove bool) (string, []string, string, bool) {
 	if strings.TrimSpace(content) == "" {
-		return content, false
+		return content, nil, "", false
 	}
 
 	hadTrailingNewline := strings.HasSuffix(content, "\n")
@@ -317,7 +358,7 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		if curSection == "" && section != "" {
 			if updated, ok := deleteTOMLInlineTableMember(line, section, leaf); ok {
 				ls[i] = updated
-				return rebuild(), true
+				return rebuild(), nil, "", true
 			}
 		}
 		if curSection != section {
@@ -330,13 +371,46 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		}
 	}
 	if removeAt < 0 {
-		return content, false
+		return content, nil, "", false
 	}
 
-	kept := preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+	removeFrom := removeAt
+	var comments []string
+	var trailing string
+	var kept []string
+	if forMove {
+		removeFrom = leadingTOMLCommentStart(ls, stringContent, removeAt)
+		comments = append(comments, ls[removeFrom:removeAt]...)
+		preserved := preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+		if removeAt == removeThrough && len(preserved) == 1 {
+			// A single-line scalar's trailing comment reattaches to the moved
+			// line, not to a preamble slot — and never to the site.
+			trailing = tomlAssignmentTrailingComment(ls[removeAt])
+		} else {
+			comments = append(comments, preserved...)
+		}
+	} else {
+		kept = preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+	}
 	kept = append(kept, ls[removeThrough+1:]...)
-	ls = append(ls[:removeAt], kept...)
-	return rebuild(), true
+	ls = append(ls[:removeFrom], kept...)
+	return rebuild(), comments, trailing, true
+}
+
+// tomlAssignmentTrailingComment returns the inline comment on a single-line
+// assignment, including the whitespace that preceded the '#', so it can be
+// reattached to the value byte-for-byte — "" when there is none.
+func tomlAssignmentTrailingComment(line string) string {
+	_, equal, ok := tomlAssignmentPath(line)
+	if !ok {
+		return ""
+	}
+	valueStart := equal + 1
+	for valueStart < len(line) && (line[valueStart] == ' ' || line[valueStart] == '\t') {
+		valueStart++
+	}
+	_, comment := splitTrailingComment(line[valueStart:])
+	return comment
 }
 
 // TOML's two multiline string delimiters. They are scanned as three-byte UNITS

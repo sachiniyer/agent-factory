@@ -145,7 +145,7 @@ func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testin
 
 	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
-	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2}
+	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2, totalAttempts: 2}
 	manager.mu.Unlock()
 
 	// This Manager's own log (#3797): a shared sink is written by every Manager

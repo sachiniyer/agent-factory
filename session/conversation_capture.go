@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -34,6 +35,13 @@ var (
 	// appeared after the snapshot. Prompt text cannot identify which process owns
 	// which rollout, even when only one has recorded it so far (#2228 review).
 	ErrPromptReceiptAmbiguous = errors.New("prompt receipt ambiguous")
+	// ErrPromptReceiptUndecidable means the prompt itself cannot produce a
+	// receipt verdict. A prompt that is empty after trimming the whitespace Codex
+	// strips from a recorded turn would degrade the substring matcher to an empty
+	// needle — which matches every rollout — so the receipt is refused as
+	// undecidable rather than falsely confirmed or run out against the caller's
+	// timeout (#5488).
+	ErrPromptReceiptUndecidable = errors.New("prompt receipt undecidable")
 )
 
 // errCodexCaptureUndecided marks a retryable observation in which at least one
@@ -159,6 +167,16 @@ func WaitForPromptReceipt(
 ) error {
 	if agent != tmux.ProgramCodex {
 		return fmt.Errorf("%w for agent %q", ErrPromptReceiptUnavailable, agent)
+	}
+	// Codex trims leading and trailing whitespace from a submitted turn before
+	// recording it (codex-rs/tui chat_composer.rs prepare_submission_text_*),
+	// so the matcher compares a trailing-whitespace-stripped prompt against the
+	// recorded text. A prompt that is empty after that trim would degrade
+	// strings.Contains to an empty needle (which matches every rollout), so it
+	// is refused as undecidable up front rather than polling to a timeout or
+	// falsely confirming (#5488).
+	if normalizedReceiptPrompt(prompt) == "" {
+		return fmt.Errorf("%w: prompt is empty after trimming whitespace", ErrPromptReceiptUndecidable)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -390,7 +408,7 @@ func codexRolloutHasPrompt(path, prompt string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	normalizedPrompt := normalizePromptReceiptText(prompt)
+	normalizedPrompt := normalizedReceiptPrompt(prompt)
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -477,6 +495,21 @@ func jsonValueContainsPrompt(value any, prompt string) bool {
 func normalizePromptReceiptText(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	return strings.ReplaceAll(text, "\r", "\n")
+}
+
+// normalizedReceiptPrompt prepares the prompt for use as the needle of a
+// substring match against a recorded Codex user turn. Codex strips trailing
+// whitespace from a submitted turn before it is ever recorded
+// (codex-rs/tui/src/bottom_pane/chat_composer.rs prepare_submission_text_*:
+// `text = text.trim().to_string()`), so a prompt that ends in whitespace —
+// which configagent.BuildBriefing's output does ("\n\n") — can never appear as a
+// contiguous substring of the trimmed recorded text. Trimming the prompt's
+// trailing whitespace restores the symmetry: the trimmed prompt is a suffix of
+// what Codex recorded. Only the trailing edge is trimmed: the matcher uses
+// strings.Contains, so the prompt's leading edge must be preserved to keep it
+// anchored to its actual position within the recorded message (#5488).
+func normalizedReceiptPrompt(prompt string) string {
+	return strings.TrimRightFunc(normalizePromptReceiptText(prompt), unicode.IsSpace)
 }
 
 func codexRolloutFiles(codexHome string) map[string]struct{} {

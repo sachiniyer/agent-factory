@@ -138,13 +138,13 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 		detail := "coder whoami failed"
 		if ctx.Err() == context.DeadlineExceeded {
 			detail = "coder whoami timed out"
-		} else if line := firstLine(string(out)); line != "" {
+		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
 		}
 		report.Warn(sectionRemote, "coder", detail, "run `coder login`", false)
 		return
 	}
-	who := firstLine(string(out))
+	who := firstNonEmptyLine(string(out))
 	if who == "" {
 		who = "authenticated"
 	}
@@ -199,8 +199,9 @@ func hookExecIssue(field, cmd, configHint string) string {
 	return ""
 }
 
-// firstLine returns the first non-empty line of s, for compact error context.
-func firstLine(s string) string {
+// firstNonEmptyLine returns the first non-empty line of s, for compact error
+// context.
+func firstNonEmptyLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			return line
