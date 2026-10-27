@@ -528,3 +528,11 @@ function isoTodayAt(hour: number, min: number): string {
   d.setHours(hour, min, 0, 0);
   return d.toISOString();
 }
+
+test("rowTitle prefixes [remote] for every off-box backend like the TUI (#4336)", () => {
+  for (const b of ["docker", "ssh", "sandbox", "remote"]) {
+    assert.equal(rowTitle(sess({ title: "w", backend_type: b })), "[remote] w", b);
+  }
+  assert.equal(rowTitle(sess({ title: "w", backend_type: "local" })), "w");
+  assert.equal(rowTitle(sess({ title: "w" })), "w");
+});

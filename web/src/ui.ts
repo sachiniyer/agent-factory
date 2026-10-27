@@ -54,6 +54,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  isOffBoxWorkspace,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
@@ -438,23 +439,7 @@ export function restoreRequiresConfirmation(session: SessionData): boolean {
   return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
 }
 
-/** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
- *
- *  This list is the ONE place the web names backend types. It exists only because
- *  the session envelope carries `backend_type` but not the daemon's capability
- *  bits — the honest fix is to serialize the capability so no client re-derives
- *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
- *  what ui.test.ts pins. */
-const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
-
-/** The existing backend-type fallback for off-box workspace ownership. */
-export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
-}
+export { isOffBoxWorkspace };
 
 /** The kinds this session may gain a tab of, as the DAEMON decided them.
  *
