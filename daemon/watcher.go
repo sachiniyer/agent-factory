@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -49,9 +49,9 @@ import (
 //     are expired at replay time with a logged count (#1129)
 //   - each run buffers its recent output (last 10 lines / 2KB: stdout lines
 //     that did not become delivered events, plus stderr). Non-zero exits log
-//     that tail, and the crash-loop breaker persists "errored: <exit>:
-//     <first line>" into last_run_status so `af tasks list` and the TUI
-//     show why the task errored (#797)
+//     that tail, and the crash-loop breaker persists "errored: gave up after
+//     N failures in W (last: <exit>): <newest line>" into last_run_status so
+//     `af tasks list` and the TUI show why the task errored (#797, #5329)
 const (
 	// maxWatchLineBytes caps how much of a single stdout line becomes an
 	// event; the rest of the line is discarded with a logged note.
@@ -124,29 +124,43 @@ type watcherSupervisor struct {
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
-	// lifecycle statuses without a task store, and queueDir redirects the
+	// lifecycle statuses without a task store, recoverStatus substitutes the
+	// conditional stale-terminal recovery write, and queueDir redirects the
 	// durable event queues to a scratch directory.
-	loadTasks   func() ([]task.Task, error)
-	deliver     func(taskID, line string, options watchDeliveryOptions) error
-	setStatus   func(taskID, status string)
-	recordDrops func(taskID string, total int, droppedAt time.Time) error
-	logPath     func(taskID string) (string, error)
-	queueDir    func() (string, error)
+	loadTasks     func() ([]task.Task, error)
+	deliver       func(taskID, line string, options watchDeliveryOptions) error
+	setStatus     func(taskID, status string)
+	recoverStatus func(taskID string, armed task.Task, status string) (bool, error)
+	recordDrops   func(taskID string, total int, droppedAt time.Time) error
+	logPath       func(taskID string) (string, error)
+	queueDir      func() (string, error)
 	// observeTargetLimit orders a backlog event's retention admission against
 	// limit publication. A later transition cannot make that already-admitted
 	// event retroactively part of the protected episode.
 	observeTargetLimit func(taskID string) (limited bool, err error)
 
-	shell            string
-	baseBackoff      time.Duration
-	maxBackoff       time.Duration
-	crashWindow      time.Duration
-	crashMaxExits    int
-	eventsPerMinute  int
-	stopGrace        time.Duration
-	drainBaseBackoff time.Duration
-	drainMaxBackoff  time.Duration
-	queueMaxAge      time.Duration
+	shell string
+	// lifelineExe is the af binary each watch command is started under as its
+	// watch lifeline (#5329, internal/watchlifeline), binding the command's
+	// lifetime to this daemon's; empty starts the shell directly.
+	// lifelineUnsupported records that a probe found the binary not to speak
+	// the protocol — one warning per degradation, cleared when a probe speaks
+	// it again. lifelineProbeHold suppresses probing only until its unix-nano
+	// deadline: a no-ack can be a transient launcher failure (systemd-run may
+	// exit before exec'ing the lifeline), so the probe retries after
+	// watchLifelineProbeRetry rather than latching off until daemon restart.
+	lifelineExe         string
+	lifelineUnsupported atomic.Bool
+	lifelineProbeHold   atomic.Int64
+	baseBackoff         time.Duration
+	maxBackoff          time.Duration
+	crashWindow         time.Duration
+	crashMaxExits       int
+	eventsPerMinute     int
+	stopGrace           time.Duration
+	drainBaseBackoff    time.Duration
+	drainMaxBackoff     time.Duration
+	queueMaxAge         time.Duration
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
@@ -168,7 +182,9 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		observeTargetLimit: func(string) (bool, error) {
 			return false, nil
 		},
+		recoverStatus:    task.RecoverStaleWatcherStatus,
 		shell:            watcherShell(),
+		lifelineExe:      resolveWatchLifelineExe(),
 		baseBackoff:      watcherBaseBackoff,
 		maxBackoff:       watcherMaxBackoff,
 		crashWindow:      watcherCrashWindow,
@@ -213,6 +229,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		startedCh:      make(chan struct{}),
 		dropped:        dropped,
 		persistedDrops: dropped,
+		armTask:        t,
 	}
 	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
 	// the right repo's snapshot (#1238). A resolution failure only costs the
@@ -236,8 +253,10 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 
 // watcherSignature captures the fields that define the watch process itself;
 // a change to any of them restarts the script on reload.
-// tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
-// to keep watcher.go under its file-length ceiling, #1145).
+// tailBuffer and its failure/give-up summary helpers live in tailbuffer.go
+// (extracted to keep watcher.go under its file-length ceiling, #1145), and
+// the run-health helpers — signal classification, backoff pacing, and stale
+// terminal-status recovery — in watcher_health.go.
 
 // taskWatcher supervises one watch task: it restarts the script with backoff
 // on failure and feeds its stdout lines to the supervisor's deliver hook.
@@ -284,6 +303,14 @@ type taskWatcher struct {
 	lastDroppedAt   time.Time
 	lastDeliveredAt time.Time
 	terminalStatus  string
+	// runAlive marks that a watch process is currently running, so the
+	// crashWindow recovery timer can tell "alive a full window" from "died
+	// just before it" — only the former may retire a stale terminal status.
+	runAlive bool
+	// armTask is the store row this watcher armed over: the recovery may
+	// replace its last_run_status only while the stored row is still this
+	// one — any rewrite since is newer evidence (Codex #5457).
+	armTask task.Task
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
@@ -411,7 +438,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.persistTerminalStatus(failureSummary(runErr, tail))
+			w.persistTerminalStatus(giveUpSummary(runErr, tail, len(failures), w.sup.crashWindow))
 			return
 		}
 
@@ -433,50 +460,16 @@ func (w *taskWatcher) run() {
 	}
 }
 
-// nextBackoff computes the delay before the next restart and the backoff to
-// carry into the following cycle. A run that stayed healthy for a whole crash
-// window resets the chain: it waits baseBackoff and leaves the carried backoff
-// at baseBackoff, so the next failure restarts the documented 1s→2s→4s…
-// sequence from the base rather than from 2*baseBackoff (#1005). An unhealthy
-// run waits the current backoff and doubles it toward maxBackoff for next time.
-func nextBackoff(current, base, max time.Duration, healthy bool) (wait, next time.Duration) {
-	if healthy {
-		return base, base
-	}
-	next = current * 2
-	if next > max {
-		next = max
-	}
-	return current, next
-}
-
-// exitedFromSignal reports whether err is an exec exit caused by the given
-// signal (as opposed to a non-zero exit code or a start failure).
-func exitedFromSignal(err error, sig syscall.Signal) bool {
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
-		return false
-	}
-	ws, ok := ee.Sys().(syscall.WaitStatus)
-	return ok && ws.Signaled() && ws.Signal() == sig
-}
-
 // runOnce spawns the script once and consumes its stdout until the shell
 // exits. Returns nil on exit 0, the exit/start error otherwise, plus the
 // run's output tail (never nil) for the caller's failure logging.
 func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	tail := &tailBuffer{}
-	cmd := systemdunit.NewBoundChildCommand(w.sup.shell, "-c", w.cmdStr)
-	cmd.Dir = w.dir
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"AF_TASK_ID="+w.taskID,
 		"AF_TASK_NAME="+w.name,
 		"AF_PROJECT_PATH="+w.dir,
 	)
-	// Own process group so the whole tree — including grandchildren the
-	// script backgrounded with `&` or `disown` — can be signaled together,
-	// mirroring the post-worktree hook runner (#610, #769).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// stderr appends to the per-task log, size-capped by the same rotation
 	// policy as the main log (#1062): NewRotatingFile rotates on open when the
@@ -506,12 +499,12 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	if err != nil {
 		return tail, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
-	cmd.Stdout = pw
 
 	// stderr flows through a pipe we own for the same reasons, teed to the
 	// per-task log and into the failure tail (#797). Pipe failure degrades to
 	// the pre-#797 direct-to-file wiring rather than failing the run.
 	var stderrR, stderrW *os.File
+	var stderrFile *os.File
 	if er, ew, perr := os.Pipe(); perr != nil {
 		log.WarningLog.Printf("watch task %s: cannot create stderr pipe (stderr won't appear in failure logs): %v", w.taskID, perr)
 		// Degrade to the pre-#797 direct-to-file wiring. cmd.Stderr must be a
@@ -527,16 +520,34 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 			if f, ferr := os.OpenFile(stderrLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); ferr != nil {
 				log.WarningLog.Printf("watch task %s: cannot reopen stderr log: %v", w.taskID, ferr)
 			} else {
-				cmd.Stderr = f
+				stderrFile = f
 				defer f.Close()
 			}
 		}
 	} else {
 		stderrR, stderrW = er, ew
-		cmd.Stderr = stderrW
+		stderrFile = stderrW
 	}
 
-	if err := cmd.Start(); err != nil {
+	cmd, lifeline, err := w.sup.startWatchProcess(w.taskID, w.cmdStr, w.stopCh, func(cmd *exec.Cmd) {
+		cmd.Dir = w.dir
+		cmd.Env = env
+		// Own process group so the whole tree — including grandchildren the
+		// script backgrounded with `&` or `disown` — can be signaled together,
+		// mirroring the post-worktree hook runner (#610, #769). Under a
+		// lifeline the lifeline leads this group and the shell joins it.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Stdout = pw
+		if stderrFile != nil {
+			cmd.Stderr = stderrFile
+		}
+	}, r, stderrR)
+	if lifeline != nil {
+		// Held for the whole run: closing it is what tells the lifeline its
+		// daemon is gone. It closes after the group is reaped below.
+		defer lifeline.Close()
+	}
+	if err != nil {
 		_ = r.Close()
 		_ = pw.Close()
 		if stderrR != nil {
@@ -547,6 +558,23 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	}
 	if w.startedCh != nil {
 		w.startedOnce.Do(func() { close(w.startedCh) })
+	}
+	// A run that stays alive a full crash window has proven healthy, so
+	// while it runs a timer retires a stale terminal status from an earlier
+	// life (#5441). Arming HERE — after startWatchProcess confirms the shell
+	// is running — makes the window measure real liveness (Codex #5457).
+	disarm := w.armRecovery()
+	defer disarm()
+	// The run's anchor pins the process-group number for the run's whole
+	// life: a live member that ignores the group's SIGTERM — proven before
+	// the spawn returns — so kill(-pgid) can only ever name this run's own
+	// group, while the watchdog signals it and while the reaper cleans it
+	// (reapWatchGroupLeader). Its stdin pipe is held here, so this
+	// daemon's death ends it too.
+	anchor := spawnWatchGroupAnchor(cmd.Process.Pid)
+	if anchor == nil {
+		log.WarningLog.Printf("watch task %s: cannot spawn a process-group anchor for the watch command; "+
+			"if the leader's exit cannot be awaited without reaping it, the group cleanup kill is skipped", w.taskID)
 	}
 	_ = pw.Close() // the child holds its own dup
 	if stderrW != nil {
@@ -577,31 +605,45 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	}
 
 	// Watchdog for stop requests: SIGTERM the group so the script can clean
-	// up, escalate to a group SIGKILL after the grace.
-	waitDone := make(chan struct{})
+	// up, escalate to a group SIGKILL after the grace. A lifeline catches
+	// that SIGTERM and keeps supervising; the SIGKILL ends it with the group.
+	leaderExited := make(chan struct{})
+	watchdogDone := make(chan struct{})
 	go func(pgid int) {
+		defer close(watchdogDone)
 		select {
 		case <-w.stopCh:
-			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+			_ = watchGroupKill(-pgid, syscall.SIGTERM)
 			select {
-			case <-waitDone:
+			case <-leaderExited:
 			case <-time.After(w.sup.stopGrace):
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				_ = watchGroupKill(-pgid, syscall.SIGKILL)
 			}
-		case <-waitDone:
+		case <-leaderExited:
 		}
 	}(cmd.Process.Pid)
 
-	waitErr := cmd.Wait()
-	close(waitDone)
-
 	// Group-kill on every exit path (#769): backgrounded grandchildren must
 	// not outlive the watcher. This also closes any inherited stdout/stderr
-	// write ends, so both reader goroutines are guaranteed to reach EOF.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	// write ends, so both reader goroutines are guaranteed to reach EOF. The
+	// watchdog is joined, and the kill sent, while the group's number is
+	// still pinned — by the unreaped leader, and by the anchor member the
+	// run has kept since it started — so neither can name a reused group
+	// (reapWatchGroupLeader).
+	groupKilled, waitErr := reapWatchGroupLeader(cmd, anchor, func() {
+		close(leaderExited)
+		// The run ends when the leader is observed dead: disarm HERE, not
+		// at runOnce return — reader drain can hold runOnce open past the
+		// crash window, and a timer firing then would write "started" for
+		// a process that no longer exists.
+		disarm()
+		<-watchdogDone
+	})
+	if lifeline != nil {
+		waitErr = lifeline.shellResult(waitErr)
+	}
 	close(stdoutWritersStopped)
-	<-readerDone
-	<-stderrDone
+	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, readerDone, stderrDone)
 
 	return tail, waitErr
 }

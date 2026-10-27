@@ -1156,14 +1156,15 @@ func TestTasksList_PrefersDaemonSnapshot(t *testing.T) {
 // fallback and its not-found behavior against the seeded disk state.
 func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	useTempConfig(t)
+	resetScopeFlags(t)
 	stubDaemon(t)
 	seedTask(t, task.Task{ID: "g1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
-	got, err := getTaskByID("af tasks get", "g1")
+	got, _, err := resolveTaskArg("af tasks get", "g1")
 	require.NoError(t, err)
 	assert.Equal(t, "g1", got.ID)
 
-	_, err = getTaskByID("af tasks get", "missing1")
+	_, _, err = resolveTaskArg("af tasks get", "missing1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -1173,6 +1174,7 @@ func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 // returns not-found WITHOUT re-reading disk (even though disk holds the id).
 func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 	useTempConfig(t)
+	resetScopeFlags(t)
 	stubDaemon(t)
 	// Disk holds "shadow"; the daemon does NOT report it.
 	seedTask(t, task.Task{ID: "shadow", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
@@ -1180,13 +1182,13 @@ func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
 	}
 
-	got, err := getTaskByID("af tasks get", "live")
+	got, _, err := resolveTaskArg("af tasks get", "live")
 	require.NoError(t, err)
 	assert.Equal(t, "live", got.ID)
 
 	// A daemon miss is authoritative — no disk fallback even though "shadow"
 	// exists on disk.
-	_, err = getTaskByID("af tasks get", "shadow")
+	_, _, err = resolveTaskArg("af tasks get", "shadow")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found",
 		"a reachable daemon's miss is authoritative; get must not re-read disk")

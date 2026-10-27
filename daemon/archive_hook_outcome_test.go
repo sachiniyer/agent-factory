@@ -335,3 +335,24 @@ func TestArchiveSession_OutputFileStragglerCommitsWithoutAFalseTimeoutWarning(t 
 	assert.False(t, exists(srcPath), "the archive itself must still have committed")
 	assert.True(t, exists(archivedPath))
 }
+
+// The deletion route's scratch working directory is created before the hook
+// log is opened (#5102): a failure to create it must not leak the log's
+// descriptor or leave an empty log behind on every archive.
+func TestArchiveHook_ScratchDirFailureLeavesNoOutputLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeOnArchiveCommand(t, "printf ran")
+	hookCtx := archiveHookContext(t)
+	hookCtx.worktreeGone = true
+	hookCtx.archivePath = ""
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	err := runOnArchiveHook(hookCtx)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create a working directory for the on-archive hook")
+	logs, globErr := filepath.Glob(filepath.Join(home, "logs", "hooks", "on-archive-*.log"))
+	require.NoError(t, globErr)
+	assert.Empty(t, logs, "a hook that never started must not leave an output log")
+}

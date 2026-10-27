@@ -107,46 +107,6 @@ func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
 	return bindings, nil
 }
 
-// parseWorktreeBranchHolds reads `git worktree list --porcelain -z` output into
-// branch -> holding worktree path. Each record is a NUL-terminated
-// `worktree <path>` line followed by attribute records and terminated by an
-// EMPTY record; a record carries a `branch refs/heads/<name>` only when that
-// worktree has a branch checked out (detached and bare worktrees do not).
-//
-// Paths are taken verbatim to the end of the record, which is what git emits —
-// every archived worktree path contains spaces, so any whitespace-splitting
-// parse would truncate exactly the paths this exists to report. The same is true
-// of NEWLINES, which is why this reads -z and not the newline-delimited form
-// (#3524): a path ending in a newline left an empty trailing fragment that read
-// as a record separator, so the record's branch line was dropped and a branch
-// that WAS checked out came back reported as free.
-//
-// It returns an ERROR for a listing it could not read, and that is the half that
-// generalises. A bare map has no way to say "I could not read that", so a
-// partially-parsed listing arrived looking exactly like one that genuinely held
-// nothing, and every read failure resolved to the permissive answer. The caller
-// already has a deliberate, safe response to an unanswerable probe — log it and
-// proceed, letting `git worktree add` refuse loudly if the name really is held
-// (#2127) — it simply could never be reached. Nil map with the error, never a
-// partial one: a caller that ranges over what arrived would be reading a
-// truncated listing as the complete set.
-//
-// No \r trimming: that only ever made sense for line-delimited output, and under
-// -z a trailing \r is part of the path.
-func parseWorktreeBranchHolds(porcelain string) (map[string][]string, error) {
-	bindings, err := parseWorktreeBranchBindings(porcelain)
-	if err != nil {
-		return nil, err
-	}
-	holds := make(map[string][]string)
-	for _, binding := range bindings {
-		if binding.Branch != "" {
-			holds[binding.Branch] = append(holds[binding.Branch], binding.Path)
-		}
-	}
-	return holds, nil
-}
-
 func parseWorktreeBranchBindings(porcelain string) ([]WorktreeBranchBinding, error) {
 	if err := requireCompleteWorktreeListing(porcelain); err != nil {
 		return nil, err

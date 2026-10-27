@@ -3,18 +3,34 @@ name: Auto Preview Release
 # Cuts a preview release (vX.Y.Z-preview-N, GitHub prerelease) off master
 # every 3 hours when there are new commits. Stable releases are cut manually
 # via stable-release.yml. See docs/dev/release-process.md (#1041).
+#
+# Atomicity rule (#5159): a version tag exists on origin only if its release
+# was published. The check job computes the version without pushing anything;
+# every job pins github.sha; the tag is created by `gh release create
+# --target` inside the publish call itself — after the build matrix has
+# succeeded — so a failed or cancelled run can leave a draft at worst, never
+# a tag with no release. "Latest tag" means latest tag with a published
+# release everywhere below, so one stranded tag can never wedge future runs.
 
 on:
   schedule:
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
+# One run at a time, never cancelled: two concurrent runs can compute the same
+# version, and cancelling mid-publish is exactly how drafts and tags get
+# stranded (#5159). Queued runs coalesce — the pending one releases the newest
+# master anyway.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
-  check-and-tag:
-    name: Check for changes and tag preview
+  check:
+    name: Check for changes and compute version
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
@@ -23,7 +39,6 @@ jobs:
     - uses: actions/checkout@v6
       with:
         fetch-depth: 0
-        ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -31,12 +46,25 @@ jobs:
         go-version: '1.25'
         cache: true
 
-    - name: Check for new commits since last tag
+    # Release state, not tag state, decides what "latest" means: a tag pushed
+    # without its release (a cancelled run under the pre-#5159 scheme, or any
+    # future stranding) shipped no binaries and must not be the baseline.
+    # Drafts are excluded — they carry a tag_name but no ref and no binaries.
+    - name: List tags with a published release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh api "repos/${{ github.repository }}/releases?per_page=100" \
+          --paginate --jq '.[] | select(.draft == false) | .tag_name' \
+          > "$RUNNER_TEMP/released-tags.txt"
+        echo "$(wc -l < "$RUNNER_TEMP/released-tags.txt") published releases"
+
+    - name: Check for new commits since last released tag
       id: check
       run: |
-        LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+        LATEST_TAG=$(.github/scripts/latest-released-tag.sh "$RUNNER_TEMP/released-tags.txt")
         if [ -z "$LATEST_TAG" ]; then
-          echo "No tags found, should release"
+          echo "No released tags found, should release"
           echo "should_release=true" >> "$GITHUB_OUTPUT"
         else
           COMMITS_SINCE=$(git rev-list "${LATEST_TAG}..HEAD" --count)
@@ -79,35 +107,32 @@ jobs:
         go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
-    - name: Compute preview version and tag
+    # Only released tags feed the computation: a stranded tag must not bump the
+    # preview counter either (#5159). Nothing is tagged or pushed in this job —
+    # the tag is created by the release itself in the release job.
+    - name: Compute preview version
       id: compute
       if: steps.check.outputs.should_release == 'true'
       run: |
-        NEW_VERSION=$(git tag | .github/scripts/next-preview-version.sh)
+        NEW_VERSION=$(.github/scripts/next-preview-version.sh < "$RUNNER_TEMP/released-tags.txt")
         echo "New preview version: $NEW_VERSION"
         echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-        # Previews never touch main.go or master history (#1041): the release
-        # binaries get their version stamped at build time via -ldflags. Just
-        # tag the current master commit.
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git tag "v${NEW_VERSION}"
-        git push origin "v${NEW_VERSION}"
-
   build:
     name: Build
-    needs: check-and-tag
-    if: needs.check-and-tag.outputs.should_release == 'true'
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
+    # The exact commit the check job validated — not a tag, which does not
+    # exist yet by design (#5159).
     - uses: actions/checkout@v6
       with:
-        ref: v${{ needs.check-and-tag.outputs.new_version }}
+        ref: ${{ github.sha }}
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -120,7 +145,7 @@ jobs:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
       run: |
-        VERSION="${{ needs.check-and-tag.outputs.new_version }}"
+        VERSION="${{ needs.check.outputs.new_version }}"
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
         go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
@@ -137,12 +162,12 @@ jobs:
 
   release:
     name: Release
-    needs: [check-and-tag, build]
+    needs: [check, build]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
       with:
-        ref: v${{ needs.check-and-tag.outputs.new_version }}
+        ref: ${{ github.sha }}
 
     - name: Download build artifacts
       uses: actions/download-artifact@v7
@@ -153,22 +178,43 @@ jobs:
     - name: Generate checksum manifest
       run: .github/scripts/write-sha256sums.sh dist
 
-    # Immutable releases require all assets to be attached before the release
-    # is published: create as draft, upload assets into the draft, then publish.
-    # Previews are prereleases and must NOT be marked --latest: the
-    # releases/latest redirect (install.sh, fresh installs) stays pinned to
-    # the newest stable release; auto-update resolves previews via the API.
     - name: Publish release
       env:
         GH_TOKEN: ${{ github.token }}
-        VERSION: ${{ needs.check-and-tag.outputs.new_version }}
+        VERSION: ${{ needs.check.outputs.new_version }}
         GH_REPO: ${{ github.repository }}
+        TARGET: ${{ github.sha }}
       run: |
+        # A previous run may have died between drafting and publishing — or
+        # stranded a tag under the pre-#5159 scheme — leaving residue that
+        # would collide with this create or pin the tag to a stale commit.
+        .github/scripts/release-forget-version.sh "$VERSION"
+
+        # Immutable releases require all assets to be attached before the
+        # release is published: create as draft, upload assets into the draft,
+        # then publish. A draft creates NO git ref, and publishing creates the
+        # tag at TARGET atomically with the release — the first moment a tag
+        # can exist on origin is the moment its release exists too (#5159).
+        # Previews are prereleases and must NOT be marked --latest: the
+        # releases/latest redirect (install.sh, fresh installs) stays pinned to
+        # the newest stable release; auto-update resolves previews via the API.
         gh release create "v${VERSION}" \
           --title "v${VERSION}" \
+          --target "$TARGET" \
           --generate-notes \
           --prerelease \
           --draft \
           dist/*.tar.gz \
           dist/sha256sums.txt
         gh release edit "v${VERSION}" --draft=false
+
+    # A cancelled job runs no cleanup, so self-healing lives in the pre-create
+    # forget above; this step covers an ordinary failure mid-publish (e.g. a
+    # failed asset upload) leaving a draft behind.
+    - name: Forget the version on failure
+      if: failure()
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ needs.check.outputs.new_version }}
+        GH_REPO: ${{ github.repository }}
+      run: .github/scripts/release-forget-version.sh "$VERSION"

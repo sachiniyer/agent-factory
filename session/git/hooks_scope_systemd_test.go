@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -137,7 +138,19 @@ func TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping(t *testing.T
 	done := RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
 
 	pid := waitForPidFile(t, pidFile, 30*time.Second)
-	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	// The surviving hook is the entire point of this test, so it is still
+	// running — and the runner is still owed journal writes under logs/hooks —
+	// when teardown begins. Cleanups run LIFO, so registering this after every
+	// t.TempDir above makes it run before any RemoveAll: kill the survivor's
+	// process group, then hold teardown until the runner has reaped it and
+	// finished writing. done closes only after cmd.Wait and the last journal
+	// write land, so it is the deterministic "nothing can still write into the
+	// temp dir" signal — not a sleep (#5377).
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		waitForClosed(t, done, 30*time.Second,
+			"post-worktree hook runner did not finish after the surviving hook's process group was killed")
+	})
 
 	stopStandInDaemonUnit(t)
 	// The runner's own channel is the oracle, not kill(pid, 0): a hook systemd
@@ -232,6 +245,9 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	requireSystemdUserManager(t)
 	claimDaemonMarker(t)
 	if os.Getenv("AF_TEST_REAL_SCOPE_HELPER") == "1" {
+		// Re-exec'd test binary owned by the spawning test — if that parent
+		// dies, nothing else will ever reap this process (#4412).
+		testguard.ExitWhenOrphaned(50 * time.Millisecond)
 		t.Setenv("AGENT_FACTORY_HOME", os.Getenv("AF_TEST_REAL_SCOPE_HOME"))
 		previous := &GitWorktree{
 			repoPath:     os.Getenv("AF_TEST_REAL_SCOPE_REPO"),
@@ -260,7 +276,8 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "hook.pid")
 	order := filepath.Join(t.TempDir(), "order")
 	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{PostWorktreeCommands: []string{
-		fmt.Sprintf("printf '%%s' \"$$\" > %q; while [ ! -f %q ]; do sleep 0.2; done; printf 'first\\n' >> %q", pidFile, gate, order),
+		fmt.Sprintf("printf '%%s' \"$$\" > %q; %s; printf 'first\\n' >> %q", pidFile,
+			testguard.BoundedGateWait(gate, 200*time.Millisecond, 10*time.Minute), order),
 		fmt.Sprintf("printf 'second\\n' >> %q", order),
 	}})
 
@@ -268,14 +285,13 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	// prevents it from finishing the journal or launching entry 2; entry 1 must
 	// survive in its real unbound scope and only the adopter can run the suffix.
 	previous := exec.Command(os.Args[0], "-test.run=^TestRestoreAdoptsAHookRunStillLiveInItsRealScope$", "-test.v")
-	previous.Env = append(os.Environ(),
+	previous.Env = append(append(os.Environ(),
 		"AF_TEST_REAL_SCOPE_HELPER=1", "AF_TEST_REAL_SCOPE_HOME="+home,
 		"AF_TEST_REAL_SCOPE_REPO="+repoPath, "AF_TEST_REAL_SCOPE_TREE="+worktreePath,
-		"AF_TEST_REAL_SCOPE_SESSION="+sessionID)
+		"AF_TEST_REAL_SCOPE_SESSION="+sessionID,
+	), testguard.ExpectedOwnerEnv()...)
 	previous.Stdout, previous.Stderr = os.Stdout, os.Stderr
-	if err := previous.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, previous)
 	previousReaped := false
 	t.Cleanup(func() {
 		if !previousReaped {

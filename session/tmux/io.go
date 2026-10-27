@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -83,12 +84,15 @@ type tmuxGeneration struct {
 	sessionID string
 	serverPID string
 	created   string
-	// teardownInitiated records that af itself asked for this generation's
+	// teardownInitiated records that af itself asked for this session's
 	// teardown — set by close() before kill-session runs so the
 	// ErrSessionGone branch can tell "af asked" (INFO) from "vanished on its
-	// own" (ERROR) (#4472). It clears only on tmux ANSWERING that the SAME
-	// generation is live — a live name is not proof, since the name may
-	// already belong to a replacement — see the clear sites in close(),
+	// own" (ERROR) (#4472). close() IS af's recorded teardown op, so the mark
+	// lands whatever the name resolves to: a monitor whose session was
+	// already gone when close() ran is still going silent inside an
+	// af-initiated teardown (#5138). It clears only on tmux ANSWERING that
+	// the SAME generation is live — a live name is not proof, since the name
+	// may already belong to a replacement — see the clear sites in close(),
 	// Start, and ClosedConclusivelyAndStillAbsent — except on an unanswered
 	// rebind, where the generation object itself is carried to the
 	// replacement monitor because a wedged probe is no evidence the request
@@ -136,11 +140,15 @@ func newReattachStatusMonitor() *statusMonitor {
 // for a different generation this request is aimed at the replacement, not at
 // the bound session that vanished on its own — and marking the bound
 // generation would launder that unrequested death into af's request (Codex on
-// #4473). An answered probe reporting nothing at the name is the same
+// #4473, #5138). An answered probe reporting nothing at the name is the same
 // refusal in the other direction: the bound generation already vanished
 // without af asking, kill-session cannot target it, and marking it would
-// launder that unrequested death into af's request at the next poll (Codex
-// on #4473). A probe that never answers is different again: no mark lands
+// launder that unrequested death into af's request at the next poll. The
+// archive/kill/on_complete window those already-gone teardowns produce is
+// covered instead by the instance-level expectation poll supplies through
+// the ExpectingTeardown variants — af's own op fence and kill tombstone —
+// which says "tearing down" without claiming this close caused the death
+// (#5138). A probe that never answers is different again: no mark lands
 // and probeAnswered reports false, because a server wedged enough to refuse
 // the probe will fail the kill the same way — close() reports the run
 // unknown there rather than paying a second and third command budget for
@@ -262,10 +270,40 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	return updated, hasPrompt, content
 }
 
+// HasUpdatedExpectingTeardown is HasUpdated plus the caller's own
+// af-initiated-teardown predicate — the instance's lifecycle state carried
+// into the tmux layer. It is consulted at exactly one place: a poll that
+// finds the session gone. The generation's teardown mark covers only the
+// window after close() lands it; the predicate covers the window before —
+// from af recording the teardown (kill tombstone, archiving/killing op,
+// cleared started, an owed on_complete) to close() reaching the mark
+// (#5138). nil for callers with no instance state to consult.
+func (t *TmuxSession) HasUpdatedExpectingTeardown(expectGone func() bool) (updated bool, hasPrompt bool, content string) {
+	updated, hasPrompt, content, _ = t.HasUpdatedWithBaselineExpectingTeardown(expectGone)
+	return updated, hasPrompt, content
+}
+
 // HasUpdatedWithBaseline also reports the first successful capture after a
 // reattach. That capture seeds comparison state: it proves neither pane churn
 // nor idleness, so daemon observations must preserve the distinction.
 func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, content string, baseline bool) {
+	return t.HasUpdatedWithBaselineExpectingTeardown(nil)
+}
+
+// HasUpdatedWithBaselineExpectingTeardown is HasUpdatedWithBaseline plus the
+// af-initiated-teardown predicate described at HasUpdatedExpectingTeardown.
+func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() bool) (updated bool, hasPrompt bool, content string, baseline bool) {
+	updated, hasPrompt, content, baseline, _ = t.HasUpdatedObserved(expectGone)
+	return updated, hasPrompt, content, baseline
+}
+
+// HasUpdatedObserved is HasUpdatedWithBaselineExpectingTeardown plus a
+// capture-success bit: the pane-evidence contract distinguishes "the pane
+// answered and was unchanged/empty" from "no pane was captured at all" — a
+// wedged server, a dead monitor, and a failed capture-pane all reach the same
+// all-false return the narrower wrappers emit, and observation-streak
+// bookkeeping must not count any of them as observed silence (#5221 review).
+func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, hasPrompt bool, content string, baseline bool, captured bool) {
 	// A nil monitor means Restore never ran for this session: a persisted Dead
 	// instance is loaded with started=true but LocalBackend.Start returns before
 	// Restore (which is the only place monitor is initialized) so the corpse is
@@ -311,11 +349,21 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	}
 	t.monitorMu.Unlock()
 	if !alive {
-		return false, false, "", false
+		return false, false, "", false, false
 	}
 
 	captureStartedAt := time.Now()
 	var err error
+	// probeUnanswered records WHERE the error came from: an identity probe
+	// that ended the poll without an answer, so capture-pane never ran. The
+	// mid-teardown demotion below exists only for failures OF the capture —
+	// a pane dead under a session tmux has not finished removing is the
+	// expected shape of af's own teardown — while an unanswered probe is an
+	// infrastructure fault (exec-level failure, wedge) that request cannot
+	// explain: it keeps ERROR under an active mark or predicate, and is
+	// logged as the probe failure it is, never as a capture failure (Codex
+	// on #5327).
+	probeUnanswered := false
 	// An id-bound monitor owes its liveness question to the GENERATION, not
 	// to whatever session currently answers at the id: tmux ids are
 	// per-server counters, so a replacement server can reissue the same $N
@@ -349,6 +397,7 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 			// generationMatches never reports it as ErrSessionGone, so the
 			// monitor stays retryable and the dead latch stays unset.
 			err = probeErr
+			probeUnanswered = true
 		}
 	}
 	if err == nil {
@@ -361,29 +410,59 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		// session is still alive are rare and still surface every tick.
 		// CapturePaneContent has already probed ExistsOrUnknown on the
 		// error path, so use the wrapped sentinel rather than re-probing.
-		if errors.Is(err, ErrSessionGone) {
-			// af-initiated teardown (kill, archive, task completion, handoff
-			// swap, root reap) routes through close(), which marks the
-			// GENERATION before kill-session runs — that disappearance is the
-			// request completing, not an anomaly, and at ~5,800 lines per log
-			// rotation it buried the errors that matter (#4472). The mark is
-			// read off the snapshotted monitor's generation: a poll in flight
-			// across a same-object restart still attributes the OLD session's
-			// death to the teardown af asked for (Codex on #4473), and a
-			// vanish af never asked for stays at ERROR.
-			t.monitorMu.Lock()
-			initiated := mon.generation != nil && mon.generation.teardownInitiated
+		//
+		// Expectedness is decided from af's own state, never from timing
+		// or the error text (#5138). Two records count. The generation's
+		// teardown mark — this object's close() ran — which the
+		// snapshotted monitor reads so a poll in flight across a
+		// same-object restart still attributes the OLD session's death to
+		// the teardown af asked for (Codex on #4473). And the caller's
+		// predicate — the instance's own lifecycle state (kill tombstone,
+		// archiving/killing op, cleared started, an owed on_complete) —
+		// covering the whole window between af recording the teardown and
+		// close() landing the mark. Neither present means the session
+		// vanished unexpectedly — the ERROR is what the level exists for.
+		expected := expectGone != nil && expectGone()
+		gone := errors.Is(err, ErrSessionGone)
+		t.monitorMu.Lock()
+		initiated := expected || (mon.generation != nil && mon.generation.teardownInitiated)
+		if gone {
 			mon.dead = true
-			t.monitorMu.Unlock()
-			if initiated {
-				log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
-			} else {
-				log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
-			}
-			return false, false, "", false
 		}
-		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
-		return false, false, "", false
+		t.monitorMu.Unlock()
+		switch {
+		case gone && initiated:
+			log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+		case gone:
+			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+		case probeUnanswered:
+			log.ErrorLog.Printf("tmux session %s: identity probe failed in status monitor: %v", t.sanitizedName, err)
+		case errors.Is(err, errLivenessProbeUnanswered):
+			// The capture failed and its own gone-probe could not answer,
+			// so "the pane died under a session still being removed" is
+			// not the evidence on hand — the infrastructure failure is.
+			// Only a capture failure with an AFFIRMATIVE liveness answer
+			// may demote (Codex on #5327, second finding).
+			log.ErrorLog.Printf("tmux session %s: liveness probe unanswered in status monitor: %v", t.sanitizedName, err)
+		case errors.Is(err, errCaptureNotAnswered):
+			// The probe may have answered alive, but the capture's own
+			// failure carried no answer from tmux — it never ran, or a
+			// signal destroyed it — so "the pane died under a session
+			// still being removed" is not the evidence on hand (Codex on
+			// #5327).
+			log.ErrorLog.Printf("tmux session %s: capture-pane did not answer in status monitor: %v", t.sanitizedName, err)
+		case initiated && !errors.Is(err, ErrTmuxTimeout):
+			// The same attribution covers the failure a step earlier in
+			// the teardown: a pane can die under a session object tmux
+			// has not finished removing, so capture-pane fails while the
+			// gone-probe still answers alive-or-unknown (#5317). A tripped
+			// deadline is different evidence — af asking for the teardown
+			// does not explain a wedged server — and keeps ERROR.
+			log.InfoLog.Printf("tmux session %s: error capturing pane content in status monitor during af-initiated teardown: %v", t.sanitizedName, err)
+		default:
+			log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
+		}
+		return false, false, "", false, false
 	}
 
 	// A capture that BEGAN after the asking close() returned and still
@@ -430,7 +509,7 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		mon.baselinePending = false
 	}
 	t.monitorMu.Unlock()
-	return changed, hasPrompt, content, baseline
+	return changed, hasPrompt, content, baseline, true
 }
 
 // CapturePaneContent captures the content of the tmux pane. When the capture
@@ -510,28 +589,72 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 		if bctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.captureTargetAliveOrUnknown(gen) {
+		alive, known, probeErr := t.captureTargetLiveness(gen)
+		switch {
+		case !known:
+			// The capture failed and the probe that could call the pane
+			// expectedly dead never answered — an exec-level fault or a
+			// wedge that af's teardown request cannot explain. The bare
+			// capture error alone would read as demotable; carry the
+			// probe's non-answer so the poll keeps the failure at ERROR
+			// (Codex on #5327, second finding).
+			return "", fmt.Errorf("error capturing pane content: %v; %w: %w",
+				err, errLivenessProbeUnanswered, probeErr)
+		case !alive:
 			return "", t.sessionGoneError("capture-pane", err)
+		default:
+			// Only tmux's own failure answer may read as "the pane died
+			// under a session still being removed": a nonzero EXIT means
+			// capture-pane ran and reported. An exec-level fault (fork/
+			// exec refused, transport failure) or a process destroyed by
+			// a signal carries no answer about the pane — infrastructure
+			// the teardown request cannot explain even with an
+			// affirmative liveness answer (Codex on #5327).
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || !exitErr.Exited() {
+				return "", fmt.Errorf("%w: %w", errCaptureNotAnswered, err)
+			}
+			return "", fmt.Errorf("error capturing pane content: %v", err)
 		}
-		return "", fmt.Errorf("error capturing pane content: %v", err)
 	}
 	return string(output), nil
 }
 
-// captureTargetAliveOrUnknown is the gone-probe for a possibly id-bound
-// capture: a bound generation needs the identity answer for THAT generation,
-// not the reused name, or a replacement's liveness — whether it took the name
-// or reissued the id on a new server — would mask the polled generation's
-// death. Same conservative timeout lie as ExistsOrUnknown.
-func (t *TmuxSession) captureTargetAliveOrUnknown(gen *tmuxGeneration) bool {
+// errLivenessProbeUnanswered marks a capture-pane failure whose gone-probe
+// could not answer: unlike a capture failure tmux answered "still alive" for
+// — the mid-teardown shape af's own teardown request explains — this is an
+// infrastructure failure that must keep ERROR under any teardown attribution
+// (#5327 review).
+var errLivenessProbeUnanswered = errors.New("liveness probe did not answer")
+
+// errCaptureNotAnswered marks a capture-pane failure that carries no answer
+// from tmux itself — the command could not be executed, or the process was
+// destroyed by a signal instead of exiting with a status. Either way the
+// failure holds no evidence about the pane's fate: the mid-teardown
+// demotion exists only for failures tmux itself reported, and an
+// affirmative liveness probe does not turn an infrastructure fault into
+// expected teardown noise (#5327 review).
+var errCaptureNotAnswered = errors.New("capture-pane did not answer")
+
+// captureTargetLiveness is the gone-probe for a possibly id-bound capture:
+// a bound generation needs the identity answer for THAT generation, not the
+// reused name, or a replacement's liveness — whether it took the name or
+// reissued the id on a new server — would mask the polled generation's
+// death. Unlike the bool it replaces, it does not launder "unknown" into
+// "alive": known reports whether the probe answered, and probeErr carries
+// its failure — the affirmative-vs-unanswerable distinction the status
+// monitor's teardown demotion needs (#5327 review).
+func (t *TmuxSession) captureTargetLiveness(gen *tmuxGeneration) (alive, known bool, probeErr error) {
 	if gen == nil || gen.sessionID == "" {
-		return t.ExistsOrUnknown()
+		existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+		if !answered {
+			// probeSession only reports !known on a tripped deadline.
+			return true, false, fmt.Errorf("%w: has-session for %s after %s",
+				ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
+		}
+		return existsOrUnknown, true, nil
 	}
-	same, known, _ := t.generationMatches(gen)
-	if !known {
-		return true
-	}
-	return same
+	return t.generationMatches(gen)
 }
 
 // confirmedGeneration resolves the concrete tmux session currently standing
@@ -654,6 +777,32 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("error capturing pane grid: %v", err)
+	}
+	return string(output), nil
+}
+
+// CapturePaneBuffer captures the pane's WHOLE buffer — scrollback plus the
+// visible grid — in the same GRID form CaptureVisiblePaneGrid returns
+// (capture-pane -p -e without -J): one line per stored row, so a caller can
+// slice it by pane rows. The dead-pane repaint uses it to bottom-anchor the
+// tail (#5330): the visible grid alone is what a live repaint wants, but a
+// held dead pane's content extends into history and its last rows are the
+// only ones worth showing.
+//
+// Bounded by tmuxCommandTimeout (#1787) like its visible-grid sibling, which
+// it can replace on the subscribe path; wraps ErrSessionGone the same way.
+func (t *TmuxSession) CapturePaneBuffer() (string, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-S", "-", "-t", exactTarget(t.sanitizedName))
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: capture-pane buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		if !t.ExistsOrUnknown() {
+			return "", t.sessionGoneError("capture-pane buffer", err)
+		}
+		return "", fmt.Errorf("error capturing pane buffer: %v", err)
 	}
 	return string(output), nil
 }

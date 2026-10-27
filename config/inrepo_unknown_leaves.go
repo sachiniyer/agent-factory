@@ -7,9 +7,13 @@ import (
 	"sync"
 )
 
-// InRepoUnknownLeaf is one leaf under an in-repo [docker] or [ssh] table that
-// no DockerConfig/SSHConfig field matches. The typed decode drops it, so the
-// setting it was meant to carry has no effect (#4599).
+// InRepoUnknownLeaf is one leaf under an allowed structured config table that
+// no typed field matches: an in-repo [docker] or [ssh] table (no
+// DockerConfig/SSHConfig field) or a personal per-project [root_agent] table
+// (no RootAgent field). The typed decode drops it, so the setting it was
+// meant to carry has no effect. The in-repo loader reports [docker]/[ssh]
+// leaves this way (#4599); the personal loader reports [root_agent] leaves the
+// same way, so neither root-agent surface silently drops a typo'd leaf.
 type InRepoUnknownLeaf struct {
 	// Path is the config file, in the home-abbreviated form load errors use.
 	Path string

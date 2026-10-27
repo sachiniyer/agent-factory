@@ -150,11 +150,13 @@ type Sidebar struct {
 	seenSig    string
 	seenSelSeq uint64
 
-	// treeCollapsed is the title of the display-selected instance whose tab
-	// children the user explicitly collapsed (h/←). Cleared when the selection
-	// moves to a different instance, so every newly selected instance starts
-	// auto-expanded (collapse-by-default applies to non-selected instances).
-	treeCollapsed string
+	// treeCollapsed is the display-selected instance whose tab children the
+	// user explicitly collapsed (h/←). Keyed by pointer so a #765 same-title
+	// kill+recreate swap — which mints a new instance carrying the old title —
+	// is detected and the override cleared; every newly selected instance
+	// starts auto-expanded (collapse-by-default applies to non-selected
+	// instances).
+	treeCollapsed *session.Instance
 
 	// lastCursor* remember the identity of the last instance-section row the
 	// cursor rested on (tab -1 = the instance row itself). The reconcile's #969
@@ -173,6 +175,17 @@ type Sidebar struct {
 	// String() (rebuilds can shift indices between renders), scrolling
 	// minimally so the selected row stays visible.
 	scrollOffset int
+
+	// renderedStart/renderedEnd bracket the visibleItems indices the fitted
+	// window last put on screen — the only rows whose ▾ marker is visible.
+	// RowVerbTarget's resting-binding fallback consults them rather than the
+	// full item list: a bound row scrolled outside the window carries no ▾
+	// marker on screen, so no row verb may resolve to it (#4755 review).
+	// rebuildVisibleItems drops hasRendered because the bounds describe the
+	// OLD list; RowVerbTarget refits on demand (ensureRenderedWindow) so the
+	// check always answers against the rows the next frame will paint.
+	renderedStart, renderedEnd int
+	hasRendered                bool
 
 	// Rendering
 	renderer *tree.InstanceRenderer
@@ -218,6 +231,10 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
 	s.renderer.SetWidth(s.contentWidth())
+	// The fitted window assumes the old allocation — a resize can move the
+	// bound row across the fold without any rebuild. Mark it stale so the
+	// next RowVerbTarget refits before answering (#4755 review).
+	s.hasRendered = false
 }
 
 // SetNamingPlaceholder threads the autocreate-name shadow text (#2470) from the
@@ -305,19 +322,21 @@ func (s *Sidebar) structureSig() string {
 	// identifies the partition, so it catches both a single archive/restore and
 	// a same-count swap.
 	_, archived := partitionByArchived(s.proj.GetInstances())
-	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
+	return fmt.Sprintf("%d|%s|%d|%t|%p|%v",
 		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
 // the display-selected instance auto-expands (matched by title so a #765
 // same-title swap keeps the subtree open) unless it is transient or the user
-// explicitly collapsed it. Everything else is collapsed — the keep-row-count-
-// manageable default for non-selected instances.
+// explicitly collapsed it. The collapse override is keyed by pointer so a
+// same-title kill+recreate swap drops it — the old session's fold cannot pass
+// through to the replacement. Everything else is collapsed — the keep-row-
+// count-manageable default for non-selected instances.
 func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
 	sel := s.proj.GetSelectedInstance()
 	if sel == nil || inst == nil || sel.Title != inst.Title {
 		return false
 	}
-	return tree.Expandable(inst) && s.treeCollapsed != inst.Title
+	return tree.Expandable(inst) && s.treeCollapsed != inst
 }
