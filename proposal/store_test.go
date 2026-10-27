@@ -349,11 +349,11 @@ func TestDetach(t *testing.T) {
 func TestWriteAndAddDoc(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA, "goals")
-	file, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal})
+	file, _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal})
 	if err != nil || file != "risks.md" {
 		t.Fatalf("AddDoc = %q, %v", file, err)
 	}
-	if _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal}); err == nil {
+	if _, _, err := s.AddDoc("p", "risks", Committer{Author: AuthorExternal}); err == nil {
 		t.Fatal("adding an existing doc must fail")
 	}
 	if _, commit, err := s.Write("p", "risks.md", "new text\n", Committer{Author: AuthorExternal}); err != nil || commit == "" {
