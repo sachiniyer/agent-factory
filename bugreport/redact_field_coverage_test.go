@@ -172,6 +172,7 @@ var verbatimInstanceFields = map[string]string{
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",
 	"Worktree.RelocationRecovery.CleanupGeneration":                            "minted cleanup-generation token",
 	"Worktree.RelocationRecovery.CleanupLifecycle":                             "bounded RelocationRecoveryState enum",
+	"Worktree.RelocationRecovery.MissingFencedState":                           "bounded RelocationRecoveryState enum",
 	"Worktree.RelocationRecovery.State":                                        "bounded RelocationRecoveryState enum",
 }
 
