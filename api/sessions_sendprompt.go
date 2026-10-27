@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -147,6 +148,14 @@ can inspect per-session results.`,
 		}
 
 		prompt, rest := resolveSendPrompt(cmd, args)
+		if apiclient.IsRemoteTarget() && (sendPromptAllFlag || sendPromptCreateFlag) {
+			// Broadcast enumerates targets from this machine's disk and --create
+			// resolves the repo, config and program locally; both would act on the
+			// wrong host. A plain <title> <prompt> send is routed (W9.1).
+			return jsonError(fmt.Errorf("--all and --create are not available against the daemon at %s yet: "+
+				"broadcast targets and create-time repo resolution are computed on this machine. "+
+				"Send to one session by <title>, or run the command on the daemon host", apiclient.RemoteTargetURL()))
+		}
 		if sendPromptAllFlag {
 			return runBroadcast(prompt)
 		}
@@ -157,7 +166,7 @@ can inspect per-session results.`,
 		// preserves the prior all-repo search; a non-empty one confines both
 		// the existence pre-check and the delivery to that repo so a
 		// same-titled session in a different repo never receives the prompt.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -222,9 +231,16 @@ can inspect per-session results.`,
 			return jsonOut(sendPromptResult{OK: true, Status: status})
 		}
 
-		exists, err := instanceTitleExistsInScope(repoID, title)
-		if err != nil {
-			return jsonError(err)
+		// Against a remote target the existence check would read THIS machine's
+		// disk and refuse a session that lives only on the daemon; the daemon's
+		// SendPrompt resolves the title itself and reports not-found.
+		exists := true
+		if !apiclient.IsRemoteTarget() {
+			var err error
+			exists, err = instanceTitleExistsInScope(repoID, title)
+			if err != nil {
+				return jsonError(err)
+			}
 		}
 		if !exists {
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))

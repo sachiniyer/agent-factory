@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"sync/atomic"
 	"time"
 
@@ -457,10 +456,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// check from being inflated by the round trip's own latency (#5221 review).
 	capturedAt := nowFunc()
 	obs, _, backstopGeneration, observedOp, epoch, err := instance.SnapshotAgent()
-	// Whatever happened, no loss episode survives an attach (see above). The
-	// outage flag retires on the same evidence — an attach streams the pane,
-	// which no unreachable sandbox can serve — but a CURRENT-generation probe
-	// that still went unanswered re-raises it below (#5571 W1.3).
+	// Whatever happened, no loss episode (or outage flag, #5571 W1.3) survives an attach.
 	m.clearRemoteLoss(key)
 	instance.ClearUnreachable()
 	if observedOp != session.OpNone {
@@ -472,9 +468,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		// success inside the gap horizon inherits silence nobody watched
 		// (#5221 review).
 		instance.NotePaneCaptureFailed()
-		if instance.AgentObservationCurrent(backstopGeneration) && !errors.Is(err, session.ErrRemoteSandboxNotProvisioned) {
-			instance.SetUnreachable(err)
-		}
+		markUnreachableIfCurrent(instance, backstopGeneration, err)
 		return
 	}
 	// A probe that cannot answer is dropped whole — the doc above's own rule.
@@ -697,8 +691,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	if !instance.Started() {
-		// An archived row is unstarted: an outage flag raised before the archive
-		// landed must not outlive it (the LiveArchived arm below is unreachable).
+		// An archived row is unstarted; its outage flag must not outlive the archive.
 		instance.ClearUnreachable()
 		return
 	}

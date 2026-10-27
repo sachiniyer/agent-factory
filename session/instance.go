@@ -150,6 +150,13 @@ type Instance struct {
 	// exactly once per process. A restart re-derives the same end from the same
 	// durable verdict, so the re-stamp is idempotent.
 	taskRunFailedStamp bool
+	// taskRunFailurePending is the DURABLE twin of taskRunFailedStamp (#5646):
+	// raised where the run ends failed, persisted with the row, and cleared only
+	// when the daemon acknowledges the task's status write (or its refusal).
+	// The in-memory stamp dies with the process; this survives a restart that
+	// lands between the edge and the stamp, which would otherwise leave the task
+	// reading "started" forever for a run that provably failed.
+	taskRunFailurePending bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -213,6 +220,12 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
+	// callbackUnavailable retains the reason this session has no af callback:
+	// the daemon's mint refusal on a sandbox it created, the in-sandbox
+	// agent-server's undelivered-credential notice, or a mirror of either on a
+	// client-side projection. Persisted; surfaces render it under
+	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
+	callbackUnavailable string
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets

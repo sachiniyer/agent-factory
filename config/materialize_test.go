@@ -18,10 +18,40 @@ import (
 // config.json.
 
 // fastShell keeps DefaultConfig's cached claude-alias probe off the
-// interactive bash/zsh path so these tests do not pay for shell startup.
+// interactive bash/zsh path so these tests do not pay for shell startup. It
+// does not hide an installed claude — `which claude` under /bin/sh still finds
+// one on PATH — so a test whose expectation changes when claude is detected
+// needs withoutClaude instead.
 func fastShell(t *testing.T) {
 	t.Helper()
 	t.Setenv("SHELL", "/bin/sh")
+}
+
+// withoutClaude makes the claude probe behind every DefaultConfig() find
+// nothing, whatever is installed on the machine running the tests (#5612).
+//
+// DefaultConfig layers the machine's auto-detected claude command onto the
+// compiled-in defaults (ProgramOverrides["claude"]), so a test that expects
+// that seed to be absent — an unset program_overrides table rendering {} — passes
+// on a CI runner and fails on a developer box with claude installed. The probe
+// is a pure function of SHELL, PATH and HOME (claudeProbeEnvKey), so this pins
+// all three: SHELL=/bin/sh never sources an rc file, HOME is an empty directory
+// so no rc file could define a claude alias even if one were sourced, and PATH is
+// an empty directory so neither `which claude` nor the exec.LookPath fallback has
+// anything to find.
+//
+// The final probe is a guard, not a formality: if the isolation ever stops
+// holding, the caller's expectation silently becomes machine-dependent again and
+// fails far from its cause, so fail here, naming it.
+func withoutClaude(t *testing.T) {
+	t.Helper()
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	if path, err := GetClaudeCommand(); err == nil {
+		t.Fatalf("withoutClaude: the claude probe still resolves %q under an isolated SHELL, HOME and PATH, "+
+			"so any DefaultConfig-derived expectation would depend on this machine", path)
+	}
 }
 
 func TestLoadConfig_MaterializeSilentOnFirstRun(t *testing.T) {

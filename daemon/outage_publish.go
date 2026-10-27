@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -39,4 +41,13 @@ func unreachableDataEqual(a, b *session.UnreachableData) bool {
 		return a == b
 	}
 	return a.Since.Equal(b.Since) && a.Error == b.Error
+}
+
+// markUnreachableIfCurrent raises the outage flag for an unanswered probe of the
+// CURRENT runtime (#5571 W1.3). The not-provisioned sentinel is definitive
+// absence — af knows there is nothing to reach — so it is not an outage.
+func markUnreachableIfCurrent(instance *session.Instance, generation session.AgentObservationGeneration, err error) {
+	if instance.AgentObservationCurrent(generation) && !errors.Is(err, session.ErrRemoteSandboxNotProvisioned) {
+		instance.SetUnreachable(err)
+	}
 }

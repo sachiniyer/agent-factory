@@ -107,6 +107,20 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
 			wantErr: true,
 		},
+		{
+			// #5137: the new daemon's policy refusal of a tokenless non-loopback
+			// listener is a HEALTHY non-bound state — without it, upgrading an
+			// exposed daemon can never adopt the refusing release because the
+			// candidate's refusal reads as a lost socket and forces rollback to
+			// the old exposed daemon.
+			name: "policy-refused tcp listener satisfies the bound expectation",
+			health: HealthStatus{DaemonVersion: "1.0.100", Listeners: DaemonListenerStatus{
+				TCPBound:         false,
+				TCPRefusalReason: "refused: tokenless non-loopback",
+			}},
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
+			wantErr: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := daemonMatchesIdentity(tc.health, previousDaemonIdentity(tc.journal))

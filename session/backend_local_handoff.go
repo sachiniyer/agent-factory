@@ -20,7 +20,7 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 	// skill against the still-recorded outgoing account would mark a
 	// non-scopable target unresolved and drop the ambient af skill the
 	// replacement pane should read (#4430 review round 7).
-	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, "", ""))
+	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, "", ""), i.CallbackUnavailable() != "")
 	program, conversation := planLaunchConversation(i.ID, program)
 	workDir := i.GetWorktreePath()
 	if workDir == "" {

@@ -38,6 +38,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		IsRoot:                   IsReservedTitle(i.Title),
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
+		CallbackUnavailable:      i.callbackUnavailable,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
 		Unreachable:              i.unreachableDataLocked(),
@@ -158,6 +159,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
 	if i.taskRunActive {
@@ -476,6 +478,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
+		callbackUnavailable:      data.CallbackUnavailable,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
 		unreachableSince:         unreachableSinceFromData(data.Unreachable),
@@ -522,6 +525,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.taskRunTurnGateHeld = false
 		instance.taskRunFailed = true
 		instance.taskRunFailedStamp = true
+		instance.taskRunFailurePending = true
+	}
+	// The restart twin of the durable flag (#5646): the failure edge fired and
+	// persisted TaskRunActive=false before the daemon stamped the task, so the
+	// re-derivation above (which needs the run still active) cannot see it.
+	// Re-arm the stamp; the daemon's write is a compare-and-set and idempotent.
+	if data.TaskRunFailurePending && !instance.userKilled && liveness != LiveArchived {
+		instance.taskRunFailed = true
+		instance.taskRunFailedStamp = true
+		instance.taskRunFailurePending = true
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	// The pending on_complete obligation rides the restart so the daemon can

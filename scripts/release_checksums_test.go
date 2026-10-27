@@ -16,6 +16,9 @@ var checksumReleaseAssets = []string{
 	"agent-factory-darwin-arm64.tar.gz",
 	"agent-factory-linux-amd64.tar.gz",
 	"agent-factory-linux-arm64.tar.gz",
+	// The CGO_ENABLED=0 host-streaming artifacts (#5571 W2.2).
+	"agent-factory-linux-amd64-static.tar.gz",
+	"agent-factory-linux-arm64-static.tar.gz",
 }
 
 func TestReleaseWorkflowsPublishChecksumManifest(t *testing.T) {
