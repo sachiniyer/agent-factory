@@ -102,7 +102,9 @@ type ListBackendsResponse struct {
 // unspecified create resolves to. It is read-only: it provisions nothing, starts
 // nothing, dials nothing, and touches no session state.
 func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackendsResponse) error {
-	repo, err := config.RepoFromPath(req.RepoPath)
+	// A remote client sends the path as typed; expand ~ against THIS (the
+	// daemon's) home, never the caller's.
+	repo, err := config.RepoFromPath(config.ExpandTilde(strings.TrimSpace(req.RepoPath)))
 	if err != nil {
 		return err
 	}
