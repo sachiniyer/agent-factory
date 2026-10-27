@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -17,9 +18,27 @@ import (
 // healthy pass is a handful of cheap lstats and nothing gains from more.
 const worktreeProbeConcurrency = 8
 
+// worktreeMissingSummaryThreshold is the most flagged rows of one kind — live
+// or archived — one status pass reports individually (#5547). A live-flagged
+// count past it collapses the pass's per-row detail to INFO behind one summary
+// WARNING; an archived-flagged count past it collapses likewise behind one
+// summary INFO line, since a reclaimed-archive backlog is a normal state, not
+// an anomaly.
+const worktreeMissingSummaryThreshold = 20
+
 type worktreeProbeTarget struct {
 	repoID   string
 	instance *session.Instance
+}
+
+// worktreeMissingFlag is one row's transition to worktree-missing in a single
+// status pass: the rendered per-row line — the same text the live-row WARNING
+// has always carried — and whether the row is archived, which decides the
+// level it logs at. The pass collects them so a mass flagging can be
+// summarized instead of warned a row at a time (#5547).
+type worktreeMissingFlag struct {
+	archived bool
+	detail   string
 }
 
 // refreshWorktreesMissing probes every eligible row's tracked worktree with
@@ -35,6 +54,8 @@ type worktreeProbeTarget struct {
 func (m *Manager) refreshWorktreesMissing(targets []worktreeProbeTarget) {
 	sem := make(chan struct{}, worktreeProbeConcurrency)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var flagged []worktreeMissingFlag
 	for _, target := range targets {
 		inst := target.instance
 		if inst == nil || inst.UserKilled() || inst.StartupStateUnknown() ||
@@ -46,10 +67,62 @@ func (m *Manager) refreshWorktreesMissing(targets []worktreeProbeTarget) {
 		go func(repoID string, inst *session.Instance) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			m.refreshWorktreeMissing(repoID, inst)
+			if flag := m.refreshWorktreeMissing(repoID, inst); flag != nil {
+				mu.Lock()
+				flagged = append(flagged, *flag)
+				mu.Unlock()
+			}
 		}(target.repoID, inst)
 	}
 	wg.Wait()
+	m.logWorktreesMissing(flagged)
+}
+
+// logWorktreesMissing emits one pass's flag transitions. A live row's vanished
+// worktree is an anomaly and keeps its own WARNING; an archived row's is a
+// normal state on any home that reclaims archive directories
+// (on_archive_command, manual cleanup, disk-pressure sweeps) and reads at INFO
+// (#5547). Each kind reports individually only up to
+// worktreeMissingSummaryThreshold: past it, live misses collapse to one summary
+// WARNING and archived misses to one summary INFO line, so a backlog sweep
+// cannot bury the log at either level. The WARNING is keyed on the LIVE count
+// alone — an archive-only backlog, however large, is intentional on those
+// homes and must not warn on every pass.
+func (m *Manager) logWorktreesMissing(flagged []worktreeMissingFlag) {
+	if len(flagged) == 0 {
+		return
+	}
+	// The probes answered in parallel; sort so the detail block reads stably.
+	sort.Slice(flagged, func(a, b int) bool { return flagged[a].detail < flagged[b].detail })
+	live := 0
+	for _, flag := range flagged {
+		if !flag.archived {
+			live++
+		}
+	}
+	archived := len(flagged) - live
+	switch {
+	case live > worktreeMissingSummaryThreshold:
+		for _, flag := range flagged {
+			m.info().Print(flag.detail)
+		}
+		m.warn().Printf("flagged %d sessions whose tracked worktree is missing (%d archived); 'af sessions list' shows them", len(flagged), archived)
+	case archived > worktreeMissingSummaryThreshold:
+		for _, flag := range flagged {
+			if !flag.archived {
+				m.warn().Print(flag.detail)
+			}
+		}
+		m.info().Printf("flagged %d archived sessions whose tracked worktree is missing; 'af sessions list' shows them", archived)
+	default:
+		for _, flag := range flagged {
+			if flag.archived {
+				m.info().Print(flag.detail)
+			} else {
+				m.warn().Print(flag.detail)
+			}
+		}
+	}
 }
 
 // Manager.worktreeMissingUndurable holds rows (by stableSessionKey) whose
@@ -64,21 +137,29 @@ func (m *Manager) refreshWorktreesMissing(targets []worktreeProbeTarget) {
 // refreshWorktreeMissing folds one presence probe of the tracked worktree into
 // the row's worktree-missing flag and, on a transition only, persists and
 // publishes it so every listing surface picks it up (#5102). Steady state costs
-// one bounded lstat and no write.
+// one bounded lstat and no write. It reports the transition to the caller —
+// nil when the row did not newly flag missing — and logging is the pass's,
+// after every probe has answered, so a backlog sweep can be summarized rather
+// than warned a row at a time (#5547).
 //
 // A transition whose write had to be abandoned (see persistWorktreeMissing) is
 // remembered and retried on later passes: the flag is sticky, so the probe will
 // never report that transition a second time.
-func (m *Manager) refreshWorktreeMissing(repoID string, instance *session.Instance) {
+func (m *Manager) refreshWorktreeMissing(repoID string, instance *session.Instance) *worktreeMissingFlag {
 	missing, changed := instance.RefreshWorktreeMissing()
 	key := stableSessionKey(repoID, instance)
 	if !changed && !m.takeWorktreeMissingUndurable(key) {
-		return
+		return nil
 	}
+	var flag *worktreeMissingFlag
 	if changed && missing {
-		m.warn().Printf("session %q: tracked worktree %s is gone (deleted outside af); flagging it — %s; if a directory reappears at that path, inspect it before acting, since af cannot verify it is the session's", instance.Title, instance.GetWorktreePath(), worktreeMissingRemedy(instance))
+		flag = &worktreeMissingFlag{
+			archived: instance.GetLiveness() == session.LiveArchived,
+			detail:   fmt.Sprintf("session %q: tracked worktree %s is gone (deleted outside af); flagging it — %s; if a directory reappears at that path, inspect it before acting, since af cannot verify it is the session's", instance.Title, instance.GetWorktreePath(), worktreeMissingRemedy(instance)),
+		}
 	}
 	m.persistWorktreeMissing(repoID, instance)
+	return flag
 }
 
 // worktreeMissingRemedy names the resolution that actually exists for a row
