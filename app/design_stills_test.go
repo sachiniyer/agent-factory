@@ -25,8 +25,12 @@ import (
 const (
 	// Noon UTC on the day before the fixture's daily 09:00 schedule preserves the
 	// approved "next Sep 07" still while keeping it independent of capture time.
+	// The record arms the entry rather than deriving it from the expression: the
+	// 29-cell "from cron: next Sep 07 09:00" qualifier cannot fit the rail's
+	// 30-cell scene width under #5153's fixed-indent field budget (24 cells),
+	// while the armed observation "next Sep 07 09:00" (17 cells) can.
 	designStillsNowRFC3339    = "2026-09-06T12:00:00Z"
-	designStillsPinnedNextRun = "from cron: next Sep 07"
+	designStillsPinnedNextRun = "next Sep 07 09:00"
 )
 
 // Run exclusively in the playtest container. These supplement P4 recovery
@@ -337,7 +341,13 @@ func newDesignDriverSceneHome(t *testing.T, mode string, initialNow func() time.
 }
 
 func configureDesignDriverRailScene(h *home, scene string) {
-	h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true, CronExpr: "0 9 * * *"}})
+	// The armed entry agrees with what the pinned clock makes the expression
+	// compute (Sep 06 noon → next 09:00 is Sep 07), so carrying it live keeps
+	// the still deterministic AND fits the rail's field budget where the
+	// computed "from cron:" qualifier could not (#5153 review).
+	next := time.Date(2026, time.September, 7, 9, 0, 0, 0, time.UTC)
+	h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true,
+		CronExpr: "0 9 * * *", Arming: task.ArmingArmed, NextRunAt: &next}})
 	h.projects.SetProjects([]ui.SidebarProject{{Name: "Agent Factory", Root: h.repoRoot, Active: true}, {Name: "Second project", Root: "/second"}})
 	h.relayout()
 	if scene == "rail-task-selection" {

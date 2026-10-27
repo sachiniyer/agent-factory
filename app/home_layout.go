@@ -96,6 +96,18 @@ func (m *home) relayout() {
 	m.syncFocus()
 
 	m.sidebar.SetRect(lay.Tree)
+	// The re-rect invalidated the sidebar's fitted window (SetSize drops
+	// hasRendered), so a bound resting row may have crossed the viewport
+	// fold with no cursor move and no row-list rebuild — a resize is one
+	// trigger, but a pane opening or a rail section growing re-solves the
+	// same rects. Re-resolve the footer's row-verb target NOW —
+	// RowVerbTarget refits before answering — rather than let the stale
+	// target (and its hint/click zones) ride until the next
+	// selectionChanged up to ~100ms away (#5259). In every cursor position
+	// the menu's target IS RowVerbTarget: the cursor's own row when it
+	// rests on one, else the on-screen ▾-marked resting row its section
+	// header adopts — the value selectionChanged writes in both branches.
+	m.menu.SetInstance(m.sidebar.RowVerbTarget())
 	visible := make(map[int]bool, len(m.visiblePanes))
 	for i, p := range m.visiblePanes {
 		visible[p.ID()] = true
