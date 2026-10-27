@@ -16628,6 +16628,9 @@ function renderLogin(root2, state, actions2) {
   const input = root2.querySelector("#af-token");
   if (input) input.value = draft;
 }
+function clearLoginDraft(root2) {
+  loginDrafts.set(root2, "");
+}
 function loginView(state, actions2) {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({
@@ -18930,6 +18933,7 @@ async function fetchRegisteredProjects(tok) {
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
