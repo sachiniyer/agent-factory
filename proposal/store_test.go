@@ -455,3 +455,10 @@ func TestCreateRemovesFolderOnFailure(t *testing.T) {
 		t.Fatalf("a failed create left changes:\n%s", status)
 	}
 }
+
+func TestRulesExplainPushedEdits(t *testing.T) {
+	r := Rules("p", "/x/p")
+	if !strings.Contains(r, `arrive as a prompt that starts with "Proposal p:"`) || !strings.Contains(r, `you do not need to run "af proposal changes" first`) {
+		t.Fatalf("rule 2 must explain pushed edits:\n%s", r)
+	}
+}

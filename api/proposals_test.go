@@ -22,8 +22,10 @@ const proposalTestSessionID = "33333333-3333-4333-8333-333333333333"
 
 // proposalTestHost is the daemon side of the service for CLI tests.
 type proposalTestHost struct {
-	repoID string
-	tabs   map[string]string
+	repoID  string
+	tabs    map[string]string
+	prompts []string
+	mode    proposal.PushMode
 }
 
 func (h *proposalTestHost) Session(id string) (proposal.Session, error) {
@@ -50,6 +52,13 @@ func (h *proposalTestHost) CloseDocsTabs(sessionID, slug string) (string, error)
 
 func (h *proposalTestHost) Publish(proposal.Change) {}
 
+func (h *proposalTestHost) SendPrompt(sessionID, prompt string) (proposal.Delivery, error) {
+	h.prompts = append(h.prompts, prompt)
+	return proposal.DeliveryConfirmed, nil
+}
+
+func (h *proposalTestHost) PublishPush(proposal.PushStatus) {}
+
 func decodeInto[T any](raw []byte) (T, error) {
 	var v T
 	err := json.Unmarshal(raw, &v)
@@ -67,6 +76,13 @@ func stubProposalDaemon(t *testing.T) (*proposalTestHost, *[]string) {
 	host := &proposalTestHost{repoID: repo.ID, tabs: map[string]string{}}
 	svc := proposal.NewService(host)
 	var methods []string
+	pushTarget := func(sessionID string) proposal.PushTarget {
+		modes := map[string]proposal.PushMode{}
+		for slug := range host.tabs {
+			modes[slug] = host.mode
+		}
+		return proposal.PushTarget{RepoID: host.repoID, SessionID: sessionID, Modes: modes, Ready: true}
+	}
 	tgt := func(sessionID, repoID, repoPath string) proposal.Target {
 		return proposal.Target{SessionID: sessionID, RepoID: repoID, RepoPath: repoPath}
 	}
@@ -141,6 +157,21 @@ func stubProposalDaemon(t *testing.T) (*proposalTestHost, *[]string) {
 				return nil, err
 			}
 			return svc.Checkpoint(r.SessionID)
+		},
+		"SetProposalPushMode": func(raw []byte) (any, error) {
+			r, err := decodeInto[daemon.SetProposalPushModeRequest](raw)
+			if err != nil {
+				return nil, err
+			}
+			host.mode = proposal.PushMode(r.Mode)
+			return svc.SetPushMode(pushTarget(r.SessionID), host.mode)
+		},
+		"SendProposalChanges": func(raw []byte) (any, error) {
+			r, err := decodeInto[daemon.SendProposalChangesRequest](raw)
+			if err != nil {
+				return nil, err
+			}
+			return svc.SendNow(pushTarget(r.SessionID))
 		},
 	}
 	prev := callProposalRoute
@@ -369,6 +400,8 @@ func TestProposalCommandOutputsKeepTheirShape(t *testing.T) {
 		{cmd: proposalWriteCmd, args: []string{"p", "goals"}, stdin: "new\n", want: []string{"author", "commit", "doc", "path", "slug"}},
 		{cmd: proposalCheckpointCmd, want: []string{"commit", "cursor", "slug", "unseen"}},
 		{cmd: proposalChangesCmd, want: []string{"edits", "from", "slug", "to"}},
+		{cmd: proposalPushModeCmd, args: []string{"manual"}, want: []string{"due_at", "due_in_ms", "mode", "session_id", "slug", "state", "unsent"}},
+		{cmd: proposalSendCmd, want: []string{"due_at", "due_in_ms", "mode", "session_id", "slug", "state", "unsent"}},
 		{cmd: proposalDetachCmd, want: []string{"detached", "slug"}},
 	}
 	for _, tc := range cases {
@@ -413,5 +446,36 @@ func TestProposalWriteAuthorFollowsTheSession(t *testing.T) {
 	}
 	if err := json.Unmarshal(out, &got); err != nil || got["author"] != "external" {
 		t.Fatalf("write outside a session = %s, %v; want external", out, err)
+	}
+}
+
+func TestProposalPushModeAndSend(t *testing.T) {
+	setupRepoForCmd(t)
+	stubProposalSelf(t)
+	host, methods := stubProposalDaemon(t)
+	if _, err := runCmdCaptureStdout(t, proposalStartCmd, []string{"p", "--docs", "goals"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCmdCaptureStdout(t, proposalPushModeCmd, []string{"manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := decodeInto[proposal.PushStatus](out)
+	if err != nil || st.Mode != proposal.PushManual || st.Slug != "p" || st.SessionID != proposalTestSessionID {
+		t.Fatalf("push-mode output %s: %v", out, err)
+	}
+	*methods = nil
+	if _, err := runCmdCaptureStdout(t, proposalPushModeCmd, []string{"sometimes"}); err == nil {
+		t.Fatal("want an error for an unknown mode")
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("an unknown mode must fail before any route: %v", *methods)
+	}
+	out, err = runCmdCaptureStdout(t, proposalSendCmd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err = decodeInto[proposal.PushStatus](out); err != nil || st.Unsent != 0 || len(host.prompts) != 0 {
+		t.Fatalf("send with nothing unsent: %s, %v, %d prompts", out, err, len(host.prompts))
 	}
 }
