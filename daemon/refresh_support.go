@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // isLegacyTransientGhost identifies disposable projections, not sessions.
@@ -180,6 +181,23 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // relocation recovery is the one the loader starts, so it is the one shape the
 // fallback re-raises.
 //
+// RestoreArchiveRollbackFence runs before any relocation decision, the same
+// order FromInstanceData and LoadedActivity use. ForStorage replaces
+// Worktree.RelocationRecovery with the synthetic archive kill fence
+// (archiveReportKillFence) and preserves the real recovery only in
+// ArchiveReport.RollbackFence; without restoring the fence first, the relocation
+// checks below would decode the synthetic fence as a real pending relocation.
+// For a LiveLost row whose original recovery was nil, the synthetic fence
+// survives RestoreRelocationRecoveryOriginals (it carries the retained tree's
+// identity, so isWorktreeMissingRollbackFence does not recognize it) and the
+// LiveLost fallback releases a ghost the loaded restore loop would count,
+// allowing max_concurrent_runs to be exceeded; if the archived original is
+// malformed, the synthetic fence decodes where the real one would not, and the
+// LoadedActivityPending early return can hold an unmaterializable ghost forever.
+// Restoring the archive fence first recovers the real recovery (or nil) the way
+// FromInstanceData does, so the relocation checks see the same record the loader
+// does.
+//
 // A row whose relocation-recovery record cannot be decoded at all (for example,
 // missing rollback-safety originals) is unmaterializable: FromInstanceData
 // rejects it at the same RestoreRelocationRecoveryOriginals boundary, so no
@@ -189,7 +207,29 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // hold the slot and wedge the cap on a ghost no in-memory lifecycle edge can
 // release. The undecodable guard at the top releases that shape before
 // LoadedActivity is consulted, mirroring the loader's rejection.
+//
+// A row whose relocation-recovery record decodes but is runtime-invalid is
+// equally unmaterializable: FromInstanceData installs it through
+// GitWorktree.RestoreRelocationRecovery, which rejects shapes a rollback-safe
+// projection preserves but the worktree cannot install (a move_unknown with an
+// empty alternate path or missing identity, a claim_stale with no identity, a
+// cleanup state with no generation, or an alternate path that collides with the
+// worktree's own). LoadedActivity does not run that boundary, so a
+// non-sandbox row whose record decodes but cannot install reports ActivityPending;
+// the LoadedActivityPending early return would hold its slot and, with no
+// Instance to run the lifecycle edge that clears TaskRunActive, wedge
+// max_concurrent_runs forever. The runtime-installable guard below mirrors
+// GitWorktree.RestoreRelocationRecovery's state-shape and path-collision
+// checks on the restored record, so the fence releases the same unmaterializable
+// shape the loader rejects.
 func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
+	// Restore the archive rollback fence before inspecting relocation, the same
+	// order FromInstanceData and LoadedActivity restore it. Without this, the
+	// relocation checks below would read the synthetic archive kill fence
+	// ForStorage publishes in Worktree.RelocationRecovery instead of the real
+	// recovery the fence preserved in ArchiveReport.RollbackFence, and release or
+	// hold a ghost the loaded form does not.
+	item = item.RestoreArchiveRollbackFence()
 	// A row whose relocation-recovery record cannot be decoded is unmaterializable:
 	// FromInstanceData rejects it at this same RestoreRelocationRecoveryOriginals
 	// boundary, so no Instance or restore loop can ever clear its TaskRunActive.
@@ -199,7 +239,25 @@ func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
 	// it, wedge max_concurrent_runs forever on a ghost no in-memory Instance can
 	// clear. Check the loader's restoration boundary before accepting
 	// LoadedActivityPending and release this unmaterializable shape.
-	if _, err := item.RestoreRelocationRecoveryOriginals(); err != nil {
+	restored, err := item.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return false
+	}
+	item = restored
+	// A row whose relocation-recovery record decodes but is runtime-invalid is
+	// equally unmaterializable: FromInstanceData installs it through
+	// GitWorktree.RestoreRelocationRecovery, which rejects shapes the rollback
+	// metadata preserves but the worktree cannot install (a move_unknown with an
+	// empty alternate path or missing identity, a claim_stale with no identity, a
+	// cleanup state with no generation, or an alternate path that collides with
+	// the worktree's own). LoadedActivity does not run that boundary, so a
+	// non-sandbox row whose record decodes but cannot install reports
+	// ActivityPending; the LoadedActivityPending early return would hold its slot
+	// and, with no Instance to run the lifecycle edge that clears TaskRunActive,
+	// wedge max_concurrent_runs forever. Mirror the loader's install check on the
+	// restored record before accepting LoadedActivityPending and release this
+	// unmaterializable shape.
+	if !relocationRecoveryInstallable(item.Worktree.RelocationRecovery, item.Worktree.WorktreePath) {
 		return false
 	}
 	if activity, _ := session.LoadedActivity(item); activity == session.ActivityPending {
@@ -224,14 +282,67 @@ func handoffFenceLoadedFormHolds(item session.InstanceData) bool {
 	// pending relocation in place, so a row whose restored record has no
 	// relocation recovery is the one the loader starts and the restore loop can
 	// still revive — the only shape the fence re-raises a hold for.
-	restored, err := item.RestoreRelocationRecoveryOriginals()
-	if err != nil {
-		// Unreachable: the guard above already released an undecodable row.
-		// Fail closed rather than wedge a ghost no Instance can clear.
+	return session.EffectiveLiveness(item) == session.LiveLost &&
+		item.Worktree.RelocationRecovery == nil
+}
+
+// relocationRecoveryInstallable reports whether GitWorktree.RestoreRelocationRecovery
+// would accept the restored relocation-recovery record — the runtime boundary
+// FromInstanceData enforces after RestoreRelocationRecoveryOriginals decodes the
+// rollback metadata. RestoreRelocationRecoveryOriginals only reverses the
+// rollback-safe projection; it does not validate the record's runtime shape (a
+// move_unknown with an empty alternate path or missing identity, a claim_stale
+// with no identity, a cleanup state with no generation, or a path that collides
+// with the worktree's own), so a row whose record decodes can still fail to
+// materialize at GitWorktree.RestoreRelocationRecovery. Such a row has no
+// Instance and no restore loop to clear TaskRunActive, so handoffFenceLoadedFormHolds
+// releases it instead of wedging the cap on a ghost the loaded form would never
+// hold. The state-shape and path-collision mirrors below are the same boundary
+// GitWorktree.RestoreRelocationRecovery enforces, restricted to the fields a
+// restored InstanceData carries. A nil recovery is installable (FromInstanceData
+// skips the install block when there is no record to install).
+func relocationRecoveryInstallable(recovery *session.GitWorktreeRelocationRecoveryData, worktreePath string) bool {
+	if recovery == nil {
+		return true
+	}
+	state := recovery.State
+	identityKnown := recovery.IdentityKnown
+	if state == "" {
+		// normalizeRecovery: a record without an explicit state is a legacy
+		// ambiguous move with a known identity, the same default
+		// GitWorktree.RestoreRelocationRecovery applies before validating it.
+		state = sessiongit.RelocationRecoveryMoveUnknown
+		identityKnown = true
+	}
+	switch state {
+	case sessiongit.RelocationRecoveryMoveUnknown:
+		if recovery.AlternatePath == "" || !identityKnown {
+			return false
+		}
+	case sessiongit.RelocationRecoveryClaimStale:
+		if !identityKnown {
+			return false
+		}
+	case sessiongit.RelocationRecoveryCleanupReady, sessiongit.RelocationRecoveryCleanupFinalizing:
+		if !identityKnown || recovery.CleanupGeneration == "" {
+			return false
+		}
+	case sessiongit.RelocationRecoveryStalled:
+		// A read-only probe may time out before any identity can be captured.
+	case sessiongit.RelocationRecoveryCleanupStalled:
+		// An identity-unknown stall is accepted (and promoted to cleanup_ready);
+		// an identity-qualified stall requires a generation to retry the exact
+		// claimed archive.
+		if identityKnown && recovery.CleanupGeneration == "" {
+			return false
+		}
+	default:
 		return false
 	}
-	return session.EffectiveLiveness(item) == session.LiveLost &&
-		restored.Worktree.RelocationRecovery == nil
+	if recovery.AlternatePath != "" && recovery.AlternatePath == worktreePath {
+		return false
+	}
+	return true
 }
 
 // releasesLostSandboxGhost reports whether a row that failed to materialize is a

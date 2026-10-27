@@ -517,3 +517,249 @@ func TestLocalPendingHandoffGhostReleasesUndecodableRelocation(t *testing.T) {
 		t.Fatalf("rawTaskRunHoldsSlot held a local row whose relocation-recovery record is undecodable (FromInstanceData rejects it, so no Instance or restore loop can clear TaskRunActive); LoadedActivity returns ActivityPending for the non-sandbox shape, but the loaded form never exists, so holding it wedges max_concurrent_runs forever on a ghost no in-memory lifecycle edge can release")
 	}
 }
+
+// TestLocalPendingHandoffGhostArchiveFenceRestoresRelocation is the first shape
+// the archive-rollback fence must be restored before the relocation checks for:
+// a local LiveLost row whose ambiguous handoff also has a non-empty archive report.
+// ForStorage replaces Worktree.RelocationRecovery with the synthetic archive kill
+// fence (archiveReportKillFence, a ClaimStale with the retained tree's identity)
+// and preserves the real recovery only in ArchiveReport.RollbackFence; for a row
+// whose original recovery was nil, the real recovery is nil, so
+// RestoreArchiveRollbackFence recovers nil. handoffFenceLoadedFormHolds must
+// restore the archive fence before inspecting relocation — the same order
+// FromInstanceData and LoadedActivity use — or the LiveLost fallback sees the
+// synthetic fence (which isWorktreeMissingRollbackFence does not recognize,
+// because it carries the retained tree's non-zero identity) as a real pending
+// relocation and releases the row. The loaded form counts it: the original
+// recovery is nil so the loader starts it and canAutoRestoreLostSession holds the
+// recoverable LiveLost row, and the restore loop revives it. Releasing it
+// undercounts the cap; the loader's restore loop revives the row and holds its
+// slot, so a replacement admit exceeds max_concurrent_runs.
+//
+// The row is written through ForStorage so it carries the exact on-disk shape a
+// ghost carries: the synthetic archive kill fence in Worktree.RelocationRecovery
+// and the real (nil) recovery in ArchiveReport.RollbackFence.
+func TestLocalPendingHandoffGhostArchiveFenceRestoresRelocation(t *testing.T) {
+	// The in-memory shape before a storage write: a local LiveLost row mid-handoff
+	// with a non-empty archive report and no real relocation recovery. ForStorage
+	// projects the handoff fence (StartupStateUnknown=true with the original false
+	// captured) and the archive kill fence (Worktree.RelocationRecovery replaced
+	// by archiveReportKillFence, the real nil recovery preserved only in
+	// ArchiveReport.RollbackFence with RelocationRecoveryProjected=true).
+	before := session.InstanceData{
+		TaskID:                "task1",
+		TaskRunActive:         true,
+		Liveness:              session.LiveLost,
+		BackendType:           "local",
+		PendingHandoffMission: "continue the inherited work",
+		HandoffDeliveryStatus: session.PromptCouldNotConfirm,
+		StartupStateUnknown:   false,
+		ArchiveReport: &sessiongit.ArchiveReport{
+			RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+				Path:          "/worktrees/.af-source-0123456789abcdef0123456789abcdef",
+				IdentityKnown: true, Device: 1, Inode: 2, FileType: 0o040000,
+			}},
+			// RollbackFence deliberately nil: the disk-reload recapture branch of
+			// ForStorage captures it from the row before the pending projections,
+			// preserving the original (no relocation recovery) and the original
+			// startup state.
+		},
+	}
+	row := before.ForStorage()
+	if row.ArchiveReport == nil || row.ArchiveReport.RollbackFence == nil {
+		t.Fatalf("precondition: ForStorage did not project the archive rollback fence for the LiveLost row; the archive fence must carry the original recovery for the test to exercise the shape")
+	}
+	if !row.ArchiveReport.RollbackFence.RelocationRecoveryProjected {
+		t.Fatalf("precondition: the archive fence must project a relocation recovery so RestoreArchiveRollbackFence recovers the real (nil) recovery")
+	}
+	if row.ArchiveReport.RollbackFence.OriginalRelocationRecovery != nil {
+		t.Fatalf("precondition: the original recovery must be nil for this to be the synthetic-fence shape the loaded form counts; got %v", row.ArchiveReport.RollbackFence.OriginalRelocationRecovery)
+	}
+	if row.Worktree.RelocationRecovery == nil {
+		t.Fatalf("precondition: ForStorage must publish the synthetic archive kill fence in Worktree.RelocationRecovery; without it the row does not exercise the bug (the synthetic fence is what the raw arm sees instead of the real nil recovery)")
+	}
+	if row.HandoffOriginalStartupStateUnknown == nil || *row.HandoffOriginalStartupStateUnknown != false {
+		t.Fatalf("precondition: ForStorage must project the handoff fence with the original false startup state for the LiveLost row; got %v", row.HandoffOriginalStartupStateUnknown)
+	}
+	// The materialized oracle: RestoreArchiveRollbackFence recovers the real
+	// (nil) recovery, so the loaded form's LiveLost row has no relocation the
+	// loader keeps inert — it starts the row and canAutoRestoreLostSession holds
+	// it through the restore loop. A non-empty ArchiveReport does not change
+	// that: the loader restores the archive fence before any relocation decision,
+	// so the real nil recovery is what it sees.
+	restored := row.RestoreArchiveRollbackFence()
+	if restored.Worktree.RelocationRecovery != nil {
+		t.Fatalf("precondition: RestoreArchiveRollbackFence must recover the real (nil) recovery; the synthetic fence survives in Worktree.RelocationRecovery and the test no longer exercises the bug (got %v)", restored.Worktree.RelocationRecovery)
+	}
+	// Precondition: the loaded form holds this row. RestoreArchiveRollbackFence
+	// recovers the real (nil) recovery, so the local LiveLost row has no
+	// relocation the loader keeps inert — it starts the row and
+	// canAutoRestoreLostSession holds it through the restore loop. ClassifyActivity
+	// calls LiveLost terminal, so LoadedActivity reports ActivityTerminal (the
+	// local backend does not rewrite liveness), and the handoffFence's LiveLost
+	// fallback is what holds it — exactly the on-disk shape the loaded form holds
+	// and the raw arm must agree on.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityTerminal {
+		t.Fatalf("precondition: LoadedActivity must report ActivityTerminal for the local LiveLost row whose archive fence recovers a nil recovery; got %v (the LiveLost fallback is the only hold the fence re-raises)", activity)
+	}
+	if !rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot released a local LiveLost row whose archive fence recovers a nil relocation recovery (the loader starts the row and canAutoRestoreLostSession holds it through the restore loop); without restoring the archive fence first, the LiveLost fallback sees the synthetic archive kill fence as a real pending relocation and releases the ghost, undercounting the cap")
+	}
+}
+
+// TestLocalPendingHandoffGhostArchiveFenceUndecodableOriginal is the second
+// shape the archive-rollback fence must be restored before the relocation
+// checks for: a local row whose ArchiveReport.RollbackFence carries a malformed
+// original recovery (its rollback-safety originals are missing), so the real
+// recovery is undecodable. ForStorage publishes the synthetic archive kill fence
+// (a valid ClaimStale with the retained tree's identity) in
+// Worktree.RelocationRecovery, so the raw undecodable guard — which runs
+// RestoreRelocationRecoveryOriginals on the synthetic fence without restoring
+// the archive fence first — sees a decodable record and accepts it. LoadedActivity
+// restores the archive fence internally and reports ActivityPending for the
+// non-sandbox err branch, so the LoadedActivityPending early return holds an
+// unmaterializable ghost forever: the loader restores the same malformed original
+// and rejects it at RestoreRelocationRecoveryOriginals, so no Instance or restore
+// loop can clear TaskRunActive. Restoring the archive fence first lets the
+// undecodable guard see the malformed original the loader sees and release the
+// row the loaded form can never materialize.
+//
+// The row carries a LiveRunning liveness so LoadedActivity's non-sandbox err
+// branch reports ActivityPending (the verdict the early return would hold on),
+// and the handoff fence marker so handoffFenceLoadedFormHolds is the gate.
+func TestLocalPendingHandoffGhostArchiveFenceUndecodableOriginal(t *testing.T) {
+	branchTrue := true
+	// The on-disk shape ForStorage produces for a row whose archive report's
+	// rollback fence preserves a malformed real recovery (a Stalled record with
+	// none of the rollback-safety originals RestoreRelocationRecoveryOriginals
+	// requires) and a synthetic archive kill fence in Worktree.RelocationRecovery.
+	// The retained tree's identity makes the synthetic fence a ClaimStale with a
+	// non-zero identity, so isWorktreeMissingRollbackFence does not recognize it
+	// and RestoreRelocationRecoveryOriginals decodes it — the shape the raw guard
+	// must not accept after the archive fence is restored.
+	row := session.InstanceData{
+		TaskID:                             "task1",
+		TaskRunActive:                      true,
+		Liveness:                           session.LiveRunning,
+		BackendType:                        "local",
+		PendingHandoffMission:              "continue the inherited work",
+		HandoffDeliveryStatus:              session.PromptCouldNotConfirm,
+		StartupStateUnknown:                true,
+		HandoffOriginalStartupStateUnknown: func() *bool { b := false; return &b }(),
+		ArchiveReport: &sessiongit.ArchiveReport{
+			RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+				Path:          "/worktrees/.af-source-0123456789abcdef0123456789abcdef",
+				IdentityKnown: true, Device: 1, Inode: 2, FileType: 0o040000,
+			}},
+			RollbackFence: &sessiongit.ArchiveRollbackFence{
+				OriginalStartupStateUnknown: false,
+				OriginalExternalWorktree:    false,
+				OriginalBranchCreatedByUs:   &branchTrue,
+				RelocationRecoveryProjected: true,
+				// A real but malformed recovery: a Stalled state with none of the
+				// rollback-safety originals RestoreRelocationRecoveryOriginals
+				// requires, so the loader rejects it at the same boundary the
+				// raw guard must restore the archive fence to reach.
+				OriginalRelocationRecovery: &sessiongit.ArchiveRollbackRelocationRecovery{
+					State: sessiongit.RelocationRecoveryStalled,
+				},
+			},
+		},
+	}
+	// Precondition: the synthetic archive kill fence is a decodable ClaimStale
+	// the raw undecodable guard would accept without the archive fence restored,
+	// but the real recovery it preserves is undecodable.
+	if _, err := row.RestoreRelocationRecoveryOriginals(); err != nil {
+		t.Fatalf("precondition: the synthetic archive kill fence must decode for the raw guard to accept it without the archive fence; got %v", err)
+	}
+	restored := row.RestoreArchiveRollbackFence()
+	if _, err := restored.RestoreRelocationRecoveryOriginals(); err == nil {
+		t.Fatalf("precondition: the real recovery the archive fence recovers must be undecodable (the loader rejects it at RestoreRelocationRecoveryOriginals); got no error")
+	}
+	// The materialized oracle: LoadedActivity restores the archive fence
+	// internally, so it sees the malformed original and reports ActivityPending
+	// for the non-sandbox err branch — the verdict the early return would hold
+	// on a row whose loaded form never materializes.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityPending {
+		t.Fatalf("precondition: LoadedActivity must report ActivityPending for the non-sandbox row with an undecodable relocation the loader rejects; got %v (the LoadedActivityPending early return is the hold the fence must not re-raise)", activity)
+	}
+	if rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot held a local row whose archive fence recovers a malformed relocation recovery the loader rejects at RestoreRelocationRecoveryOriginals; no Instance or restore loop can clear TaskRunActive, so the cap wedges forever on the unmaterializable ghost")
+	}
+}
+
+// TestLocalPendingHandoffGhostRuntimeInvalidRelocation is the fourth shape the
+// handoffFenceLoadedFormHolds relocation gate must not re-raise: a local
+// LiveRunning row whose relocation-recovery record decodes (passes
+// RestoreRelocationRecoveryOriginals) but is runtime-invalid at the loader's
+// GitWorktree.RestoreRelocationRecovery — a move_unknown with an empty
+// alternate path. FromInstanceData installs the recovery through
+// GitWorktree.RestoreRelocationRecovery, which rejects the empty alternate
+// path, so the row never materializes and no lifecycle edge can clear
+// TaskRunActive. LoadedActivity only runs RestoreRelocationRecoveryOriginals,
+// which decodes the rollback metadata but not the runtime shape, so it reports
+// ActivityPending for the local LiveRunning row and the LoadedActivityPending
+// early return holds the slot. The runtime-installable gate mirrors
+// GitWorktree.RestoreRelocationRecovery's state-shape validation on the
+// restored record, so the fence releases the same unmaterializable shape the
+// loader rejects instead of wedging the cap on a ghost no Instance can clear.
+//
+// The row carries the handoff fence marker so handoffFenceLoadedFormHolds is the
+// gate, and a move_unknown with an empty alternate path and the rollback-safety
+// originals so RestoreRelocationRecoveryOriginals decodes it (the loader rejects
+// it at the later GitWorktree.RestoreRelocationRecovery boundary).
+func TestLocalPendingHandoffGhostRuntimeInvalidRelocation(t *testing.T) {
+	originalFalse := false
+	branchTrue := true
+	externalFalse := false
+	row := session.InstanceData{
+		TaskID:                             "task1",
+		TaskRunActive:                      true,
+		Liveness:                           session.LiveRunning,
+		BackendType:                        "local",
+		PendingHandoffMission:              "continue the inherited work",
+		HandoffDeliveryStatus:              session.PromptCouldNotConfirm,
+		StartupStateUnknown:                true,
+		HandoffOriginalStartupStateUnknown: &originalFalse,
+		Worktree: session.GitWorktreeData{
+			// A move_unknown with an empty alternate path: the rollback-safety
+			// originals decode (so RestoreRelocationRecoveryOriginals succeeds),
+			// but GitWorktree.RestoreRelocationRecovery rejects it for the empty
+			// alternate path, so FromInstanceData never materializes an Instance.
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State:                       sessiongit.RelocationRecoveryMoveUnknown,
+				IdentityKnown:               true,
+				OriginalExternalWorktree:    &externalFalse,
+				OriginalBranchCreatedByUs:   &branchTrue,
+				OriginalStartupStateUnknown: &originalFalse,
+			},
+		},
+	}
+	// Precondition: the relocation record decodes (the rollback-safety
+	// originals are present), so the undecodable guard does not release it.
+	if _, err := row.RestoreRelocationRecoveryOriginals(); err != nil {
+		t.Fatalf("precondition: the relocation record must decode for the runtime-invalid shape (the rollback-safety originals are present); got %v", err)
+	}
+	restored, _ := row.RestoreRelocationRecoveryOriginals()
+	if restored.Worktree.RelocationRecovery == nil {
+		t.Fatalf("precondition: the restored record must still carry the pending relocation (a nil record is the worktree-missing fence shape, not the runtime-invalid move_unknown this test is for)")
+	}
+	if restored.Worktree.RelocationRecovery.AlternatePath != "" {
+		t.Fatalf("precondition: the move_unknown record must have an empty alternate path so GitWorktree.RestoreRelocationRecovery rejects it; got %q", restored.Worktree.RelocationRecovery.AlternatePath)
+	}
+	// The materialized oracle: LoadedActivity reports ActivityPending for the
+	// local LiveRunning row (the local backend does not rewrite liveness, and
+	// the handoff fence is not up because the row has no InFlightOp). The loader
+	// would reject the row at GitWorktree.RestoreRelocationRecovery, so no
+	// Instance materializes — the fence must not hold a slot no lifecycle edge
+	// can clear.
+	activity, _ := session.LoadedActivity(row)
+	if activity != session.ActivityPending {
+		t.Fatalf("precondition: LoadedActivity must report ActivityPending for the local LiveRunning row (the verdict the LoadedActivityPending early return would hold); got %v", activity)
+	}
+	if rawTaskRunHoldsSlot(row) {
+		t.Fatalf("rawTaskRunHoldsSlot held a local row whose relocation record decodes but is runtime-invalid (a move_unknown with an empty alternate path GitWorktree.RestoreRelocationRecovery rejects); no Instance materializes to clear TaskRunActive, so the cap wedges forever on the unmaterializable ghost")
+	}
+}
