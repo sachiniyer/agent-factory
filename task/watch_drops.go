@@ -18,14 +18,16 @@ const WatchRateDropStatus = "dropped: event rate limit exceeded"
 // outcome that a drop flush must not overwrite. It mirrors the live-overlay
 // terminal latch in daemon/watcher_drop_visibility.go (applyLiveDropState):
 // "stopped" (a clean script exit) and any "errored:" outcome (the crash-loop
-// breaker's failureSummary, or an arming refusal's "errored: not armed — …")
+// breaker's giveUpSummary, or an arming refusal's "errored: not armed — …")
 // are both newer-than-the-drop terminal outcomes that deliberately record
 // without advancing LastRunAt, so a stop-time drop flush passing lastDroppedAt
 // would otherwise satisfy the LastRunAt guard and clobber them. Unlike the
 // live overlay this durable guard cannot rely on an in-memory terminalStatus
 // latch, so it inspects the on-disk LastRunStatus directly.
 func isTerminalWatcherStatus(status string) bool {
-	return status == "stopped" || strings.HasPrefix(status, "errored:")
+	// The bare "errored" form is the pre-#797 persisted value; the TUI still
+	// renders it (ui/task_pane.go), so the terminal predicate must too.
+	return status == "stopped" || status == "errored" || strings.HasPrefix(status, "errored:")
 }
 
 // RecordWatchRateDrops advances a task's cumulative rate-drop count to total

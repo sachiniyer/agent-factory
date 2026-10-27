@@ -182,6 +182,7 @@ func HandoffTargetIsCurrent(current, target, effective, recorded string) bool {
 	if effective != "" {
 		return current != "" && current == effective
 	}
+	recorded = strings.TrimSpace(recorded)
 	return recorded != "" && recorded == strings.TrimSpace(target)
 }
 

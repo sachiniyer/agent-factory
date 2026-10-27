@@ -597,6 +597,201 @@ echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 	}
 }
 
+// TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure pins the #2440/#1955
+// quiesce on the provision_cmd exit-0 + stdout-contract-violation path — the
+// branch the premature p.launchPgid = 0 in runProvisionCmd silently disarmed.
+//
+// runProvisionCmd spends the script's process-group id so a later, minutes-stale
+// failure during the transport phase can never SIGKILL a group the kernel has
+// reissued to an unrelated process. The bug spent it BEFORE the stdout parse, so
+// every stdout-contract-violation branch returned with the id already gone and
+// the quiesceLaunchGroup() call in provisionHostOrReap was a no-op — a
+// backgrounded child the script left mid-provision survived the whole reap path
+// (including delete_cmd), the exact silent-orphan harm quiesceLaunchGroup's own
+// comment says it exists to prevent. The launch path keeps the id set through
+// its own stdout parse for the same reason (TestHookReapKillsAnOrphanedLaunchChildBeforeDeleting
+// is its regression); this is the parity test for provision_cmd.
+//
+// Each subtest is one parse-failure branch, plus a control (non-zero exit) that
+// already quiesced before the fix and must keep quiescing after it — isolating
+// the fix to the exit-0 parse branches rather than a uniform policy change. The
+// child outlives the script by sleeping, so it is alive at the parse boundary
+// iff the bug is present; the assertion proves provisionHostOrReap leaves it
+// dead by outcome — the orphan's side effect (the marker) never appears, and a
+// child that was merely reaped to a zombie still never runs the sleep that
+// writes it, so the outcome is a non-signaling proof that does not probe a PID
+// the kernel may have recycled.
+func TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		// provisionBody runs after the script has backgrounded the orphan child
+		// and recorded its pid. It is what provision_cmd prints on stdout and
+		// how it exits — the determinant of which branch of runProvisionCmd's
+		// parse discipline fails (or, for the control, the early-exit branch).
+		provisionBody string
+	}{
+		{
+			// The violation branch: stdout carries content that is not the
+			// record. parseHookProvisionRecord returns (nil, false, violation).
+			name:          "garbage on stdout",
+			provisionBody: "echo 'not a host record'\nexit 0\n",
+		},
+		{
+			// The no-JSON branch: stdout is empty. parseHookProvisionRecord
+			// returns (nil, false, nil) — the "printed no host record" error.
+			name:          "empty stdout",
+			provisionBody: "exit 0\n",
+		},
+		{
+			// The wrong-shape branch: stdout is JSON but not a usable record
+			// (no host_key). parseHookProvisionRecord returns (nil, true, nil)
+			// — the "is not a host record" error.
+			name:          "json without host_key",
+			provisionBody: "echo '{\"host\":\"10.0.0.7\"}'\nexit 0\n",
+		},
+		{
+			// Control A: the non-zero-exit branch in runProvisionCmd returns
+			// before the spend (the early `if err != nil` is above it), so it
+			// quiesced before the fix and must keep quiescing after it. This is
+			// the asymmetry the bug was — the function's own non-zero-exit
+			// branch was never subject to it.
+			name:          "non-zero exit control",
+			provisionBody: "echo 'provisioned, then died' >&2\nexit 7\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkHookTimeouts(t, completingLaunchBound, 5*time.Second)
+			requireProvisionCmdQuiescesChild(t, tc.provisionBody)
+		})
+	}
+}
+
+// requireProvisionCmdQuiescesChild wires provision_cmd to a script that
+// backgrounds a long-running child (in the script's own process group, so the
+// quiesce can reach it), prints the given body on stdout, and exits. It then
+// drives provisionHostOrReap and asserts the child is dead by the time it
+// returns — by the child's side effect never appearing (the outcome). The
+// assertion is non-signaling: it never sends a signal to the child's numeric
+// PID, which on a reaping host may have been recycled to an unrelated process
+// after the quiesce, so a probe that signaled it could terminate that process.
+func requireProvisionCmdQuiescesChild(t *testing.T, provisionBody string) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	markerFile := filepath.Join(dir, "orphan-finished-here")
+	deleteRanLog := filepath.Join(dir, "delete-ran.log")
+
+	// The orphan child: sleeps long enough to outlive the failing provision,
+	// then writes a marker — the stand-in for "the orphan finished provisioning
+	// a VM after delete_cmd reported success". The marker is the only thing the
+	// test watches for: a child the quiesce killed never writes it, and a child
+	// the quiesce missed does, so its absence is a non-signaling proof of death
+	// that never touches the (possibly recycled) numeric PID.
+	child := writeHookScript(t, filepath.Join(dir, "provision-child.sh"), fmt.Sprintf(`
+sleep 0.25
+echo "a VM that bills by the hour" > %s
+`, shellsuggest.Arg(markerFile)))
+
+	// provision_cmd: backgrounds the orphan child, records its pid for the
+	// assertion, then runs the body under test (print-and-exit) on stdout.
+	provisionCmd := writeHookScript(t, filepath.Join(dir, "provision.sh"), fmt.Sprintf(`
+%s &
+echo $! > %s
+%s
+`, shellsuggest.Arg(child), shellsuggest.Arg(pidFile), provisionBody))
+
+	// delete_cmd: logs that it ran (so the test can confirm the reap path was
+	// taken) and tolerates a slug it cannot find — the contract the bug
+	// exploits, since a successful reap latches nil while the orphan is still
+	// alive and no orphanWarning ever fires.
+	deleteCmd := writeHookScript(t, filepath.Join(dir, "delete.sh"), fmt.Sprintf(`
+echo "$name" >> %s
+true
+`, shellsuggest.Arg(deleteRanLog)))
+
+	p := &hookProvisioner{
+		hooks: config.RemoteHooks{ProvisionCmd: provisionCmd, DeleteCmd: deleteCmd},
+		spec:  ProvisionSpec{Title: "orphaned provision child", CloneURL: "https://example.invalid/repo.git"},
+		slug:  Slugify("orphaned provision child"),
+	}
+
+	_, err := p.provisionHostOrReap()
+	require.Error(t, err, "provision_cmd must fail so the reap path runs")
+
+	// The reap path ran: delete_cmd was invoked, so the quiesce-then-reap gate
+	// in provisionHostOrReap was reached — the branch the bug disarmed.
+	_, logErr := os.Stat(deleteRanLog)
+	require.NoError(t, logErr, "delete_cmd must run: provision_cmd started, so it may have provisioned")
+
+	// The child's PID was recorded before the script exited.
+	pidData, readErr := os.ReadFile(pidFile)
+	require.NoError(t, readErr, "provision_cmd must record the background child's pid")
+	var childPID int
+	_, scanErr := fmt.Sscan(strings.TrimSpace(string(pidData)), &childPID)
+	require.NoError(t, scanErr, "provision_cmd wrote an invalid child pid %q", pidData)
+	require.Positive(t, childPID, "the recorded child pid must be a live process id")
+
+	// Capture the child's process group NOW, at the earliest point after
+	// provisionHostOrReap returns, while the child is freshly dead (the fix
+	// path) or still alive (the bug path). Re-deriving it at cleanup time — after
+	// the 1.2s of assertion window below — would hand cleanup a numeric PID the
+	// kernel may have recycled. The individual PID is never signalled in cleanup
+	// or in the assertion: a bare kill(childPID) on a recycled PID hits an
+	// unrelated single process, and the group kill subsumes it anyway (the child
+	// is in the script's process group, the same group quiesceLaunchGroup
+	// targets in production). This matches the established cleanup pattern in
+	// TestHookLaunchDoesNotKillBackgroundedChildren, which signals the captured
+	// group only.
+	childPgid, childPgidErr := syscall.Getpgid(childPID)
+	// childConfirmedDead is set after the assertion below proves the child is
+	// dead. On the fix path the child is dead, so cleanup has nothing to signal;
+	// on the bug path t.Fatalf fires before it is set, so cleanup still runs
+	// and tears the (still-live) group down. This avoids signalling a PID whose
+	// group the kernel has already recycled — the fix-path child is gone, and
+	// the bug-path child is alive so its group is still ours.
+	childConfirmedDead := false
+	t.Cleanup(func() {
+		if childConfirmedDead {
+			return
+		}
+		if childPgidErr == nil {
+			_ = syscall.Kill(-childPgid, syscall.SIGKILL)
+		}
+	})
+
+	// THE OUTCOME CLAIM: the child is dead by the time provisionHostOrReap
+	// returns. The marker is what the orphan would write if it finished
+	// provisioning after the reap reported success — a resource that bills
+	// forever with nothing pointing at it. Watch across the whole window in
+	// which it would land: the child sleeps 0.25s before writing it, so a child
+	// the quiesce killed never writes it and a child the quiesce missed does
+	// within that 0.25s — well inside the 1.2s window. A resource that appears
+	// at ANY point after the reap is the leak, because delete_cmd already
+	// reported success and will never run again. This is a non-signaling proof:
+	// it never sends a signal to the numeric PID, so a host that has already
+	// reaped the child and recycled its PID to an unrelated process is not
+	// disturbed by the assertion.
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(markerFile); statErr == nil {
+			t.Fatalf("a provision_cmd child outlived provisionHostOrReap and created %s: "+
+				"delete_cmd reported success, so this sandbox now bills with nothing pointing at it",
+				markerFile)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The outcome claim passed: the child never wrote the marker across the full
+	// 1.2s window, so it was killed before it could — quiesce did its work. A
+	// zombie (a reaping init leaves one briefly) does not run the sleep or write
+	// the file either, so the absence of the marker is enough and no probe signal
+	// is needed. Cleanup has nothing to signal — skip it rather than risk
+	// kill(-childPgid, SIGKILL) on a PID the kernel may have recycled by now.
+	childConfirmedDead = true
+}
+
 // TestHookQuiesceNeverSignalsAStalePgid pins the other half of the process-group
 // kill: it may only ever target a group THIS attempt established.
 //
