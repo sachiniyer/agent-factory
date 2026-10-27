@@ -29,7 +29,7 @@ default_program = "aider"
 post_worktree_commands = ["npm install"]
 
 [program_overrides]
-codex = "/opt/codex --fast"
+codex = "codex --fast"
 
 [remote_hooks]
 launch_cmd = "l"

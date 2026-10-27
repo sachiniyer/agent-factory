@@ -141,7 +141,14 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	for _, field := range strings.Fields(string(out)) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
-		if err != nil || panePID <= 1 {
+		if err != nil {
+			// The parse error carries the case-specific text: a dead pane
+			// missing its @af_pane_pid stamp fails closed with an actionable
+			// message (#5319), where a flat "invalid pane pid" would hide it.
+			captureErrs = append(captureErrs, fmt.Errorf("%w in list-panes output", err))
+			continue
+		}
+		if panePID <= 1 {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
