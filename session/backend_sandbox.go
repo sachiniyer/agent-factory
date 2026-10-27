@@ -172,6 +172,11 @@ type sandboxProvisioner struct {
 
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
+	// Before anything is created on the host: a missing tool refuses the create
+	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
+	if err := w.checkHostPrereqs(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
