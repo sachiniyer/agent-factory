@@ -76,6 +76,12 @@ func (m *Manager) SetAttention(req SetAttentionRequest) (string, string, error) 
 		}
 	}
 
+	// opLock→repoStartLock is the ordering the kill/archive paths use: the write
+	// below persists the whole row, so without the op lock it can checkpoint a
+	// handoff's provisional swap state that the swap later reverts in memory.
+	opLock := m.opLockFor(daemonInstanceKey(repoID, title))
+	opLock.Lock()
+	defer opLock.Unlock()
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
@@ -171,6 +177,11 @@ func (m *Manager) clearAttentionNow(instance *session.Instance, setAt time.Time)
 	if !ok {
 		return
 	}
+	// Same opLock→repoStartLock ordering as SetAttention: the whole-row persist
+	// must not interleave with a handoff's provisional swap state.
+	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
+	opLock.Lock()
+	defer opLock.Unlock()
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
@@ -191,13 +202,21 @@ func (m *Manager) clearAttentionNow(instance *session.Instance, setAt time.Time)
 // user types into the agent pane.
 type attentionClearingBinding struct {
 	ptyTabBinding
-	clear func()
+	instance *session.Instance
+	clear    func(time.Time)
 }
 
 func (b attentionClearingBinding) input(p []byte) error {
+	// The keystroke answers the request set when it was sent, so capture it
+	// before transport: a request that lands while input is in flight is a
+	// different question and must survive this clear.
+	var answered time.Time
+	if seen := b.instance.Attention(); seen != nil {
+		answered = seen.SetAt
+	}
 	err := b.ptyTabBinding.input(p)
-	if err == nil && isTypedInput(p) {
-		b.clear()
+	if err == nil && isTypedInput(p) && !answered.IsZero() {
+		b.clear(answered)
 	}
 	return err
 }
