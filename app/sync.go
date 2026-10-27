@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -607,6 +608,16 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
+	// Record the roster the TUI observed at swap time: the daemon builds a
+	// recreated session's tabs one call at a time, so a poll can swap in a
+	// partial roster, and the real-TUI scenarios (scripts/tui-swap-pane-repin-
+	// scenario.sh, #5620) need this evidence to tell that setup race from a
+	// re-pin defect.
+	tabNames := make([]string, 0, len(inst.GetTabs()))
+	for _, tab := range inst.GetTabs() {
+		tabNames = append(tabNames, tab.Name)
+	}
+	log.InfoLog.Printf("same-title swap of %q: replacement roster [%s]", d.Title, strings.Join(tabNames, ","))
 	// Pre-pin the cursor to the surviving selectedTitle BEFORE any
 	// sidebar-reading relayout this swap can trigger (#5298 ordering, applied
 	// to the swap path). ReplaceInstanceByTitle re-sorts the whole projection,
