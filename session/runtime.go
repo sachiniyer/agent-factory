@@ -68,6 +68,9 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
+	// Host is the listed host the session was placed on (W6.3); empty means the
+	// repo's own ssh settings, or the default_host where the runtime allows it.
+	Host string
 	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
 	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
 	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new

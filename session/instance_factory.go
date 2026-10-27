@@ -81,6 +81,11 @@ type InstanceOptions struct {
 	// `backend` config key. Empty means "resolve from config" — which defaults
 	// to local, so an unset Backend keeps the local default byte-identical.
 	Backend BackendKind
+	// Host names the listed host (global `hosts`, #5571 W6.3) the session runs on.
+	// It selects the ssh runtime: with Backend empty the kind resolves to ssh, and
+	// with any other explicit Backend the create is refused. Empty means "no pick"
+	// — the default_host applies only where the resolved backend is ssh.
+	Host string
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch. The worktree is marked external so kill/cleanup
@@ -156,6 +161,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		RepoRoot:              absPath,
 		Title:                 opts.Title,
 		Program:               opts.Program,
+		Host:                  opts.Host,
 		SessionEnvPassthrough: provisionSessionEnv,
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
@@ -303,6 +309,14 @@ func discardUnusableSandbox(who sandboxIdentity, res ProvisionResult, creds Sand
 // session). A config that loads but declares an invalid backend value surfaces
 // that error — misconfiguration should fail the create, not silently run local.
 func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
+	if opts.Host != "" {
+		// A host pick is an ssh placement. An explicit backend that is not ssh
+		// contradicts it; refuse rather than guess which was meant.
+		if opts.Backend != "" && opts.Backend != BackendSSH {
+			return "", fmt.Errorf("--host %q places a session on a listed host over ssh, which contradicts --backend %s; drop one of them", opts.Host, opts.Backend)
+		}
+		return BackendSSH, nil
+	}
 	if opts.Backend != "" {
 		return ParseBackendKind(string(opts.Backend))
 	}

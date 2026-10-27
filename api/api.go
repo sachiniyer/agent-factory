@@ -706,6 +706,7 @@ func init() {
 	// advertise a stale set — but knowing a backend EXISTS is not knowing this
 	// project can use it, which is what "af sessions backends" answers (#1933).
 	// Naming that verb here is the only place a --backend reader will look.
+	sessionsCreateCmd.Flags().StringVar(&createHostFlag, "host", "", "Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run \"af sessions backends\" to see each host and whether it is usable")
 	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run \"af sessions backends\" for which of these this project can actually use, and why not")
 
 	// Tab addressing for `sessions preview` (#1948). The daemon's PreviewRequest

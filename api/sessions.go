@@ -366,6 +366,7 @@ var (
 	createHereFlag    bool
 	createInPlaceFlag bool
 	createBackendFlag string
+	createHostFlag    string
 )
 
 func resolveCreateTitle(args []string, nameFlag string) (string, error) {
@@ -474,6 +475,12 @@ pointing at one).`,
 		if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
 			return jsonError(err)
 		}
+		if createHostFlag != "" && createBackendFlag != "" && createBackendFlag != config.BackendSSH {
+			return jsonError(fmt.Errorf("--host places the session on a listed host over ssh and is incompatible with --backend %s; drop one of them", createBackendFlag))
+		}
+		if inPlace && createHostFlag != "" {
+			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --host"))
+		}
 		if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
 			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
 		}
@@ -488,6 +495,7 @@ pointing at one).`,
 		// user never typed.
 		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
 			Backend: session.BackendKind(createBackendFlag),
+			Host:    createHostFlag,
 		}, workspace)
 		if err != nil {
 			return jsonError(err)
@@ -521,6 +529,7 @@ pointing at one).`,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
+			Host:     createHostFlag,
 		})
 		if err != nil {
 			return jsonError(err)

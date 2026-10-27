@@ -53,6 +53,11 @@ type SSHRuntimeCleanupData struct {
 	Config     config.SSHConfig `json:"config"`
 	SessionDir string           `json:"session_dir"`
 	RemotePID  string           `json:"remote_pid,omitempty"`
+	// HostName is the listed host (global `hosts`) the session was placed on, or
+	// empty for a session built from the repo's own ssh settings. Config above is
+	// the resolved copy the reap composes from, so a later edit to the host list
+	// cannot redirect a teardown; this records the operator's name for it (W6.3).
+	HostName string `json:"host_name,omitempty"`
 	// DialAddress is the literal address this session was provisioned on: the one
 	// thing the record knows and no re-resolution can recover. Without it, reaping a
 	// multi-address name could reach a DIFFERENT machine, find nothing, report
