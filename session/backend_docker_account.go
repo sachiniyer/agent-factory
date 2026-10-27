@@ -824,11 +824,15 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "stat", "-c", "%u:%g", dockerAccountHome)
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot identify the mounted account owner: %s: %w", strings.TrimSpace(string(out)), err)
+		// The owner read writes nothing under the account bind; the only
+		// data-root writes are dockerd's privileged exec bookkeeping —
+		// daemon-write class, never the unprivileged-writer window.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the mounted account owner: %s: %w", strings.TrimSpace(string(out)), err), dockerOpDaemonWrite)
 	}
 	owner, err := parseContainerOwner(string(out))
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot identify the mounted account owner: %w", err)
+		// af failed to read the engine's answer — nothing reached a writer.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the mounted account owner: %w", err), dockerOpLocal)
 	}
 	script := fmt.Sprintf("mkdir -p %s %s && chown %s %s %s",
 		shellQuote(dockerAccountRuntimeHome), shellQuote(dockerWorkspaceDir), owner,
@@ -836,7 +840,7 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
 	if err != nil {
-		return fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err)
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
 	}
 	p.containerUser = owner
 	return nil

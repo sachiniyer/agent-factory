@@ -179,6 +179,37 @@ test("saveNotice tolerates an older daemon that sends no address", () => {
   assert.doesNotMatch(notice, /undefined/);
 });
 
+test("saveNotice surfaces a write-only warning the daemon applied silently (default_accounts)", () => {
+  // #5266: for an applied-live write the only warning is per-write — it lands on
+  // resp.result.warnings while resp.warnings stays empty. The TUI falls back to
+  // the result channel (ui/config_target.go); the web form must too, or the one
+  // place that tells the operator the account is unregistered disappears.
+  const warning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      // warnings absent: the apply channel is silent for an applied
+      // default_accounts write
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${warning}`);
+});
+
+test("saveNotice prefers the apply-time warnings when both channels speak", () => {
+  // The fallback is not a union: a daemon-running edit can carry differently
+  // worded versions of the same notice on both channels, and the TUI shows
+  // exactly the apply-time one. The surfaces must agree.
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "0.0.0.0:8443", path: "/tmp/config.toml", requires_restart: false, warnings: ["write-time phrasing"] },
+      warnings: ["apply-time phrasing"],
+    }),
+  );
+  assert.doesNotMatch(notice, /write-time phrasing/);
+  assert.match(notice, /apply-time phrasing/);
+});
+
 test("setConfigValue surfaces the validator's own message on a rejected value", async () => {
   // The daemon returns the validator's error verbatim; a 500 is how this API
   // reports a handler error (daemon/httpserver.go). The browser must not rewrite

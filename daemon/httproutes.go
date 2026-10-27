@@ -490,6 +490,27 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(CheckpointProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CheckpointProposal) },
 	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetProposalPushMode",
+		Description: "Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status.",
+		requestType: reflect.TypeOf(SetProposalPushModeRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProposalPushMode) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/HoldProposalPush",
+		Description: "Hold the session's pending proposal push until the next human save, and return its push status.",
+		requestType: reflect.TypeOf(HoldProposalPushRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HoldProposalPush) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SendProposalChanges",
+		Description: "Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status.",
+		requestType: reflect.TypeOf(SendProposalChangesRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendProposalChanges) },
+	},
 	// Tasks.
 	{
 		Method:      http.MethodPost,

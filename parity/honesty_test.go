@@ -95,11 +95,14 @@ func TestDerivationSeesLazyCobraSurface(t *testing.T) {
 // It reads what the web SENDS, which is not the same as what a user can DO. #1968
 // could not prove end-to-end that a working remote session is creatable from the
 // browser — provisioning was observed but the program-start timed out, cause
-// unresolved — so the inventory records session.create.opt.backend's web cell as
-// `partial`, not `yes`. `yes` needs someone to have created a working remote
-// session from a browser and said so. This is the package's oldest blind spot,
-// "reachable != user-settable" under Known blind spots: the derivation reads call
-// sites, not outcomes. #1936 is the same trap mirrored.
+// unresolved — so the inventory held session.create.opt.backend's web cell at
+// `partial`, not `yes`, until TestWebCreateSessionOnHookBackend
+// (integration/web_remote_hook_test.go) drove the browser's exact endpoints
+// through a working hook-backend create and the web-driver selftest submitted
+// the + New modal itself with hook selected (the modal-to-wire seam this
+// static derivation cannot see). This remains the package's oldest
+// blind spot class — "reachable != user-settable" under Known blind spots: the
+// derivation reads call sites, not outcomes. #1936 is the same trap mirrored.
 func TestDerivationSeesWebCreateOptions(t *testing.T) {
 	sent, unanalyzable := webCallBodyChecked(t, "CreateSession")
 	if len(unanalyzable) > 0 {
