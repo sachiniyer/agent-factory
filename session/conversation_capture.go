@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -768,11 +769,13 @@ func openCodexRollout(path string) (*os.File, error) {
 }
 
 // codexSessionMetaReadCap bounds the bytes working-directory classification
-// reads for a rollout's session_meta — always the first JSONL record.
-// Correlation inspects that header on every poll, so reading whole transcripts
-// just to reach the newline was the bulk of a long receipt wait's I/O (#5471
-// review); the cap keeps even a pathological first record inside the bound.
-const codexSessionMetaReadCap = 1 << 20
+// reads for a rollout's session_meta — always the first JSONL record. The read
+// streams the record fragment-wise, so a short header costs a short read while
+// a legitimately large session_meta (a fully populated base_instructions/tools
+// payload can exceed 1 MiB) still parses whole instead of truncating into an
+// unclassifiable file. The cap stays a hard bound against unbounded memory on
+// a pathological first record (#5471 review, #5486 review).
+const codexSessionMetaReadCap = 8 << 20
 
 func readCodexRolloutFirstLine(path string) ([]byte, error) {
 	file, err := openCodexRollout(path)
@@ -781,12 +784,23 @@ func readCodexRolloutFirstLine(path string) ([]byte, error) {
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(io.LimitReader(file, codexSessionMetaReadCap))
-	if err != nil {
-		return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
+	reader := bufio.NewReader(file)
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		line = append(line, fragment...)
+		if len(line) > codexSessionMetaReadCap {
+			return nil, fmt.Errorf("read Codex rollout %s: first record exceeds %d-byte bound", path, codexSessionMetaReadCap)
+		}
+		switch {
+		case err == nil, errors.Is(err, io.EOF):
+			return bytes.TrimSuffix(line, []byte{'\n'}), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		default:
+			return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
+		}
 	}
-	line, _, _ := bytes.Cut(data, []byte{'\n'})
-	return line, nil
 }
 
 func jsonValueContainsPrompt(value any, prompt string) bool {

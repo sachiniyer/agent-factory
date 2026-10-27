@@ -802,6 +802,47 @@ func TestCodexRolloutWorkingDir_ObjectSourceKeepsCwd(t *testing.T) {
 	require.Equal(t, workDir, cwd)
 }
 
+// A session_meta larger than the old 1 MiB read cap is a valid record: Codex
+// embeds full base_instructions and tool payloads in it. Truncating the record
+// left the launch permanently uncorrelatable; the streamed read must deliver
+// the complete line so the cwd still classifies (#5486 review).
+func TestCodexRolloutWorkingDir_FirstRecordLargerThanOneMiBStillParses(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	path := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-41-059f386f-7206-7fc2-803b-f7045e07a246.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": workDir, "base_instructions": strings.Repeat("x", 2<<20)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(meta, '\n'), 0644))
+
+	cwd, ok := codexRolloutWorkingDir(path)
+	require.True(t, ok, "a complete >1 MiB session_meta record must still classify")
+	require.Equal(t, workDir, cwd)
+}
+
+// The streamed read keeps a hard bound: a first record larger than the cap
+// stays unclassifiable rather than growing memory without limit.
+func TestCodexRolloutWorkingDir_FirstRecordBeyondReadCapStaysUnclassifiable(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	path := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-42-069f386f-7206-7fc2-803b-f7045e07a247.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	meta, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": workDir, "base_instructions": strings.Repeat("y", codexSessionMetaReadCap)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(meta, '\n'), 0644))
+
+	_, ok := codexRolloutWorkingDir(path)
+	require.False(t, ok, "a first record beyond the read cap must remain unclassifiable")
+}
+
 // A tracked pool file whose size has not passed its boundary is never opened,
 // and a quiet file is only re-statted on the slow cadence — poll cost must not
 // scale as pool size x the 50ms tick (#5486 review). Once the file grows past
