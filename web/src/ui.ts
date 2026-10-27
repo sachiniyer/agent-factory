@@ -44,6 +44,7 @@ import {
   isArchived,
   isCreating,
   idleReasonDetail,
+  unreachableDetail,
   isLimitReached,
   isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingAgentHandoffDeliveryConfirmable,
@@ -3421,14 +3422,23 @@ export function sessionRow(
   const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  // The outage detail outranks the idle reason: it explains why every other
+  // fact on the row may be stale, so it renders even on unselected rows — the
+  // TUI keeps it for the same reason (#5571 W1.3).
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts: Array<Node | string> = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
   ];
-  if (selected && idleDetail) {
+  if ((selected || outageDetail !== "") && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      // Repaint hook: refreshIdleReasonAges re-ages the outage without a
+      // session event, exactly like the pane-churn arm below.
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
@@ -3507,6 +3517,23 @@ export function sessionRow(
 /** Patch relative pane ages without waiting for a session event or rebuilding
  * the rail. The row's branch, controls, selection, and scroll position survive. */
 export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()): void {
+  for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError },
+      } as SessionData,
+      now,
+    );
+    idle.textContent = detail ? ` · ${detail}` : "";
+    const row = idle.closest(".af-row") as HTMLElement | null;
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+      );
+    }
+  }
   for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {

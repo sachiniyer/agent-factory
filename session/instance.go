@@ -494,6 +494,18 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+	// unreachableSince/unreachableErr are the live-probe OUTAGE observation
+	// (#5571 W1.3): set when a remote observation goes unanswered, retired on
+	// the next answered probe or any other transport evidence (attach stream,
+	// runtime replacement, tombstone). They are an observation flag, not a
+	// liveness — unreachable coexists with Running/Ready/Lost because an
+	// unanswered probe is not evidence about the agent, and the remote-loss
+	// debounce deliberately preserves last-known liveness underneath.
+	// Projection-only: ForStorage scrubs them, so a restarted daemon re-derives
+	// the claim from its own probes instead of inheriting an outage it never
+	// observed. Guarded by i.mu.
+	unreachableSince time.Time
+	unreachableErr   string
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

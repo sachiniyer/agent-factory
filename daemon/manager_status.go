@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -445,6 +446,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
@@ -454,9 +456,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// have been taken. Feeding it to the turn watch keeps the boundary-age
 	// check from being inflated by the round trip's own latency (#5221 review).
 	capturedAt := nowFunc()
-	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
-	// Whatever happened, no loss episode survives an attach (see above).
+	obs, _, backstopGeneration, observedOp, epoch, err := instance.SnapshotAgent()
+	// Whatever happened, no loss episode survives an attach (see above). The
+	// outage flag retires on the same evidence — an attach streams the pane,
+	// which no unreachable sandbox can serve — but a CURRENT-generation probe
+	// that still went unanswered re-raises it below (#5571 W1.3).
 	m.clearRemoteLoss(key)
+	instance.ClearUnreachable()
 	if observedOp != session.OpNone {
 		return
 	}
@@ -466,6 +472,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		// success inside the gap horizon inherits silence nobody watched
 		// (#5221 review).
 		instance.NotePaneCaptureFailed()
+		if instance.AgentObservationCurrent(backstopGeneration) && !errors.Is(err, session.ErrRemoteSandboxNotProvisioned) {
+			instance.SetUnreachable(err)
+		}
 		return
 	}
 	// A probe that cannot answer is dropped whole — the doc above's own rule.
@@ -656,6 +665,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	key := stableSessionKey(repoID, instance)
 	if instance.UserKilled() {
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		m.finishUserKill(repoID, instance)
 		return
 	}
@@ -666,6 +676,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// explicit user action may move this record into the UserKilled branch above.
 	if instance.StartupStateUnknown() {
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	manualSwap, _ := instance.PendingManualAccountSwap()
@@ -675,6 +686,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// normal status probe must not rewrite its checkpointed liveness and route
 		// it through ordinary recovery. Manual checkpoints can also be healthy.
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	if !instance.Started() {
@@ -687,12 +699,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// the old Loading/Deleting skip (#1195). The op may also be REPLACING the
 		// runtime under us, which is the other reason its failure history dies here.
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	if instance.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): no tmux to probe, inert (started=false) so already
 		// skipped by !Started above — belt-and-suspenders against a future change.
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	if m.isPollPaused(repoID, instance.Title, instance.ID) {
@@ -726,6 +740,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// renews it for the whole attach), so a surviving count would let the first
 		// blip after detach re-provision a sandbox the user was just typing into.
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 
@@ -743,6 +758,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	before := instance.GetLiveness()
@@ -769,6 +785,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
+		instance.ClearUnreachable()
 		return
 	}
 	if err != nil {
@@ -806,6 +823,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			before,
 			beforeReset,
 			epoch,
+			err,
 		)
 		return
 	}
@@ -852,6 +870,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	if !m.clearRemoteLossAtGeneration(key, instance, observationGeneration) {
 		return
 	}
+	// The answer retires the outage flag under the same generation gate: a stale
+	// predecessor success must not un-mark an outage a successor runtime earned.
+	instance.ClearUnreachableAtObservation(observationGeneration)
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).

@@ -647,6 +647,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
 		changed = true
 	}
+	// The outage flag is daemon truth on every snapshot: this is the reconcile
+	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
+	// runs (#5571 W1.3).
+	if inst.ReconcileUnreachable(d.Unreachable) {
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
