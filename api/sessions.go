@@ -30,9 +30,9 @@ var SessionsCmd = &cobra.Command{
 
 var (
 	createSessionViaDaemon  = daemon.CreateSession
-	killSessionViaDaemon    = daemon.KillSession
-	archiveSessionViaDaemon = daemon.ArchiveSession
-	restoreSessionViaDaemon = daemon.RestoreSession
+	killSessionViaDaemon    = routedKillSession
+	archiveSessionViaDaemon = routedArchiveSession
+	restoreSessionViaDaemon = routedRestoreSession
 	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
 		// the local control socket would report THIS host's archives for a
@@ -47,7 +47,7 @@ var (
 		return client.PruneSessions(req)
 	}
 	sessionsArchiveSelf     bool
-	sendPromptViaDaemon     = daemon.SendPromptWithStatus
+	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
 	createTabViaDaemon      = daemon.CreateTab
 	closeTabViaDaemon       = daemon.CloseTab

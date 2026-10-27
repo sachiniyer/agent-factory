@@ -1,8 +1,12 @@
 package api
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -14,7 +18,7 @@ import (
 // — so the CLI cannot report a different catalog than the web, and a backend
 // added server-side reaches both with no client change. Held in a var so tests
 // can answer without a live daemon, like the other *ViaDaemon seams.
-var listBackendsViaDaemon = daemon.ListBackends
+var listBackendsViaDaemon = routedListBackends
 
 var sessionsBackendsCmd = &cobra.Command{
 	Use:   "backends",
@@ -57,15 +61,35 @@ Example:
 		// including its "--repo is required" and af-home refusals. A separate
 		// resolver could answer about a different project than the create it is
 		// meant to predict.
-		repo, err := resolveRepo()
+		repoPath, err := backendsRepoPath()
 		if err != nil {
 			return jsonError(err)
 		}
 
-		resp, err := listBackendsViaDaemon(daemon.ListBackendsRequest{RepoPath: repo.Root})
+		resp, err := listBackendsViaDaemon(daemon.ListBackendsRequest{RepoPath: repoPath})
 		if err != nil {
 			return jsonError(err)
 		}
 		return jsonOut(resp)
 	},
+}
+
+// backendsRepoPath is the project path the catalog is computed for. Locally it
+// is resolveRepo's root. Against a remote target the path is sent AS TYPED —
+// the daemon resolves it on its own filesystem, and resolving it here would
+// expand ~ against the caller's home and reject a path only the daemon has.
+// --repo is required there: this machine's cwd names no project the daemon has.
+func backendsRepoPath() (string, error) {
+	if apiclient.IsRemoteTarget() {
+		if strings.TrimSpace(repoFlag) == "" {
+			return "", fmt.Errorf("--repo is required against the daemon at %s: the catalog is computed for a project path on the DAEMON's host. "+
+				"Pass --repo <path on the daemon host>", apiclient.RemoteTargetURL())
+		}
+		return repoFlag, nil
+	}
+	repo, err := resolveRepo()
+	if err != nil {
+		return "", err
+	}
+	return repo.Root, nil
 }
