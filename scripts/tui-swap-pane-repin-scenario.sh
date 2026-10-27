@@ -88,7 +88,7 @@ selected_name() {
     af_capture | grep -oE '▾[[:space:]]+[^[:space:]●○◌]+' | head -1 | sed 's/▾[[:space:]]*//'
 }
 
-run_leg() { # <leg> <binary>
+run_leg_once() { # <leg> <binary>
     local leg="$1" bin="$2"
     export AF_DRIVER_BIN="$2"
 
@@ -148,6 +148,29 @@ claude = "bash"'
     printf '%s\t%s\t%s\n' "swap-panerepin" "$sel" "$tab" >>"$EVID/$leg-results.tsv"
     _af_log "$leg/swap-panerepin -> selected='$sel' active_tab='$tab'"
     return 0
+}
+
+# run_leg retries run_leg_once: the replacement's tabs are created by separate
+# `af` invocations after the create, so a 750ms snapshot poll can land between
+# them and swap in a PARTIAL roster ([agent, b], "a" not yet created). That
+# correctly closes the pane on "a" and lands on "b", the sibling in the vacated
+# slot (#5298) — a different timeline from the equivalent-tab-by-name path this
+# scenario exercises, and not one the scenario can pin from outside the TUI
+# process (#5620: it passed on #5308's own head by timing luck). Retry up to 3
+# times until the leg reaches its expected outcome: the branch leg must land on
+# "a", the control leg on anything but "a". A leg that never does is reported
+# by the verdict below; the partial-roster timeline itself is pinned by
+# TestSwapSameTitle_PartialRosterThenTabArrives in app/.
+run_leg() { # <leg> <binary>
+    local leg="$1" bin="$2" attempt tab
+    for attempt in 1 2 3; do
+        rm -f "$EVID/$leg-results.tsv"
+        run_leg_once "$leg" "$bin" || return 1
+        tab="$(awk -F'\t' '{print $3}' "$EVID/$leg-results.tsv")"
+        if [ "$leg" = branch ] && [ "$tab" = a ]; then return 0; fi
+        if [ "$leg" = master ] && [ "$tab" != a ]; then return 0; fi
+        _af_log "$leg: attempt $attempt landed on '$tab' (partial-roster poll race?); retrying"
+    done
 }
 
 run_leg master "$HOME/bin/af.master"
