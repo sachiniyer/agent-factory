@@ -158,7 +158,7 @@ func TestReapGroupOrphansCollectsKilledGrandchildren(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	reapGroupOrphans(t, pgid)
+	ReapGroupOrphans(t, pgid)
 	var status unix.WaitStatus
 	var rusage unix.Rusage
 	if _, err := unix.Wait4(grandchild, &status, unix.WNOHANG, &rusage); !errors.Is(err, unix.ECHILD) {

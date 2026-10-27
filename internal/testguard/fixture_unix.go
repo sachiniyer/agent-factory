@@ -96,13 +96,13 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 		// this helper exists to contain, in exactly the failure conditions
 		// (a transient fork/exec refusal) that produce one. Kill the group
 		// and collect the leader before failing; the pin never started, so
-		// nothing else holds the id. reapGroupOrphans runs for the same
+		// nothing else holds the id. ReapGroupOrphans runs for the same
 		// reason as in the normal cleanup: a leader that already forked a
 		// child leaves that grandchild orphaned to this process under the
 		// subreaper mark, and collecting only the leader strands it as a
 		// zombie for a non-reaping container PID 1 (#4417 review).
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		reapGroupOrphans(t, cmd.Process.Pid)
+		ReapGroupOrphans(t, cmd.Process.Pid)
 		_, _ = cmd.Process.Wait()
 		t.Fatalf("start fixture group pin: %v", err)
 	}
@@ -113,12 +113,12 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	// Process.Wait rather than cmd.Wait: a test may already hold a cmd.Wait
 	// goroutine, and concurrent Cmd.Wait calls are a data race on
 	// ProcessState — os.Process.Wait is the concurrent-safe reap.
-	// reapGroupOrphans sits between the kill and the Waits so the grandchildren
+	// ReapGroupOrphans sits between the kill and the Waits so the grandchildren
 	// the kill just orphaned are collected while the group's members are
 	// confirmed dead — the Waits then no-op on whatever the drain took first.
 	t.Cleanup(func() { _, _ = pin.Process.Wait() })
 	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
-	t.Cleanup(func() { reapGroupOrphans(t, cmd.Process.Pid) })
+	t.Cleanup(func() { ReapGroupOrphans(t, cmd.Process.Pid) })
 	KillProcessGroupOnCleanup(t, cmd.Process.Pid)
 	return cmd
 }

@@ -69,12 +69,15 @@ func reapOrphanedChild(t testing.TB, pid int) {
 	}
 }
 
-// reapGroupOrphans collects the members of a just-killed fixture group that
-// were reparented HERE under the subreaper mark StartGroupProcess set: the
+// ReapGroupOrphans collects the members of a just-killed group that were
+// reparented HERE under the subreaper mark StartGroupProcess set: the
 // grandchildren a whole-group SIGKILL orphans — including the pin's own
 // `sleep 1`, so even a childless fixture leaves one — would otherwise sit as
 // permanent zombies under a container init that never collects, a
-// process-table entry every fixture test leaks (#4417 review).
+// process-table entry every fixture test leaks (#4417 review). It also covers
+// a process the fixture spawned into its OWN group — hooks.go launches hooks
+// that way — whose members the runner's death adopts to this test binary
+// outside the fixture group's reap (#4417 review).
 //
 // waitid(P_PGID) scopes the reap to the killed group's members: a foreign
 // child of this test binary — adopted under the same subreaper flag, or a
@@ -86,7 +89,7 @@ func reapOrphanedChild(t testing.TB, pid int) {
 // (it can mean "orphans still in flight"); it must hold across several
 // polls. The loop is bounded so a member wedged in an unkillable state costs
 // this cleanup its budget rather than hanging the test binary.
-func reapGroupOrphans(t testing.TB, pgid int) {
+func ReapGroupOrphans(t testing.TB, pgid int) {
 	t.Helper()
 	var info unix.Siginfo
 	var rusage unix.Rusage

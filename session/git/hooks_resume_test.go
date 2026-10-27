@@ -49,6 +49,13 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 		testguard.ExpectedOwnerEnv()...)
 	testguard.StartGroupProcess(t, runner)
 	hookPID := waitForPidFile(t, pid, 10*time.Second)
+	// The hook lives in its own process group, so the group reap
+	// StartGroupProcess registered for runner does not cover it: runner's
+	// death adopts the hook to this test binary under the subreaper mark, and
+	// it would sit a zombie until the package exits even after the group kill
+	// below (#4417 review). Registered before the kill so LIFO order runs
+	// kill-then-reap.
+	t.Cleanup(func() { testguard.ReapGroupOrphans(t, hookPID) })
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
 	_ = runner.Process.Kill()
 	_ = runner.Wait()

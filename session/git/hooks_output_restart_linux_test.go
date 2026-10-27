@@ -58,6 +58,10 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForPidFile(t, pidFile, 20*time.Second)
+	// Same adopted-orphan reap as hooks_resume_test.go: the hook's own group
+	// is outside the runner group's reap, so it needs its own kill-then-reap
+	// pair (LIFO: this reap cleanup is registered before the kill below).
+	t.Cleanup(func() { testguard.ReapGroupOrphans(t, hookPID) })
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
 	if err := runner.Process.Kill(); err != nil {
 		t.Fatalf("stop helper daemon generation: %v", err)
