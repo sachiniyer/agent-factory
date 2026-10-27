@@ -438,7 +438,7 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 	// any mounts that could carry a writer's own credentials onto the
 	// probed filesystem. `docker run --user`/`--userns=host` land in the
 	// first two; the third is the overlay-bypass proof.
-	containerIdentity := func(user, usernsMode string, mounts ...string) func(args []string) ([]byte, error) {
+	containerIdentityDest := func(dest, user, usernsMode string, mounts ...string) func(args []string) ([]byte, error) {
 		return func(args []string) ([]byte, error) {
 			if args[0] == "inspect" {
 				var ms strings.Builder
@@ -446,13 +446,16 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 					if i > 0 {
 						ms.WriteString(",")
 					}
-					fmt.Fprintf(&ms, `{"Type":"bind","Source":%q,"Destination":"/m%d"}`, src, i)
+					fmt.Fprintf(&ms, `{"Type":"bind","Source":%q,"Destination":%q}`, src, dest)
 				}
 				return []byte(fmt.Sprintf(`{"Config":{"User":%q},"HostConfig":{"UsernsMode":%q},"Mounts":[%s]}`,
 					user, usernsMode, ms.String())), nil
 			}
 			return failExec(args)
 		}
+	}
+	containerIdentity := func(user, usernsMode string, mounts ...string) func(args []string) ([]byte, error) {
+		return containerIdentityDest("/workspace", user, usernsMode, mounts...)
 	}
 
 	// stubSameFilesystem fakes the st_dev comparison — the mount source is
@@ -654,6 +657,128 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 		assert.False(t, errors.Is(err, syscall.ENOSPC),
 			"a container that opted out of remap writes as real uid 0: %v", err)
 	})
+
+	vfsInfo := func(t *testing.T) []byte {
+		info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(info, &raw))
+		raw["Driver"] = "vfs"
+		info, err := json.Marshal(raw)
+		require.NoError(t, err)
+		return info
+	}
+
+	t.Run("vfs driver makes every exec write self-credentialed", func(t *testing.T) {
+		// vfs has no overlay mounter: the writable layer is plain
+		// directories under the data root, so a non-root exec's write hits
+		// the filesystem with its own fsuid whether or not a bind exists —
+		// the Bavail window IS its ENOSPC (#5382 review).
+		fakeDockerCapacityProbe(t, vfsInfo(t), containerIdentity("1000", ""))
+		reservedWindow(t)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "vfs-user", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"on vfs a non-root exec writes its own layer with its own creds — no bind needed: %v", err)
+	})
+
+	t.Run("a bind off the write roots is not bypass evidence", func(t *testing.T) {
+		// A credential or cache bind that shares the data-root filesystem
+		// but mounts somewhere the failed step never writes — /srv/cache —
+		// proves nothing about where THIS exec wrote. Treating it as the
+		// bypass would hand every exec failure the Bavail window (#5382
+		// review).
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+			containerIdentityDest("/srv/cache", "1000", "", "/var/lib/docker/cache"))
+		reservedWindow(t)
+		stubSameFilesystem(t, true)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "off-target-bind", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, syscall.ENOSPC),
+			"an unrelated bind sharing the fs is not evidence the step wrote through it: %v", err)
+	})
+
+	t.Run("a bind covering a write root counts", func(t *testing.T) {
+		// The positive half of the destination check: a bind mounted AT
+		// the workspace is exactly where the failed exec wrote.
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+			containerIdentity("1000", "", "/var/lib/docker/worktree"))
+		reservedWindow(t)
+		stubSameFilesystem(t, true)
+		p := &dockerProvisioner{
+			image: "img:latest",
+			spec:  ProvisionSpec{Title: "on-target-bind", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"a data-root bind over the workspace is the bypass the session exec wrote through: %v", err)
+	})
+}
+
+// TestProvisionFailure_ContainerdStoreRootIsProbed is the #5382-review
+// containerd-image-store coverage: on Engine 29's default layout snapshots
+// and the metadata bolt db live under the containerd root, so a daemon-side
+// write can fail ENOSPC on a filesystem DockerRootDir doesn't describe. The
+// conventional root is probed through the same co-location proof — and only
+// when the engine reports the containerd snapshotter.
+func TestProvisionFailure_ContainerdStoreRootIsProbed(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+	t.Setenv("DOCKER_CONTEXT", "")
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+
+	containerdInfo := func(t *testing.T) []byte {
+		info := dockerInfoAnswer(t, "/var/lib/docker", host, false)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(info, &raw))
+		raw["DriverStatus"] = [][]string{{"driver-type", "io.containerd.snapshotter.v1"}}
+		info, err := json.Marshal(raw)
+		require.NoError(t, err)
+		return info
+	}
+	failRun := func(args []string) ([]byte, error) {
+		if args[0] == "run" {
+			return []byte("Error response from daemon: no space left on device\n"), fmt.Errorf("exit status 125")
+		}
+		return nil, nil
+	}
+
+	t.Run("a full containerd root fails the same docker run", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, containerdInfo(t), failRun)
+		old := statfsFull
+		statfsFull = func(dir string) (bool, error) { return dir == dockerContainerdRoot, nil }
+		t.Cleanup(func() { statfsFull = old })
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "ctr-store"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"a full containerd store root must produce the same verdict as a full data root: %v", err)
+		assert.Contains(t, err.Error(), dockerContainerdRoot,
+			"the evidence must name the filesystem that is actually full")
+	})
+
+	t.Run("a non-containerd engine never probes the containerd root", func(t *testing.T) {
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		var probed []string
+		old := statfsFull
+		statfsFull = func(dir string) (bool, error) { probed = append(probed, dir); return true, nil }
+		t.Cleanup(func() { statfsFull = old })
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "ov2"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		require.True(t, errors.Is(err, syscall.ENOSPC))
+		assert.NotContains(t, probed, dockerContainerdRoot,
+			"an engine without the containerd image store has no second write root to probe")
+	})
 }
 
 // TestProvisionFailure_LocalStepFailureGetsNoEvidence is the #5382-review
@@ -783,7 +908,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 					return []byte(dockerCreatedID + "\n"), nil
 				case args[0] == "inspect":
 					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
-						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/work"}]}`), nil
+						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/workspace"}]}`), nil
 				case args[0] == "exec":
 					return nil, fmt.Errorf("exit status 1")
 				}
@@ -811,7 +936,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 					return []byte(dockerCreatedID + "\n"), nil
 				case args[0] == "inspect":
 					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
-						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/work"}]}`), nil
+						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/workspace"}]}`), nil
 				case args[0] == "exec":
 					return []byte("\n"), nil
 				}

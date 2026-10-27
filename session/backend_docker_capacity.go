@@ -51,12 +51,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
@@ -135,10 +138,12 @@ func dockerStepErr(err error, op dockerOpClass) error {
 // runs rootless or remaps container uids. A field the engine did not report
 // stays empty and keeps the corresponding proof from being made.
 type dockerEngineInfo struct {
-	root     string
-	name     string
-	rootless bool
-	userns   bool
+	root            string
+	name            string
+	driver          string
+	containerdStore bool
+	rootless        bool
+	userns          bool
 }
 
 // parseDockerEngineInfo decodes the `docker info` snapshot. The dockerExec
@@ -151,9 +156,11 @@ type dockerEngineInfo struct {
 // appends itself — and nothing else is trusted as privilege evidence.
 func parseDockerEngineInfo(out []byte) (dockerEngineInfo, bool) {
 	var raw struct {
-		DockerRootDir   string   `json:"DockerRootDir"`
-		Name            string   `json:"Name"`
-		SecurityOptions []string `json:"SecurityOptions"`
+		DockerRootDir   string     `json:"DockerRootDir"`
+		Name            string     `json:"Name"`
+		Driver          string     `json:"Driver"`
+		DriverStatus    [][]string `json:"DriverStatus"`
+		SecurityOptions []string   `json:"SecurityOptions"`
 	}
 	start := strings.IndexByte(string(out), '{')
 	if start < 0 {
@@ -163,8 +170,18 @@ func parseDockerEngineInfo(out []byte) (dockerEngineInfo, bool) {
 		return dockerEngineInfo{}, false
 	}
 	info := dockerEngineInfo{
-		root: strings.TrimSpace(raw.DockerRootDir),
-		name: strings.TrimSpace(raw.Name),
+		root:   strings.TrimSpace(raw.DockerRootDir),
+		name:   strings.TrimSpace(raw.Name),
+		driver: strings.TrimSpace(raw.Driver),
+	}
+	for _, pair := range raw.DriverStatus {
+		// Engine 29's default image store reports the containerd snapshotter
+		// through DriverStatus — snapshots and the metadata db then live
+		// under the containerd root, possibly a different filesystem than
+		// DockerRootDir (#5382 review).
+		if len(pair) == 2 && pair[0] == "driver-type" && strings.Contains(pair[1], "containerd") {
+			info.containerdStore = true
+		}
 	}
 	for _, opt := range raw.SecurityOptions {
 		switch opt {
@@ -175,6 +192,27 @@ func parseDockerEngineInfo(out []byte) (dockerEngineInfo, bool) {
 		}
 	}
 	return info, true
+}
+
+// dockerContainerdRoot is the conventional data root of the containerd
+// image store: the docker API does not expose containerd's configured root,
+// so the default install path is the only honest candidate. It is probed
+// only when the engine reports a containerd-backed driver, and only through
+// the same co-location proof the data root must pass — an absent or foreign
+// path skips rather than fabricating a verdict.
+const dockerContainerdRoot = "/var/lib/containerd"
+
+// dockerDataRootCandidates lists the daemon-side write roots the capacity
+// probe must answer for: the reported data root always, plus the containerd
+// store root when the image store is containerd-backed — a full containerd
+// filesystem fails the same `docker run` while the data root still has room
+// (#5382 review).
+func dockerDataRootCandidates(info dockerEngineInfo) []string {
+	roots := []string{info.root}
+	if info.containerdStore && dockerContainerdRoot != info.root {
+		roots = append(roots, dockerContainerdRoot)
+	}
+	return roots
 }
 
 // dockerRootFSFullEvidence derives the resource verdict docker's combined
@@ -214,44 +252,53 @@ func (p *dockerProvisioner) dockerRootFSFullEvidence(op dockerOpClass) error {
 	// daemon never wrote into af's view (a bind under --uts=host, Docker
 	// Desktop's artifact, an ssh forward) still cannot prove the root is
 	// af's. Anything unreadable or unprovable is not proven.
-	if !daemonSharesDataRootFS(endpoint, info.root) {
-		return nil
-	}
 	// The failed step's writer picks the block counter: a rootless engine's
 	// every write is Bavail-bounded, and so is any container-side writer that
 	// cannot reach the reserved blocks on a rootful engine. Evaluated once —
 	// resolving an image's USER costs a docker call.
 	unpriv := info.rootless || p.dockerStepWriterUnprivileged(info, op)
-	var full bool
-	var probeErr error
-	switch {
-	case info.rootless:
-		full, probeErr = statfsFullUnprivileged(info.root)
-	case unpriv:
-		// The writer cannot reach the reserved blocks, so EITHER counter at
-		// zero is its ENOSPC: Bfree for the daemon-side writes the step still
-		// makes, Bavail for the unprivileged process's own.
-		if full, probeErr = statfsFull(info.root); !full && probeErr == nil {
-			full, probeErr = statfsFullUnprivileged(info.root)
+	// Every daemon-side write target is a candidate: the reported data root
+	// always, plus the containerd store root when the image store is
+	// containerd-backed. Each candidate needs its own co-location proof
+	// before its statfs means anything about the engine; a root af cannot
+	// prove is skipped, not treated as healthy.
+	for _, root := range dockerDataRootCandidates(info) {
+		if !daemonSharesDataRootFS(endpoint, root) {
+			continue
 		}
-	default:
-		full, probeErr = statfsFull(info.root)
+		var full bool
+		var probeErr error
+		switch {
+		case info.rootless:
+			full, probeErr = statfsFullUnprivileged(root)
+		case unpriv:
+			// The writer cannot reach the reserved blocks, so EITHER
+			// counter at zero is its ENOSPC: Bfree for the daemon-side
+			// writes the step still makes, Bavail for the unprivileged
+			// process's own.
+			if full, probeErr = statfsFull(root); !full && probeErr == nil {
+				full, probeErr = statfsFullUnprivileged(root)
+			}
+		default:
+			full, probeErr = statfsFull(root)
+		}
+		if probeErr != nil {
+			return fmt.Errorf("could not statfs docker data root %s: %w", root, probeErr)
+		}
+		if !full {
+			continue
+		}
+		who := "the rootful engine"
+		switch {
+		case info.rootless:
+			who = "the rootless engine"
+		case unpriv:
+			who = "unprivileged writers on the rootful engine"
+		}
+		return fmt.Errorf("statfs on docker data root %s reports no allocatable space for %s (blocks or inodes) — writes there would fail ENOSPC: %w",
+			root, who, &os.PathError{Op: "statfs", Path: root, Err: syscall.ENOSPC})
 	}
-	if probeErr != nil {
-		return fmt.Errorf("could not statfs docker data root %s: %w", info.root, probeErr)
-	}
-	if !full {
-		return nil
-	}
-	who := "the rootful engine"
-	switch {
-	case info.rootless:
-		who = "the rootless engine"
-	case unpriv:
-		who = "unprivileged writers on the rootful engine"
-	}
-	return fmt.Errorf("statfs on docker data root %s reports no allocatable space for %s (blocks or inodes) — writes there would fail ENOSPC: %w",
-		info.root, who, &os.PathError{Op: "statfs", Path: info.root, Err: syscall.ENOSPC})
+	return nil
 }
 
 // peerMountinfo reads the answering daemon's own mount table —
@@ -346,6 +393,13 @@ func socketServerPid(peer int, sockPath string) (int, serverVerdict) {
 // enumerates everything; a same-uid af sees what it can prove. An fd table
 // af cannot fully enumerate cannot prove the holder set is complete, so the
 // second return is false whenever any /proc/<pid>/fd is unreadable.
+// listenerScanBudget bounds the /proc/*/fd walk the socket-activation proof
+// makes. The scan runs inside the synchronous restore path before the failed
+// container is reaped: a pid space of tens of thousands, or one process
+// holding hundreds of thousands of descriptors, must yield unproven rather
+// than stall the cleanup loop or balloon on a single ReadDir (#5382 review).
+const listenerScanBudget = 1500 * time.Millisecond
+
 var listenerHolders = func(sockPath string) (map[int]struct{}, bool) {
 	inodes, ok := listenerInodes(sockPath)
 	if !ok || len(inodes) == 0 {
@@ -355,30 +409,57 @@ var listenerHolders = func(sockPath string) (map[int]struct{}, bool) {
 	if err != nil {
 		return nil, false
 	}
+	deadline := time.Now().Add(listenerScanBudget)
 	holders := map[int]struct{}{}
 	for _, p := range pids {
+		if time.Now().After(deadline) {
+			return nil, false // scan budget spent: holder set unproven
+		}
 		pid, perr := strconv.Atoi(p.Name())
 		if perr != nil || pid <= 0 {
 			continue
 		}
-		fds, ferr := os.ReadDir("/proc/" + p.Name() + "/fd")
+		fdDir, ferr := os.Open("/proc/" + p.Name() + "/fd")
 		if ferr != nil {
 			if errors.Is(ferr, os.ErrNotExist) {
 				continue // the process raced away — not a blind spot
 			}
 			return nil, false // unreadable fd table: holder set unproven
 		}
-		for _, fd := range fds {
-			link, lerr := os.Readlink("/proc/" + p.Name() + "/fd/" + fd.Name())
-			if lerr != nil {
-				continue // the fd raced away — not a blind spot
+		hit, complete := false, true
+		for !hit {
+			if time.Now().After(deadline) {
+				complete = false
+				break
 			}
-			if ino, found := strings.CutPrefix(link, "socket:["); found {
-				if _, hit := inodes[strings.TrimSuffix(ino, "]")]; hit {
-					holders[pid] = struct{}{}
-					break
+			// Chunked reads bound a huge descriptor table's footprint and
+			// let the deadline bite mid-table; entries returned alongside
+			// io.EOF are still valid.
+			fds, rerr := fdDir.ReadDir(256)
+			for _, fd := range fds {
+				link, lerr := os.Readlink("/proc/" + p.Name() + "/fd/" + fd.Name())
+				if lerr != nil {
+					continue // the fd raced away — not a blind spot
+				}
+				if ino, found := strings.CutPrefix(link, "socket:["); found {
+					if _, isHolder := inodes[strings.TrimSuffix(ino, "]")]; isHolder {
+						holders[pid] = struct{}{}
+						hit = true
+						break
+					}
 				}
 			}
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			if rerr != nil {
+				complete = false // mid-table error: holder set unproven
+				break
+			}
+		}
+		fdDir.Close()
+		if !complete {
+			return nil, false
 		}
 	}
 	return holders, true
@@ -589,15 +670,28 @@ func (p *dockerProvisioner) dockerStepWriterUnprivileged(info dockerEngineInfo, 
 	default:
 		return false
 	}
-	// An exec's write only hits the probed filesystem with the exec's own
-	// credentials when a mount bypasses the overlay: writes into the
+	// An exec's write only hits a probed filesystem with the exec's own
+	// credentials where a mount bypasses the overlay: writes into the
 	// container's writable layer go through overlayfs, which accesses its
 	// upper with the mounter's credentials — the daemon's, so rootful
 	// dockerd reaches reserved blocks no matter which uid the exec ran as.
-	// A bind or volume whose source lives on the data-root filesystem is
-	// the path that proves the writer's own fsuid applies (#5382 review).
-	user, usernsHost, boundDataRoot := p.containerExecIdentity(info.root)
-	if !boundDataRoot {
+	// The exception is vfs: it has no overlay mounter, so every in-container
+	// write carries the exec's own fsuid whether a bind exists or not. On
+	// overlay drivers the bypass must cover a path THIS op writes — a bind
+	// or volume whose source lives on a probed filesystem, mounted over a
+	// write root of the failed step. An unrelated credential or cache bind
+	// sharing that filesystem is not evidence the step's write went through
+	// it (#5382 review).
+	user, usernsHost, boundDests := p.containerExecIdentity(dockerDataRootCandidates(info))
+	bypass := info.driver == "vfs"
+	for _, dest := range boundDests {
+		for _, w := range dockerOpWriteRoots(op) {
+			if mountCoversPath(dest, w) {
+				bypass = true
+			}
+		}
+	}
+	if !bypass {
 		return false
 	}
 	if op == dockerOpRootExec {
@@ -633,9 +727,34 @@ func dockerUserUnprivileged(user string) bool {
 	return true
 }
 
+// dockerOpWriteRoots names the in-container roots an op class's writes land
+// under — af's own managed mount destinations plus the workspace, the only
+// places a failed provisioning step was trying to write. The Bavail verdict
+// may only be borrowed when a data-root bind covers one of these (#5382
+// review). Root execs only touch the account mounts; session execs write
+// the workspace, the account dirs a mounted session owns, and /tmp for the
+// agent-server banner redirect.
+func dockerOpWriteRoots(op dockerOpClass) []string {
+	switch op {
+	case dockerOpRootExec:
+		return []string{dockerAccountHome, dockerAccountRuntimeHome}
+	case dockerOpSessionExec:
+		return []string{dockerWorkspaceDir, dockerAccountHome, dockerAccountRuntimeHome, "/tmp"}
+	}
+	return nil
+}
+
+// mountCoversPath reports whether a container mount destination contains a
+// write root — the mount AT the root or an ancestor of it (a `/` bind
+// covers everything). A sibling or child bind says nothing about where the
+// failed step wrote.
+func mountCoversPath(dest, target string) bool {
+	return dest == "/" || dest == target || strings.HasPrefix(target, dest+"/")
+}
+
 // containerExecIdentity reads the running container's resolved exec user,
-// its per-container userns mode, and whether any of its mounts give an
-// in-container writer a path onto the probed data-root filesystem with the
+// its per-container userns mode, and the destinations of any mounts that
+// give an in-container writer a path onto a probed filesystem with the
 // writer's own credentials — what `docker run` actually merged, not what
 // the image declared: a `--user` in docker.run_args replaces the image's
 // USER for every unpinned exec, `--userns=host` opts this container out of
@@ -645,17 +764,17 @@ func dockerUserUnprivileged(user string) bool {
 // invented Bavail verdict), an unknown UsernsMode falls back to the
 // engine's proven default, and no proven mount means the exec's writes
 // ride the daemon's credentials anyway.
-func (p *dockerProvisioner) containerExecIdentity(dataRoot string) (user string, usernsHost bool, boundDataRoot bool) {
+func (p *dockerProvisioner) containerExecIdentity(dataRoots []string) (user string, usernsHost bool, boundDests []string) {
 	if p.containerID == "" {
-		return "", false, false
+		return "", false, nil
 	}
 	out, err := p.docker(dockerShortStepTimeout, "inspect", "--format", "{{json .}}", p.containerID)
 	if err != nil {
-		return "", false, false
+		return "", false, nil
 	}
 	start := strings.IndexByte(string(out), '{')
 	if start < 0 {
-		return "", false, false
+		return "", false, nil
 	}
 	var c struct {
 		Config struct {
@@ -665,20 +784,26 @@ func (p *dockerProvisioner) containerExecIdentity(dataRoot string) (user string,
 			UsernsMode string `json:"UsernsMode"`
 		} `json:"HostConfig"`
 		Mounts []struct {
-			Type   string `json:"Type"`
-			Source string `json:"Source"`
+			Type        string `json:"Type"`
+			Source      string `json:"Source"`
+			Destination string `json:"Destination"`
 		} `json:"Mounts"`
 	}
 	if err := json.NewDecoder(strings.NewReader(string(out)[start:])).Decode(&c); err != nil {
-		return "", false, false
+		return "", false, nil
 	}
 	for _, m := range c.Mounts {
-		if (m.Type == "bind" || m.Type == "volume") && sameFilesystem(m.Source, dataRoot) {
-			boundDataRoot = true
-			break
+		if m.Type != "bind" && m.Type != "volume" {
+			continue
+		}
+		for _, root := range dataRoots {
+			if sameFilesystem(m.Source, root) {
+				boundDests = append(boundDests, path.Clean(m.Destination))
+				break
+			}
 		}
 	}
-	return strings.TrimSpace(c.Config.User), c.HostConfig.UsernsMode == "host", boundDataRoot
+	return strings.TrimSpace(c.Config.User), c.HostConfig.UsernsMode == "host", boundDests
 }
 
 // sameFilesystem is the st_dev comparison behind the overlay-bypass proof:
