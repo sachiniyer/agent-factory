@@ -14,6 +14,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // requireShellSyntax asserts command parses as valid shell syntax — the
