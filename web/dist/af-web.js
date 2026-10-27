@@ -7455,6 +7455,7 @@ function viewNavigation(onSelect) {
   }
   return { el: el2, tabs };
 }
+var activeModalTrap = null;
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
   const errorLine = h("div", { class: "af-modal-error", role: "alert" });
@@ -7473,7 +7474,10 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
-  card.addEventListener("keydown", (event) => {
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  const trap = (event) => {
+    if (!backdrop.isConnected) return;
     if (event.key !== "Tab") return;
     const controls = [...card.querySelectorAll(
       "button, input, select, textarea, a[href], summary, [tabindex]"
@@ -7486,14 +7490,21 @@ function modalChrome(opts) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     }
-  });
+  };
+  const installTrap = () => {
+    if (activeModalTrap) document.removeEventListener("keydown", activeModalTrap, true);
+    document.addEventListener("keydown", trap, true);
+    activeModalTrap = trap;
+  };
+  installTrap();
   card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
   cancelBtn.addEventListener("click", () => opts.onCancel());
   const handle = {
     el: backdrop,
     setBusy(busy) {
+      if (busy && card.isConnected && (document.activeElement === confirmBtn || document.activeElement === cancelBtn)) {
+        card.focus();
+      }
       confirmBtn.disabled = busy;
       cancelBtn.disabled = busy;
       card.classList.toggle("af-modal-busy", busy);
@@ -7502,6 +7513,9 @@ function modalChrome(opts) {
       if (msg) {
         errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
+        if (card.isConnected && !card.contains(document.activeElement)) {
+          card.focus();
+        }
       } else {
         errorLine.textContent = "";
         errorLine.hidden = true;
@@ -7509,6 +7523,9 @@ function modalChrome(opts) {
     },
     close() {
       backdrop.remove();
+    },
+    reactivate() {
+      installTrap();
     }
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
@@ -19183,6 +19200,7 @@ function openModal(m, focusCard = false, explicitInvoker) {
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    m.reactivate?.();
     if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
   });
 }
