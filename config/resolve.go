@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -26,6 +27,13 @@ var legacyDeprecationLogged sync.Map
 // retainedLegacyBareRepoConfigLogged dedupes the ambiguity warning for a
 // pre-#3358 parent-keyed config to once per corrected repository identity.
 var retainedLegacyBareRepoConfigLogged sync.Map
+
+// resetRetainedLegacyBareRepoConfigWarnings clears that memo. captureLog calls
+// it so a test asserting the warning is not silenced by an earlier test in the
+// same process that happened to use the same repo and legacy identity.
+func resetRetainedLegacyBareRepoConfigWarnings() {
+	retainedLegacyBareRepoConfigLogged.Clear()
+}
 
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
@@ -108,6 +116,121 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 // the bare directory owns identity but has no checked-out files.
 func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
+}
+
+// boundedRepoResolve serializes in-flight bounded resolutions per repository.
+// A read wedged on a dead mount cannot be killed mid-syscall, so without
+// serialization every form open after a timeout would stack another abandoned
+// worker on the same files; retries instead wait on the one in-flight resolve
+// and bound only their own wait (#4889 review).
+//
+// It is deliberately NOT singleflight's result sharing: a caller that joins an
+// in-flight flight predating its own call would accept a snapshot that can
+// precede the config change this read exists to observe (#4889 review). A
+// joiner waits for the flight to FINISH — the pileup cap is the point — then
+// loops: every flight it can join on a later pass began after the call, so the
+// result is as live as its own read would have been. A completed flight is
+// removed before its result is published, so a caller can never attach to a
+// resolved flight's stale channel.
+// A flight BROADCASTS its outcome: done is closed (not sent on) after out is
+// set, so every waiter observing the close reads the same result — a channel
+// send would wake exactly one waiter and strand the rest until ctx expiry
+// (#4889 review). The close synchronizes-before every observing read, so out
+// needs no other guard.
+type repoResolveFlight struct {
+	done chan struct{}
+	out  repoResolveOutcome
+	// Callers parked on done — tests read it to prove a join attached before
+	// releasing the flight, so the re-read path runs under a real pileup.
+	waiters atomic.Int32
+}
+
+type repoResolveOutcome struct {
+	val *ResolvedConfig
+	err error
+}
+
+var (
+	repoResolveFlightsMu sync.Mutex
+	repoResolveFlights   = map[string]*repoResolveFlight{}
+)
+
+// resolveRepoForBound is the resolve a bounded flight performs, taken out to a
+// var so tests can watch how many workers a wedge accumulates.
+var resolveRepoForBound = func(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
+}
+
+// ResolveConfigForRepoContext is ResolveConfigForRepo bounded by ctx: the git
+// subprocesses inside a RepoContext already carry their own deadlines, but the
+// resolution itself is ordinary file I/O — global/legacy/checked-in/personal
+// TOML — that an unavailable mount can stall indefinitely. A caller that must
+// answer (the TUI's off-loop refresh) bounds the read here (#4889 review).
+// Same pattern as resolveConfigForRepoInspectionWithGlobalAndPersonalContext,
+// plus the per-repo flight above so a wedged read never multiplies workers; the
+// observation record is kept because this is the runtime, not inspection,
+// resolve — a worker that finishes after its callers timed out recorded a
+// load that genuinely happened.
+func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo resolution")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve repository config: %w", err)
+	}
+	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
+	firstJoin := true
+	for {
+		// A joiner that wakes to a dead ctx must not spawn a fresh worker for
+		// the required re-read — the worker ignores ctx and would run for a
+		// result nobody waits on (#4889 review).
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("resolve repository config: %w", err)
+		}
+		repoResolveFlightsMu.Lock()
+		flight, joined := repoResolveFlights[key]
+		if !joined {
+			flight = &repoResolveFlight{done: make(chan struct{})}
+			repoResolveFlights[key] = flight
+			go func() {
+				val, err := resolveRepoForBound(repo)
+				repoResolveFlightsMu.Lock()
+				delete(repoResolveFlights, key)
+				repoResolveFlightsMu.Unlock()
+				flight.out = repoResolveOutcome{val, err}
+				close(flight.done)
+			}()
+		}
+		repoResolveFlightsMu.Unlock()
+
+		flight.waiters.Add(1)
+		select {
+		case <-flight.done:
+			if joined && firstJoin {
+				// The flight predates this call — its snapshot can precede a
+				// change this read exists to observe. Wait done; read again.
+				firstJoin = false
+				continue
+			}
+			return flight.out.val, flight.out.err
+		case <-ctx.Done():
+			// A completed read is an answer even if its caller's deadline
+			// became ready at the same instant — unless the flight predates
+			// this call, whose stale snapshot the loop still owes a
+			// replacement for and the expired ctx will not wait through.
+			select {
+			case <-flight.done:
+				if !(joined && firstJoin) {
+					return flight.out.val, flight.out.err
+				}
+			default:
+			}
+			return nil, fmt.Errorf("resolve repository config: %w", ctx.Err())
+		}
+	}
 }
 
 // ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
@@ -231,7 +354,13 @@ func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
 		return nil, fmt.Errorf("encode global config snapshot: %w", err)
 	}
 	snapshot := snapshotConfig(global)
-	snapshot.source.builtIn = snapshotConfig(global)
+	// Use the compiled-in defaults, not DefaultConfig(), as the built-in
+	// provenance baseline: DefaultConfig() reruns the machine-dependent claude
+	// probe and would reintroduce the auto-detected ProgramOverrides the
+	// operator may have cleared, changing the effective snapshot. The
+	// auto-detected override lives in the handed-off global layer, not the
+	// built-in baseline (#5113).
+	snapshot.source.builtIn = snapshotConfig(staticDefaultConfig())
 	if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
 		return nil, fmt.Errorf("describe global config snapshot: %w", err)
 	}
@@ -701,7 +830,7 @@ func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
 		if os.IsNotExist(err) {
 			return
 		}
-		key := repo.ID + "|" + legacyID
+		key := repo.ID + "|" + legacyID + "|inspect-error"
 		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
 			return
 		}
