@@ -57,33 +57,41 @@ func assertOrphanIsReapable(t *testing.T, err error, wantBackend Backend, wantID
 	require.NotNil(t, stored.RuntimeCleanup, "a tombstoned orphan must keep its teardown identity")
 }
 
-// The revalidation exit: the sandbox came up, the credential minted for it was
-// invalidated while it was being provisioned, and the reap that follows could not
-// establish whether the sandbox is gone.
-func TestDefaultBackendFactory_RevalidationFailureWithUnknownCleanupYieldsAReapableOrphan(t *testing.T) {
+// The revalidation exit under W3.1 (#5571): the sandbox came up and the
+// credential minted for it was invalidated while it was being provisioned — and
+// the session DEGRADES instead of being discarded. A callback-less sandbox is
+// still a working session, so nothing is reaped and nothing fails: the reason
+// rides ProvisionResult.CallbackUnavailable onto the durable record instead.
+func TestDefaultBackendFactory_RevalidationFailureDegradesAndKeepsTheSandbox(t *testing.T) {
 	provisioned := &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
 		SSHCommand: "ssh sandbox.invalid",
 		SessionDir: "/remote/af-sessions/orphan",
 	}}
+	teardowns := 0
 	rt := fakeRuntime{res: ProvisionResult{
 		Backend:  provisioned,
 		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
-		Teardown: func() error { return fmt.Errorf("%w: cleanup timed out", ErrWorkspaceStateUnknown) },
+		Teardown: func() error { teardowns++; return fmt.Errorf("%w: cleanup timed out", ErrWorkspaceStateUnknown) },
 	}}
 	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
 	defer restoreRuntime()
 
 	creds := &fakeCreds{invalid: errors.New("the listener moved while the sandbox was being provisioned")}
-	_, err := defaultBackendFactoryForKind(InstanceOptions{
+	res, err := defaultBackendFactoryForKind(InstanceOptions{
 		ID:                 "announced-id",
 		Title:              "s",
 		Program:            "claude",
 		SandboxCredentials: creds,
 	}, t.TempDir(), BackendSandbox)
 
-	require.Error(t, err)
-	assertOrphanIsReapable(t, err, provisioned, "announced-id")
-	assert.NotZero(t, creds.revokes, "the credential minted for an unusable sandbox must not outlive it")
+	require.NoError(t, err, "a dead callback must not fail a create whose sandbox is otherwise fine")
+	assert.Equal(t, "the listener moved while the sandbox was being provisioned", res.CallbackUnavailable,
+		"the degraded reason is the revalidation's own text — surfaces render it verbatim")
+	assert.Equal(t, 0, teardowns,
+		"the sandbox is KEPT — reaping it would destroy a session that merely lost a capability")
+	assert.Same(t, provisioned, res.Backend)
+	assert.NotNil(t, res.Teardown, "the teardown handle stays with the session that now owns the sandbox")
+	assert.NotZero(t, creds.revokes, "the dead grant is still revoked for tidiness")
 }
 
 // The client-build exit: the sandbox is up but its endpoint could not be wired,
@@ -109,90 +117,60 @@ func TestNewInstance_ClientBuildFailureWithUnknownCleanupYieldsAReapableOrphan(t
 }
 
 // A KNOWN teardown outcome means the sandbox IS gone, so there is nothing to
-// reap and no orphan to record. This guards the deliberate difference between the
-// two exits rather than normalizing it away: NewInstance SURFACES a known cleanup
-// error (a create failing for a reason it can name should say so) while
-// discardUnusableSandbox logs it. Neither may start producing an orphan.
+// reap and no orphan to record: NewInstance SURFACES a known cleanup error (a
+// create failing for a reason it can name should say so) and it must not
+// manufacture an orphan for it. (The revalidation half of this test was
+// retired by #5571 W3.1 — a dead callback now degrades and KEEPS the sandbox,
+// so there is no teardown on that path for a known outcome to be reported
+// about.)
 func TestCreateOrphan_KnownCleanupOutcomeIsNotAnOrphan(t *testing.T) {
 	known := errors.New("runtime answered with a cleanup failure")
 
-	t.Run("client build", func(t *testing.T) {
-		previousFactory := backendFactory
-		backendFactory = func(InstanceOptions, string, BackendKind) (ProvisionResult, error) {
-			return ProvisionResult{
-				Backend:  newInertSandboxBackend("docker"),
-				Endpoint: &AgentServerEndpoint{URL: "://invalid", Token: "tok"},
-				Teardown: func() error { return known },
-			}, nil
-		}
-		defer func() { backendFactory = previousFactory }()
-
-		_, err := NewInstance(InstanceOptions{Title: "s", Path: t.TempDir(), Program: "claude"})
-		var orphan *SandboxOrphanError
-		require.False(t, errors.As(err, &orphan), "a confirmed teardown must not manufacture an orphan record")
-		require.ErrorIs(t, err, known, "the known cleanup failure must still surface, as it deliberately does today")
-	})
-
-	t.Run("revalidation", func(t *testing.T) {
-		rt := fakeRuntime{res: ProvisionResult{
-			Backend:  &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SSHCommand: "ssh h", SessionDir: "/d"}},
-			Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
+	previousFactory := backendFactory
+	backendFactory = func(InstanceOptions, string, BackendKind) (ProvisionResult, error) {
+		return ProvisionResult{
+			Backend:  newInertSandboxBackend("docker"),
+			Endpoint: &AgentServerEndpoint{URL: "://invalid", Token: "tok"},
 			Teardown: func() error { return known },
-		}}
-		restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
-		defer restoreRuntime()
+		}, nil
+	}
+	defer func() { backendFactory = previousFactory }()
 
-		invalidated := errors.New("the credential was invalidated during provisioning")
-		_, err := defaultBackendFactoryForKind(InstanceOptions{
-			Title:              "s",
-			Program:            "claude",
-			SandboxCredentials: &fakeCreds{invalid: invalidated},
-		}, t.TempDir(), BackendSandbox)
-		var orphan *SandboxOrphanError
-		require.Error(t, err)
-		require.False(t, errors.As(err, &orphan), "a confirmed teardown must not manufacture an orphan record")
-		// Pin the log-and-return-cause behaviour itself, not just the absence of an
-		// orphan: the CAUSE must survive and the known teardown error must not be
-		// joined into it. Asserting only "some error" would still pass if
-		// discardUnusableSandbox started returning the teardown error instead.
-		require.ErrorIs(t, err, invalidated, "the revalidation cause must remain the reported failure")
-		require.NotErrorIs(t, err, known, "a completed teardown error is logged, not joined into the create error")
-	})
+	_, err := NewInstance(InstanceOptions{Title: "s", Path: t.TempDir(), Program: "claude"})
+	var orphan *SandboxOrphanError
+	require.False(t, errors.As(err, &orphan), "a confirmed teardown must not manufacture an orphan record")
+	require.ErrorIs(t, err, known, "the known cleanup failure must still surface, as it deliberately does today")
 }
 
-// A sentinel in the CAUSE is not evidence about the TEARDOWN. Credential
-// revalidation can fail with an error that itself wraps ErrWorkspaceStateUnknown,
-// and an earlier version of this classified the create by testing
-// TeardownStateUnknown on the COMBINED error — so a reap that had positively
-// confirmed the sandbox gone still produced an orphan record, a durable tombstone
-// and a held title for nothing at all.
-//
-// The classification belongs to whoever ran the teardown, and only to them.
-func TestCreateOrphan_UnknownSentinelInTheCauseIsNotAnUnconfirmedTeardown(t *testing.T) {
+// A revalidation cause that happens to carry ErrWorkspaceStateUnknown is a
+// REASON STRING now, not an error anyone classifies (#5571 W3.1): nothing calls
+// TeardownStateUnknown on it because nothing reaps — the sandbox is kept and
+// the text lands on the durable record verbatim. The misclassified-orphan bug
+// this test used to guard is removed at the root, not preserved and worked
+// around.
+func TestCreateOrphan_RevalidationCauseCarryingSentinelStillDegrades(t *testing.T) {
 	teardowns := 0
 	rt := fakeRuntime{res: ProvisionResult{
 		Backend:  &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SSHCommand: "ssh h", SessionDir: "/d"}},
 		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
-		// CONFIRMED gone.
 		Teardown: func() error { teardowns++; return nil },
 	}}
 	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
 	defer restoreRuntime()
 
-	// ...while the revalidation failure carries the teardown sentinel itself.
+	// The revalidation failure carries the teardown sentinel itself — under the
+	// old contract this combination reaped the sandbox AND risked an orphan
+	// record on misclassification; under W3.1 it degrades plainly.
 	invalidated := fmt.Errorf("%w: the listener probe timed out", ErrWorkspaceStateUnknown)
-	_, err := defaultBackendFactoryForKind(InstanceOptions{
+	res, err := defaultBackendFactoryForKind(InstanceOptions{
 		ID:                 "announced-id",
 		Title:              "s",
 		Program:            "claude",
 		SandboxCredentials: &fakeCreds{invalid: invalidated},
 	}, t.TempDir(), BackendSandbox)
 
-	require.Error(t, err)
-	require.Equal(t, 1, teardowns, "the unusable sandbox must still be reaped")
-	var orphan *SandboxOrphanError
-	require.False(t, errors.As(err, &orphan),
-		"the teardown CONFIRMED the sandbox gone; a sentinel in the cause must not manufacture an orphan, a tombstone and a held title")
-	// And the cause's own sentinel must still reach callers unchanged.
-	require.ErrorIs(t, err, ErrWorkspaceStateUnknown, "the cause must not be swallowed to avoid the misclassification")
+	require.NoError(t, err)
+	assert.Equal(t, invalidated.Error(), res.CallbackUnavailable,
+		"the reason carries the cause's full text — sentinel included — for the surfaces to render")
+	assert.Equal(t, 0, teardowns, "the sandbox is kept; only a real teardown classifies cleanup state")
 }
