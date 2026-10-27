@@ -16360,19 +16360,24 @@ function applyProjectFavicon(color) {
   }
 }
 function applyProjectColor(root2, color, surfaces) {
+  const els = /* @__PURE__ */ new Set([root2, document.body]);
   if (color === null) {
-    if (root2.dataset.projectColor === void 0) return;
-    delete root2.dataset.projectColor;
-    for (const name of PROJECT_VARS) root2.style.removeProperty(name);
+    for (const el2 of els) {
+      if (el2.dataset.projectColor === void 0) continue;
+      delete el2.dataset.projectColor;
+      for (const name of PROJECT_VARS) el2.style.removeProperty(name);
+    }
     return;
   }
-  if (root2.dataset.projectColor === color) return;
   const { light, dark } = surfaces();
-  root2.dataset.projectColor = color;
-  root2.style.setProperty("--af-project-color", color);
-  root2.style.setProperty("--af-project-ink", markInk(color));
-  root2.style.setProperty("--af-project-accent-light", accentOn(color, light));
-  root2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  for (const el2 of els) {
+    if (el2.dataset.projectColor === color) continue;
+    el2.dataset.projectColor = color;
+    el2.style.setProperty("--af-project-color", color);
+    el2.style.setProperty("--af-project-ink", markInk(color));
+    el2.style.setProperty("--af-project-accent-light", accentOn(color, light));
+    el2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  }
 }
 function accentOn(color, surfaces) {
   const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
@@ -17170,6 +17175,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectColor(this.el, null, themeSurfaces);
     applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the

@@ -1006,6 +1006,14 @@ button:disabled,
 .af-app[data-project-color] [data-af-theme=dark] {
   --af-accent: var(--af-project-accent-dark);
 }
+:root[data-af-theme=light] body[data-project-color],
+body[data-project-color] [data-af-theme=light] {
+  --af-accent: var(--af-project-accent-light);
+}
+:root[data-af-theme=dark] body[data-project-color],
+body[data-project-color] [data-af-theme=dark] {
+  --af-accent: var(--af-project-accent-dark);
+}
 .af-app[data-project-color] .af-appbar {
   background: var(--af-project-color);
   color: var(--af-project-ink);

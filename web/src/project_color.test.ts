@@ -175,3 +175,9 @@ test("the phone tools popover restores theme ink over the colored app bar's ink"
     /@media \(max-width: 768px\) \{\s*\.af-app\[data-project-color\] \.af-appbar-tools \{\s*color: var\(--af-ink\);/,
   );
 });
+
+test("body-mounted controls take the project accent too", () => {
+  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+  assert.match(css, /body\[data-project-color\] \[data-af-theme="light"\] \{\s*--af-accent: var\(--af-project-accent-light\);/);
+  assert.match(css, /body\[data-project-color\] \[data-af-theme="dark"\] \{\s*--af-accent: var\(--af-project-accent-dark\);/);
+});

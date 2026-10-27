@@ -1260,6 +1260,16 @@ button:disabled,
 .af-app[data-project-color] [data-af-theme="dark"] {
   --af-accent: var(--af-project-accent-dark);
 }
+/* Controls mounted straight on <body> — the phone keybar, its paste sheet —
+ * never inherit from the app root, so the same stamp lands there too. */
+:root[data-af-theme="light"] body[data-project-color],
+body[data-project-color] [data-af-theme="light"] {
+  --af-accent: var(--af-project-accent-light);
+}
+:root[data-af-theme="dark"] body[data-project-color],
+body[data-project-color] [data-af-theme="dark"] {
+  --af-accent: var(--af-project-accent-dark);
+}
 
 /* The app bar takes the raw project color, so the current project reads at a
  * glance. Controls with a raised surface stay as chips on the bar. */
