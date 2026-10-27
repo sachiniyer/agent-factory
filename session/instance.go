@@ -228,6 +228,12 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
+	// callbackUnavailable retains the reason this session has no af callback:
+	// the daemon's mint refusal on a sandbox it created, the in-sandbox
+	// agent-server's undelivered-credential notice, or a mirror of either on a
+	// client-side projection. Persisted; surfaces render it under
+	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
+	callbackUnavailable string
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets

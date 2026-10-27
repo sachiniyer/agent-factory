@@ -30,9 +30,9 @@ var SessionsCmd = &cobra.Command{
 
 var (
 	createSessionViaDaemon  = daemon.CreateSession
-	killSessionViaDaemon    = daemon.KillSession
-	archiveSessionViaDaemon = daemon.ArchiveSession
-	restoreSessionViaDaemon = daemon.RestoreSession
+	killSessionViaDaemon    = routedKillSession
+	archiveSessionViaDaemon = routedArchiveSession
+	restoreSessionViaDaemon = routedRestoreSession
 	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
 		// the local control socket would report THIS host's archives for a
@@ -47,7 +47,7 @@ var (
 		return client.PruneSessions(req)
 	}
 	sessionsArchiveSelf     bool
-	sendPromptViaDaemon     = daemon.SendPromptWithStatus
+	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
 	createTabViaDaemon      = daemon.CreateTab
 	closeTabViaDaemon       = daemon.CloseTab
@@ -173,11 +173,11 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 				// reads the repoID-keyed storage map and so recovers what the
 				// snapshot dropped. The error message keeps the
 				// human-readable repo Paths the user passes to --repo.
-				repoIDs, repoPaths, gaps, err := diskRepoPathsForTitle(title, paths)
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
 				if err == nil && len(repoIDs) > 1 {
 					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
-				notice = warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
 			return &matches[0], notice, nil
 		}
