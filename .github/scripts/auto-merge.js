@@ -12,7 +12,10 @@ const FIX_LABEL = "fix-master";
 const HOLD_LABELS = ["hold", "no-auto-merge"];
 const REQUIRED_CHECKS = ["Build", "Lint"];
 const CODEX_LOGIN = "chatgpt-codex-connector";
-const ACK_RE = /RESOLVED|ACCEPTED|\[gate-ack\]/;
+// A reply is an acknowledgment only when it STARTS with the marker (optionally
+// after whitespace / markdown emphasis): a substring match would let "UNRESOLVED"
+// or "NOT ACCEPTED" clear a P1 finding (#5676).
+const ACK_RE = /^[\s*_>]*(?:RESOLVED|ACCEPTED|\[gate-ack\])(?![A-Za-z])/;
 const BROKEN_TITLE_PREFIX = "master broken by merge batch";
 // Same list auto-gate.js re-raised after a merge (MASTER_PUSH_WORKFLOWS).
 const MASTER_WORKFLOWS = [
@@ -39,8 +42,9 @@ query($owner: String!, $repo: String!, $base: String!, $after: String) {
         headRefOid
         isDraft
         mergeable
-        labels(first: 20) { nodes { name } }
+        labels(first: 20) { pageInfo { hasNextPage } nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+          totalCount
           pageInfo { hasNextPage }
           nodes {
             __typename
@@ -158,6 +162,13 @@ async function verifyMasterHead(github, core, owner, repo) {
   return { status, head, states, runs };
 }
 
+// A connection read with `first: N` that has more than it returned.
+function isTruncated(conn) {
+  if (!conn) return false;
+  if (conn.pageInfo && conn.pageInfo.hasNextPage) return true;
+  return typeof conn.totalCount === "number" && conn.totalCount > (conn.nodes || []).length;
+}
+
 function isCodex(login) {
   return (login || "").replace(/\[bot\]$/, "") === CODEX_LOGIN;
 }
@@ -184,6 +195,8 @@ function checksGreen(pr) {
   const rollup = commit && commit.commit && commit.commit.statusCheckRollup;
   if (!rollup) return false;
   const nodes = (rollup.contexts && rollup.contexts.nodes) || [];
+  // A truncated read could hide a second (failing) Build/Lint run: fail closed (#5678).
+  if (isTruncated(rollup.contexts)) return false;
   return REQUIRED_CHECKS.every((name) => {
     const runs = nodes.filter((n) => n.__typename === "CheckRun" && n.name === name);
     return (
@@ -195,6 +208,8 @@ function checksGreen(pr) {
 
 // Returns {pr, reason} entries: reason is null for a PR to merge.
 function evaluate(pr) {
+  // A hold label could sit past the labels we read: fail closed (#5678).
+  if (isTruncated(pr.labels)) return "labels truncated";
   const labels = ((pr.labels && pr.labels.nodes) || []).map((l) => l.name);
   if (pr.isDraft) return "draft";
   const held = HOLD_LABELS.find((l) => labels.includes(l));
@@ -417,4 +432,5 @@ module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
+  isTruncated, ACK_RE,
 };
