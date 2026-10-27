@@ -21,7 +21,7 @@ Under continuous merging every master Build is cancelled by the next push (`canc
 2. Per workflow: any `success` → ok; else any `failure`/`timed_out` → red; else any queued/in-progress → wait; else (all cancelled, or a push that never ran it) → no live run.
 3. Both ok → merge, at most `AUTO_MERGE_BATCH_SIZE` PRs (repository variable, default 8). Either red → **halt** (the job summary names the run). Either waiting → exit without merging; the `workflow_run` trigger on Build/Lint wakes the merger again when it finishes. No live run → `workflow_dispatch` it on master and wait.
 
-A PR labelled `fix-master` (Build + Lint still required on its head) is exempt from the red halt, so a red master can always be repaired through the merger. `docs.yml` no longer cancels superseded runs, because it publishes (#5659).
+A PR labelled `fix-master` (Build + Lint still required on its head) is exempt from the red halt, so a red master can always be repaired through the merger.
 
 Other halt: an open `master broken by merge batch <sha>` issue while master still fails the composition check.
 
