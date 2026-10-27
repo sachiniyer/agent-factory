@@ -1578,11 +1578,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd → proposal.Store"
+        "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd → POST /v1/{Start,Attach,Detach}Proposal, PullProposalChanges, CheckpointProposal (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 1 (docs/dev/proposals/proposal-mode/) ships only the CLI, which the agent in a session runs. Step 2 adds daemon routes and the web Docs tab, which start and attach open beside the agent and which saves as the human author; step 3 adds push from that tab. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Not yet: proposal mode step 2a (docs/dev/proposals/proposal-mode/api.md) puts these verbs on daemon routes, which the CLI calls and the web can call. Step 2b adds the web Docs tab, which start and attach open beside the agent; step 3 adds push from that tab. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
     },
     {
       "id": "proposal.docs",
@@ -1597,11 +1597,30 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → proposal.Store"
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 1 ships only the CLI. Step 2 adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over new daemon routes under /v1/repos/{repoID}/proposals, and moves this CLI onto those routes. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Not yet: proposal mode step 2a adds the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moves this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. Step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+    },
+    {
+      "id": "proposal.docs-tab",
+      "title": "Open the Docs tab of a proposal beside the agent",
+      "tui": {
+        "status": "no",
+        "pointer": "ui/tab_pane.go docsTabPlaceholder"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go --kind docs --proposal; api/proposals.go start/attach create it"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Proposal mode step 2a adds the docs tab kind (session.TabKindDocs) and creates it from af proposal start and attach. Step 2b renders it in the web UI as the proposal editor. The TUI shows a placeholder that says the tab is web only: goals.md lists a TUI editor as a non-goal."
     }
   ],
   "ledger": {
@@ -1695,6 +1714,17 @@
     },
     "routes": {
       "GET /v1/health": "-",
+      "POST /v1/AddProposalDoc": "proposal.docs",
+      "POST /v1/AttachProposal": "proposal.agent-workflow",
+      "POST /v1/CheckpointProposal": "proposal.agent-workflow",
+      "POST /v1/DetachProposal": "proposal.agent-workflow",
+      "POST /v1/GetProposal": "proposal.docs",
+      "POST /v1/ListProposals": "proposal.docs",
+      "POST /v1/PullProposalChanges": "proposal.agent-workflow",
+      "POST /v1/ReadProposalDoc": "proposal.docs",
+      "POST /v1/SaveProposalDoc": "proposal.docs",
+      "POST /v1/StartProposal": "proposal.agent-workflow",
+      "POST /v1/WriteProposalDoc": "proposal.docs",
       "POST /v1/AddTask": "task.add",
       "POST /v1/AccountLogin": "session.account-login",
       "POST /v1/ArchiveSession": "session.archive",
@@ -1988,6 +2018,7 @@
       "af sessions tab-create --kind": "session.tab.create.options",
       "af sessions tab-create --name": "session.tab.create.options",
       "af sessions tab-create --port": "session.tab.create.web",
+      "af sessions tab-create --proposal": "proposal.docs-tab",
       "af sessions tab-create --url": "session.tab.create.web",
       "af sessions tab-delete --help": "meta.discovery",
       "af sessions tab-delete --name": "session.tab.close",
@@ -2003,6 +2034,7 @@
       "af sessions tabs create --kind": "session.tab.create.options",
       "af sessions tabs create --name": "session.tab.create.options",
       "af sessions tabs create --port": "session.tab.create.web",
+      "af sessions tabs create --proposal": "proposal.docs-tab",
       "af sessions tabs create --url": "session.tab.create.web",
       "af sessions tabs delete --help": "meta.discovery",
       "af sessions tabs delete --name": "session.tab.close",
@@ -2150,6 +2182,9 @@
           },
           "port": {
             "gap": "session.tab.create.web"
+          },
+          "proposal": {
+            "ok": "The TUI does not create docs tabs: the Docs tab is web only, and af proposal start and attach create it for the agent's session. The TUI renders an existing docs tab as a placeholder."
           }
         }
       },
@@ -2512,6 +2547,9 @@
         },
         "port": {
           "gap": "session.tab.create.web"
+        },
+        "proposal": {
+          "gap": "proposal.docs-tab"
         }
       },
       "HandoffSessionV2": {
