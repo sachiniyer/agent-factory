@@ -12502,7 +12502,10 @@ var TabKind = {
    *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
    *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
    *  lockstep with the Go enum. */
-  VSCode: 4
+  VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5
 };
 var InFlightOp = {
   None: 0,
@@ -13607,6 +13610,8 @@ function tabLabel(tab) {
       return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
+    case TabKind.Docs:
+      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
     default:
       return tab.name || "Tab";
   }
@@ -13615,7 +13620,7 @@ function tabDisplayLabel(tab) {
   return tabLabel(tab);
 }
 function isRenameableTab(kind) {
-  return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;
+  return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode || kind === TabKind.Docs;
 }
 
 // src/split.ts
