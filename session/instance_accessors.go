@@ -65,6 +65,15 @@ func (i *Instance) ArchiveWarning() string {
 	return i.archiveWarning
 }
 
+// CallbackUnavailable returns the reason this session has no af callback, or ""
+// when one was delivered (or the session's backend never injects one). Surfaces
+// render it prefixed by CallbackUnavailablePrefix.
+func (i *Instance) CallbackUnavailable() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.callbackUnavailable
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //

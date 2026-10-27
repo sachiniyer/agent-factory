@@ -147,6 +147,11 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunFailurePending records that the run ended failed (initial prompt
+	// proven undelivered, #5278) and the task's errored status has not yet been
+	// acknowledged as written (#5646). omitempty + additive: an older record
+	// decodes to false, the pre-fix behaviour.
+	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.
@@ -447,6 +452,13 @@ type InstanceData struct {
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
 	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// CallbackUnavailable is the reason this session has no af callback (#5571
+	// W3.1) — the mint refusal recorded when its sandbox provisioned without one,
+	// or the in-sandbox agent-server's undelivered-credential notice. Persisted
+	// like the LostRestoreFailure durability class: it survives restarts so the
+	// surfaces never silently drop the explanation, and it is additive +
+	// omitempty so older binaries read and rewrite the row untouched.
+	CallbackUnavailable string `json:"callback_unavailable,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live
@@ -742,9 +754,18 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // DeleteInstanceByStableID) keep the disk current on every mutation; this full save is the
 // shutdown checkpoint. Records are deduped by title (#808) before marshaling.
 // Because the manager's memory is the source of truth, ordinary rows do not read
-// disk first. Only a sandbox archive snapshot re-reads the exact repo under its
-// file lock, and only a newer committed outcome for the same stable identity can
-// displace memory.
+// disk first. One on-disk read remains, under the repo file lock, serving two
+// preservation purposes for rows the in-memory snapshot cannot see or has
+// dropped:
+//
+//   - A mid-archive sandbox snapshot re-reads the repo so a newer committed
+//     archive outcome for the same stable identity can displace the stale
+//     pre-push in-memory snapshot.
+//   - Every checkpoint re-reads the repo so on-disk rows the daemon did NOT
+//     materialize (unloadable "ghost" rows the loader deliberately left on
+//     disk for repair, #4162/#1892/#3310) survive the wholesale rewrite. The
+//     carve-out for an older binary's disposable Loading/Deleting projection
+//     (#551) is reaped; durable ghosts are preserved verbatim.
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Keep the live instances grouped by their stable storage repo. Each repo is
 	// projected once to decide whether it has anything to checkpoint, then again
@@ -761,6 +782,22 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if !initial.shouldWrite() {
 			continue
 		}
+		// inMemoryTitles is the set of titles the daemon holds in memory for
+		// THIS repo. Titles are unique per repo (the daemon's
+		// findTitleConflictLocked enforces this on create), so a title match is
+		// a same-logical-session match. preserveUnmaterializedGhostRows uses it
+		// to recognize an on-disk row that is the durable record for a live
+		// (even if checkpoint-dropped) instance and must not be re-persisted as
+		// a ghost — including a killed instance the snapshot legitimately
+		// drops (#819/#844). Scoped per repo: a same-titled session in a
+		// DIFFERENT repo is a distinct logical session and must not silence
+		// this repo's ghost.
+		inMemoryTitles := make(map[string]struct{}, len(repoInstances))
+		for _, inst := range repoInstances {
+			if inst.Title != "" {
+				inMemoryTitles[inst.Title] = struct{}{}
+			}
+		}
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
@@ -771,20 +808,44 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				return nil
 			}
 			group := checkpoint.group
-			if checkpoint.needsArchiveReconcile() {
-				raw, readErr := s.state.GetInstances(rid)
-				if readErr != nil {
-					return fmt.Errorf("reconcile: read disk for repo %s: %w", rid, readErr)
+			// Read the on-disk rows for this repo under the file lock. The
+			// checkpoint rewrites the repo's instances.json wholesale from the
+			// in-memory group, so without preserving rows the daemon did not
+			// materialize the rewrite would silently erase every unloadable
+			// ("ghost") row in the file — the opposite of the
+			// durable-across-restarts promise the loader makes to those rows
+			// (#4162/#1892/#3310). The archive reconciliation below used to be
+			// the only on-disk read; this single read generalizes it so a mixed
+			// repo's ghosts survive the shutdown checkpoint too. A read failure
+			// propagates: silently proceeding would let the wholesale rewrite
+			// clobber ghost rows (or a committed archive row) with the stale
+			// in-memory snapshot, the exact data loss (#938) the file lock
+			// exists to prevent.
+			raw, readErr := s.state.GetInstances(rid)
+			if readErr != nil {
+				// Classify the read failure: a newer-schema file or an
+				// I/O failure propagates so the checkpoint does not clobber
+				// rows it cannot read (#4783/#766); a corrupt-but-readable
+				// file falls back to overwrite (#938). GetInstances maps a
+				// missing file to "[]".
+				if err := checkpointReadError(readErr, path); err != nil {
+					return fmt.Errorf("checkpoint: read disk for repo %s: %w", rid, err)
 				}
-				if len(raw) > 0 {
-					var onDisk []InstanceData
-					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
-						reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
-						group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
-					}
-				}
+				raw = nil
 			}
-			jsonData, err := json.Marshal(dedupeInstanceData(group))
+			// onDisk is the decoded form used for matching (title), the
+			// disposable-ghost carve-out, and archive reconciliation. onDiskRaw
+			// is the parallel raw form preserved verbatim so additive fields a
+			// newer binary wrote under the same schema version — which this
+			// binary's InstanceData does not know and would silently drop on a
+			// decode/encode round trip — survive the checkpoint (#6).
+			onDisk, onDiskRaw := decodeOnDiskRows(raw)
+			if checkpoint.needsArchiveReconcile() {
+				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
+				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
+			}
+			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}
