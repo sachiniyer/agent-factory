@@ -162,24 +162,26 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		}
 	}
 
-	// No auth-posture gate here, deliberately (#2168 Phase 0). #2090 made a
-	// tokenless network listener a FATAL startup refusal at this exact spot; the
-	// owner reversed that: binding 0.0.0.0 with no token is allowed, and the
-	// exposure is surfaced as a warning instead of decided for the user.
+	// No process-level auth-posture gate here, deliberately — the #5137 refusal
+	// is scoped to the TCP LISTENER, not the daemon. #2090 made a tokenless
+	// network listener a FATAL startup refusal at this exact spot, and the
+	// autostart unit's Restart=on-failure could not tell a config the daemon
+	// rejects on every attempt from a crash, so it restarted every 5s forever
+	// (#2168 §1.2). #2168 Phase 0 then went to warn-and-serve, which #5137
+	// reversed by owner decision: a non-loopback listen_addr with the token off
+	// is refused unless network.allow_unauthenticated_network is set. What is
+	// refused is the BIND — webListeners.reconcile declines the socket, logs the
+	// reason at ERROR, and records it for `af daemon status` and `af doctor` —
+	// while this process keeps starting and keeps serving the unix control
+	// socket, so the TUI, CLI, and sessions are never hostages to a network
+	// posture. Breaking the install path would be worse than the exposure.
 	//
-	// Two reasons it does not simply move up here as a log line. The exposure is
-	// only real once the listener actually binds — a warning emitted here would
-	// still fire when the web port is taken and nothing gets served — and the
-	// "say it exactly once" requirement is easiest to keep honest at the single
-	// site that opens the port. So the notice
-	// (config.ListenerExposureNotice) is emitted by startHTTPServer, which
-	// RunDaemon calls once, below.
-	//
-	// The refusal's other effect was the #2168 incident: a config rejected on
-	// every attempt is not transient, but the autostart unit's
-	// Restart=on-failure could not tell that apart from a crash, so the unit
-	// restarted every 5s forever. Nothing here exits non-zero on config posture
-	// any more.
+	// The reason it does not simply move up here as a log line is unchanged:
+	// the posture is only real at bind time, and the "say it exactly once"
+	// requirement is easiest to keep honest at the single site that decides the
+	// socket — so both the exposure notice (config.ListenerExposureNotice, on an
+	// opted-in bind) and the refusal (config.ListenerBindRefusal) are emitted by
+	// the listener owner startHTTPServer reaches below.
 
 	// Refuse to run two daemons against the same control socket. EnsureDaemon
 	// pings before launching, but a daemon started directly (af --daemon, the
@@ -683,15 +685,20 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
-	// skipped collects repos whose instances.json failed to read or parse, so the
-	// Snapshot RPC can carry the drop to clients instead of silently serving a
-	// partial list (#603 closed over the wire). Collected on every refresh, but
-	// only the startup call (existing==nil) genuinely drops rows — the polling
-	// path re-hydrates a corrupted repo's prior in-memory rows, so its sessions
-	// stay in the snapshot and the caller (restoreInstances vs refreshLocked)
-	// decides whether the set is authoritative for the snapshot: seed at
-	// startup, then trim repaired repos on poll without ever adding a
-	// mid-life-corrupted one (see retainStillSkipped).
+	// skipped collects repos whose instances.json failed to read, parse, or
+	// whose rows failed to load, so the startup orphan sweep can defer its
+	// destructive pass until the protected-slug set is complete and the
+	// Snapshot RPC can carry the corrupted/unreadable drop to clients instead
+	// of silently serving a partial list (#603 closed over the wire). Collected
+	// on every refresh, but only the startup call (existing==nil) genuinely
+	// drops rows — the polling path re-hydrates a corrupted repo's prior
+	// in-memory rows, so its sessions stay in the snapshot and the caller
+	// (restoreInstances vs refreshLocked) decides whether the set is
+	// authoritative for the snapshot: seed at startup, then trim repaired repos
+	// on poll without ever adding a mid-life-corrupted one (see
+	// retainStillSkipped). A fresh startup rows-failure is withheld from the
+	// wire by startupRowsFailedRepos (master never seeded it); the polling
+	// rewrite of a previously-skipped repo's stale reason still surfaces.
 	var skipped []SkippedRepo
 	// An unreadable repo is skipped exactly like a corrupt one, with its own
 	// reason so the refusal can say "could not be read" rather than "corrupted"
@@ -782,9 +789,19 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					if existing != nil {
 						if prior := existing[key]; prior != nil {
 							next[key] = prior
+							materialized++
 							continue
 						}
 					}
+					// A legacy row whose stable ID could not be durably persisted
+					// and has no prior to re-hydrate is dropped — count it as a
+					// failed row so the startup skip set is seeded and the
+					// destructive orphan sweep defers, exactly like a row that
+					// fails fromInstanceDataForRefresh (#4998). Without this, a
+					// read-only state file or a full disk at startup leaves the
+					// row's slug absent from the protected set and the sweep can
+					// reap its still-running container.
+					failedRows++
 					if rawTaskRunHoldsSlot(item) {
 						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					}
@@ -794,6 +811,9 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if existing != nil {
 				if instance := existing[key]; instance != nil {
 					next[key] = instance
+					if stableIDMatchesForDaemon(instance.ID, item.ID) {
+						materialized++
+					}
 					continue
 				}
 			}
@@ -840,10 +860,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			materialized++
 		}
 		// Parsed but not fully loadable is NOT a repair: retract the "repaired"
-		// signal so the repo stays skipped, and on poll record a rows-failed
-		// skip entry whose reason rewrites the stale one (#4812, #4876). The
-		// partial-loss and self-healing rationale lives in the helper.
-		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
+		// signal so the repo stays skipped, and record a rows-failed skip entry
+		// whose reason rewrites the stale one on poll and arms the startup
+		// orphan-sweep deferral (#4812, #4876, #4998 follow-up). A fresh startup
+		// rows-failure is withheld from the wire by startupRowsFailedRepos
+		// (master never seeded it); only the polling rewrite of a previously-
+		// skipped repo surfaces on the wire. The partial-loss and self-healing
+		// rationale lives in the helper.
+		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, skipped)
 	}
 	refreshRowOutcomes.prune(allInstances)
 

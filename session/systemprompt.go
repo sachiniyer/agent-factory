@@ -33,7 +33,21 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+
+// afUsageReferenceCallbackless replaces afUsageReference for an instance that
+// has NO af callback — a sandbox session whose credential could not be minted
+// or delivered (#5571 W3.1). Teaching af verbs there is worse than omitting
+// them: every command fails on its own and the agent spends turns discovering
+// it. The variant keeps the inside framing (the agent IS an af instance — that
+// fact stays true) and says plainly that af is unreachable from here, so it
+// does its work and reports instead of trying the CLI. The shared file seams
+// (codex/gemini/amp/devin SKILL.md) keep the full doc until W3.3's
+// capability-generated guidance; only the per-instance seams (claude
+// --plugin-dir, aider --read) carry this text.
+const afUsageReferenceCallbackless = `You are an AI coding agent running inside Agent Factory (af): a tool that runs many AI coding agents at once, each isolated in its own git worktree — you are one of them.
+
+The af CLI is NOT reachable from this session: af could not deliver a callback credential to this sandbox, so af commands run here cannot reach the daemon and will fail. Do not run af commands — do not try to open tabs, dispatch work, or query the daemon. Do your work in this worktree and report plainly what you did and anything you could not do; the user reads your output directly.`
 
 // AfPluginUsageReference is afUsageReference reframed for an agent that is NOT
 // running inside af: the same body and the same command reference, but an
@@ -128,6 +142,20 @@ Root-agent configuration is frozen at daemon start. An already-running root sess
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 
+// afUsageProposalsInside names only the entry points; the working rules are
+// printed by af proposal start and attach, so they can change without a
+// skill update. Proposal commands need a session, so plugins do not get it.
+const afUsageProposalsInside = `Proposals: when the user asks you to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.`
+
+// afSkillDescriptionInside is AfSkillDescription for an agent inside an af
+// session, where proposal commands work.
+const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, and the daemon via the af CLI"
+
+// afProposalTrigger is the activation text for proposal requests. Agents load a
+// skill body only when the request matches its description, and "make a
+// proposal" does not match a description about sessions and tasks.
+const afProposalTrigger = "Use when the user asks to make, write, draft, or start a proposal, plan, spec, or design doc, or to work on, continue, review, or update an existing proposal"
+
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
 // self-archive, and doing so kills it.
 const afUsageOutroInside = `Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It is non-destructive — the worktree is moved out, nothing is deleted, and the session is restorable later with "af sessions restore <title>". But it tears down THIS session's tmux, so it kills you the instant you run it: nothing you say or do after it is ever seen. Treat it as the ABSOLUTE LAST action — first finish every summary, result, and confirmation the user needs, and only once you have nothing left to report run "af sessions archive --self" as the very last step.`
@@ -215,10 +243,16 @@ func shellQuote(s string) string {
 // agents that DISCOVER it from a config root, places it where the launch will
 // actually look: target carries the account boundary's config root for a scoped
 // session, and the zero value means unscoped (#3645).
-func injectSystemPrompt(resolved string, target skillTarget) string {
+//
+// callbackUnavailable swaps the guidance on the PER-INSTANCE seams (claude's
+// --plugin-dir, aider's --read) for the callbackless variant — a session with
+// no af callback must not be taught af verbs it cannot use (#5571 W3.1). The
+// shared config-root seams keep the full doc until W3.3's capability-generated
+// guidance; they are opted into globally rather than per session anyway.
+func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable bool) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
-		pluginDir, err := ensurePluginDir()
+		pluginDir, err := ensurePluginDir(callbackUnavailable)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return resolved
@@ -280,7 +314,7 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		// skills folder. A write failure (or a non-af file at our path) yields an
 		// empty path, in which case we must NOT append --read pointing at a file
 		// we do not own — return the launch command unchanged.
-		path, err := ensureAiderReadFile()
+		path, err := ensureAiderReadFile(callbackUnavailable)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up aider af skill, af guidance unavailable to aider: %v", err)
 			return resolved

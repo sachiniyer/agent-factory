@@ -42,6 +42,19 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
+- [`af proposal`](#af-proposal) — Write proposals together with agents
+- [`af proposal add-doc`](#af-proposal-add-doc) — Add a doc to a proposal from a template, or blank
+- [`af proposal attach`](#af-proposal-attach) — Attach this session to a proposal and print the rules
+- [`af proposal cat`](#af-proposal-cat) — Print a doc of a proposal
+- [`af proposal changes`](#af-proposal-changes) — Print what others changed since this session's cursor, then move the cursor
+- [`af proposal checkpoint`](#af-proposal-checkpoint) — Commit this session's edits to its proposal and move its cursor
+- [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
+- [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
+- [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
+- [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
+- [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
@@ -114,6 +127,7 @@ af [flags]
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af proposal`](#af-proposal) — Write proposals together with agents
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
@@ -869,13 +883,17 @@ Settable keys:
   web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to false —
-                             set network.require_token = true in the same breath, or anyone who can reach the
-                             address controls this machine. af serves plain HTTP, so front a routable
-                             listener with a TLS-terminating proxy or a private network.
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) with
+                             network.require_token off is refused by default — the daemon still starts and
+                             the unix socket still works, but the TCP listener stays unbound until
+                             network.require_token = true, a loopback address, or
+                             network.allow_unauthenticated_network = true lands. af serves plain HTTP, so
+                             front a routable listener with a TLS-terminating proxy or a private network.
   network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
   network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.allow_unauthenticated_network  true | false  (default false: explicit opt-in that lets a non-loopback
+                             listen_addr bind with the token off — the full control API, DeliverPrompt included,
+                             is then served unauthenticated to anyone who can reach the address)
   network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
@@ -906,9 +924,9 @@ Settable keys:
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
-ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
-canonical grouped values.
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
 uses the same apply-on-save path as the TUI and web config panes (#2480). Most
@@ -1075,10 +1093,13 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with network.require_token = false anyone who can reach the
-address drives your agents, so set network.require_token = true unless you trust the
-network. That listener speaks plain HTTP either way, so put it behind a reverse
+--token flags. A routable listener with the token off is REFUSED: with
+network.require_token = false anyone who can reach the address drives your agents,
+so af declines to bind it unless you opt in with
+network.allow_unauthenticated_network = true. Set network.require_token = true
+instead unless you trust the network (turn it on BEFORE moving the address — the
+write guard refuses the tokenless-network posture). That listener speaks plain
+HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
@@ -1554,6 +1575,324 @@ af projects rebind <project-id> <path>
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af proposal
+
+Write proposals together with agents
+
+A proposal is a folder of markdown docs that belongs to the project. The user and agent sessions edit the docs with their normal tools; af records each edit, and "af proposal changes" shows a session what others changed since it last looked.
+
+Commands that need a session use the calling af session, or --session <title>. The others follow the shared project contract: --repo names a project, otherwise the current directory's project is used.
+
+```
+af proposal
+```
+
+**Subcommands**
+
+- [`af proposal add-doc`](#af-proposal-add-doc) — Add a doc to a proposal from a template, or blank
+- [`af proposal attach`](#af-proposal-attach) — Attach this session to a proposal and print the rules
+- [`af proposal cat`](#af-proposal-cat) — Print a doc of a proposal
+- [`af proposal changes`](#af-proposal-changes) — Print what others changed since this session's cursor, then move the cursor
+- [`af proposal checkpoint`](#af-proposal-checkpoint) — Commit this session's edits to its proposal and move its cursor
+- [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
+- [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
+- [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
+- [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
+- [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal add-doc
+
+Add a doc to a proposal from a template, or blank
+
+```
+af proposal add-doc <slug> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal attach
+
+Attach this session to a proposal and print the rules
+
+Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Docs tab for the proposal when it has none, and "tab" names it.
+
+```
+af proposal attach [<slug>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal cat
+
+Print a doc of a proposal
+
+```
+af proposal cat <slug> <doc>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal changes
+
+Print what others changed since this session's cursor, then move the cursor
+
+Print every edit to this session's proposal since its cursor that the session did not checkpoint itself — edits by the user, by other editors, and by other sessions — then move the cursor. An empty edits array means nobody else changed the proposal.
+
+```
+af proposal changes [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal checkpoint
+
+Commit this session's edits to its proposal and move its cursor
+
+Commit the uncommitted edits in this session's proposal as the session's own, so "af proposal changes" does not show them back to it. The cursor does not move past edits by others that changes has not shown yet; unseen counts them.
+
+```
+af proposal checkpoint [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal detach
+
+Remove this session's proposal attachment and cursor
+
+Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.
+
+```
+af proposal detach [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal list
+
+List the project's proposals, newest edit first
+
+```
+af proposal list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal path
+
+Print the absolute folder path of a proposal
+
+Print the absolute folder path of a proposal. With --daemon-url, the path is on the daemon host.
+
+```
+af proposal path <slug>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal push-mode
+
+Set whether the Docs tab sends the user's edits to this session by itself
+
+Set the push mode of this session's Docs tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
+
+```
+af proposal push-mode auto|manual [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal send
+
+Send the user's unsent edits to this session now
+
+Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Docs tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
+
+```
+af proposal send [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal start
+
+Create a proposal from templates, attach this session, and print the rules
+
+Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Docs tab for the proposal, and "tab" names it.
+
+```
+af proposal start <slug> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,future]`) |
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal write
+
+Replace a doc with stdin and commit it
+
+Replace an existing doc with stdin and commit it: as this session's own edit inside an af session or with --session, otherwise as an external edit.
+
+```
+af proposal write <slug> <doc> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af quota
 
 Show usage-limit status for each agent CLI
@@ -1765,6 +2104,11 @@ names the offending value.
 
 The reasons are the same text a create prints when it refuses, because both come
 from the same precondition checks.
+
+An available backend may also carry "callback_unavailable_reason": a create on
+it succeeds but the session gets no af callback, because the daemon cannot mint
+a credential under its current listener/auth posture. It is advisory, not a
+precondition — the session still works, it just cannot call back into af.
 
 Example:
   af sessions backends
@@ -2196,7 +2540,10 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -2269,11 +2616,16 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
+Docs tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
+the session's project (see af proposal). It has no process. The TUI shows a
+placeholder, because the editor is web only. af proposal start and attach create
+this tab for you.
+
 The tab persists and reconnects across a daemon/af restart like every other
 tab — for a process tab "reconnect" means reattach-only, never re-running the
 command (see above).
 
---name sets a process, web, or VS Code tab's name — the handle every other tab
+--name sets a process, web, VS Code, or docs tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:
@@ -2297,9 +2649,10 @@ af sessions tab-create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
@@ -2480,9 +2833,10 @@ af sessions tabs create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -112,7 +113,10 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -144,6 +148,14 @@ can inspect per-session results.`,
 		}
 
 		prompt, rest := resolveSendPrompt(cmd, args)
+		if apiclient.IsRemoteTarget() && (sendPromptAllFlag || sendPromptCreateFlag) {
+			// Broadcast enumerates targets from this machine's disk and --create
+			// resolves the repo, config and program locally; both would act on the
+			// wrong host. A plain <title> <prompt> send is routed (W9.1).
+			return jsonError(fmt.Errorf("--all and --create are not available against the daemon at %s yet: "+
+				"broadcast targets and create-time repo resolution are computed on this machine. "+
+				"Send to one session by <title>, or run the command on the daemon host", apiclient.RemoteTargetURL()))
+		}
 		if sendPromptAllFlag {
 			return runBroadcast(prompt)
 		}
@@ -154,7 +166,7 @@ can inspect per-session results.`,
 		// preserves the prior all-repo search; a non-empty one confines both
 		// the existence pre-check and the delivery to that repo so a
 		// same-titled session in a different repo never receives the prompt.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -219,9 +231,16 @@ can inspect per-session results.`,
 			return jsonOut(sendPromptResult{OK: true, Status: status})
 		}
 
-		exists, err := instanceTitleExistsInScope(repoID, title)
-		if err != nil {
-			return jsonError(err)
+		// Against a remote target the existence check would read THIS machine's
+		// disk and refuse a session that lives only on the daemon; the daemon's
+		// SendPrompt resolves the title itself and reports not-found.
+		exists := true
+		if !apiclient.IsRemoteTarget() {
+			var err error
+			exists, err = instanceTitleExistsInScope(repoID, title)
+			if err != nil {
+				return jsonError(err)
+			}
 		}
 		if !exists {
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))

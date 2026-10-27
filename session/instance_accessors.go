@@ -65,6 +65,15 @@ func (i *Instance) ArchiveWarning() string {
 	return i.archiveWarning
 }
 
+// CallbackUnavailable returns the reason this session has no af callback, or ""
+// when one was delivered (or the session's backend never injects one). Surfaces
+// render it prefixed by CallbackUnavailablePrefix.
+func (i *Instance) CallbackUnavailable() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.callbackUnavailable
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //
@@ -96,6 +105,43 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	}
 	i.agentSrv = nil
 	i.runtimeTeardown = teardown
+}
+
+// owesNoRuntimeTeardownLocked reports whether a sandbox-backed instance
+// positively owes no off-box reap — i.e. its backend carries no durable cleanup
+// identity at all (the cleanup field is nil). It is the EARNED-EVIDENCE half of
+// the KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+//
+// Caller holds i.mu (read or write) and hands over the backend pointer it
+// already read. It must NOT acquire i.mu itself: sync.RWMutex is not reentrant,
+// so a nested RLock from a caller holding the read lock deadlocks the moment a
+// writer queues between the two acquisitions, and from a caller holding the
+// write lock it deadlocks unconditionally. The snapshot path (toInstanceDataLocked
+// — whose contract is that the caller already holds i.mu) calls this, so any lock
+// acquisition here would wedge snapshot, persistence, and kill behind a session
+// mutex that never releases.
+//
+// The necessity of the second condition besides `runtimeTeardown == nil` is the
+// f58ca97f wedge-fix gone wrong: a sandbox row reloaded INERT after a daemon
+// restart ALWAYS has `runtimeTeardown == nil` (the inert backend binds no live
+// teardown), regardless of whether its off-box runtime survived — so gating the
+// "nothing owed" marker on that nil alone laundered a still-live ssh workspace or
+// hook-provisioned sandbox into a no-op kill and deleted the only record that
+// pointed at it. Persisting RuntimeCleanup for ordinary sandbox rows (ForStorage)
+// and rebuilding it at load (FromInstanceData) puts a real teardown handle back on
+// a reloaded LIVE row, so this `runtimeTeardown == nil` arm stops firing for it;
+// the marker is staged only when the backend itself positively carries no
+// cleanup identity, which is the always-inert shape the original wedge fix meant
+// to admit.
+func owesNoRuntimeTeardownLocked(backend Backend) bool {
+	if backend == nil {
+		return true
+	}
+	provider, ok := backend.(runtimeCleanupProvider)
+	if !ok {
+		return true
+	}
+	return provider.runtimeCleanupData() == nil
 }
 
 // SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
@@ -398,6 +444,44 @@ func (i *Instance) ResolvedPaneProgram() string {
 		return ""
 	}
 	return ts.Program()
+}
+
+// ResolvedPaneGeneratedArgs returns the af-authored argument words recorded for
+// the local agent pane's frozen program, or nil when the instance has no local
+// tmux binding. It surfaces TmuxSession.GeneratedArgs through the instance so
+// validateAccountSwapPlan can seed a launch proof whose base came from
+// ResolvedPaneProgram instead of RuntimeProgram: that pane command already
+// carries af's own injected flags, so re-deriving the declaration from that base
+// treats af's words as undeclared user arguments and the swap is refused
+// (#5433). The recorded declaration is the provenance the pane carries beside
+// the command string, and is exactly what the proof needs to trust them.
+func (i *Instance) ResolvedPaneGeneratedArgs() []string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil
+	}
+	return ts.GeneratedArgs()
+}
+
+// ResolvedPaneTrustedExecutable returns the exact executable path af's built-in
+// program detection recorded for the local agent pane's frozen program, or empty
+// when the launch recorded none. It surfaces TmuxSession.TrustedExecutable so a
+// launch proof seeded from the pane's frozen program (the #5433 pane-fallback)
+// carries the pane's recorded executable provenance instead of inferring the
+// base's first word: an untrusted absolute override records an empty
+// TrustedExecutable deliberately, and inferring the path would launder a
+// repository-controlled executable into the account boundary's trust
+// (internal/sessionenv/account.go:47-54, account_command.go:269-276).
+func (i *Instance) ResolvedPaneTrustedExecutable() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return ""
+	}
+	return ts.TrustedExecutable()
 }
 
 // RuntimeProgram returns durable evidence of the override-resolved base command

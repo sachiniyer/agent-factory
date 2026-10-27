@@ -284,9 +284,13 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// write config.toml around the gate, and an apply is not inert — it swaps the
 	// live config, rebinds listeners, and changes auth posture, mutating the very
 	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
-	"ApplyConfig":  blockedDuringProbation,
-	"GetConfig":    allowedDuringProbation,
-	"ListBackends": allowedDuringProbation,
+	"ApplyConfig": blockedDuringProbation,
+	"GetConfig":   allowedDuringProbation,
+	// A read of the daemon host's on-disk config provenance (#4803): no
+	// manager, no daemon state, nothing an upgrade window is protecting —
+	// same class as GetConfig, whose rows it explains.
+	"ExplainConfig": allowedDuringProbation,
+	"ListBackends":  allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
 	// for the same reason — the Add-project view a client builds out of the two
@@ -308,6 +312,22 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// A name suggestion is a best-effort read (no readiness gate), so it answers
 	// during probation like the other read-only lookups (#2470).
 	"SuggestSessionName": allowedDuringProbation,
+	// Proposal reads answer during probation; every route that can commit to the
+	// proposal store or change a tab waits like the other mutations.
+	"ListProposals":       allowedDuringProbation,
+	"GetProposal":         allowedDuringProbation,
+	"StartProposal":       blockedDuringProbation,
+	"AttachProposal":      blockedDuringProbation,
+	"DetachProposal":      blockedDuringProbation,
+	"AddProposalDoc":      blockedDuringProbation,
+	"ReadProposalDoc":     blockedDuringProbation,
+	"SaveProposalDoc":     blockedDuringProbation,
+	"WriteProposalDoc":    blockedDuringProbation,
+	"PullProposalChanges": blockedDuringProbation,
+	"CheckpointProposal":  blockedDuringProbation,
+	"SetProposalPushMode": blockedDuringProbation,
+	"HoldProposalPush":    blockedDuringProbation,
+	"SendProposalChanges": blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

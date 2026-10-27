@@ -465,6 +465,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
 	}
+	// CallbackUnavailable is a reason string minted from an error — mint
+	// refusals and revalidation failures can embed the operator's configured
+	// callback endpoint or sandbox host detail (e.g. the callback_url an
+	// operator wrote), which is the same class of user-chosen text as Account.
+	if d.CallbackUnavailable != "" {
+		d.CallbackUnavailable = redactedMarker
+	}
 	// PendingHandoffMission is a rendered takeover brief that embeds the user's
 	// free-text prompt/goal verbatim — the same sensitivity class as Prompt. It
 	// was added with transactional handoff (#2286) after this policy was written,
@@ -625,6 +632,15 @@ func redactTabData(tab *session.TabData) {
 	}
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
+	}
+	// A proposal slug is user-chosen, like a tab name, and names the work.
+	if tab.Proposal != "" {
+		tab.Proposal = redactedMarker
+	}
+	// Only the two push modes af writes are kept, so a hand-edited value cannot
+	// carry user text into a shared report.
+	if tab.PushMode != "" && tab.PushMode != "auto" && tab.PushMode != "manual" {
+		tab.PushMode = redactedMarker
 	}
 	// An account label, the same fact InstanceData.Account is redacted for
 	// (#4506 review).

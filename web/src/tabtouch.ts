@@ -57,3 +57,38 @@ export const TAB_PRESS_LIMITS: TabPressLimits = { holdMs: 500, slopPx: 10 };
 export function pressDistance(fromX: number, fromY: number, toX: number, toY: number): number {
   return Math.hypot(toX - fromX, toY - fromY);
 }
+
+// Which feedback region a HELD touch pointer is over, once a tab has been picked up
+// (#2899). This is the `pointermove` counterpart of `attachTabTouchDrag`'s `pointerup`
+// drop decision, kept pure and tested here — rather than inline in a pointer handler —
+// for the same reason `tabPressVerdict` is: the previous handler had only two outcomes
+// (pane vs "everything else shows the bar's insertion gap"), so while a finger dragged
+// over the header/appbar/empty space the indicator kept tracking its horizontal
+// position right up to a release that is a cancel. The third region — neither bar nor
+// pane — fixes that, and pinning all three here keeps the collapse from coming back.
+//
+// The vocabulary is the three things a release can land on:
+//
+//   - `bar`  — the tab bar: show its insertion gap; a release here reorders.
+//   - `pane` — a split pane: the pane owns the point; a release here splits. The pane
+//     hint is shown as a side effect of the hit-test the caller already ran, so this
+//     verdict only says which it is — it does not paint anything itself.
+//   - `none` — the header, appbar controls, or empty space: show nothing, because a
+//     release here cancels and the indicator must not pretend otherwise.
+
+/** The region a held touch pointer is over, deciding what drag feedback to show. */
+export type TabDragFeedbackRegion = "bar" | "pane" | "none";
+
+/** `overBar` wins over `overPane`: the bar's hit rectangle owns a point that overlaps a
+ *  pane, the same precedence the original `else if (bar.contains(hit))` branch had. The
+ *  caller computes `overPane` ONLY when `!overBar` (the pane hit-test shows the pane
+ *  hint as a side effect, so running it over the bar would both waste the work and
+ *  paint a hint under a finger that is not over a pane), so `overBar === true` is
+ *  always paired with `overPane === false` in practice — but the precedence handles the
+ *  impossible overlap the way the bar branch already did. */
+export function tabDragFeedbackRegion(overBar: boolean, overPane: boolean): TabDragFeedbackRegion {
+  if (overBar) {
+    return "bar";
+  }
+  return overPane ? "pane" : "none";
+}

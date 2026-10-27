@@ -240,6 +240,52 @@ func TestRootAgentProgramComparisonPreservesOverrideWhitespace(t *testing.T) {
 	require.Contains(t, check.Detail, "match the configured command")
 }
 
+// TestRootAgentProgramQuotingOnlySpellingIsNotDrift is the doctor leg of
+// #5504: a quoting-only difference between the configured and running command
+// is not drift. Doctor uses the same byte-or-literal-argv comparison as the
+// daemon's drift latch, so the two surfaces can never disagree on a pair.
+func TestRootAgentProgramQuotingOnlySpellingIsNotDrift(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+
+	body := "schema_version = 1\n[program_overrides]\ncodex = \"'/opt/codex' --x\"\n" +
+		"[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, "/opt/codex --x")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusPass, check.Status)
+	require.Contains(t, check.Detail, "match the configured command")
+}
+
+// A running command the comparator cannot vouch for falls back to the byte
+// verdict — configured "'/opt/codex' --x" against a glob-pattern running
+// command is a byte difference and must still warn.
+func TestRootAgentProgramNonLiteralRunningStillWarns(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+
+	body := "schema_version = 1\n[program_overrides]\ncodex = \"'/opt/codex' --x\"\n" +
+		"[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, "/opt/co* --x")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "program drift")
+	require.True(t, check.Problem)
+}
+
 func TestRootAgentProgramResolutionFailureIsIncomplete(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)

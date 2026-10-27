@@ -63,16 +63,13 @@ func TestAuthPostureDefaults(t *testing.T) {
 		"listen_addr must default to loopback — it is what bounds the tokenless default")
 }
 
-// TestListenerExposureNotice is the #2168 Phase 0 contract: NO posture is
-// refused any more, and the one posture that serves the control API to
-// unauthenticated network peers says so.
-//
-// The owner's decision this pins: "just allow binding to 0.0.0.0 without a
-// token. Assume users are safe and will do the right thing." #2090 had made this
-// combination a fatal startup refusal; the notice is what replaced it. The
-// property that must hold is therefore about the RETURN TYPE as much as the
-// table — a string cannot be returned up a call stack as a failure, which is how
-// the refusal reached os.Exit(1) and crash-looped the autostart unit (#2168 §1.2).
+// TestListenerExposureNotice pins the exposure notice for the ONE posture it
+// still describes since #5137: a serving unauthenticated network bind, which is
+// reachable only through the explicit allow_unauthenticated_network opt-in
+// (every tokenless non-loopback row below therefore sets it). Without the
+// opt-in the posture is refused outright (TestListenerBindRefusal) and the
+// notice must stay silent — "af serves" is a lie about a listener that is
+// never bound.
 //
 // The require_loopback_token rows are the subtle ones and the reason this table
 // exists. That key reads like a second lock, but daemon.webListenerPolicy sets
@@ -104,20 +101,11 @@ func TestListenerExposureNotice(t *testing.T) {
 		{"network bind with token", "0.0.0.0:8443", true, false, false},
 		{"routable ip with token", "192.168.1.10:8443", true, false, false},
 		{"all interfaces ipv6 with token", "[::]:8443", true, false, false},
-
-		// The #2090 exposure, in each shape it reaches users.
-		{"all interfaces, tokenless", "0.0.0.0:8443", false, false, true},
-		{"unspecified ipv6, tokenless", "[::]:8443", false, false, true},
-		{"empty host binds every interface", ":8443", false, false, true},
-		{"routable ip, tokenless", "192.168.1.10:8443", false, false, true},
-
-		// require_loopback_token cannot rescue a tokenless network bind: it is
-		// inert while require_token is false.
-		{"network, tokenless, loopback token on", "0.0.0.0:8443", false, true, true},
-		// ...and it is not needed to permit an authenticated one.
-		{"network, token on, loopback token on", "0.0.0.0:8443", true, true, false},
 	}
-
+	// Every row above is wantNotice=false: the only posture that still earns a
+	// notice — an OPTED-IN tokenless network bind — needs
+	// AllowUnauthenticatedNetwork set, and is exercised by
+	// TestListenerExposureNoticeOnlyFiresOnTheOptIn below.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -135,12 +123,97 @@ func TestListenerExposureNotice(t *testing.T) {
 			// auth, so pin both rather than just its existence.
 			assert.Contains(t, notice, tc.listenAddr, "name the exposed address")
 			assert.Contains(t, notice, "DeliverPrompt", "say what an unauthenticated peer can actually do")
-			assert.Contains(t, notice, "network.require_token = true", "offer the canonical token fix")
-			// It reports; it does not forecast a failure that no longer happens.
-			assert.NotContains(t, notice, "refus", "the posture is allowed since #2168 Phase 0 — nothing refuses it")
+			assert.Contains(t, notice, "af config set network.require_token true", "offer the canonical token fix")
+			// It reports the opted-in exposure; the refusal is a different message
+			// (ListenerBindRefusal) carried by different surfaces.
+			assert.NotContains(t, notice, "refus", "the opted-in posture is serving, not refused — the notice must not conflate them")
 			assert.NotContains(t, notice, "\n", "one line: this goes in a log and a status row")
 		})
 	}
+}
+
+// TestListenerExposureNoticeOnlyFiresOnTheOptIn pairs the notice with its
+// gate: the same tokenless network postures the table above expects warned
+// produce NOTHING without allow_unauthenticated_network — the bind is refused
+// (TestListenerBindRefusal), so a serving-exposure notice would be a lie.
+// require_loopback_token is toggled on one axis too: it is inert while
+// require_token is false, so it must neither rescue the refusal nor silence
+// the opted-in notice.
+func TestListenerExposureNoticeOnlyFiresOnTheOptIn(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:8443", "[::]:8443", ":8443", "192.168.1.10:8443"} {
+		for _, loopbackToken := range []bool{false, true} {
+			cfg := DefaultConfig()
+			cfg.ListenAddr = addr
+			cfg.RequireToken = false
+			cfg.RequireLoopbackToken = loopbackToken
+			assert.Empty(t, ListenerExposureNotice(cfg),
+				"%q (loopback_token=%v) without the opt-in is refused, not served — no exposure notice", addr, loopbackToken)
+			cfg.AllowUnauthenticatedNetwork = true
+			assert.NotEmpty(t, ListenerExposureNotice(cfg),
+				"%q (loopback_token=%v) with the opt-in IS served unauthenticated — the notice must fire", addr, loopbackToken)
+		}
+	}
+}
+
+// TestListenerBindRefusal is the #5137 contract: a non-loopback listen_addr
+// with the token off and no opt-in is refused, in EVERY shape the exposure
+// reaches users — wildcard, IPv4, IPv6, empty host, hostname — while loopback,
+// token-required, and opted-in postures bind normally.
+func TestListenerBindRefusal(t *testing.T) {
+	cases := []struct {
+		name                    string
+		listenAddr              string
+		requireToken            bool
+		allowUnauthenticatedNet bool
+		wantRefused             bool
+	}{
+		// The refused shapes — every non-loopback form, including the wildcards
+		// and a Tailscale CGNAT address (a tailnet is a network like any other).
+		{"wildcard ipv4", "0.0.0.0:8443", false, false, true},
+		{"wildcard ipv6", "[::]:8443", false, false, true},
+		{"empty host binds every interface", ":8443", false, false, true},
+		{"routable ipv4", "192.168.1.10:8443", false, false, true},
+		{"private ipv4", "10.0.0.5:8443", false, false, true},
+		{"tailscale address", "100.83.69.90:8443", false, false, true},
+		{"hostname", "myhost.example.com:8443", false, false, true},
+
+		// Allowed: the three named fixes, each on its own.
+		{"wildcard with token required", "0.0.0.0:8443", true, false, false},
+		{"wildcard with explicit opt-in", "0.0.0.0:8443", false, true, false},
+		{"loopback, tokenless", "127.0.0.1:8443", false, false, false},
+		{"loopback ipv6, tokenless", "[::1]:8443", false, false, false},
+		{"localhost, tokenless", "localhost:8443", false, false, false},
+		{"loopback /8 edge, tokenless", "127.42.0.1:8443", false, false, false},
+		{"web server disabled", "", false, false, false},
+		{"wildcard with token AND opt-in", "0.0.0.0:8443", true, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ListenAddr = tc.listenAddr
+			cfg.RequireToken = tc.requireToken
+			cfg.AllowUnauthenticatedNetwork = tc.allowUnauthenticatedNet
+
+			refusal := ListenerBindRefusal(cfg)
+			if !tc.wantRefused {
+				assert.Empty(t, refusal)
+				return
+			}
+			require.NotEmpty(t, refusal)
+			// The SAME message goes everywhere — startup log, config-set error,
+			// doctor FAIL, daemon status — so pin the three named fixes and the
+			// consequence rather than today's phrasing.
+			assert.Contains(t, refusal, tc.listenAddr, "name the refused address")
+			assert.Contains(t, refusal, "DeliverPrompt", "say what an unauthenticated peer could reach")
+			assert.Contains(t, refusal, "network.require_token true", "fix one: require the token")
+			assert.Contains(t, refusal, "af token show", "say where the token comes from")
+			assert.Contains(t, refusal, "network.listen_addr 127.0.0.1:8443", "fix two: bind loopback")
+			assert.Contains(t, refusal, "network.allow_unauthenticated_network true", "fix three: the explicit opt-in")
+			assert.Contains(t, refusal, "unix control socket", "say what still works — the refusal is listener-scoped")
+			assert.NotContains(t, refusal, "\n", "one line: this goes in a log and a status row")
+		})
+	}
+	assert.Empty(t, ListenerBindRefusal(nil), "a nil config refuses nothing — it configures nothing")
 }
 
 // TestListenerExposureNoticeNilConfig pins the nil case: callers reach this with
@@ -253,6 +326,12 @@ func TestDefaultConfigHasNoExposureNotice(t *testing.T) {
 // the #2090 report to the same predicate: `af config set` warns at write time
 // exactly when the daemon will warn at bind time.
 //
+// Both fixtures opt in: since #5137 the warning exists ONLY under
+// allow_unauthenticated_network — everywhere else the posture is refused
+// outright and exposureWarning defers to listenerWriteRefusal, which runs first
+// and errors the write. Setting the opt-in here is what keeps the warn branch
+// exercised rather than vacuous.
+//
 // Drift here is silently awful in both directions. A set-time warning with no
 // daemon notice means the only record of an exposure is a line the user saw once,
 // days before it started serving. A daemon notice with no set-time warning means
@@ -270,12 +349,14 @@ func TestExposureWarningAgreesWithTheDaemonNotice(t *testing.T) {
 				cfg := DefaultConfig()
 				cfg.RequireToken = requireToken
 				cfg.ListenAddr = addr
+				cfg.AllowUnauthenticatedNetwork = true
 
 				warned := exposureWarning(cfg, "listen_addr") != ""
 
 				noticedCfg := DefaultConfig()
 				noticedCfg.ListenAddr = addr
 				noticedCfg.RequireToken = requireToken
+				noticedCfg.AllowUnauthenticatedNetwork = true
 				noticed := ListenerExposureNotice(noticedCfg) != ""
 
 				assert.Equal(t, noticed, warned,
@@ -284,3 +365,9 @@ func TestExposureWarningAgreesWithTheDaemonNotice(t *testing.T) {
 		}
 	}
 }
+
+// The stale-daemon write guard used to live here as a key-based classifier —
+// it was deleted when review established that a pre-#5137 daemon's write→apply
+// sequence is not atomic, so no write is provably safe on its own. Every
+// config write now posts to the guarded route unconditionally; the pinning
+// tests live in apiclient/config_test.go and commands/config_remote_write_test.go.

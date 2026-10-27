@@ -3,14 +3,35 @@
 #
 # Report whether the af CLI is on PATH. Read-only on purpose: this hook never
 # downloads or installs anything (see docs/agent-plugins.md).
-set -euo pipefail
+set -uo pipefail
 
-if command -v af >/dev/null 2>&1; then
-	# `af version` can print a second "an upgrade is available" line; the
-	# hook only wants the version itself.
-	version=$(af version 2>/dev/null | head -n 1)
-	echo "${version:-af (version unknown)} is available."
-else
+# af_version_bounded runs `af version` with a short wall-clock bound so a
+# wrapper that hangs or floods output cannot stall SessionStart for the 600s
+# Codex applies when a hook declares no timeout. timeout(1) is on Linux and
+# macOS-with-coreutils; where it is missing the probe falls back to the
+# unbounded capture (the prior behavior) rather than misreport a healthy af
+# as broken. The whole `af version` output is captured into a variable first
+# (no head in the pipe), so af version runs to completion and its real exit
+# status — not a masked pipeline — decides the branch; a timeout (exit 124)
+# or a wrapper that prints a version-looking line then exits non-zero is
+# reported as broken, not masked as healthy by a || true.
+af_version_bounded() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout -k 2s 10s bash -c 'af version' 2>/dev/null
+	else
+		af version 2>/dev/null
+	fi
+}
+
+if ! command -v af >/dev/null 2>&1; then
 	echo "af is not installed. Install it with:"
+	echo "  curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh"
+	elif af_out=$(af_version_bounded) && [ -n "$af_out" ]; then
+	# `af version` can print a second "an upgrade is available" line; the
+	# hook only wants the version itself, so keep only the first line.
+	version=${af_out%%$'\n'*}
+	echo "${version} is available."
+else
+	echo "af is on PATH but failed to execute. Reinstall it with:"
 	echo "  curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh"
 fi

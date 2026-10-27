@@ -1123,3 +1123,37 @@ func TestRemoveTask_MatchingExpectationSucceeds(t *testing.T) {
 }
 
 func strPtrT(s string) *string { return &s }
+
+// TestUpdateTaskStatusIf_GuardRunsAgainstCommittedRow pins the compare-and-set
+// of #5645: the guard sees the row as committed under the file lock, a refusing
+// guard leaves the row untouched and reports applied=false, and a passing guard
+// writes.
+func TestUpdateTaskStatusIf_GuardRunsAgainstCommittedRow(t *testing.T) {
+	setupTestTasks(t, []Task{
+		{ID: "r1", Name: "Run", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/tmp", Enabled: true},
+	})
+	t0 := time.Now().Truncate(time.Second)
+	_, err := UpdateTaskStatus("r1", &t0, "errored: prompt not delivered")
+	require.NoError(t, err)
+
+	var seen string
+	later := t0.Add(time.Minute)
+	_, applied, err := UpdateTaskStatusIf("r1", &later, "started", func(cur Task) bool {
+		seen = cur.LastRunStatus
+		return cur.LastRunStatus != "errored: prompt not delivered"
+	})
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.Equal(t, "errored: prompt not delivered", seen)
+	got, err := GetTask("r1")
+	require.NoError(t, err)
+	assert.Equal(t, "errored: prompt not delivered", got.LastRunStatus, "refused write must not land")
+	assert.True(t, got.LastRunAt.Equal(t0), "refused write must not move LastRunAt")
+
+	_, applied, err = UpdateTaskStatusIf("r1", &later, "started", func(Task) bool { return true })
+	require.NoError(t, err)
+	assert.True(t, applied)
+	got, err = GetTask("r1")
+	require.NoError(t, err)
+	assert.Equal(t, "started", got.LastRunStatus)
+}
