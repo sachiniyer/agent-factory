@@ -68,15 +68,20 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
 		assert.Contains(t, view, "alpha · Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
-		// The header's noun is whole-or-omitted since #5153: at every rail width
-		// either composed here produces (22 and 30 cells, below the
-		// " Automations: n (m on)" fit) the section speaks the counts vocabulary
-		// and never ellipsizes into "Autom…". The count is the information the
-		// header exists to carry — assert it plus the manage affordance FIX 2
-		// guarantees is never cut.
-		assert.Contains(t, view, "1 (0 on)", "%dx%d: automations section count", tc.w, tc.h)
-		manageHint := helpKey(keys.KeyTaskList) + " manage"
-		assert.Contains(t, view, manageHint, "%dx%d: the manage affordance survives", tc.w, tc.h)
+		// The header's noun is the last fragment shed since #5372: at every
+		// rail width either composed here produces (22 and 30 cells) the strip
+		// still says what is being counted, and never ellipsizes into
+		// "Autom…". The affordance outranks the secondary count, so the rail
+		// keeps "· m manage" at 30 cells and "(0 on)" at the 22-cell floor
+		// where the affordance itself has shed.
+		assert.Contains(t, view, "Automations:", "%dx%d: the automations noun survives (#5372)", tc.w, tc.h)
+		if tc.w >= 120 {
+			assert.Contains(t, view, "Automations: 1 · "+helpKey(keys.KeyTaskList)+" manage",
+				"%dx%d: the 30-cell rail keeps the affordance beside noun and primary count", tc.w, tc.h)
+		} else {
+			assert.Contains(t, view, "Automations: 1 (0 on)",
+				"%dx%d: the 22-cell rail floor keeps noun and full counts", tc.w, tc.h)
+		}
 		// #1087: the automations section lives inside the left rail, under a
 		// full-rail-width horizontal rule.
 		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),

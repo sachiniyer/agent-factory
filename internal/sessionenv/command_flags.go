@@ -3,19 +3,23 @@ package sessionenv
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // AgentForCommand returns a supported agent only when the complete command is
 // one literal invocation of that agent (optionally through env or exec). Nested
 // agent-server commands are never classified from strings; Docker/SSH use the
-// effect-bound exec protocol instead. This result grants credentials to a
-// process, so an agent-looking argument to an arbitrary executable must never
-// match.
+// effect-bound exec protocol instead. This is the IDENTITY classifier ("what
+// does this command run"); the credential grant a process receives is gated by
+// GrantAgentForCommand, which layers operator attribution on top of it. The
+// identity answer still feeds account boundaries, so an agent-looking argument
+// to an arbitrary executable must never match.
 func AgentForCommand(command string) string {
 	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
 	if !ok {
@@ -53,9 +57,28 @@ func AgentNamespaceForCommand(command string) string {
 }
 
 type agentCommand struct {
-	agent                       string
-	executable                  string
+	agent      string
+	executable string
+	// wrapper is the env executable spelling the invocation ran through (""
+	// for a direct invocation). Its resolution is part of the grant's
+	// attribution surface: `env /opt/codex` names an operator file, but a bare
+	// `env` resolving into the repository runs repository code with the grant.
+	wrapper string
+	// executableResolutionChanged marks the environment changes that redirect
+	// executable RESOLUTION — PATH assignment/removal, environment clearing,
+	// env chdir. The grant predicate refuses them because POSIX lookup then
+	// selects a file the command string cannot attribute. Non-resolution
+	// assignments (TERM, ANTHROPIC_BASE_URL, agent cloud selectors) stay
+	// tolerated: a bare string cannot tell an operator's documented override
+	// apart from a repo-authored one, and checked-in program_overrides are
+	// refused assignment-carrying values at load instead (#5265 review).
 	executableResolutionChanged bool
+	// environmentMutated records ANY command-local environment change: a
+	// shell assignment prefix or an env-wrapper mutation, unset, clear, or
+	// chdir. The launch predicate does not consult it — config load does, to
+	// refuse checked-in program_overrides values that set environment (#5265
+	// review).
+	environmentMutated bool
 }
 
 // literalAgentCommand parses one literal agent invocation, optionally through an
@@ -79,20 +102,28 @@ func literalAgentCommand(command string, envMatch func(string) bool) (agentComma
 		return agentCommand{}, false
 	}
 	executable := args[0]
+	wrapper := ""
 	resolutionChanged := shellAssignmentsChangeExecutableResolution(call.Assigns)
+	var envMutations []envcommand.Mutation
+	envClearedOrMoved := false
 	if envMatch(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return agentCommand{}, false
 		}
+		wrapper = args[0]
 		executable = args[1+invocation.CommandIndex]
+		envMutations = invocation.Mutations
+		envClearedOrMoved = invocation.ClearEnvironment || invocation.Chdir != ""
 		resolutionChanged = resolutionChanged || envChangesExecutableResolution(invocation)
 	}
 	agent := supportedAgent(executable)
 	return agentCommand{
 		agent:                       agent,
 		executable:                  executable,
+		wrapper:                     wrapper,
 		executableResolutionChanged: resolutionChanged,
+		environmentMutated:          envClearedOrMoved || len(call.Assigns) > 0 || len(envMutations) > 0,
 	}, agent != ""
 }
 
@@ -117,6 +148,225 @@ func credentialAgentForCommand(command string) string {
 		return ""
 	}
 	return invocation.agent
+}
+
+// GrantAgentForCommand is the ONE predicate every credential-grant site
+// shares: the tmux launcher (session_env.go), the pane exec shim
+// (execInvocation), and the backend provisioners that install credential
+// material (docker mounts, hook environments — via the remote variant
+// below). It returns the supported agent command invokes ONLY when the
+// file POSIX resolution selects is attributable to the operator — a bare
+// name whose first PATH hit is an absolute directory outside workDir or
+// whose all-absolute PATH walk never lands a hit (exec can then only fail,
+// never run repository content), or an absolute path outside workDir. Any
+// spelling that lets the checked-out repository pick the file earns no
+// grant, because program_overrides is an in-repo config key and a repo can
+// therefore name an executable it ships (#5265):
+//
+//   - a RELATIVE executable (./codex, bin/codex, ../codex) resolves against
+//     the pane's working directory;
+//   - a command that respells resolution (a PATH=… assignment, env PATH=…,
+//     env -u PATH, env -i, env -C) selects the directory itself. Other
+//     command-local assignments cannot be told apart from an operator's own
+//     override by the string alone, so checked-in config is refused them at
+//     load (config.LoadInRepoConfig) instead;
+//   - an env WRAPPER that itself fails attribution: a bare env resolving
+//     through a repository-controlled PATH entry runs repository code no
+//     matter what its operand names;
+//   - an inherited PATH whose walk reaches an empty or relative entry
+//     before the executable resolves a bare name into or relative to the
+//     pane's working directory;
+//   - an ABSOLUTE path inside workDir is inside the checked-out tree.
+//
+// AgentForCommand remains the identity classifier ("what does this command
+// run"); GrantAgentForCommand answers the different question "may this
+// command carry the operator's credential grant". credentialAgentForCommand
+// stays deliberately stricter — it serves the effect-bound agent-server
+// handoff, where the program string crosses a wire and even an absolute path
+// has no trusted provenance.
+//
+// Callers pass the environment the command's resolution actually reads (the
+// launcher's own environment, which is what the filtered pane inherits) and
+// the directory the pane launches in. A caller that cannot know the
+// directory — a remote hook host — passes "" and still denies every
+// non-absolute spelling.
+func GrantAgentForCommand(command string, environ []string, workDir string) string {
+	return grantAgentForCommand(command, environ, workDir)
+}
+
+// GrantAgentForRemoteCommand is GrantAgentForCommand for a provisioner whose
+// resolved executable lives on a filesystem the host cannot enumerate — a
+// docker image's rootfs or an ssh target. The remote PATH walk cannot be
+// stat'ed from here, so a bare name is attributed the way it was before the
+// grant predicate existed: the remote's PATH is image or sshd state, which the
+// repository does not control through program_overrides. Every spelling the
+// repository CAN control — a relative or in-workspace executable, a
+// resolution-mutating command — is denied exactly as it is locally.
+func GrantAgentForRemoteCommand(command, workDir string) string {
+	return grantAgentForCommand(command, nil, workDir)
+}
+
+func grantAgentForCommand(command string, environ []string, workDir string) string {
+	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
+	if !ok {
+		return ""
+	}
+	if !executableAttributableToOperator(invocation, environ, workDir) {
+		return ""
+	}
+	return invocation.agent
+}
+
+// AgentCommandExecutable reports the executable token af's literal agent
+// resolution selected in command — including through a trusted env wrapper —
+// for a caller that must judge the FILE, not only the attributed agent. It
+// answers "" only when the command is not one literal simple call at all —
+// the executable is reported whether or not it classifies as a supported
+// agent, because the in-repo refusal applies to absolute spellings wholesale:
+// LoadInRepoConfig uses it to refuse any checked-in program_overrides value
+// that selects an absolute executable: a repository spelling is not trusted
+// provenance for a file outside it (#5265).
+func AgentCommandExecutable(command string) string {
+	invocation, _ := literalAgentCommand(command, isTrustedEnvExecutable)
+	return invocation.executable
+}
+
+// AgentCommandSetsEnvironment reports whether command sets command-local
+// environment — a shell assignment prefix (LD_PRELOAD=./x.so codex) or an
+// env-wrapper mutation (env NAME=…, env -u, env -i, env -C). LoadInRepoConfig
+// uses it to refuse checked-in program_overrides values that set environment:
+// the launch grant cannot tell an operator's documented override
+// (ANTHROPIC_BASE_URL=… claude in a global config) apart from a
+// repository-authored one, so the untrusted layer is refused at load while
+// operator layers keep the power (#5265 review).
+func AgentCommandSetsEnvironment(command string) bool {
+	invocation, _ := literalAgentCommand(command, isTrustedEnvExecutable)
+	return invocation.environmentMutated
+}
+
+// executableAttributableToOperator reports whether POSIX resolution of the
+// parsed invocation's executables can only select files the operator — not
+// the checked-out repository — controls. Both the agent executable and, when
+// the invocation runs through env, the wrapper itself must attribute: `env
+// /opt/codex` names an operator file, but a bare `env` resolving into the
+// repository runs repository code with the grant (#5265 review).
+func executableAttributableToOperator(invocation agentCommand, environ []string, workDir string) bool {
+	if invocation.executableResolutionChanged {
+		return false
+	}
+	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, workDir) {
+		return false
+	}
+	return spellingAttributableToOperator(invocation.executable, environ, workDir)
+}
+
+// spellingAttributableToOperator is the attribution rule for one executable
+// spelling. A path-qualified executable names its file directly: only an
+// absolute path is operator-attributable, and not one inside the session's
+// working tree, which is repository content whatever its spelling. A bare
+// name resolves through PATH: the inherited environment is the attribution
+// channel, so the first entry holding the executable must be absolute and
+// outside workDir — and an all-absolute walk that finds no hit attributes
+// too, since exec can then only fail rather than land in the repository.
+func spellingAttributableToOperator(executable string, environ []string, workDir string) bool {
+	if strings.Contains(executable, "/") {
+		return filepath.IsAbs(executable) && pathOutsideWorkDir(executable, workDir)
+	}
+	return searchPathAttributesExecutable(environ, executable, workDir)
+}
+
+// pathOutsideWorkDir reports whether path resolves outside workDir — outside
+// the checked-out tree, where repository content cannot supply the file.
+// ResolveForCompare canonicalizes both sides, so a symlinked worktree root or
+// a symlinked target cannot evade containment. An unresolvable workDir denies
+// rather than letting an unknowable containment answer default open; an empty
+// workDir leaves the check open for a caller that cannot know the directory.
+func pathOutsideWorkDir(path, workDir string) bool {
+	if workDir == "" {
+		return true
+	}
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	resolvedDir := pathutil.ResolveForCompare(absDir)
+	// LEXICAL containment is checked alongside RESOLVED containment: a
+	// spelling inside the tree names repository content even when the file it
+	// selects resolves out — an in-tree symlink to /bin/sh still lets a later
+	// commit repoint it before exec. Containment is tested against workDir as
+	// spelled and as resolved, so a workDir itself spelled through a link
+	// cannot slide a spelling past the lexical half either.
+	if pathutil.IsAtOrInside(absPath, absDir) ||
+		pathutil.IsAtOrInside(absPath, resolvedDir) ||
+		pathutil.IsAtOrInside(pathutil.ResolveForCompare(absPath), resolvedDir) {
+		return false
+	}
+	return true
+}
+
+// searchPathAttributesExecutable models execvp's real walk of environ's PATH:
+// directories are tried in order and the first one holding the executable
+// wins, so the grant follows when that first hit is absolute AND outside
+// workDir. An empty or relative entry resolves in or relative to the working
+// directory — repository content — and denies before any absolute hit, while
+// an absolute entry that does not hold the file is skipped exactly as execvp
+// skips it (ENOENT and EACCES alike continue the walk). An ALL-ABSOLUTE walk
+// that never holds the executable still grants: resolution can then only
+// fail, never land in the repository — nothing repo-controlled runs, which is
+// what the grant exists to prevent. An absent PATH resolves through execvp's
+// compiled-in default, which is absolute and operator-controlled.
+//
+// The stat is advisory only — the filesystem can change between this check
+// and the shell's own resolution at exec (TOCTOU). Exploiting the gap needs
+// the file to vanish from the winning absolute directory and reappear under a
+// later empty/relative entry inside the race window, which requires write
+// access to an operator-controlled PATH directory — outside the repository's
+// reach by definition.
+func searchPathAttributesExecutable(environ []string, name, workDir string) bool {
+	searchPath, found := firstEnvValue(environ, "PATH")
+	if !found {
+		return true
+	}
+	for _, dir := range strings.Split(searchPath, ":") {
+		if !filepath.IsAbs(dir) {
+			return false
+		}
+		if !pathEntryHoldsExecutable(dir, name) {
+			continue
+		}
+		return pathOutsideWorkDir(filepath.Join(dir, name), workDir)
+	}
+	return true
+}
+
+// pathEntryHoldsExecutable reports whether dir contains an executable file
+// named name — the local-filesystem stat the search-path walk uses for
+// execvp's "first entry that holds it" question. Mode bits alone are not the
+// answer: execvp's walk is EACCES-aware and skips a file it cannot actually
+// execute, so the probe is the daemon's own effective access — a bit-check
+// that ignores it would attribute a hit the real exec never makes and let
+// resolution fall through to a later relative entry (#5265 review).
+func pathEntryHoldsExecutable(dir, name string) bool {
+	path := filepath.Join(dir, name)
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() &&
+		info.Mode().Perm()&0o111 != 0 && executableAccess(path)
+}
+
+// firstEnvValue returns the value of the FIRST name= entry in environ — the
+// one getenv, and therefore execvp's PATH walk, honors when an environment
+// carries a name twice.
+func firstEnvValue(environ []string, name string) (string, bool) {
+	for _, entry := range environ {
+		if value, found := strings.CutPrefix(entry, name+"="); found {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func shellAssignmentsChangeExecutableResolution(assignments []*syntax.Assign) bool {

@@ -680,6 +680,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
 		}
+		// Same settle-persist contract as the restore paths: a respawn that
+		// settles a relocation record persists the cleared state before the
+		// spawn proceeds (#5295 review).
+		instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+			return m.persistInstanceErr(repoID, i)
+		})
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {
