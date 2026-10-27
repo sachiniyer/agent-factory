@@ -145,6 +145,7 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	})
 
 	// --- tab ------------------------------------------------------------------
+	// An external URL: a loopback target is refused on a sandbox until W5 (#3062).
 	before := len(find(title).Tabs)
 	var tab daemon.CreateTabResponse
 	post("/v1/CreateTab", daemon.CreateTabRequest{Title: title, RepoID: repoID, Kind: "web", URL: "https://example.com", Name: "dev"}, &tab)
