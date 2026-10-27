@@ -103,6 +103,15 @@ func (s *Store) readDoc(slug, file string) ([]byte, error) {
 	return data, nil
 }
 
+func (s *Store) statDoc(slug, file string) (fs.FileInfo, error) {
+	f, err := s.openDoc(slug, file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
+}
+
 func (s *Store) readSlugDir(slug string) ([]os.DirEntry, error) {
 	dir, err := s.openSlugDir(slug)
 	if err != nil {

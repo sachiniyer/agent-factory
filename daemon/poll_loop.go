@@ -108,6 +108,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 
 			manager.ResumeLimitedSessions()
 
+			// Report proposal docs that changed on disk to open Docs tabs. A stat
+			// of each watched doc; it commits nothing.
+			manager.ScanProposals()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:
