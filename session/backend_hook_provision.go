@@ -155,7 +155,13 @@ func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string
 func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord) string {
 	parts := []string{
 		"ssh",
-		"-o", "UserKnownHostsFile=" + shellQuote(knownHostsPath),
+		// Two-layer quoting, same discipline as ssh_command.go (see sshConfigQuote):
+		// this command runs through the shared `sh -c '<sshCmd> "$@"'` wrapper, so
+		// shellQuote alone is consumed by the outer shell before ssh sees the value,
+		// and ssh re-splits a bare UserKnownHostsFile value on whitespace. An AF
+		// home containing a space (the hook store lives under AF home) would
+		// otherwise never be the file hookProvisionKnownHosts just wrote.
+		"-o", shellQuote("UserKnownHostsFile=" + sshConfigQuote(knownHostsPath)),
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
 		// operator's matching Host block could hand OpenSSH a different key and

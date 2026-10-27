@@ -200,7 +200,16 @@ export function shouldCloseSavedField(
  */
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
-  const warnings = resp.warnings ?? [];
+  // resp.warnings is the apply-time channel; resp.result.warnings is the
+  // per-write channel the daemon fills even when the apply produced none
+  // (e.g. default_accounts.<agent> is EffectAppliedLive). Fall back the way
+  // the TUI does (ui/config_target.go) so every surface shows exactly one
+  // notice — never the two differently-worded ones a daemon-running edit can
+  // carry on both channels (#5266).
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
   // A warning makes the apply outcome actionable even for an ordinarily-live
   // key. In that case the restart notice must not be hidden by the key's static
   // requires-restart classification: it describes what happened to this save.
