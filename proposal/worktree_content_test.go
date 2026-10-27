@@ -57,7 +57,7 @@ func TestIgnoreFileCannotHideDocs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.Dir(), ".gitignore"), []byte("*\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddDoc("p", "notes", agent(sessA)); err != nil {
+	if _, _, err := s.AddDoc("p", "notes", agent(sessA)); err != nil {
 		t.Fatalf("AddDoc: %v", err)
 	}
 	editOnDisk(t, s, "p", "goals.md", "external edit\n")

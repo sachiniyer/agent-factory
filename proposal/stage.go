@@ -111,6 +111,21 @@ func (s *Store) stage(pathspecs []string) error {
 	return err
 }
 
+// changedDocs lists the docs that differ between commits from and to.
+func (s *Store) changedDocs(from, to string) ([]docSpec, error) {
+	out, err := s.git(nil, "diff", "--name-only", "--no-renames", "-z", from, to, "--")
+	if err != nil {
+		return nil, err
+	}
+	var docs []docSpec
+	for _, p := range strings.Split(out, "\x00") {
+		if slug, file, ok := isDocPath(p); ok {
+			docs = append(docs, docSpec{slug: slug, file: file})
+		}
+	}
+	return docs, nil
+}
+
 // trackedDocs maps each doc path in the index to its blob id. An entry of any
 // other mode than 100644 (one a legacy store imported) maps to "", so stage
 // rewrites it as a regular doc or deletes it.
