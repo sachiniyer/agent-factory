@@ -426,6 +426,15 @@ type remoteClientlessChannel struct {
 	// ring as contiguous output instead of a silent scrollback hole. Written
 	// by readLoop under mu; read by StartCapture under the same lock.
 	remoteSeq uint64
+	// dialSeq is the ?since the live subscription requested, and helloPending
+	// marks its OpHello as not yet seen. The first OpHello's seq is the
+	// post-clamp start position — equal to dialSeq iff the remote honored the
+	// cursor exactly. Any clamp (down over an evicted head, or up over a base
+	// ahead of the cursor) leaves a gap the local ring cannot backfill, so the
+	// recovery repaint is still owed; replayContiguous records the verdict.
+	dialSeq          uint64
+	helloPending     bool
+	replayContiguous bool
 	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
 	// concurrent reader + one writer, but two goroutines writing (an input and a
 	// resize) would race the frame boundary.
@@ -463,6 +472,7 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, err
 	}
 	c.conn, c.ctx, c.cancel = conn, ctx, cancel
+	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	pr, pw := io.Pipe()
 	go c.readLoop(ctx, conn, pw)
 	return pr, nil
@@ -496,6 +506,10 @@ func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.
 		case agentproto.OpHello:
 			c.mu.Lock()
 			c.reseedRemoteSeqLocked(conn, msg.Frame.Seq)
+			if c.helloPending && c.remoteSeqWritableLocked(conn) {
+				c.replayContiguous = msg.Frame.Seq == c.dialSeq
+				c.helloPending = false
+			}
 			c.mu.Unlock()
 		case agentproto.OpPTYOut:
 			n, werr := pw.Write(msg.Frame.Data)
@@ -537,15 +551,18 @@ func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, d
 	}
 }
 
-// ReplaysHistory reports that this channel's captures restore contiguous
-// retained output on every re-dial (?since=remoteSeq, which the remote clamps
-// to its retained base). A restarted capture therefore re-delivers the missing
-// window as ordinary bytes, so a subscriber whose ring cursor still covers that
-// window needs no recovery repaint — the repaint's screen already reflects the
-// replayed output and would be followed by the same bytes again (#5571 W1.2).
-// The tmux channel has no replay: its respawns produce a fresh pane and the
-// repaint is every subscriber's re-baseline.
-func (c *remoteClientlessChannel) ReplaysHistory() bool { return true }
+// ReplaysHistory reports whether THIS capture actually delivers contiguous
+// retained output — the remote honored the ?since cursor exactly, proven by
+// the subscription's OpHello seq matching the requested dialSeq. A clamped
+// OpHello means the remote ring evicted our cursor during the outage and the
+// gap is unrecoverable from the stream: the recovery repaint is still owed.
+// False whenever no capture is live or the hello has not landed — both are
+// the repaint-safe side.
+func (c *remoteClientlessChannel) ReplaysHistory() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil && c.replayContiguous
+}
 
 // StopCapture cancels the read loop and closes the WS, so the broker's read side
 // (the pipe) returns EOF. Idempotent.

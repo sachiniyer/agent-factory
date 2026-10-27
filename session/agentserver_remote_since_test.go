@@ -156,3 +156,42 @@ func TestRemoteChannelMidStreamReseed(t *testing.T) {
 	require.NoError(t, ch.StopCapture())
 	remoteSeqEventually(t, ch, 5002, "re-seed 5000 + 2 delivered bytes — not 1000+4")
 }
+
+// TestRemoteChannelReplayContiguityGatesRepaint is the recovery-repaint
+// contract (#5571 W1.2 codex): the broker suppresses the recovery repaint only
+// when the LIVE capture provably replays contiguous history — the OpHello seq
+// matching the requested ?since exactly. A clamped hello (remote ring evicted
+// the cursor mid-outage) means the missing window is gone from the stream and
+// the repaint is still owed; no live capture or a hello not yet landed is the
+// repaint-safe side too.
+func TestRemoteChannelReplayContiguityGatesRepaint(t *testing.T) {
+	// Honored cursor: dialSeq 1000, hello answers 1000 → contiguous replay.
+	probe := &streamProbe{frames: []agentproto.Frame{agentproto.HelloFrame(1000)}}
+	ch := newStreamProbeChannel(t, probe)
+	ch.mu.Lock()
+	ch.remoteSeq = 1000
+	ch.mu.Unlock()
+
+	_, err := ch.StartCapture()
+	require.NoError(t, err)
+	require.Eventually(t, ch.ReplaysHistory, 5*time.Second, 10*time.Millisecond,
+		"an exact-honor hello must mark the capture contiguous")
+	require.NoError(t, ch.StopCapture())
+	require.False(t, ch.ReplaysHistory(), "no live capture → nothing replays")
+
+	// Clamped cursor: dialSeq 999999, hello answers the real base 500 → the
+	// outage window is gone; the repaint is still owed.
+	ch.mu.Lock()
+	ch.remoteSeq = 999999
+	ch.mu.Unlock()
+	_, err = ch.StartCapture()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ch.StopCapture() })
+	require.Eventually(t, func() bool {
+		ch.mu.Lock()
+		defer ch.mu.Unlock()
+		return !ch.helloPending
+	}, 5*time.Second, 10*time.Millisecond, "the clamped hello must land")
+	require.False(t, ch.ReplaysHistory(),
+		"a clamped hello leaves a gap the ring cannot backfill — repaint stays owed")
+}
