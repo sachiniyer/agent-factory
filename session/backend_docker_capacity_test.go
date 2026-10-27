@@ -1139,16 +1139,17 @@ func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
 }
 
 // TestDockerOpWriteRoots_IncludesNonAccountHome pins that a root exec's
-// write roots include the non-account session home (dockerContainerHome,
-// /root) only for a non-account session: prepareNonAccountUser's
-// mkdir+chown runs as a root exec through /root for a non-account session,
-// so a /root bind backed by a probed data-root filesystem can let the
-// Bavail verdict fire for that failure. /root is omitted for an account
-// session so an unrelated /root bind cannot make an account root exec
-// borrow the Bavail window (#5424 review). /workspace is a root-exec
-// write root on both paths because each prepare step mkdir+chowns it as
-// root; the account mounts stay so the account path's root exec is still
-// covered.
+// write roots are scoped to the session that actually performs it: a
+// non-account root exec writes the session home (dockerContainerHome,
+// /root) plus /workspace, and an account root exec writes the account
+// mounts (dockerAccountHome, dockerAccountRuntimeHome) plus /workspace.
+// prepareNonAccountUser never writes /af-home or /af-account, so an
+// unrelated bind or volume at either account path cannot make a
+// non-account root exec borrow the Bavail window (#5424 review);
+// symmetrically, prepareAccountUser never writes /root, so an unrelated
+// /root bind cannot make an account root exec borrow the window.
+// /workspace is a root-exec write root on both paths because each
+// prepare step mkdir+chowns it as root.
 func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
 	nonAccount := &dockerProvisioner{spec: ProvisionSpec{Title: "non-account"}}
 	roots := nonAccount.dockerOpWriteRoots(dockerOpRootExec)
@@ -1156,8 +1157,10 @@ func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
 		"a non-account root exec writes the session home (/root); it must be a root-exec write root so a /root bind can borrow the Bavail window")
 	assert.Contains(t, roots, dockerWorkspaceDir,
 		"a non-account root exec also mkdir+chowns /workspace; it must be a root-exec write root")
-	assert.Contains(t, roots, dockerAccountRuntimeHome,
-		"the account runtime home stays a root-exec write root")
+	assert.NotContains(t, roots, dockerAccountHome,
+		"a non-account root exec never writes /af-account; an unrelated bind there must not borrow the Bavail window")
+	assert.NotContains(t, roots, dockerAccountRuntimeHome,
+		"a non-account root exec never writes /af-home; an unrelated bind there must not borrow the Bavail window")
 
 	account := &dockerProvisioner{spec: ProvisionSpec{Title: "account",
 		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/af-account"}}}
@@ -1166,6 +1169,10 @@ func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
 		"an account root exec never writes /root; an unrelated /root bind must not borrow the Bavail window")
 	assert.Contains(t, accountRoots, dockerWorkspaceDir,
 		"an account root exec mkdir+chowns /workspace; it must be a root-exec write root")
+	assert.Contains(t, accountRoots, dockerAccountHome,
+		"an account root exec writes the mounted account home; it must be a root-exec write root")
+	assert.Contains(t, accountRoots, dockerAccountRuntimeHome,
+		"an account root exec writes the account runtime home; it must be a root-exec write root")
 	assert.Contains(t, account.dockerOpWriteRoots(dockerOpSessionExec), dockerWorkspaceDir,
 		"session execs still write the workspace")
 }

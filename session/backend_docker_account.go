@@ -847,8 +847,11 @@ func (p *dockerProvisioner) prepareContainerUser() error {
 // It probes the image's default user by running `id -u`/`id -g` with no --user
 // override, so the image's USER directive resolves via the image's own
 // /etc/passwd (a name like `dev`, a bare uid, or a uid:gid pair all resolve to a
-// numeric uid:gid this way). It then chowns HOME and creates+chowns /workspace
-// as root (0:0) to that uid. Subsequent provisioning execs (configureGit,
+// numeric uid:gid this way). It then recursively chowns HOME (a non-root BYO
+// image may ship root-owned descendants such as /root/.codex or /root/.config
+// with mode 0700, and a shallow chown of the top-level dir alone leaves those
+// unreadable by the selected uid) and creates+chowns /workspace as root
+// (0:0) to that uid. Subsequent provisioning execs (configureGit,
 // cloneWorkspace) and the agent-server itself run as that user via
 // sessionExecOptions, with a HOME it can now write to.
 //
@@ -889,9 +892,16 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if uid, _, _ := strings.Cut(owner, ":"); uid == "0" {
 		return nil
 	}
-	script := fmt.Sprintf("mkdir -p %s %s && chown %s %s %s",
+	// The home is chowned recursively (-R) rather than shallowly: a non-root
+	// BYO image may ship root-owned descendants under /root (e.g. /root/.codex
+	// or /root/.config with mode 0700), and a shallow chown of the top-level
+	// directory leaves those unreadable and unwritable by the selected uid,
+	// so the agent later cannot read or update its existing configuration.
+	// /workspace is freshly created by mkdir -p above, so it has no existing
+	// descendants and a shallow chown is enough.
+	script := fmt.Sprintf("mkdir -p %s %s && chown -R %s %s && chown %s %s",
 		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir), owner,
-		shellQuote(p.sessionHome()), shellQuote(dockerWorkspaceDir))
+		shellQuote(p.sessionHome()), owner, shellQuote(dockerWorkspaceDir))
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
 	if err != nil {

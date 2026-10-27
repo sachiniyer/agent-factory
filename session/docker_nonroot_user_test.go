@@ -149,6 +149,14 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 		"prepareNonAccountUser must chown HOME (dockerContainerHome) so the non-root user can write it; call=%v", chown)
 	require.Contains(t, chownJoined, shellQuote(dockerWorkspaceDir),
 		"prepareNonAccountUser must chown /workspace so the non-root user can clone into it; call=%v", chown)
+	// The HOME chown is recursive so a non-root BYO image that ships root-owned
+	// descendants under /root (e.g. /root/.codex or /root/.config with mode
+	// 0700) does not leave them unreadable by the selected uid (#5424 review).
+	// /workspace is freshly created by mkdir -p, so its chown stays shallow.
+	require.Contains(t, chownJoined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+		"prepareNonAccountUser must recursively chown HOME so root-owned descendants become accessible; call=%v", chown)
+	require.NotContains(t, chownJoined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		"/workspace is freshly created by mkdir -p; its chown must stay shallow; call=%v", chown)
 
 	// git config (configureGit) runs as the probed non-root user with HOME=/root
 	// (now writable because it was chowned). Before the fix this ran as the
@@ -320,6 +328,35 @@ func TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate(t *testing.T) {
 	require.Contains(t, err.Error(), "image's default user",
 		"the diagnostic must name the probe step so an operator sees the real cause, not a downstream git error")
 	require.False(t, sawChown, "a probe failure must not proceed to chown or any later provisioning step")
+}
+
+// TestPrepareNonAccountUser_ChownsHomeRecursively pins that the HOME chown is
+// recursive so a non-root BYO image that ships root-owned descendants under
+// /root (e.g. /root/.codex or /root/.config with mode 0700) does not leave them
+// unreadable by the selected uid — a shallow chown of the top-level directory
+// alone would not fix the configured HOME for the agent (#5424 review).
+// /workspace is freshly created by mkdir -p, so its chown stays shallow.
+func TestPrepareNonAccountUser_ChownsHomeRecursively(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+
+	chown := findExecCall(calls, "--user 0:0", "chown", dockerNonRootImageUser)
+	require.NotNil(t, chown, "prepareNonAccountUser must chown HOME and /workspace as root; calls=%v", calls)
+	joined := strings.Join(chown, " ")
+	require.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+		"HOME must be chowned recursively so root-owned descendants become accessible; call=%v", chown)
+	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		"/workspace is freshly created by mkdir -p; its chown must stay shallow; call=%v", chown)
+	require.Equal(t, dockerNonRootImageUser, p.containerUser,
+		"containerUser must record the probed uid:gid so later execs run as it; calls=%v", calls)
 }
 
 // TestPrepareNonAccountUser_NoOpForAccount pins the dispatch: an account-

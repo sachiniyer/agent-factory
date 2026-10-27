@@ -737,15 +737,22 @@ func dockerUserUnprivileged(user string) bool {
 // /workspace for a non-account session (prepareNonAccountUser mkdir+chowns
 // /root and /workspace); the non-account home is selected only for a
 // non-account session so an unrelated /root bind cannot make an account root
-// exec borrow the Bavail window (#5424 review). Session execs write the
-// workspace, the account dirs a mounted session owns, and /tmp for the
-// agent-server banner redirect.
+// exec borrow the Bavail window (#5424 review). Symmetrically, the account
+// mounts are selected only for an account session — prepareNonAccountUser
+// never writes /af-home or /af-account — so an unrelated bind or volume at
+// either account path cannot make a non-account root exec borrow the Bavail
+// window (#5424 review). /workspace stays a root-exec write root on both
+// paths because each prepare step mkdir+chowns it as root. Session execs
+// write the workspace, the account dirs a mounted session owns, and /tmp
+// for the agent-server banner redirect.
 func (p *dockerProvisioner) dockerOpWriteRoots(op dockerOpClass) []string {
 	switch op {
 	case dockerOpRootExec:
-		roots := []string{dockerAccountHome, dockerAccountRuntimeHome, dockerWorkspaceDir}
+		roots := []string{dockerWorkspaceDir}
 		if p.spec.Account.Dir == "" {
 			roots = append(roots, dockerContainerHome)
+		} else {
+			roots = append(roots, dockerAccountHome, dockerAccountRuntimeHome)
 		}
 		return roots
 	case dockerOpSessionExec:
