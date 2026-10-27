@@ -75,18 +75,20 @@ func railHeaderCases() []railHeaderCase {
 				a.SetRect(layout.Rect{W: w, H: 4})
 				return strings.TrimRight(strings.Split(stripANSI(a.View()), "\n")[0], " ")
 			},
-			// #5153 (review): the section speaks the compact counts vocabulary
-			// at EVERY width — "2 (2 on)" beside the noun, then alone, then the
-			// bare primary "2" — so widening can never remove a count the
-			// narrower form had. The noun is whole-or-omitted rather than
-			// ellipsized, so present-at-all and complete are the same width.
+			// #5372: the counts and the affordance shed before the noun —
+			// "Automations:" is whole at every supported width and is the last
+			// fragment standing. The affordance still outranks the secondary
+			// count: "2 · m manage" from 26 cells up, the full "2 (2 on)"
+			// beside the noun at 22-25, the bare primary "2" at 15-21, and the
+			// noun alone at 13-14. Below that the clipped noun — unreachable
+			// under the rail's 22-cell floor — still reads as its prefix.
 			noun:          "Automations:",
-			counts:        []string{"2 (2 on)", " 2 "},
+			counts:        []string{"2 (2 on)", " 2"},
 			hint:          railHelpKey(keys.KeyTaskList) + " manage",
-			minInfoWidth:  13,
-			minHintWidth:  13,
-			minNounWidth:  33,
-			fullNounWidth: 33,
+			minInfoWidth:  15,
+			minHintWidth:  26,
+			minNounWidth:  13,
+			fullNounWidth: 13,
 		},
 		{
 			name: "projects",

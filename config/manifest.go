@@ -534,6 +534,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "web",
+		Type:       "table",
+		Default:    `{"terminal_font_size_desktop":13,"terminal_font_size_phone":6.5}`,
+		Purpose:    "Terminal text size in the browser client · one size for the phone-width breakpoint and one for desktop · the terminal's A−/A+ controls step and save the class in use.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "keys",
 		Type:       "table",
 		Default:    "none · the built-in bindings are used",

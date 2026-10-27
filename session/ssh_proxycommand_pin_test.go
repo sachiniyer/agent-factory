@@ -143,14 +143,15 @@ func TestEveryTransportStepRidesTheOnePinnedCommand(t *testing.T) {
 	assert.Contains(t, strings.Join(built.Args, " "), sshrelay.Subcommand,
 		"the provision steps and the reap must run over the pinned command, not a freshly composed one")
 
-	// The tunnel is the third invocation, and it is composed inside startTunnel —
-	// which dials, so it cannot be called here. Asserted against the SOURCE, the way
-	// the ExitOnForwardFailure guarantee next door is: what matters is that it
-	// extends p.sshCmd rather than building its own.
-	src, err := os.ReadFile("backend_sandbox.go")
+	// The tunnel is the third invocation, and it is composed inside spawnTunnel —
+	// which dials through its caller startTunnel, so it cannot be called here.
+	// Asserted against the SOURCE, the way the ExitOnForwardFailure guarantee next
+	// door is: what matters is that it extends p.sshCmd rather than building its
+	// own. Since #5564 the spawn lives in sandbox_tunnel.go.
+	src, err := os.ReadFile("sandbox_tunnel.go")
 	require.NoError(t, err)
-	assert.Contains(t, string(src), `p.sshCmd+`+"`"+` -o ExitOnForwardFailure=yes -N -L "$1"`+"`",
-		"startTunnel must extend the ONE pinned command; a tunnel that composed its own ssh invocation would "+
+	assert.Contains(t, string(src), `p.sshCmd + `+"`"+` -o ExitOnForwardFailure=yes -N -L "$1"`+"`",
+		"spawnTunnel must extend the ONE pinned command; a tunnel that composed its own ssh invocation would "+
 			"re-resolve the name and could forward to a different machine than the workspace is on (#3086)")
 }
 
@@ -673,7 +674,7 @@ func proxyCommandValue(t *testing.T, cmd string) string {
 	i := strings.Index(cmd, marker)
 	require.GreaterOrEqual(t, i, 0, "no ProxyCommand in %q", cmd)
 	rest := cmd[i+len(marker):]
-	// shellQuoteSandbox spells an embedded quote '\'' — undo that, then stop at the
+	// shellQuote spells an embedded quote '\'' — undo that, then stop at the
 	// closing quote.
 	rest = strings.ReplaceAll(rest, `'\''`, "\x00")
 	end := strings.Index(rest, "'")
