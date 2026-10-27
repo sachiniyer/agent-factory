@@ -415,7 +415,7 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 		// pointer — the exact state a retry needs — and a later retry would then
 		// find no workspace, "succeed", and drop the record, orphaning the leftovers
 		// forever. Skip it and report, same rule as the pane gate above.
-		errs = append(errs, fmt.Errorf("%w: leaving %q's session state intact so the cleanup can be retried", ErrWorkspaceStateUnknown, title))
+		errs = append(errs, worktreeRetentionError(err, title))
 		return errors.Join(errs...)
 	}
 

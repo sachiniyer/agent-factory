@@ -346,6 +346,19 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	return resp, nil
 }
 
+// ListPrograms reports the daemon host's program catalog and the default a
+// program-less create resolves to for repoPath (#4889). For a remote target
+// this is the only honest answer — the remote daemon's default_program is
+// remote state the client's local config files cannot see.
+func (c *Client) ListPrograms(repoPath string) (daemon.ListProgramsResponse, error) {
+	var resp daemon.ListProgramsResponse
+	req := daemon.ListProgramsRequest{RepoPath: repoPath}
+	if err := c.call("ListPrograms", req, &resp); err != nil {
+		return daemon.ListProgramsResponse{}, err
+	}
+	return resp, nil
+}
+
 // ListAccounts reads the daemon host's registered accounts and their logged-in
 // state, plus the per-agent account defaults configured for repoPath (#3386).
 // HTTP twin of ListAccounts.
