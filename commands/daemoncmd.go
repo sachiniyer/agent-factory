@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/linger"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -77,12 +78,21 @@ var daemonInstallCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
+		// Without lingering a systemd user unit stops at logout and is not
+		// started at boot, so enable it or refuse before touching anything (W9.8).
+		if err := linger.Ensure(); err != nil {
+			return err
+		}
 		unitPath, err := daemon.InstallAutostart()
 		if err != nil {
 			return err
 		}
 		fmt.Printf("daemon autostart installed: %s\n", unitPath)
-		fmt.Println("the daemon now starts at login and keeps task schedules running across reboots")
+		if linger.Applies() {
+			fmt.Println("systemd lingering is on: the daemon survives logout and starts at boot, keeping task schedules running across reboots")
+		} else {
+			fmt.Println("the daemon now starts at login and keeps task schedules running across reboots")
+		}
 		return nil
 	},
 }
