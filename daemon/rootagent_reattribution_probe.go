@@ -11,7 +11,7 @@ import (
 )
 
 // The re-attribution PROBE and the gates that read it (#3299). The heal pass in
-// rootagent_heal.go decides what to do with a probe's verdict; this file is the
+// rootagent_reattribution_pass.go decides what to do with a probe's verdict; this file is the
 // probe itself — what it establishes, what it deliberately does not, and the
 // two directions in which a not-yet-published identity can still be looked up.
 //
