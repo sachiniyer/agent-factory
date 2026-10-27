@@ -3,13 +3,10 @@ package api
 import (
 	"fmt"
 	"io"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/proposal"
 )
@@ -26,49 +23,9 @@ var ProposalCmd = &cobra.Command{
 		"current directory's project is used.",
 }
 
-type proposalInfo struct {
-	Slug             string   `json:"slug"`
-	Path             string   `json:"path"`
-	Docs             []string `json:"docs"`
-	AttachedSessions []string `json:"attached_sessions"`
-	LastEdit         string   `json:"last_edit,omitempty"`
-	Rules            string   `json:"rules,omitempty"`
-}
-
-func describeProposal(c *proposalCaller, slug string, withRules bool) (*proposalInfo, error) {
-	docs, err := c.store.Docs(slug)
-	if err != nil {
-		return nil, err
-	}
-	attachments, err := c.store.Attachments()
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for id, s := range attachments {
-		if s == slug {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	info := &proposalInfo{
-		Slug:             slug,
-		Path:             c.store.SlugPath(slug),
-		Docs:             docs,
-		AttachedSessions: sessionTitles(c.repoID, ids),
-	}
-	if withRules {
-		info.Rules = proposal.Rules(slug, info.Path)
-	}
-	return info, nil
-}
-
 func runProposal(fn func() (any, error)) error {
 	log.Initialize(false)
 	defer log.Close()
-	if err := proposalPreflight(); err != nil {
-		return jsonError(err)
-	}
 	out, err := fn()
 	if err != nil {
 		return jsonError(err)
@@ -84,7 +41,8 @@ var proposalStartCmd = &cobra.Command{
 	Long: "Create a proposal from templates, attach the session to it, and print the rules the " +
 		"agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and " +
 		"dashes. A doc with no template starts blank; user templates in " +
-		"<AF_HOME>/templates/proposal/<name>.md override the built-in ones.",
+		"<AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a " +
+		"Docs tab for the proposal, and \"tab\" names it.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {
@@ -95,13 +53,11 @@ var proposalStartCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			if err := c.store.Create(args[0], proposalStartDocsFlag, c.committer()); err != nil {
-				return nil, err
-			}
-			if err := c.store.Attach(args[0], c.sessionID); err != nil {
-				return nil, err
-			}
-			return describeProposal(c, args[0], true)
+			var resp daemon.StartProposalResponse
+			err = callProposalRoute("StartProposal", daemon.StartProposalRequest{
+				SessionID: c.sessionID, Slug: args[0], Docs: proposalStartDocsFlag,
+			}, &resp)
+			return resp, err
 		})
 	},
 }
@@ -111,7 +67,8 @@ var proposalAttachCmd = &cobra.Command{
 	Short: "Attach this session to a proposal and print the rules",
 	Long: "Attach the session to an existing proposal and print the rules. A session holds one " +
 		"proposal at a time, so this detaches it from any other. With no slug, print the current " +
-		"proposal and the rules again.",
+		"proposal and the rules again. The session gets a Docs tab for the proposal when it has " +
+		"none, and \"tab\" names it.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {
@@ -122,33 +79,19 @@ var proposalAttachCmd = &cobra.Command{
 			slug := ""
 			if len(args) == 1 {
 				slug = args[0]
-				if err := c.store.Attach(slug, c.sessionID); err != nil {
-					return nil, err
-				}
-			} else {
-				if slug, err = c.store.Attached(c.sessionID); err != nil {
-					return nil, err
-				}
-				if slug == "" {
-					return nil, notAttachedError(c)
-				}
 			}
-			return describeProposal(c, slug, true)
+			req := daemon.AttachProposalRequest{SessionID: c.sessionID, Slug: slug}
+			var resp daemon.AttachProposalResponse
+			err = callProposalRoute("AttachProposal", req, &resp)
+			return resp, err
 		})
 	},
-}
-
-func notAttachedError(c *proposalCaller) error {
-	slugs, _ := c.store.Slugs()
-	if len(slugs) == 0 {
-		return proposal.ErrNotAttached
-	}
-	return fmt.Errorf("%w; existing proposals: %s", proposal.ErrNotAttached, strings.Join(slugs, ", "))
 }
 
 var proposalDetachCmd = &cobra.Command{
 	Use:   "detach",
 	Short: "Remove this session's proposal attachment and cursor",
+	Long:  "Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {
@@ -156,11 +99,11 @@ var proposalDetachCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			slug, err := c.store.Detach(c.sessionID)
-			if err != nil {
+			var resp daemon.DetachProposalResponse
+			if err := callProposalRoute("DetachProposal", daemon.DetachProposalRequest{SessionID: c.sessionID}, &resp); err != nil {
 				return nil, err
 			}
-			return map[string]any{"slug": slug, "detached": slug != ""}, nil
+			return map[string]any{"slug": resp.Slug, "detached": resp.Detached}, nil
 		})
 	},
 }
@@ -175,27 +118,16 @@ var proposalListCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			slugs, err := c.store.Slugs()
-			if err != nil {
+			var resp daemon.ListProposalsResponse
+			if err := callProposalRoute("ListProposals", daemon.ListProposalsRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath,
+			}, &resp); err != nil {
 				return nil, err
 			}
-			out := []proposalInfo{}
-			edits := map[string]time.Time{}
-			for _, slug := range slugs {
-				info, err := describeProposal(c, slug, false)
-				if err != nil {
-					return nil, err
-				}
-				at, err := c.store.LastEdit(slug)
-				if err != nil {
-					return nil, err
-				}
-				edits[slug] = at
-				info.LastEdit = at.Format(time.RFC3339)
-				out = append(out, *info)
+			if resp.Proposals == nil {
+				resp.Proposals = []proposal.Summary{}
 			}
-			sort.SliceStable(out, func(i, j int) bool { return edits[out[i].Slug].After(edits[out[j].Slug]) })
-			return out, nil
+			return resp.Proposals, nil
 		})
 	},
 }
@@ -203,6 +135,7 @@ var proposalListCmd = &cobra.Command{
 var proposalPathCmd = &cobra.Command{
 	Use:   "path <slug>",
 	Short: "Print the absolute folder path of a proposal",
+	Long:  "Print the absolute folder path of a proposal. With --daemon-url, the path is on the daemon host.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {
@@ -210,10 +143,13 @@ var proposalPathCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			if err := c.store.RequireSlug(args[0]); err != nil {
+			var resp daemon.GetProposalResponse
+			if err := callProposalRoute("GetProposal", daemon.GetProposalRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath, Slug: args[0],
+			}, &resp); err != nil {
 				return nil, err
 			}
-			return map[string]string{"slug": args[0], "path": c.store.SlugPath(args[0])}, nil
+			return map[string]string{"slug": resp.Slug, "path": resp.Path}, nil
 		})
 	},
 }
@@ -228,17 +164,16 @@ var proposalAddDocCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			file, err := c.store.AddDoc(args[0], args[1], c.committer())
-			if err != nil {
+			var resp daemon.AddProposalDocResponse
+			if err := callProposalRoute("AddProposalDoc", daemon.AddProposalDocRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath,
+				Slug: args[0], Name: args[1], Author: string(c.author()),
+			}, &resp); err != nil {
 				return nil, err
 			}
-			return describeProposalDoc(c, args[0], file), nil
+			return map[string]string{"slug": resp.Slug, "doc": resp.Doc, "path": resp.Path}, nil
 		})
 	},
-}
-
-func describeProposalDoc(c *proposalCaller, slug, file string) map[string]string {
-	return map[string]string{"slug": slug, "doc": file, "path": filepath.Join(c.store.SlugPath(slug), file)}
 }
 
 var proposalChangesCmd = &cobra.Command{
@@ -254,7 +189,14 @@ var proposalChangesCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			return c.store.Changes(c.sessionID)
+			var resp daemon.PullProposalChangesResponse
+			if err := callProposalRoute("PullProposalChanges", daemon.PullProposalChangesRequest{SessionID: c.sessionID}, &resp); err != nil {
+				return nil, err
+			}
+			if resp.Edits == nil {
+				resp.Edits = []proposal.Edit{}
+			}
+			return resp, nil
 		})
 	},
 }
@@ -272,7 +214,9 @@ var proposalCheckpointCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			return c.store.Checkpoint(c.sessionID)
+			var resp daemon.CheckpointProposalResponse
+			err = callProposalRoute("CheckpointProposal", daemon.CheckpointProposalRequest{SessionID: c.sessionID}, &resp)
+			return resp, err
 		})
 	},
 }
@@ -287,11 +231,13 @@ var proposalCatCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			text, file, err := c.store.Read(args[0], args[1])
-			if err != nil {
+			var resp daemon.ReadProposalDocResponse
+			if err := callProposalRoute("ReadProposalDoc", daemon.ReadProposalDocRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath, Slug: args[0], Doc: args[1],
+			}, &resp); err != nil {
 				return nil, err
 			}
-			return map[string]string{"slug": args[0], "doc": file, "text": text}, nil
+			return map[string]string{"slug": resp.Slug, "doc": resp.Doc, "text": resp.Text}, nil
 		})
 	},
 }
@@ -312,15 +258,17 @@ var proposalWriteCmd = &cobra.Command{
 			if err != nil {
 				return nil, fmt.Errorf("read stdin: %w", err)
 			}
-			by := c.committer()
-			file, commit, err := c.store.Write(args[0], args[1], string(text), by)
-			if err != nil {
+			var resp daemon.WriteProposalDocResponse
+			if err := callProposalRoute("WriteProposalDoc", daemon.WriteProposalDocRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath,
+				Slug: args[0], Doc: args[1], Text: string(text), Author: string(c.author()),
+			}, &resp); err != nil {
 				return nil, err
 			}
-			out := describeProposalDoc(c, args[0], file)
-			out["commit"] = commit
-			out["author"] = string(by.Author)
-			return out, nil
+			return map[string]string{
+				"slug": resp.Slug, "doc": resp.Doc, "path": resp.Path,
+				"commit": resp.Commit, "author": string(resp.Author),
+			}, nil
 		})
 	},
 }

@@ -262,15 +262,16 @@ func normalizeDocNames(docs []string) ([]string, error) {
 }
 
 // AddDoc adds doc name to proposal slug from its template, or blank when no
-// template has that name. It returns the doc file name.
-func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
+// template has that name. It returns the doc file name and the new commit.
+func (s *Store) AddDoc(slug, name string, by Committer) (string, string, error) {
 	n, err := NormalizeDocName(name)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := by.validate(); err != nil {
-		return "", err
+		return "", "", err
 	}
+	var commit string
 	err = s.withLock(func() error {
 		if err := s.RequireSlug(slug); err != nil {
 			return err
@@ -288,7 +289,7 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 		if err := s.createDoc(slug, docFile(n), []byte(text)); err != nil {
 			return err
 		}
-		_, err = s.commitPaths("add "+slug+"/"+docFile(n), by.Author, by.SessionID, slug+"/"+docFile(n))
+		commit, err = s.commitPaths("add "+slug+"/"+docFile(n), by.Author, by.SessionID, slug+"/"+docFile(n))
 		if err != nil {
 			if rmErr := s.removeDoc(slug, docFile(n)); rmErr != nil {
 				return fmt.Errorf("%w (and failed to remove %s: %v)", err, docFile(n), rmErr)
@@ -296,7 +297,7 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, error) {
 		}
 		return err
 	})
-	return docFile(n), err
+	return docFile(n), commit, err
 }
 
 // docPath validates slug and doc and returns the doc's absolute path and file
