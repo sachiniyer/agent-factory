@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -147,6 +148,14 @@ can inspect per-session results.`,
 		}
 
 		prompt, rest := resolveSendPrompt(cmd, args)
+		if apiclient.IsRemoteTarget() && (sendPromptAllFlag || sendPromptCreateFlag) {
+			// Broadcast enumerates targets from this machine's disk and --create
+			// resolves the repo, config and program locally; both would act on the
+			// wrong host. A plain <title> <prompt> send is routed (W9.1).
+			return jsonError(fmt.Errorf("--all and --create are not available against the daemon at %s yet: "+
+				"broadcast targets and create-time repo resolution are computed on this machine. "+
+				"Send to one session by <title>, or run the command on the daemon host", apiclient.RemoteTargetURL()))
+		}
 		if sendPromptAllFlag {
 			return runBroadcast(prompt)
 		}
@@ -157,7 +166,7 @@ can inspect per-session results.`,
 		// preserves the prior all-repo search; a non-empty one confines both
 		// the existence pre-check and the delivery to that repo so a
 		// same-titled session in a different repo never receives the prompt.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
