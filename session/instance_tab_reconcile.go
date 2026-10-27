@@ -34,6 +34,11 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	program := i.Program
 	i.mu.RUnlock()
 
+	if gw == nil && agentTmux == nil && i.Capabilities().Workspace == WorkspaceRemote {
+		// An off-box row has no tmux or worktree on this side: its roster is
+		// only a projection of the daemon's (W4.6).
+		return i.reconcileProjectedTabs(target), nil
+	}
 	if !started || agentTmux == nil || gw == nil {
 		return false, nil
 	}
@@ -350,4 +355,64 @@ func tabExitEqual(a, b *TabExit) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// TabRosterMutable reports whether the daemon admits close, rename and reorder
+// on this row's roster. It mirrors tabMutationTarget, which refuses only an
+// archived session: a metadata-only tab is editable on any backend, so the
+// TUI must not gate those verbs on Capabilities.TabManagement (which governs
+// spawning a process tab only).
+func (i *Instance) TabRosterMutable() bool {
+	return !i.IsArchived()
+}
+
+// reconcileProjectedTabs mirrors the daemon's roster onto an off-box row that
+// owns no tmux sessions: every tab is a tmux-less projection addressed by its
+// stable id. Existing rows are reused by id (or by name for an id-less legacy
+// row) so open panes keep their pointer; the list takes the daemon's order. An
+// empty target leaves the roster alone — the daemon only publishes the
+// persisted roster once it has one, and an absent one is not a deletion.
+func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
+	if len(target) == 0 {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	next := make([]*Tab, 0, len(target))
+	changed := len(i.Tabs) != len(target)
+	for idx, td := range target {
+		kind := tabKindForData(td.Kind)
+		var cur *Tab
+		for _, t := range i.Tabs {
+			if (td.ID != "" && t.ID == td.ID) || (td.ID == "" && t.ID == "" && t.Name == td.Name) {
+				cur = t
+				break
+			}
+		}
+		exit := tabExitFromData(td.Exit)
+		if cur == nil {
+			id := td.ID
+			if id == "" {
+				id = newTabID()
+			}
+			cur = &Tab{ID: id}
+			changed = true
+		} else if cur.Name != td.Name || cur.Kind != kind || cur.URL != td.URL ||
+			cur.Command != td.Command || !tabExitEqual(cur.Exit, exit) {
+			changed = true
+		} else if idx >= len(i.Tabs) || i.Tabs[idx] != cur {
+			changed = true
+		}
+		cur.Name, cur.Kind, cur.Command, cur.URL = td.Name, kind, td.Command, td.URL
+		cur.Proposal, cur.PushMode, cur.Exit = td.Proposal, td.PushMode, exit
+		cur.accountScope = td.AccountScope
+		next = append(next, cur)
+	}
+	if !changed {
+		return false
+	}
+	i.Tabs = next
+	i.tabRosterGeneration++
+	i.touchLocked()
+	return true
 }

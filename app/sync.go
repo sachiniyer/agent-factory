@@ -787,7 +787,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// no-op rather than a behavior change: ReconcileTabsFromData already returns
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).
-	if inst.Capabilities().TabManagement {
+	{
 		// Capture the slot→identity list before the tab reconcile mutates it: an
 		// out-of-band tab change (another client, `af sessions tab-delete` /
 		// `tab-rename`, daemon-side) must apply the SAME pane close/rebind
