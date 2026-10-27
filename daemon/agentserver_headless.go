@@ -236,6 +236,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 	branchPrefix := cfg.BranchPrefix
 
+	// An unresolved program is an agent KEY (the internal transports send
+	// --program-resolved for an already-configured command). Configured
+	// program_overrides must apply while the key is still the key —
+	// resolving "claude" to an absolute path first would make
+	// program_overrides.claude unreachable (#5578 review).
+	if !opts.ProgramResolved {
+		program = session.ResolveProgramForPath(opts.RepoPath, program)
+	}
 	// The daemon sends the configured program name and flags, never its own
 	// auto-detected path — this host's filesystem is where the executable must
 	// exist (#5571 W2.1). Resolve it against the login-shell PATH (the spawn

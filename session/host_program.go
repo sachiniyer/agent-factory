@@ -38,7 +38,8 @@ func remoteProgramForHost(resolved *config.ResolvedConfig, agent string) string 
 		return command
 	}
 	tokens, ends := tmux.SplitShellTokens(command)
-	if len(tokens) == 0 {
+	exeIdx := firstExecutableWord(command, ends)
+	if exeIdx < 0 {
 		return command
 	}
 	for _, candidate := range value.Candidates {
@@ -49,12 +50,41 @@ func remoteProgramForHost(resolved *config.ResolvedConfig, agent string) string 
 		if !isStr {
 			continue
 		}
-		builtInTokens, _ := tmux.SplitShellTokens(builtIn)
-		if len(builtInTokens) > 0 && builtInTokens[0] == tokens[0] {
-			return agent + command[ends[0]:]
+		builtInTokens, builtInEnds := tmux.SplitShellTokens(builtIn)
+		builtInExeIdx := firstExecutableWord(builtIn, builtInEnds)
+		if builtInExeIdx >= 0 && builtInTokens[builtInExeIdx] == tokens[exeIdx] {
+			exeStart := wordStart(command, ends, exeIdx)
+			return command[:exeStart] + agent + command[ends[exeIdx]:]
 		}
 	}
 	return command
+}
+
+// firstExecutableWord returns the token index of the first word that is not a
+// leading NAME=VALUE environment assignment, or -1 when the command is all
+// assignments (or empty). ends must be the offsets SplitShellTokens returned
+// alongside the tokens.
+func firstExecutableWord(command string, ends []int) int {
+	prevEnd := 0
+	for i, end := range ends {
+		seg := command[prevEnd:end]
+		if !isEnvAssignmentWord(strings.TrimLeft(seg, " \t")) {
+			return i
+		}
+		prevEnd = end
+	}
+	return -1
+}
+
+// wordStart returns the byte offset where token i's raw word begins,
+// including any quote characters — the rewrite splices on raw text.
+func wordStart(command string, ends []int, i int) int {
+	prevEnd := 0
+	for j := 0; j < i; j++ {
+		prevEnd = ends[j]
+	}
+	seg := command[prevEnd:ends[i]]
+	return prevEnd + len(seg) - len(strings.TrimLeft(seg, " \t"))
 }
 
 // hostProgramProbeTimeout bounds one login-shell probe. Interactive rc files
@@ -135,7 +165,16 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 	if len(tokens) == 0 {
 		return "", "", fmt.Errorf("agent program %q has no executable word", program)
 	}
-	exe, suffix := tokens[0], program[ends[0]:]
+	// Leading NAME=VALUE environment assignments are a legal command prefix
+	// (CLAUDE_CODE_USE_BEDROCK=1 claude); the executable is the first
+	// non-assignment word and the prefix must survive the rewrite (#5578).
+	exeIdx := firstExecutableWord(program, ends)
+	if exeIdx < 0 {
+		return "", "", fmt.Errorf("agent program %q has no executable word", program)
+	}
+	exe := tokens[exeIdx]
+	prefix := program[:wordStart(program, ends, exeIdx)]
+	suffix := program[ends[exeIdx]:]
 
 	if strings.ContainsRune(exe, '/') {
 		// Path-qualified — verbatim on this filesystem. The login PATH is
@@ -147,17 +186,37 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 	for _, script := range []string{hostProbeCommandV, hostProbeWhich} {
 		resolved, loginPATH, _ := p.probe(ctx, script, exe)
 		if resolved != "" {
-			return quoteHostPathIfNeeded(resolved) + suffix, mergeHostPATH(loginPATH, p.processPATH), nil
+			return prefix + quoteHostPathIfNeeded(resolved) + suffix, mergeHostPATH(loginPATH, p.processPATH), nil
 		}
 	}
 	// The login shell is not the only PATH that matters: a docker image sets
 	// PATH in its ENV where no profile can see it, so the process's own PATH
 	// is the last lookup before refusing.
 	if abs, err := p.lookPath(exe); err == nil && filepath.IsAbs(abs) {
-		return quoteHostPathIfNeeded(abs) + suffix, p.processPATH, nil
+		return prefix + quoteHostPathIfNeeded(abs) + suffix, p.processPATH, nil
 	}
 	_, loginPATH := p.probePath(ctx)
 	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe, p.host, loginPATH)
+}
+
+// isEnvAssignmentWord reports whether the RAW shell word is a leading
+// VAR=value environment assignment: an unquoted NAME= prefix where NAME is a
+// shell identifier. The raw word is checked, not the unquoted token, so a
+// quoted 'FOO=1' — which a shell would exec literally, not assign — does not
+// count (#5578).
+func isEnvAssignmentWord(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		c := word[i]
+		alpha := c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+		if !alpha && !(i > 0 && '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // probe runs one login-shell script with the executable name as $1 and splits

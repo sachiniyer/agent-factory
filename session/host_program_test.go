@@ -90,6 +90,19 @@ func TestRemoteProgramForHostQuotedDetectedPath(t *testing.T) {
 	assert.Equal(t, "claude --dangerously-skip-permissions", remoteProgramForHost(resolved, "claude"))
 }
 
+// An env-assignment prefix does not hide the detected executable — the
+// rewrite keeps the assignments and still swaps the daemon-local path for the
+// bare agent name (#5578 review).
+func TestRemoteProgramForHostStripsDetectedPathAfterEnvPrefix(t *testing.T) {
+	detected := "/home/siyer/.local/bin/claude --dangerously-skip-permissions"
+	effective := "CLAUDE_CODE_USE_BEDROCK=1 " + detected
+	resolved := resolvedConfigWithBuiltIn(t, "claude", detected, effective)
+
+	got := remoteProgramForHost(resolved, "claude")
+	assert.Equal(t, "CLAUDE_CODE_USE_BEDROCK=1 claude --dangerously-skip-permissions", got,
+		"the assignment prefix survives while the detected path becomes the bare name")
+}
+
 func TestRemoteProgramForHostNilConfig(t *testing.T) {
 	assert.Equal(t, "claude", remoteProgramForHost(nil, "claude"))
 }
@@ -182,6 +195,62 @@ func TestResolveProgramOnHostShellMetacharactersAreInert(t *testing.T) {
 	}
 	assert.Contains(t, scripts, hostProbeCommandV)
 	assert.Contains(t, scripts, hostProbeWhich)
+}
+
+// Leading VAR=value assignments are part of the command, not the executable:
+// `CLAUDE_CODE_USE_BEDROCK=1 claude` must probe "claude" and keep the
+// assignment in front of the resolved path (#5578 review).
+func TestResolveProgramOnHostSkipsLeadingEnvAssignments(t *testing.T) {
+	var calls [][]string
+	prober := hostProgramProber{
+		shell:       "/bin/sh",
+		host:        "h",
+		processPATH: "/proc/bin",
+		lookPath:    func(string) (string, error) { return "", errors.New("no") },
+		run: func(_ context.Context, argv []string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), argv...))
+			return []byte("/login/bin/claude\n__af_path__\n/login/bin\n"), nil
+		},
+	}
+
+	command, _, err := resolveProgramOnHost(context.Background(),
+		"CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-west-2 claude --model opus", prober)
+	require.NoError(t, err)
+	assert.Equal(t, "CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-west-2 /login/bin/claude --model opus", command,
+		"the assignment prefix is preserved verbatim around the resolved path")
+
+	require.NotEmpty(t, calls)
+	assert.Equal(t, "claude", calls[0][len(calls[0])-1],
+		"the probe receives the executable name, not the assignment")
+}
+
+// A command that is only assignments has no executable to resolve — fail the
+// same way an empty program does rather than probing a VAR=value word.
+func TestResolveProgramOnHostAllAssignmentsIsNoExecutable(t *testing.T) {
+	prober := hostProgramProber{
+		shell:    "/bin/sh",
+		host:     "h",
+		lookPath: func(string) (string, error) { return "", errors.New("no") },
+		run: func(_ context.Context, _ []string) ([]byte, error) {
+			t.Fatal("no executable word — no probe may run")
+			return nil, nil
+		},
+	}
+	_, _, err := resolveProgramOnHost(context.Background(), "FOO=1 BAR=two", prober)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no executable word")
+}
+
+// A quoted 'FOO=1' is not an assignment to a shell — it is the literal command
+// name — so it must be probed, not skipped.
+func TestIsEnvAssignmentWordRejectsQuotedAndMalformed(t *testing.T) {
+	assert.True(t, isEnvAssignmentWord("FOO=1"))
+	assert.True(t, isEnvAssignmentWord("_A9=x"))
+	assert.False(t, isEnvAssignmentWord("'FOO=1'"), "quoting makes it a command word, not an assignment")
+	assert.False(t, isEnvAssignmentWord("9FOO=1"), "identifiers cannot start with a digit")
+	assert.False(t, isEnvAssignmentWord("FOO-BAR=1"), "dashes are not identifier characters")
+	assert.False(t, isEnvAssignmentWord("claude"))
+	assert.False(t, isEnvAssignmentWord("=x"))
 }
 
 // command -v that reports something other than a path (an alias value, a

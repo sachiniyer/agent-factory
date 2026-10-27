@@ -95,6 +95,16 @@ func resolveProgramForPath(path, agent string) string {
 	return config.ResolveProgram(resolveConfigForPath(path), agent)
 }
 
+// ResolveProgramForPath is the exported form of resolveProgramForPath for
+// out-of-package callers that must apply configured overrides before doing
+// their own resolution — a directly-invoked `af agent-server` resolves the
+// configured command's executable on its host, and the key-level override
+// lookup must happen first or the absolute path can no longer match
+// program_overrides entries (#5578 review).
+func ResolveProgramForPath(path, agent string) string {
+	return resolveProgramForPath(path, agent)
+}
+
 func resolveConfigForInstance(i *Instance) *config.Config {
 	return resolveConfigForPath(i.Path)
 }
