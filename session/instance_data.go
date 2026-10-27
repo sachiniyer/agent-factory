@@ -504,6 +504,22 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
 	}
+	// The restart twin of the live edge (#5278): a run persisted mid-flight
+	// whose prompt boundary reloads unbound AND whose last send verdict is a
+	// proven non-delivery had its prompt demonstrably never land — its initial
+	// delivery failed. End it failed here: left open, the row holds its
+	// concurrency slot forever on a gate that can never arm, and a Ready→Ready
+	// observation could still be claimed as its completion. A tombstoned,
+	// archived, or startup-unknown row keeps its own outcome instead.
+	if instance.taskRunActive && taskRunAttemptAt.IsZero() &&
+		data.LastPromptDeliveryStatus == PromptNotDelivered &&
+		!instance.userKilled && !instance.startupStateUnknown && liveness != LiveArchived {
+		instance.taskRunActive = false
+		instance.taskRunIdleEdgeHeld = false
+		instance.taskRunTurnGateHeld = false
+		instance.taskRunFailed = true
+		instance.taskRunFailedStamp = true
+	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
