@@ -20,7 +20,7 @@ function normalizeAuthorLogin(login) {
 // nothing has, and a squatter registering the username would gain the gate's
 // trust. If a real surface ever does emit it, the unauthorized-acker
 // diagnostics below now name it in the summary instead of failing invisibly.
-const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app"]);
+const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app", "gauntface"]);
 function isAllowedAuthor(login) {
   return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
 }

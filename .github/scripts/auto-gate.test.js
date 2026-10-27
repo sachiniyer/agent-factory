@@ -1215,6 +1215,7 @@ for (const login of [
   "app/detail-app",
   "detail-app",
   "detail-app[bot]",
+  "gauntface",
 ]) {
   test(`author normalization admits ${login}`, () => {
     assert.equal(__test.isAllowedAuthor(login), true);
@@ -5736,7 +5737,7 @@ test("#4576: a held PR on the manual path names the hold as its first blocker", 
   assert.equal(result.manualMergeRequired, true);
   assert.match(result.manualMergeBlockers[0].reason, /`hold` label is on this pull request/);
   assert.match(result.summary, /^BLOCKED:/, "the manual decision must be blocked, not a PASS");
-  assert.match(result.manualMergeBlockers[0].remedy, /allowed author \(sachiniyer, detail-app\)/);
+  assert.match(result.manualMergeBlockers[0].remedy, /allowed author \(sachiniyer, detail-app, gauntface\)/);
 });
 
 // GitHub compares label names without regard to case when it creates them, so
