@@ -29,6 +29,8 @@ func TestFull_InodeExhaustionIsFull(t *testing.T) {
 		{"free blocks and free inodes", syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 64, Files: 200, Ffree: 50}, false},
 		{"zero free blocks", syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 0, Bavail: 0, Files: 200, Ffree: 50}, true},
 		{"no inode accounting is not exhaustion", syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 64, Files: 0, Ffree: 0}, false},
+		{"btrfs reserve window is full for root too", syscall.Statfs_t{Type: btrfsFSType, Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 0, Files: 0, Ffree: 0}, true},
+		{"ext4 reserve window is not full for root", syscall.Statfs_t{Type: 0xef53, Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 0, Files: 200, Ffree: 50}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			statfsFn = func(_ string, st *syscall.Statfs_t) error {

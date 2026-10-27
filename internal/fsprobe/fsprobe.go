@@ -178,7 +178,8 @@ func Write(dir string) error {
 // allocate the root-reserved blocks (a rootful dockerd) — the statfs answer
 // for a filesystem the caller cannot write-probe (a root-owned daemon data
 // root the process cannot create files in). "Full" means no allocatable
-// blocks (Bfree == 0) OR an exhausted inode table (Ffree == 0 under real
+// blocks (Bfree == 0 — or, on a filesystem with no root-usable reserve such
+// as btrfs, Bavail == 0) OR an exhausted inode table (Ffree == 0 under real
 // inode accounting — inode exhaustion fails metadata creation with the same
 // ENOSPC); the same verdict an ENOSPC write would report, derived without
 // write access (#5382). The syscall runs inside the same per-dir bounded

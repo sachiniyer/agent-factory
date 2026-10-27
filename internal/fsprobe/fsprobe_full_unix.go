@@ -26,13 +26,24 @@ var statfsFn = syscall.Statfs
 // the filesystem reports real inode accounting (Files > 0) — a filesystem
 // that reports zero total inodes is not tracking them and cannot be out of
 // them, so that combination is not-proven rather than full (#5382).
+//
+// btrfs is the exception to the Bfree rule for privileged writers: the
+// space Bfree still counts once Bavail hits zero is an internal reserve no
+// uid can allocate — root holds no extra room there, and ENOSPC arrives at
+// Bavail == 0 while Bfree stays positive (#5382 play-test). ext4 is the
+// counterexample: its reserve IS the root-usable pool, so a rootful dockerd
+// still writes at Bavail == 0 and only Bfree == 0 is full. A filesystem
+// whose reserve semantics are unproven keeps the Bfree rule — an unknown
+// fstype must not invent a full verdict.
+const btrfsFSType = 0x9123683e
+
 func fsFull(dir string, unprivileged bool) (bool, error) {
 	var st syscall.Statfs_t
 	if err := statfsFn(dir, &st); err != nil {
 		return false, err
 	}
 	freeBlocks := st.Bfree
-	if unprivileged {
+	if unprivileged || st.Type == btrfsFSType {
 		freeBlocks = st.Bavail
 	}
 	inodesExhausted := st.Files > 0 && st.Ffree == 0
