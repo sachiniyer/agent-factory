@@ -755,6 +755,19 @@ func resolveAttachTarget(title string) (string, string, error) {
 	return instance.Title, repoID, nil
 }
 
+// closeLogForOutputMode is the deferred close for commands whose success path
+// returns nil without going through jsonOut (attach hands the terminal over, so
+// it writes no envelope). Under --json stderr must stay empty on success, so the
+// free-form "wrote logs to ..." note is suppressed; the bare path still prints it
+// (#5649).
+func closeLogForOutputMode() {
+	if envelopeOutput {
+		log.CloseQuiet()
+		return
+	}
+	log.Close()
+}
+
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
@@ -762,7 +775,7 @@ var sessionsAttachCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
-		defer log.Close()
+		defer closeLogForOutputMode()
 
 		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {
