@@ -325,21 +325,6 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 		if !validTypes[e.Type] {
 			t.Errorf("%s: type %q is not one of string/bool/int/duration/table/list", e.Key, e.Type)
 		}
-		if len(e.AcceptedTypes) > 0 {
-			seen := make(map[string]bool, len(e.AcceptedTypes))
-			for _, acceptedType := range e.AcceptedTypes {
-				if !validTypes[acceptedType] {
-					t.Errorf("%s: accepted type %q is not one of string/bool/int/duration/table/list", e.Key, acceptedType)
-				}
-				if seen[acceptedType] {
-					t.Errorf("%s: accepted type %q is duplicated", e.Key, acceptedType)
-				}
-				seen[acceptedType] = true
-			}
-			if !seen[e.Type] {
-				t.Errorf("%s: accepted types %v omit primary type %q", e.Key, e.AcceptedTypes, e.Type)
-			}
-		}
 		if !validTiers[e.Tier] {
 			t.Errorf("%s: tier %d is not one of TierCore/TierCommon/TierAdvanced", e.Key, e.Tier)
 		}

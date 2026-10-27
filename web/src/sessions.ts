@@ -182,6 +182,22 @@ export interface TabRebindInputs {
   pinnedSessionAlive: boolean;
   /** The tab the pane should end on in the post-await roster, or -1 if it is gone. */
   targetIdx: number;
+  /** This gesture's issue order among awaited tab rebinds — the caller's counter,
+   *  incremented when the RPC is issued. The generation alone cannot order awaited
+   *  gestures: their applies land through setFocusedTabAwaited, which deliberately
+   *  moves no generation (#5061) because a gesture's own landing write is not newer
+   *  user intent. The seq is what a stale completion is told apart by instead. */
+  rebindSeq: number;
+  /** Per-session newest applied issue order — the caller's ledger of which awaited
+   *  gesture landed last, keyed by the session it targeted. A gesture whose round
+   *  trip outlived a NEWER gesture's apply on ITS OWN session must not rebind on
+   *  top of it — landing now would clobber the newer intent it already conceded
+   *  to. The keying is load-bearing: a rebind applies to the focused pane of the
+   *  session it targeted and splitView keeps each session's tree apart, so an
+   *  apply on ANOTHER session neither vetoes this gesture (it writes a different
+   *  tree) nor may overwrite this session's record (or a stale completion slips
+   *  past the veto) — #5061 Codex. */
+  newestAppliedSeqs: ReadonlyMap<string, number>;
 }
 
 /** The tab ordinal a post-await pane rebind should land on, or the refusal that
@@ -197,8 +213,14 @@ export interface TabRebindInputs {
  *     pinned `pinnedSelId`), so the ordinal names a tab in a session that is no longer
  *     on screen — applying it re-points and attaches the wrong session's pane. This is
  *     the #1815 finding, in the one place (create) its guard was never applied.
- *   - generation guard: the layout moved, bumping `layoutGeneration`; re-pointing from
- *     an intent formed before that yanks it back.
+ *   - generation guard: a NEWER intent is already on record. Either the layout moved
+ *     — `layoutGeneration` bumped by a focus move, a pane close, a drag-drop split,
+ *     or a user tab rebind — or a newer awaited gesture already applied on THIS
+ *     session (`newestAppliedSeqs[pinnedSelId]` passed `rebindSeq` — an apply on
+ *     another session writes a different pane tree and clobbers nothing here); the
+ *     generation alone cannot see the second case because awaited applies
+ *     deliberately move no generation (#5061), so the two order by issue sequence.
+ *     Re-pointing from an intent formed before either yanks the pane back.
  *
  *  `targetIdx < 0` is the honest "the tab is gone" — the created/kept tab was closed
  *  out-of-band during the await — and the pane stays where syncSplit's identity remap
@@ -222,7 +244,10 @@ export function rebindTargetAfterAwait(inputs: TabRebindInputs): TabRebindOutcom
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen) {
+  if (
+    inputs.currentGen !== inputs.pinnedGen ||
+    (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq
+  ) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -238,10 +263,10 @@ export function rebindTargetAfterAwait(inputs: TabRebindInputs): TabRebindOutcom
  *  rather than reporting a fault (#3663).
  *
  *  Each sentence claims only what its reason actually establishes. "layout-moved" is
- *  deliberately not "you focused another pane": layoutGeneration is bumped by a focus
- *  move, by re-pointing a pane at another tab, by closing a pane, by a drag-drop
- *  split, and by a concurrent rebind of this same kind — so naming the focus case
- *  would be wrong for four of the five (#3668 Codex). */
+ *  deliberately not "you focused another pane": it fires on a focus move, on
+ *  re-pointing a pane at another tab, on a pane close, on a drag-drop split, and on
+ *  a NEWER awaited gesture having already applied while this one was in flight —
+ *  so naming the focus case would be wrong for most of them (#3668 Codex, #5061). */
 export function tabRebindRefusalNotice(reason: TabRebindRefusal, verb: TabRebindVerb): string {
   const done = verb === "create" ? "Tab created" : "Tab closed";
   switch (reason) {

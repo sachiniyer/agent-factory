@@ -80,7 +80,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) bool {
 	for _, t := range s.tasks {
 		if _, ok := held[t.ID]; ok && !placed[t.ID] {
 			placed[t.ID] = true
-			next = append(next, t)
+			next = append(next, held[t.ID])
 		}
 	}
 	for id := range held {
@@ -395,4 +395,15 @@ func (s *TaskPane) IsEditing() bool {
 // IsCreating returns true if in create mode.
 func (s *TaskPane) IsCreating() bool {
 	return s.creating
+}
+
+// IsTextFieldFocused reports whether the edit/create form currently has a
+// free-text input focused. The app layer uses it to decide whether a verb key
+// (D delete) is confirmed as an action or falls through to the form to be
+// typed: when a text field is focused the character must reach the input, and
+// when a selector/button stop is focused the verb is confirmed, matching
+// list-mode D. It is false outside the form (listing), so a list-mode D is
+// always confirmed.
+func (s *TaskPane) IsTextFieldFocused() bool {
+	return (s.editing || s.creating) && s.textFocusStop()
 }

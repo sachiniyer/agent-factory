@@ -271,7 +271,11 @@ func wordIsNumericLiteralForArith(word *syntax.Word) bool {
 	if !ok || len(lit.Value) == 0 {
 		return false
 	}
-	for _, ch := range lit.Value {
+	val := lit.Value
+	if len(val) > 1 && val[0] == '-' {
+		val = val[1:]
+	}
+	for _, ch := range val {
 		if ch < '0' || ch > '9' {
 			return false
 		}
@@ -403,6 +407,15 @@ func fileHasArithmeticContextWithVariableOperand(file syntax.Node) bool {
 // after stripping any leading `command` and `builtin` wrappers. These wrappers
 // run the inner command in the current shell environment, so `command let x`
 // and `builtin let x` evaluate x as arithmetic exactly like bare `let x`.
+//
+// `command` and `builtin` take query-only `-v`/`-V` flags that print
+// information about their operand instead of executing it (and for `builtin`,
+// `-v` is not a valid option at all and errors out without running anything),
+// so a `command -v let` / `builtin -v let` form never invokes `let`. This
+// mirrors the option model in unwrapCommandBuiltin, which already treats
+// `-v`/`-V` as query-only; without this check the two helpers would disagree
+// on `command -v let` and the guard would fire on a command that contains no
+// arithmetic context at all.
 func isWrappedLetCall(call *syntax.CallExpr) bool {
 	words := call.Args
 	for len(words) > 0 {
@@ -418,6 +431,12 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 				opt, ok := literalShellWord(words[0])
 				if !ok || !strings.HasPrefix(opt, "-") {
 					break
+				}
+				// `-v`/`-V` (alone or clustered, e.g. `-vp`) make `command`/`builtin`
+				// query-only: they display information about the operand and never
+				// execute it, so a trailing `let` is not a `let` execution.
+				if strings.ContainsAny(opt[1:], "vV") {
+					return false
 				}
 				words = words[1:]
 				if opt == "--" {

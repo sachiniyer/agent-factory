@@ -369,7 +369,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · s open · enter attach"},
+			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · " + helpKey(keys.KeyOpenPane) + " open · enter attach"},
 			// The unbounded jump-to-tab prompt comes from #3021; keep the issue
 			// reference in source rather than exposing it in the help overlay.
 			{helpKey(keys.KeyJumpTabPrompt), "Jump to any tab by number or name"},

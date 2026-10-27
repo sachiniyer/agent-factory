@@ -532,7 +532,13 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		s.showActions = !s.showActions
 		return true
 	case "esc":
-		s.hasFocus = false
+		// Route the close through SetFocus(false) so the pendingCreate /
+		// pendingTrigger / pendingTriggerID clears the #1531 contract relies on
+		// actually run. Writing hasFocus directly bypasses them, so a pending
+		// run-now whose pre-trigger flush failed survives the close and fires on
+		// the first keypress after reopen (SetTasks preserves it deliberately for
+		// the mid-flush reload, #1474, so the close is the only drop).
+		s.SetFocus(false)
 		return true
 	case "up", "k":
 		if s.selectedIdx > 0 {
@@ -609,6 +615,16 @@ func (s *TaskPane) DeleteTask(id string) bool {
 		if s.tasks[i].ID == id {
 			s.selectedIdx = i
 			s.deleteSelectedTask()
+			// A delete confirmed from inside the edit form (the app layer
+			// routes edit-mode D through the same confirmation as list mode)
+			// returns the pane to list mode — mirroring Esc without dropping
+			// overlay focus — so the removed task's stale form is not left
+			// open over a shifted selection.
+			if s.editing {
+				s.editing = false
+				s.editError = ""
+				s.editErrorField = -1
+			}
 			return true
 		}
 	}

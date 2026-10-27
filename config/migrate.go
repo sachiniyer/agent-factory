@@ -217,7 +217,9 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 			}
 			// Same value in both spellings: the flat line carries no information
 			// the grouped one does not, so dropping it changes nothing at all.
-			updated, removed := deleteTOMLScalar(content, "", alias.legacy)
+			// The dropped line's comment associations go with it — left in
+			// place they would read as notes about an unrelated key (#4872).
+			updated, _, _, removed := deleteTOMLScalarForMove(content, "", alias.legacy)
 			if !removed {
 				// The decoded shape says the key is there, so a delete that finds
 				// no line means the two disagree about the file. Reporting success
@@ -249,7 +251,12 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		// the string. Deleting the source first takes that text out of the document
 		// before anything scans it. The value was lifted above, so nothing is lost
 		// by removing the line early (#3624 review).
-		updated, removed := deleteTOMLScalar(content, "", alias.legacy)
+		// The key's comment associations move with it (#4872): the contiguous
+		// leading block goes above the moved line, its own trailing comment
+		// stays on it — anything left at the site reads as a note about
+		// whatever line the delete exposes next, including as the NEXT
+		// migrated key's leading block.
+		updated, comments, trailing, removed := deleteTOMLScalarForMove(content, "", alias.legacy)
 		if !removed {
 			return nil, unremovableKeyError(alias.legacy, prettyPath)
 		}
@@ -257,9 +264,9 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		if tomlRootDottedTable(content, alias.section) {
 			// The destination table is already open as a dotted key, and TOML will
 			// not let a [header] re-open it. Join it in the same form.
-			content = setTOMLScalar(content, "", alias.section+"."+alias.leaf, encoded)
+			content = setTOMLScalarWithLeadingComments(content, "", alias.section+"."+alias.leaf, encoded+trailing, comments)
 		} else {
-			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
+			content = setTOMLScalarWithLeadingComments(content, alias.section, alias.leaf, encoded+trailing, comments)
 		}
 		// Value is the EFFECTIVE value, never the raw TOML token: a --json caller
 		// comparing two migrations of the same setting must not get "0.0.0.0:8443"

@@ -60,7 +60,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
-	if program == "" {
+
+	// An empty program field is "Use config default". When the launch itself
+	// committed to a program — an explicit --program (programFollowsConfig is
+	// false) — THAT is the default the label refers to, so the task stores it
+	// and later runs keep launching it regardless of config drift (#4889
+	// review). Only a config-following launch leaves the stored program empty,
+	// so task/task.go's runner resolves the live default_program against the
+	// task's own repo at RUN time; folding m.defaultProgram() into that case
+	// would bake a possibly-stale cache in permanently.
+	if program == "" && !m.programFollowsConfig {
 		program = m.program
 	}
 	id, err := task.GenerateID()

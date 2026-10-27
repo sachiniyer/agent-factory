@@ -257,7 +257,9 @@ func TestAdoptedRootProgramCacheRevalidatesCheckedInConfig(t *testing.T) {
 	rootProgramDriftConfigInspectionInterval = 0
 	t.Cleanup(func() { rootProgramDriftConfigInspectionInterval = previousInterval })
 	repoPath := setupControlRepo(t)
-	if err := writeRootDriftRepoConfig(repoPath, "[program_overrides]\ncodex = '/old/codex'\n"); err != nil {
+	// Relative spellings: checked-in program_overrides may not name absolute
+	// executables (#5265 review).
+	if err := writeRootDriftRepoConfig(repoPath, "[program_overrides]\ncodex = 'old/codex'\n"); err != nil {
 		t.Fatal(err)
 	}
 	manager, warnings := newManagerCapturingWarnings(t,
@@ -267,7 +269,7 @@ func TestAdoptedRootProgramCacheRevalidatesCheckedInConfig(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create pre-existing root: %v", err)
 	}
-	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/old/codex"))
+	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "old/codex"))
 
 	manager.ensureRootAgentsAndWait()
 	manager.mu.Lock()
@@ -278,7 +280,7 @@ func TestAdoptedRootProgramCacheRevalidatesCheckedInConfig(t *testing.T) {
 	}
 	waitForRootProgramResolutionIdle(t, manager, st)
 
-	if err := writeRootDriftRepoConfig(repoPath, "[program_overrides]\ncodex = '/new/codex'\n"); err != nil {
+	if err := writeRootDriftRepoConfig(repoPath, "[program_overrides]\ncodex = 'new/codex'\n"); err != nil {
 		t.Fatal(err)
 	}
 	manager.ensureRootAgentsAndWait()
@@ -286,8 +288,8 @@ func TestAdoptedRootProgramCacheRevalidatesCheckedInConfig(t *testing.T) {
 	manager.mu.Lock()
 	configured := st.programDriftConfiguredProgram
 	manager.mu.Unlock()
-	if configured != "/new/codex" {
-		t.Fatalf("configured command after checked-in edit = %q, want /new/codex", configured)
+	if configured != "new/codex" {
+		t.Fatalf("configured command after checked-in edit = %q, want new/codex", configured)
 	}
 	if !strings.Contains(warnings.String(), "root agent program drift") {
 		t.Fatalf("checked-in override drift was hidden by the stale cache:\n%s", warnings.String())
@@ -801,7 +803,9 @@ func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
 	barePath := filepath.Join(base, "identity.git")
 	worktreePath := filepath.Join(base, "checkout")
 	setupRootDriftRepoAt(t, seedPath)
-	if err := writeRootDriftRepoConfig(seedPath, "[program_overrides]\ncodex = '/repo/codex'\n"); err != nil {
+	// Relative spelling: checked-in program_overrides may not name absolute
+	// executables (#5265 review).
+	if err := writeRootDriftRepoConfig(seedPath, "[program_overrides]\ncodex = 'repo/codex'\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := exec.Command("git", "-C", seedPath, "add", ".").Run(); err != nil {

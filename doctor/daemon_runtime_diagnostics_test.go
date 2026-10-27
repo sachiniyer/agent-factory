@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,4 +80,34 @@ func TestDaemonConfig_MatchPasses(t *testing.T) {
 	report, err := Run(opts)
 	require.NoError(t, err)
 	require.Equal(t, StatusPass, findCheck(t, report, "daemon config").Status)
+}
+
+// TestDaemonPID_UnverifiableGetsAdvisoryNotStaleRow pins the tri-state on the
+// doctor surface (#5188): a daemon.pid naming a live af daemon whose home
+// could not be bound is inconclusive — possibly this home's own daemon with
+// an unreadable frame (the normal macOS shape). The stale-file row must NOT
+// fire on it (its remediation suggests deleting the only handle naming a live
+// daemon), and the advisory that does fire is not a problem-flagged row.
+func TestDaemonPID_UnverifiableGetsAdvisoryNotStaleRow(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr:         errors.New("no daemon"),
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "daemon.pid")
+	require.Len(t, rows, 1, "exactly one daemon.pid row: the advisory, not the stale-file verdict")
+	require.Contains(t, rows[0].Detail, "could not be verified")
+	require.NotContains(t, rows[0].Remediation, "remove the stale",
+		"an unproven live pid must never be offered for file removal")
+	require.False(t, rows[0].Problem,
+		"an inconclusive binding is advisory — it may be this home's own daemon")
 }

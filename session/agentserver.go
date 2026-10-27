@@ -255,6 +255,14 @@ type Observation struct {
 	// agent safety dialog. The runtime reports it on every snapshot until the
 	// model returns to Before, so no consumer has to race a one-shot log line.
 	ModelChange *AgentModelChange
+	// Captured reports whether the pane was actually captured this snapshot.
+	// A live-but-wedged local capture path returns an all-false observation
+	// indistinguishable from an unchanged empty pane; bookkeeping that
+	// accumulates observed-silence evidence must not count it (#5221 review).
+	// A backend that cannot express capture success reports true — its
+	// narrower contract already asserts the observation ran — and a remote
+	// observation resolves the wire field's compat default before here.
+	Captured bool
 }
 
 // PTYSubscription is one subscriber's read side of a session's PTY stream

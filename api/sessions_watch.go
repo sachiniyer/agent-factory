@@ -100,7 +100,17 @@ func watchForReady(d watchDeps, title string) (*session.InstanceData, error) {
 			return data, fmt.Errorf("timed out after %s waiting for session %q to become idle (still %s)",
 				d.timeout, title, describeWatchState(data))
 		}
-		d.sleep(d.interval)
+		// Never sleep past the deadline. --interval and --timeout are validated
+		// independently, so `--timeout 5s --interval 1h` is accepted — and an
+		// unconditional sleep would poll once, block for an hour, and then report a
+		// five-second timeout, making the advertised bound a fiction.
+		wait := d.interval
+		if d.timeout > 0 {
+			if remaining := start.Add(d.timeout).Sub(d.now()); remaining < wait {
+				wait = remaining
+			}
+		}
+		d.sleep(wait)
 	}
 }
 

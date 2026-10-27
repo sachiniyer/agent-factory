@@ -48,7 +48,7 @@ Progress goes on **stderr**; anything else on stdout fails the provision the sam
 
 A machine created seconds ago has no `known_hosts` entry, and the resulting prompt is precisely what an unattended provision cannot answer. None of af's host-key postures solves it: `strict` refuses an unknown host, `accept-new` is trust-on-first-use where **every** session is a first contact (and its store later refuses a legitimate VM once an address is recycled), and `insecure` invites the man-in-the-middle who would then see the bearer token.
 
-Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null` and `KnownHostsCommand=none`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
+Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null`, `KnownHostsCommand=none` and `RemoteCommand=none`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
 
 > **This path needs OpenSSH 8.5 or newer on the daemon host** — a higher floor than
 > the 7.6 that `backend = "ssh"` asks for. `KnownHostsCommand` arrived in 8.5, and an
@@ -59,6 +59,16 @@ Your script is the only party with an **authentic** channel to that key — it i
 > OpenSSH a different key and satisfy verification without af's per-session pin ever
 > deciding anything. Dropping it would trade a version floor for a key-substitution
 > hole, which is the worse bargain.
+>
+> `RemoteCommand=none` is pinned for a different reason than the host-key options:
+> af always supplies its own one-shot remote script (every step — `mktemp`, `git clone`,
+> `cat > file`, `nohup af …` — is passed as ssh's command-line remote command), and a
+> `Host` block's `RemoteCommand` would make ssh refuse outright — "Cannot execute
+> command-line and remote command." — so every provision step and the live-teardown
+> sandbox re-entry would fail before any af command reached the remote. It is the
+> documented default (no command), no hook workflow depends on a config-injected one,
+> and it arrived in OpenSSH 7.6 — beneath the `KnownHostsCommand` 8.5 floor — so it
+> costs no version.
 
 Two ways to get the key, both ordinary practice:
 

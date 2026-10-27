@@ -54,6 +54,10 @@ const (
 	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
 	// hand-edited.
 	cfgStringList
+	// cfgFloat is a fractional scalar — today the [web] terminal font sizes
+	// (#5500), whose 6.5 phone pitch no integer kind can carry. It is written as a
+	// real TOML float (8 → "8.0") so the file stays unambiguous about the type.
+	cfgFloat
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -211,6 +215,14 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"enabled": {kind: cfgBool},
 		"program": {kind: cfgString},
 	}},
+	// The browser client's display preferences (#5500). The leaf form —
+	// `af config set web.terminal_font_size_phone 8` — is what the web terminal's
+	// +/- controls write through SetConfigValue, and the compact-JSON whole-table
+	// form is what the config panes post back.
+	"web": {structured: true, subkeys: map[string]settableLeafSpec{
+		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
+		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
+	}},
 	"keys": {structured: true},
 }
 
@@ -314,14 +326,17 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart is true for every ordinary write: config.toml is read at
+	// startup, so a change applies to af and the daemon on their next start,
+	// exactly like a hand-edit. The exception is a project-scoped branch_prefix
+	// (#4539): stored but never applied, so no restart can apply it and the
+	// field reports false rather than promising one.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -581,6 +596,16 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself. And
+	// because no restart can ever apply it (the daemon names branches from its
+	// frozen global prefix), the write bypasses the generic restart
+	// result/notice: printing "restart them to apply" for a value that can
+	// never take effect would contradict the warning.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+		result.RequiresRestart = false
+	}
 	return result, nil
 }
 
@@ -792,6 +817,23 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
 	if err != nil {
 		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+	}
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
 	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's
