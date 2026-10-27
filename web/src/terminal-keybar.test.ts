@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
-  keybarPointerDown,
+  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, keybarClickIsPointerless, keybarPointerDown,
+  keybarSheetClickIsOpeningGesture, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
+
+const KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
+
+/** The complete intended keyBytes key domain: named keys plus one Unicode scalar. */
+function* keyBytesDomain(): Generator<string> {
+  yield* KEY_BYTES_NAMED_KEYS;
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint++) {
+    if (codePoint < 0xd800 || codePoint > 0xdfff) yield String.fromCodePoint(codePoint);
+  }
+}
 
 test("terminal key bytes match physical keys", () => {
   for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
@@ -475,6 +485,9 @@ function composingKeybar(t: TestContext) {
     // setFocused repaints and re-lays-out the bar; neither is under test here.
     paint: () => {}, layout: () => {},
     input: (text: string) => { writes.push(keybar.transform(text)); },
+    // The terminal wires paste to xterm's term.paste, which emits the
+    // bracketed block through onData — the same transform funnel as input.
+    paste: (text: string) => { writes.push(keybar.transform(`\x1b[200~${text}\x1b[201~`)); },
   }) as unknown as TerminalKeybar;
   textarea.addEventListener("blur", () => keybar.setFocused(false));
   let disposed = false;
@@ -596,10 +609,64 @@ test("pointerdown prevents focus transfer before acting", () => {
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
 });
 
-test("one-row keybar uses six primary targets and a replacement arrows row at 360px", async () => {
+test("pointerdown still cancels the focus steal when the key acts on release (#5426)", () => {
+  // Paste's action moved to pointerup so its clipboard read lands inside the
+  // touch activation the press never carries; the preventDefault that stops
+  // the tap stealing xterm's focus is unconditional.
+  let prevented = false;
+  keybarPointerDown({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+});
+
+test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)", () => {
+  // Assistive activation — a screen reader, keyboard Enter, a programmatic
+  // .click() — arrives as a detail:0 click with no pointerType. But a real
+  // tap's click is ALSO detail:0 once its pointerdown was canceled (Chromium
+  // zeroes the count with the compat mouse events), so detail alone would let
+  // a tap act twice. pointerType separates them.
+  assert.equal(keybarClickIsPointerless({ detail: 0 }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "" }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "touch" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
+});
+
+test("the paste sheet's backdrop dismiss ignores the opening gesture's click whatever its metadata (#5428)", () => {
+  const opening = { pointerId: 2, pointerType: "touch" };
+  // iOS Safari <18.2 dispatches the tap's trailing click as a plain MouseEvent
+  // — no pointer fields at all.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, opening), true);
+  // Safari 18.2 can label a touch click pointerType "mouse" (WebKit 282988).
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 1, pointerType: "mouse" }, opening), true);
+  // The Chromium shape — same pointer identity — is of course covered too.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, opening), true);
+  // A pointerless open arms nothing, so no click is ever swallowed; and once
+  // a fresh gesture's pointerdown disarms the marker, its click closes.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 1, pointerId: 9, pointerType: "touch" }, undefined), false);
+});
+
+test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {
   const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
-  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]]);
-  for (const row of KEYBAR_ROWS) assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+  // The A−/A+ zoom pair rides the arrows page's end (#5500) — display controls,
+  // not PTY keys — keeping both pages at the seven-target budget the geometry
+  // model below already closes on.
+  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]]);
+  // ≥348px of room: 44px targets + 4px gaps + padding. Below that the keybar's
+  // narrow rule lets keys shrink to a 40px floor (#5380), so at 320px the same
+  // model must still close.
+  for (const row of KEYBAR_ROWS) {
+    assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+    assert.ok(row.length * 40 + (row.length - 1) * 4 + 16 <= 320);
+  }
 });
 
 test("keyBytes drops ctrl/alt for arrows and specials", () => {
@@ -670,4 +737,166 @@ test("resolved bar keys pass through xterm transform without applying locked mod
     assert.equal(state.state("Ctrl"), "locked");
     assert.equal(state.state("Alt"), "locked");
   }
+});
+
+// A keybar wired for the Paste key's unit tests (#5380). node --test has no
+// DOM, so the paste sheet is a spy — openPasteSheet's own element building is
+// browser territory — and `paste` plays the terminal's term.paste callback:
+// it wraps the text in the bracketed-paste block xterm emits when the mode is
+// on, then pushes it through transform, the same funnel the real onData uses.
+function pastingKeybar(modifiers = new StickyModifiers()) {
+  const writes: string[] = [];
+  const pastes: string[] = [];
+  const sheetOpens: number[] = [];
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0, physicalInput: false, arrows: false,
+    softInput: {
+      transform: (text: string, apply: (value: string) => string) => apply(text),
+      deferAfterPendingComposition: () => false,
+      reset: () => {},
+    },
+    input: (text: string) => { writes.push(keybar.transform(text)); },
+    paste: (text: string) => {
+      pastes.push(text);
+      writes.push(keybar.transform(`\x1b[200~${text}\x1b[201~`));
+    },
+    openPasteSheet: () => { sheetOpens.push(1); },
+    closePasteSheet: () => {},
+    paint: () => {},
+    layout: () => {},
+    disposed: false,
+  }) as unknown as TerminalKeybar;
+  return { keybar, writes, pastes, sheetOpens };
+}
+
+test("the Paste key calls readText on the tap's stack and sends the clipboard through term.paste", async t => {
+  const reads: number[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { readText: () => (reads.push(1), Promise.resolve("deploy --to prod")) },
+  });
+  t.after(() => { delete (navigator as { clipboard?: unknown }).clipboard; });
+  const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+  const pending = keybar.requestPaste();
+  assert.equal(reads.length, 1, "readText was invoked inside the tap handler, not deferred");
+  await pending;
+  assert.deepEqual(pastes, ["deploy --to prod"], "term.paste saw the clipboard text exactly once");
+  assert.deepEqual(writes, ["\x1b[200~deploy --to prod\x1b[201~"],
+    "the bracketed block reached the wire untouched");
+  assert.equal(sheetOpens.length, 0);
+});
+
+test("a rejected, empty, throwing, or missing clipboard read opens the paste sheet", async t => {
+  const clipboards: unknown[] = [
+    { readText: () => Promise.reject(new Error("denied")) },
+    { readText: () => Promise.resolve("") },
+    { readText: () => { throw new Error("no activation"); } },
+    undefined, // Firefox and insecure contexts expose no readText at all.
+  ];
+  for (const clipboard of clipboards) {
+    if (clipboard === undefined) delete (navigator as { clipboard?: unknown }).clipboard;
+    else Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    await keybar.requestPaste();
+    assert.equal(sheetOpens.length, 1, `the sheet opened for ${JSON.stringify(clipboard) ?? "no clipboard"}`);
+    assert.deepEqual(pastes, []);
+    assert.deepEqual(writes, []);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("the paste sheet's send path delivers its text through term.paste", () => {
+  const { keybar, writes, pastes } = pastingKeybar();
+  // The sheet's Send button calls sendPaste with the textarea's value — the
+  // same term.paste path a direct clipboard read takes. The DOM wiring is
+  // browser territory; this is the exact call the button makes.
+  keybar.sendPaste("pasted\ntext");
+  assert.deepEqual(pastes, ["pasted\ntext"]);
+  assert.deepEqual(writes, ["\x1b[200~pasted\ntext\x1b[201~"]);
+});
+
+test("sticky modifiers neither rewrite a paste nor are consumed by it", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const { keybar, writes, pastes } = pastingKeybar(modifiers);
+  keybar.sendPaste("cd");
+  assert.deepEqual(pastes, ["cd"]);
+  assert.deepEqual(writes, ["\x1b[200~cd\x1b[201~"], "the pasted text passed through verbatim");
+  assert.equal(modifiers.state("Ctrl"), "once",
+    "the paste ignored the armed modifier rather than spending it");
+  // The next real keystroke — marked user input, as term.onKey marks it —
+  // still sees the one-shot.
+  keybar.markUserInput();
+  assert.equal(keybar.transform("c"), "\x03");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("a clipboard read settling after disposal pastes nothing and opens no sheet", async t => {
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    (keybar as unknown as { disposed: boolean }).disposed = true;
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after dispose`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after dispose`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("a clipboard read settling after the terminal lost focus pastes nothing and opens no sheet", async t => {
+  // The tap starts a read that outlives it: focusing another split blurs this
+  // terminal without disposing it, and the late clipboard text must not land
+  // in a shell the user already left.
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    keybar.setFocused(false);
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after focus moved`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after focus moved`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("the paste sheet's focus grab keeps armed sticky modifiers", t => {
+  // Focusing the sheet's textarea blurs xterm's helper, which drives
+  // setFocused(false) — but the fallback must not silently spend the armed
+  // Ctrl/Alt the next real key still expects (#5380). A genuine blur with no
+  // sheet still resets.
+  for (const sheetOpen of [false, true]) {
+    const modifiers = new StickyModifiers();
+    modifiers.tap("Ctrl", 0);
+    const { keybar } = pastingKeybar(modifiers);
+    if (sheetOpen) (keybar as unknown as { pasteSheet: unknown }).pasteSheet = {};
+    keybar.setFocused(false);
+    assert.equal(modifiers.state("Ctrl"), sheetOpen ? "once" : "off",
+      sheetOpen ? "the owned sheet blur keeps the armed modifier" : "a real blur still resets");
+  }
+});
+
+test("a paste waits behind a pending composition commit like other positional input", t => {
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendPaste("tail");
+  assert.deepEqual(writes, [], "the paste must not overtake xterm's finalizer");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\x1b[200~tail\x1b[201~"]);
 });

@@ -223,8 +223,8 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 // miss a readable second project it used to catch, i.e. strictly worse than the
 // fail-open being fixed. Caught in review of #3479 bucket 1.
 //
-// Defence in depth today: refreshDaemonInstances runs
-// config.MigrateAllRepoInstancesForDaemonLoad first, which already refuses hard
+// Defence in depth today: refreshDaemonInstances runs the per-repo file cache
+// (config.RepoInstancesFileCache.LoadAll) first, whose loadRepoFile refuses hard
 // on an unreadable per-repo file, so findSession never reaches here in that
 // state (pinned by TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution).
 // Correct on its own terms anyway: an identity guard should not depend on an

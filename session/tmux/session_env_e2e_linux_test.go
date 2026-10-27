@@ -26,7 +26,11 @@ import (
 func TestFirstDaemonSessionImportsEnvironmentAfterServerBootstrap(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
-	systemdRun := filepath.Join(dir, "systemd-run")
+	// The agent executable lives outside the session's working directory: an
+	// absolute program path INSIDE the workdir is repository content and earns
+	// no credential grant under the #5265 predicate.
+	binDir := t.TempDir()
+	systemdRun := filepath.Join(binDir, "systemd-run")
 	script := `#!/bin/sh
 set -eu
 while [ "$#" -gt 0 ]; do
@@ -41,7 +45,7 @@ exec "$@"
 	if err := os.WriteFile(systemdRun, []byte(script), 0o700); err != nil {
 		t.Fatalf("write systemd-run shim: %v", err)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 	t.Setenv("OPENAI_API_KEY", "bootstrap-secret")
@@ -49,7 +53,7 @@ exec "$@"
 	t.Cleanup(restore)
 
 	markerPath := filepath.Join(dir, "credential-observed")
-	agentPath := filepath.Join(dir, ProgramCodex)
+	agentPath := filepath.Join(binDir, ProgramCodex)
 	agent := `#!/bin/sh
 test "${OPENAI_API_KEY:-}" = bootstrap-secret || exit 9
 : >"$1"
@@ -140,7 +144,11 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 			t.Fatal("could not prepare the isolated Git push fixture")
 		}
 	}
-	agentPath := filepath.Join(dir, ProgramCodex)
+	// The agent executable lives outside the session's working directory: an
+	// absolute program path INSIDE the workdir is repository content and earns
+	// no credential grant under the #5265 predicate.
+	binDir := t.TempDir()
+	agentPath := filepath.Join(binDir, ProgramCodex)
 	program := "#!/bin/sh\n" +
 		"test -n \"$OPENAI_API_KEY\" && test -n \"$CUSTOM_PROVIDER_TOKEN\" || exit 9\n" +
 		"tr '\\000' '\\n' < /proc/$$/environ | sed 's/=.*//' | sort > \"$1.partial\" && mv -f \"$1.partial\" \"$1\"\n" +
@@ -230,12 +238,16 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	agentPath := filepath.Join(dir, ProgramCodex)
+	// The agent executable lives outside the session's working directory: a
+	// PATH entry inside the workdir that holds it is repository content and
+	// earns no credential grant under the #5265 predicate.
+	binDir := t.TempDir()
+	agentPath := filepath.Join(binDir, ProgramCodex)
 	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
 		t.Fatalf("write agent fixture: %v", err)
 	}
 	reportPath := filepath.Join(dir, "shell-environment")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	agent := NewTmuxSession("account-tab-parent", ProgramCodex)
 	agent.SetAccountForAgent(ProgramCodex, "work")
