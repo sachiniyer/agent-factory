@@ -199,11 +199,15 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	_, ok = m.sandboxTokens.sessionFor(secret)
 	assert.False(t, ok, "a credential issued under require_token=true must not outlive it: the gate short-circuits on the tokenless posture before consulting the registry, so its scope stops being enforced")
 
-	// And the operator must be TOLD, including that this does not re-isolate the
-	// sandboxes — revoking without saying so would read as a security action.
+	// And the operator must be TOLD. This test manager binds no TCP listener,
+	// so the warning takes the no-endpoint variant (#5137 review): it must not
+	// claim the control plane "answers unauthenticated callers" when nothing
+	// is serving on the network.
 	joined := strings.Join(result.Warnings, "\n")
 	assert.Contains(t, joined, "network.require_token is now false")
-	assert.Contains(t, joined, "does not re-isolate")
+	assert.Contains(t, joined, "no TCP control listener is serving")
+	assert.NotContains(t, joined, "answers unauthenticated callers",
+		"no TCP endpoint is serving — the warning must not claim a live unauthenticated exposure")
 	assert.NotContains(t, joined, "NOTE:", "warning prose must not use a shouted emphasis prefix")
 }
 
@@ -242,8 +246,13 @@ func TestApplyConfig_UnrelatedChangeKeepsSandboxCredentials(t *testing.T) {
 func TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice(t *testing.T) {
 	m := applyConfigTestManager(t)
 
-	// Enter the exposed posture: non-loopback listen_addr + require_token=false.
-	_, err := config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+	// Enter the exposed posture: non-loopback listen_addr + require_token=false,
+	// opted in — since #5137 the same pair without allow_unauthenticated_network
+	// is a refused write, not an exposure, so the warn-and-serve surface this
+	// test pins only exists under the explicit opt-in.
+	_, err := config.SetGlobalConfigValue("network.allow_unauthenticated_network", "true")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
 	require.NoError(t, err)
 	_, err = config.SetGlobalConfigValue("network.require_token", "false")
 	require.NoError(t, err)

@@ -19,7 +19,7 @@ var (
 
 // handoffSessionViaDaemon is the daemon seam, matching the other session verbs
 // in api/sessions.go so tests can substitute it.
-var handoffSessionViaDaemon = daemon.HandoffSession
+var handoffSessionViaDaemon = routedHandoffSession
 
 var sessionsHandoffCmd = &cobra.Command{
 	Use:   "handoff <title>",
@@ -90,7 +90,7 @@ Examples:
 		// Honor --repo scoping the way kill/archive do: an empty repoID keeps the
 		// all-repo search, a non-empty one confines the swap to that repo so a
 		// same-titled session elsewhere is never touched.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}

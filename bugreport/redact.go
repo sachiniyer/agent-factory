@@ -465,6 +465,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
 	}
+	// CallbackUnavailable is a reason string minted from an error — mint
+	// refusals and revalidation failures can embed the operator's configured
+	// callback endpoint or sandbox host detail (e.g. the callback_url an
+	// operator wrote), which is the same class of user-chosen text as Account.
+	if d.CallbackUnavailable != "" {
+		d.CallbackUnavailable = redactedMarker
+	}
 	// PendingHandoffMission is a rendered takeover brief that embeds the user's
 	// free-text prompt/goal verbatim — the same sensitivity class as Prompt. It
 	// was added with transactional handoff (#2286) after this policy was written,

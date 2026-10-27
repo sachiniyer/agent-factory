@@ -779,3 +779,26 @@ func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
 		"the frame after a failed capture re-anchors the streak — only 20s of observed silence, not 50s")
 	require.True(t, inst.taskRunTurnGateHeld)
 }
+
+// A restart between the failure edge and the daemon's status stamp must not
+// lose the failure (#5646): the edge persists TaskRunActive=false, so the
+// active-gated re-derivation cannot see it — the durable pending flag re-arms
+// the stamp, and the daemon's acknowledgement retires it.
+func TestTaskRunFailureSurvivesRestartBeforeStamp(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
+	require.False(t, inst.TaskRunActive())
+
+	data := inst.ToInstanceData()
+	require.True(t, data.TaskRunFailurePending, "the failure edge persists a pending acknowledgement")
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.False(t, reloaded.TaskRunActive())
+	require.True(t, reloaded.TaskRunFailed(), "the completion predicate still tells the failed run apart")
+	require.True(t, reloaded.ConsumeTaskRunFailed(), "the stamp is re-armed after the restart")
+
+	reloaded.AckTaskRunFailureStamped()
+	require.False(t, reloaded.ToInstanceData().TaskRunFailurePending,
+		"an acknowledged stamp is not re-driven by the next restart")
+}

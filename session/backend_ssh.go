@@ -215,7 +215,10 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			}
 		}
 	}
-	program := config.ResolveProgram(&cfg.Config, spec.Program)
+	// The wire program is the configured name and flags — never af's
+	// auto-detected daemon path, which this host's filesystem does not have.
+	// The agent-server resolves it on the host's login PATH (#5571).
+	program := remoteProgramForHost(cfg, spec.Program)
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
 	res, err := p.provision()
 	if err != nil {
@@ -226,8 +229,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res.Backend = &sshBackend{
 		// The command the sandbox's agent-server was bound to launch (#5108) —
+		// the host-resolved value reported back in the banner (#5571 W2.1),
 		// recorded as runtime evidence when the launch RPC returns.
-		remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+		remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
 		provisioner:        p,
 		cleanup: &SSHRuntimeCleanupData{
 			Config:     sshCfg,
