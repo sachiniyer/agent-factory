@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressVerificationTimeoutRetries(t *testing.T) {
@@ -36,10 +38,10 @@ func TestHookProgressVerificationTimeoutRetries(t *testing.T) {
 case "$*" in *"worktree list"*)
  if [ ! -f %q ]; then touch %q; sleep 60; fi
  touch %q
- while [ ! -f %q ]; do sleep 0.01; done
+ %s
 ;; esac
 exec %q "$@"
-`, first, first, second, release, realGit)
+`, first, first, second, testguard.BoundedGateWait(release, 10*time.Millisecond, 5*time.Minute), realGit)
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
 	}

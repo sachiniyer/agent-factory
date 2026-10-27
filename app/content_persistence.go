@@ -29,6 +29,14 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if notice := m.automations.TaskPane().TakeUnconfirmedQuitNotice(); notice != "" {
 		return m, m.showTransientMessage(notice)
 	}
+	// A retarget that moved a task out of the active project sink its row from
+	// the pane (#1836). The save landed; without this notice leaving looks
+	// like the task was dropped. Drained last because a deleted-draft or an
+	// unconfirmed-edit notice names lost work, which is more urgent to surface
+	// before quitting than a retarget that succeeded.
+	if notice := m.automations.TaskPane().TakeCrossRepoRetargetNotice(); notice != "" {
+		return m, m.showTransientMessage(notice)
+	}
 	m.flushTUIViewStateBestEffort()
 
 	// No instances.json write on quit: the daemon is the sole writer (#960 PR 4)
@@ -113,6 +121,38 @@ func (m *home) saveContentPaneState() error {
 	// open — the #1700 clobber, of which #1213's whole-task guard was only a
 	// partial fix. A patch that turns out empty (edited then reverted) is a
 	// harmless no-op the daemon still validates.
+	//
+	// retargetCandidates tracks edits that changed ProjectPath so the reload
+	// below can tell which ones crossed repos. AcknowledgeSavedEdit advances
+	// the pane's baseline but does NOT touch s.tasks, so the post-edit name is
+	// still on the in-memory row right here — capture it before the reload
+	// replaces the pane's list with the active scope's rows.
+	type retargetCandidate struct{ id, name, newPath string }
+	var retargetCandidates []retargetCandidate
+	// recordRetargetIfMoved queues a ProjectPath change for the post-reload
+	// cross-repo notice. The save has committed the edit (nil error or
+	// IsMutationCommitted), so the post-edit name is still on the in-memory
+	// row right here — AcknowledgeSavedEdit advances the baseline but does not
+	// touch s.tasks, so the name must be captured before the reload replaces
+	// the pane's list. Record it for both outcomes: a committed-with-warning
+	// save landed the binding too, and the active-scope reload below drops the
+	// row either way, so without a candidate the warning branch would leave the
+	// user with a generic "failed to save task" and no idea where it went.
+	recordRetargetIfMoved := func(edit task.TaskEdit) {
+		if edit.Update.ProjectPath == nil {
+			return
+		}
+		name := edit.ID
+		for _, t := range sp.GetTasks() {
+			if t.ID == edit.ID {
+				if t.Name != "" {
+					name = t.Name
+				}
+				break
+			}
+		}
+		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
+	}
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
 			if updateProvedTaskDeleted(err, edit.ID) {
@@ -129,6 +169,10 @@ func (m *home) saveContentPaneState() error {
 				// failed. Keep surfacing that failure, but advance this task's
 				// baseline so a later edit is diffed against durable state.
 				sp.AcknowledgeSavedEdit(edit.ID)
+				// The binding change committed with the task, so the reload
+				// below drops a retargeted row the same way — record it so the
+				// cross-repo notice still names where it landed.
+				recordRetargetIfMoved(edit)
 			} else if mutationOutcomeUnknown(err) {
 				// The update may have landed with only its reply lost (#4824).
 				// The draft is kept, since only a positive not-found may drop one
@@ -151,6 +195,10 @@ func (m *home) saveContentPaneState() error {
 			continue
 		}
 		sp.AcknowledgeSavedEdit(edit.ID)
+		// A ProjectPath patch retargets the task's project binding. The save
+		// committed it; the reload below decides whether the new binding
+		// stayed in the active project or moved it elsewhere.
+		recordRetargetIfMoved(edit)
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
 		// tsk is the record as the pane displayed it; pin its project binding
@@ -183,15 +231,61 @@ func (m *home) saveContentPaneState() error {
 	// reload is unconditional because SetTasks keeps the drafts of failed edits
 	// (#4487); skipping it while one was retained hid a task whose deletion
 	// failed alongside it (#4257).
-	tasks, err := task.LoadTasksForCurrentRepo()
+	//
+	// Scope the reload by the TUI's ACTIVE project (m.repoRoot/m.repoID), not
+	// the process cwd, so an edit saved after an in-place project switch
+	// (#1461) keeps the switched-to project's rows rather than being clobbered
+	// by the launch repo's list — the same scope the snapshot poll reads. A
+	// retarget that crossed repos is intentionally outside this list and is
+	// surfaced below so the silent drop does not look like a failed save
+	// (#1836, mirroring the cross-repo create path's notice in home_tasks.go).
+	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
 		// The task count feeds the rail's automations-section height (#1126);
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
+		// A retargeted task whose ID the reloaded list no longer carries moved
+		// out of the active scope: the save committed and the task lives at its
+		// new project, but the pane drops its row. Echo the new binding the way
+		// the CLI does (#1891) — without this, the silent drop looks like a
+		// failed save and the user re-edits a task they can no longer see.
+		// Subdirectory/path retargets that stay in the active repo stay in the
+		// list and produce no notice.
+		if len(retargetCandidates) > 0 {
+			inScope := make(map[string]bool, len(tasks))
+			for _, t := range tasks {
+				inScope[t.ID] = true
+			}
+			for _, rc := range retargetCandidates {
+				if inScope[rc.id] {
+					continue
+				}
+				sp.RecordCrossRepoRetarget(rc.name, rc.newPath)
+			}
+		}
 	} else {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
+		// The reload failed, so the in-scope list above is unavailable to
+		// classify each retarget. The save already committed the new
+		// ProjectPath, and the next successful snapshot poll will drop a
+		// cross-repo retarget's row from the pane — without recording the
+		// notice here, the task vanishes with no explanation (the same #1836
+		// silent drop this change exists to surface). Classify the destination
+		// directly from the committed path: a retarget whose newPath resolves
+		// to a different repo than the active scope has left the pane, so echo
+		// its binding the way the successful-reload branch does. A same-repo
+		// subdirectory retarget resolves to the same id and produces no
+		// notice, matching the in-scope check above; with no active scope
+		// (registry mode) every retarget leaves the pane and is announced,
+		// matching the empty list LoadTasksForKnownRepo returns there.
+		for _, rc := range retargetCandidates {
+			if m.repoID != "" && config.RepoIDForPath(rc.newPath) == m.repoID {
+				continue
+			}
+			sp.RecordCrossRepoRetarget(rc.name, rc.newPath)
+		}
 	}
 	if failedEdit {
 		m.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained. " + saveErr.Error(), "Press any key to continue."}

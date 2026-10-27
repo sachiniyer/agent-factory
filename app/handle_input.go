@@ -96,6 +96,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(title) == "" {
 			return m, m.handleNotice(fmt.Errorf("title cannot be empty"))
 		}
+		// The input paths all clamp to the cap, so an overlong title here means
+		// the field was seeded some other way (a restored failed-create draft).
+		// Refusing keeps the field editable and creates nothing — the same
+		// contract the naming-row input keeps (#5481).
+		if runewidth.StringWidth(title) > 32 {
+			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
+		}
 		// "root" is reserved for the daemon-managed root agent (#1106). The
 		// daemon's reserveCreate is the authoritative gate; rejecting here
 		// keeps the user in the naming overlay instead of surfacing the
@@ -353,15 +360,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				cleanRunes = append(cleanRunes, r)
 			}
 		}
-		newTitle := instance.Title + string(cleanRunes)
-		// The length cap is user feedback; the SetTitle error below is not (see
-		// the commit site above) — it keeps ERROR severity here too.
-		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
-		}
-		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
-		}
+		return m.appendToNamingTitle(string(cleanRunes))
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
 		if len(runes) == 0 {
@@ -371,13 +370,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 	case tea.KeySpace:
-		newTitle := instance.Title + " "
-		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
-		}
-		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
-		}
+		return m.appendToNamingTitle(" ")
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
 		// (#717) — see the ctrl+c branch above for the full rationale.
@@ -402,6 +395,34 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.menu.SetState(ui.StateDefault)
 		return m, tea.Batch(cmd, tea.WindowSize())
 	default:
+	}
+	return m, nil
+}
+
+// appendToNamingTitle appends suffix to the naming field's title, clamping the
+// result to the 32-cell cap. Overflow input is TRUNCATED with a notice saying
+// so rather than refused (#5481): a paste can arrive split across several
+// KeyRunes messages, so refusing each overflowing message still committed the
+// earlier chunks — the field ended holding a silent prefix of what was typed.
+// Clamping instead makes the message match the outcome every time: the field
+// shows exactly the title the session will be created with, and the notice
+// reports that the rest was dropped. Typed input at the cap behaves the same —
+// the extra keystroke is dropped and the notice explains why.
+//
+// The length cap and its notice are user feedback; the SetTitle error is not
+// (see the commit site in handleStateNew) — it keeps ERROR severity here too.
+func (m *home) appendToNamingTitle(suffix string) (tea.Model, tea.Cmd) {
+	instance := m.namingInstance
+	newTitle := instance.Title + suffix
+	truncated := runewidth.StringWidth(newTitle) > 32
+	if truncated {
+		newTitle = runewidth.Truncate(newTitle, 32, "")
+	}
+	if err := instance.SetTitle(newTitle); err != nil {
+		return m, m.handleError(err)
+	}
+	if truncated {
+		return m, m.handleNotice(fmt.Errorf("title is limited to 32 characters; extra input was dropped"))
 	}
 	return m, nil
 }

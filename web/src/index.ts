@@ -124,6 +124,7 @@ import {
   AppShell,
   isActionableSession,
   orderedSessions,
+  clearLoginDraft,
   renderLogin,
   sessionTabs,
   canManageTabs,
@@ -534,6 +535,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: Registe
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
